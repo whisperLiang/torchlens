@@ -12,8 +12,6 @@ from torch import Tensor
 
 from torchlens.attribution._layer import _autograd_leaf_variable_ids
 
-pytestmark = pytest.mark.smoke
-
 
 @pytest.mark.parametrize("depth", [1, 4, 16])
 def test_leaf_ancestry_keeps_every_branch_in_deep_graphs(depth: int) -> None:

@@ -9,7 +9,7 @@ sandbox.
 Five mutant families, one per disarming direction or granularity:
 
 * The METADATA-INVARIANT REGISTRY family is DERIVED at run time from
-  ``torchlens.validation.invariants.METADATA_INVARIANT_CONTRACTS`` inside the
+  ``torchlens.validation._invariants.METADATA_INVARIANT_CONTRACTS`` inside the
   sandbox (b9-opus R74-2: the hand-listed roster had enrolled 12 of 32
   contracts, so 20 tripwires were never margin-measured). One whole-function
   ``return None`` mutant per contract, id = the contract name; a contract
@@ -89,34 +89,30 @@ MUTANTS: dict[str, tuple[str, str]] = {
     # The flagship per-op replay comparator (R74/75-2): neutering the
     # comparison result at the callsite must be killed by the corruption
     # battery, not by a single diagnostics test.
-    "M13": ("torchlens/validation/core.py", "_deep_numeric_replay_matches_saved"),
-    # The postprocess step-contract checker (b9-sol R74-1): a return-None
-    # disarm previously survived because this suite listed only validation
-    # files. Killed directly by tests/test_postprocess_contract_arming.py and
-    # through real armed captures by the test_postprocess_dag enforcement
-    # plants below.
-    "M14": ("torchlens/postprocess/__init__.py", "_check_postprocess_contract"),
+    "M13": ("torchlens/validation/_core.py", "_deep_numeric_replay_matches_saved"),
     # The b9-sol round-5 enrollment gap (R74-2): the direct roster covered
-    # exactly one validation comparator and one postprocess checker while
-    # validation/core.py carries five more raise-on-violation entry points
-    # and postprocess/__init__.py two assert seams, all previously
-    # margin-unmeasured. tests/test_mutation_driver_governance.py now
-    # censuses the check-shaped functions in both files against this roster,
-    # so the next entry point cannot ship unenrolled.
-    "M15": ("torchlens/validation/core.py", "_check_layer_arguments_logged_correctly"),
-    "M16": ("torchlens/validation/core.py", "_validate_layer_against_arg"),
-    "M17": ("torchlens/validation/core.py", "_check_arglocs_correct_for_arg"),
-    "M18": ("torchlens/validation/core.py", "_check_unattributed_arg_slots"),
+    # exactly one validation comparator while validation/_core.py carries five
+    # more raise-on-violation entry points, all previously margin-unmeasured.
+    # tests/test_mutation_driver_governance.py now censuses the check-shaped
+    # functions in that file against this roster, so the next entry point
+    # cannot ship unenrolled.
+    "M15": ("torchlens/validation/_core.py", "_check_layer_arguments_logged_correctly"),
+    "M16": ("torchlens/validation/_core.py", "_validate_layer_against_arg"),
+    "M17": ("torchlens/validation/_core.py", "_check_arglocs_correct_for_arg"),
+    "M18": ("torchlens/validation/_core.py", "_check_unattributed_arg_slots"),
     "M19": (
-        "torchlens/validation/core.py",
+        "torchlens/validation/_core.py",
         "_check_whether_func_on_saved_parents_yields_saved_tensor",
     ),
-    "M20": ("torchlens/postprocess/__init__.py", "_assert_no_open_window"),
-    "M21": ("torchlens/postprocess/__init__.py", "_assert_postprocess_contract"),
+    # The two steps extracted from _validate_saved_outs_run (wip/mp-pp-union
+    # 459fbd9d5). ``return None`` on the first is "no output failed", on the
+    # second "the metadata invariants never ran": both the disarming direction.
+    "M20": ("torchlens/validation/_core.py", "_check_ground_truth_outputs"),
+    "M21": ("torchlens/validation/_core.py", "_check_metadata_invariants_recorded"),
 }
 
 #: mutant id -> (relative file, core-validation checker). The checkers of
-#: ``validation/core.py`` OUTSIDE the metadata-invariant registry (b9-sol
+#: ``validation/_core.py`` OUTSIDE the metadata-invariant registry (b9-sol
 #: R74r5 finding 2: the non-registry roster held one comparator and one
 #: postprocess checker while core.py carried five more verdict-steering
 #: entry points with no mutant). Their dangerous neutral value is an
@@ -125,12 +121,12 @@ MUTANTS: dict[str, tuple[str, str]] = {
 #: core.py for every ``_check_*`` / ``_validate_*`` def and demands each be
 #: enrolled here or excluded with a reason in ``CORE_CHECK_EXCLUSIONS``.
 CORE_CHECK_MUTANTS: dict[str, tuple[str, str]] = {
-    "V01": ("torchlens/validation/core.py", "_check_layer_arguments_logged_correctly"),
-    "V02": ("torchlens/validation/core.py", "_validate_layer_against_arg"),
-    "V03": ("torchlens/validation/core.py", "_check_arglocs_correct_for_arg"),
-    "V04": ("torchlens/validation/core.py", "_check_unattributed_arg_slots"),
+    "V01": ("torchlens/validation/_core.py", "_check_layer_arguments_logged_correctly"),
+    "V02": ("torchlens/validation/_core.py", "_validate_layer_against_arg"),
+    "V03": ("torchlens/validation/_core.py", "_check_arglocs_correct_for_arg"),
+    "V04": ("torchlens/validation/_core.py", "_check_unattributed_arg_slots"),
     "V05": (
-        "torchlens/validation/core.py",
+        "torchlens/validation/_core.py",
         "_check_whether_func_on_saved_parents_yields_saved_tensor",
     ),
 }
@@ -145,6 +141,22 @@ CORE_CHECK_EXCLUSIONS: dict[str, str] = {
     "_check_perturbation_exemptions": (
         "enrolled as X01: its dangerous direction is exempt-everything "
         "(return True), not always-validated"
+    ),
+    "_validate_saved_outs_run": (
+        "the whole-run body of the public validate_saved_outs entry, split out "
+        "only so the entry's finally clears per-run scratch and loaded callables; "
+        "it adds no verdict logic of its own (its verdict is composed of the "
+        "enrolled comparators and checkers)"
+    ),
+    "_check_ground_truth_outputs": (
+        "enrolled as M20: it returns the failed ValidationStatus or None, so its "
+        "dangerous direction is return None (no output failed), not an "
+        "always-validated check result"
+    ),
+    "_check_metadata_invariants_recorded": (
+        "enrolled as M21: it returns None by contract and records through the "
+        "decision recorder, so its dangerous direction is skipping the invariants "
+        "run (return None at entry), not an always-validated check result"
     ),
 }
 
@@ -161,10 +173,10 @@ def derive_core_check_roster(sandbox: Path) -> None:
     Parameters
     ----------
     sandbox:
-        Repo root whose ``torchlens/validation/core.py`` is scanned.
+        Repo root whose ``torchlens/validation/_core.py`` is scanned.
     """
 
-    core = sandbox / "torchlens" / "validation" / "core.py"
+    core = sandbox / "torchlens" / "validation" / "_core.py"
     tree = ast.parse(core.read_text(encoding="utf-8"))
     names = {
         node.name
@@ -207,51 +219,55 @@ BLOCK_MUTANTS: dict[str, tuple[str, str, str]] = {
 #: killed by the deliberately-named ``*_is_not_exempt`` negative tests
 #: (hand-run on the dispatcher during b9p3: 28 killers).
 EXEMPT_MUTANTS: dict[str, tuple[str, str]] = {
-    "X01": ("torchlens/validation/core.py", "_check_perturbation_exemptions"),
-    "X02": ("torchlens/validation/exemptions.py", "_check_getitem_exempt"),
-    "X03": ("torchlens/validation/exemptions.py", "_check_setitem_exempt"),
-    "X04": ("torchlens/validation/exemptions.py", "_check_index_put_exempt"),
-    "X05": ("torchlens/validation/exemptions.py", "_check_lstm_exempt"),
-    "X06": ("torchlens/validation/exemptions.py", "_check_interpolate_exempt"),
-    "X07": ("torchlens/validation/exemptions.py", "_check_scatter_exempt"),
-    "X08": ("torchlens/validation/exemptions.py", "_check_one_arg_where_index_exempt"),
-    "X09": ("torchlens/validation/exemptions.py", "_check_where_exempt"),
-    "X10": ("torchlens/validation/exemptions.py", "_check_masked_fill_exempt"),
-    "X11": ("torchlens/validation/exemptions.py", "_check_norm_running_stat_exempt"),
-    "X12": ("torchlens/validation/exemptions.py", "_check_scatter_or_index_domain_exempt"),
+    "X01": ("torchlens/validation/_core.py", "_check_perturbation_exemptions"),
+    "X02": ("torchlens/validation/_exemptions.py", "_check_getitem_exempt"),
+    "X03": ("torchlens/validation/_exemptions.py", "_check_setitem_exempt"),
+    "X04": ("torchlens/validation/_exemptions.py", "_check_index_put_exempt"),
+    "X05": ("torchlens/validation/_exemptions.py", "_check_lstm_exempt"),
+    "X06": ("torchlens/validation/_exemptions.py", "_check_interpolate_exempt"),
+    "X07": ("torchlens/validation/_exemptions.py", "_check_scatter_exempt"),
+    "X08": ("torchlens/validation/_exemptions.py", "_check_one_arg_where_index_exempt"),
+    "X09": ("torchlens/validation/_exemptions.py", "_check_where_exempt"),
+    "X10": ("torchlens/validation/_exemptions.py", "_check_masked_fill_exempt"),
+    "X11": ("torchlens/validation/_exemptions.py", "_check_norm_running_stat_exempt"),
+    "X12": ("torchlens/validation/_exemptions.py", "_check_scatter_or_index_domain_exempt"),
     "X13": ("torchlens/validation/_invariants_backward_flow.py", "_is_func_call_id_exempt"),
     # Landed after the b9p3 inventory (R08 exemption-narrowing wave); swept in
     # so the newest gate is margin-measured like its siblings.
-    "X14": ("torchlens/validation/exemptions.py", "_check_zipped_sibling_exempt"),
+    "X14": ("torchlens/validation/_exemptions.py", "_check_zipped_sibling_exempt"),
 }
 
 #: Bounded arming suite: the files whose job is to kill the mutants above.
 SUITE = [
     "tests/test_validation.py",
-    # Confirmed campaign survivors already have behavioral killers outside
-    # the historical arming suite. Score those tests instead of duplicating
-    # them or weakening the zero-survivor criterion.
-    "tests/validation_goldens/test_validation_exemption_hardening.py",
-    "tests/test_validation_exemption_ledger.py",
-    "tests/test_backend_registry.py",
-    "tests/test_var_names.py",
-    "tests/test_capture_unification_p3b.py",
-    "tests/test_gc.py::TestTraceGC::test_transient_data_cleared",
-    "tests/test_aten_profile.py::test_live_fk_tamper_names_primitive_invariant",
-    "tests/test_io_streaming.py",
-    "tests/test_container_registry_p4.py::test_flag_on_container_structure_round_trips",
-    "tests/test_metadata_mutation_arming.py",
+    # The perturbation / deep-clone unit tests split out of test_validation.py
+    # at its size ceiling; they stay in the arming suite they were scored in.
+    "tests/test_validation_perturbation_units.py",
     # Step-18 (streamed-bundle finalization) killers: the executor family's
-    # first sample campaign proved _should_run_step_18 forced-False survived
+    # first sample campaign proved _should_run_finalize_streamed_bundle forced-False survived
     # every file below (r7 R74; no suite file streamed to disk). Removing
     # this file resurrects a PROVEN survivor.
     "tests/test_streaming_finalization_arming.py",
+    # CUDA-cache step killer: on a CPU runner no capture touches CUDA, so
+    # _run_clear_cuda_cache neutered to return None survived every file here;
+    # this file pins its flush gate with recorders. Removing it resurrects
+    # that survivor.
+    "tests/test_executor_cuda_cache_arming.py",
     "tests/test_replay_corruption_battery.py",
     "tests/test_internals.py",
     "tests/test_ancestry_closure_invariant.py",
     "tests/test_conditional_invariants.py",
     "tests/test_loop_synthesis_ground_truth.py",
     "tests/test_r29_capval_hardening.py",
+    # V04 killer (r18, Weekly 37591108522): _check_unattributed_arg_slots has
+    # two arms. Its identity-witness arm (dropped_edge_tensor_args) is now
+    # also refused by check_source_provenance, because every dropped-edge
+    # position is stamped into unattributed_tensor_args too, so the r29 F3a/F3c
+    # plants above stopped killing V04. Its value-rooted sweep is still the
+    # ONLY check that fails a capture-witness-blind symmetric edge drop in a
+    # diamond (the producer keeps another child, so BFS completeness stays
+    # green); this W3-1 test pins exactly that arm by its decision reason.
+    "tests/test_validation_hardening.py::test_w31_dropped_parent_edge_now_fails_replay",
     # B01 killers (b9-opus R74-2): the oracle-independence tamper battery is
     # the file arming the edge-occurrence multiplicity witness; without it a
     # bare return planted before that block survived the rest of this suite.
@@ -261,18 +277,52 @@ SUITE = [
     "tests/test_oracle_independence.py",
     # r7 R74 (opus, PROVEN suite-composition artifacts): 2 of 4 sampled
     # executor survivors were killed by tests OUTSIDE this suite --
-    # _run_step_16_5 (graph_shape_hash) by six surface-oracle byte params,
-    # _run_step_20 (release_param_refs) by the outcome-characterization
+    # _run_hash_graph_shape (graph_shape_hash) by six surface-oracle byte params,
+    # _run_release_param_refs (_release_param_refs) by the outcome-characterization
     # planted-propagation test. The weekly executor leg was structurally red
     # on non-defects; score the real killers instead of writing duplicates.
     "tests/surface_oracle/test_surface_oracle.py",
     "tests/test_capture_outcome_characterization.py",
-    # M14 killers: the direct synthetic-input liveness file plus the two
-    # armed-capture enforcement plants (undeclared read, in-place write
-    # smuggle) that exercise the checker through a real postprocess run.
-    "tests/test_postprocess_contract_arming.py",
-    "tests/test_postprocess_dag.py::test_read_enforcement_trips_on_undeclared_read",
-    "tests/test_postprocess_dag.py::test_executor_seam_patched_step_executes_and_audits",
+    # W2 executor killers (lane L3 triage step 21, 2026-10-01): the bucket-name
+    # golden pins every _vtimed-wrapped step's timing bucket on a default
+    # capture, so a whole-function return-None disarm of _run_populate_source_var_names,
+    # _run_resolve_deferred_retention, _run_undecorate_saved_tensors, or _run_hash_graph_shape drops its bucket from
+    # the set and fails the exact-equality assert. Step 17.5 is deliberately
+    # unwrapped by _vtimed (and declares no op-store writes), so its own
+    # direct killer is test_step17_5_adopts_container_records_before_the_
+    # registry_clears; step 19
+    # and its gate are conditional (absent from the bucket golden's default
+    # axis either way), so their killer asserts the eviction effect directly
+    # on a streaming capture.
+    "tests/test_postprocess_executor.py::test_phase_timing_bucket_names_default_capture",
+    "tests/test_postprocess_executor.py::test_adopt_containers_step_adopts_records_before_the_registry_clears",
+    "tests/test_postprocess_executor.py::test_evict_streamed_outs_step_and_gate_evict_from_memory",
+    # W3 exempt killers (X02, X07): direct negative-case calls already proved
+    # the data parent/destination must stay strictly perturbed; they lived
+    # outside this suite. X05/X06 killers are in test_bug_fixes_phase14.py.
+    # Also hosts the new direct killers for X11/X12/X14 and the W4 registry
+    # survivors (branching_invariants, layer_pass_layer_log_xrefs,
+    # non_torch_backward_inert, non_torch_primitive_op_inert,
+    # receptive_field_metadata, site_key_invariants); backend_neutral_graph_
+    # topology and pass_count_consistency already had direct killers here too.
+    "tests/validation_goldens/test_validation_exemption_hardening.py",
+    "tests/test_bug_fixes_phase14.py",
+    # W4 registry killer for primitive_op_invariants: an in-memory FK
+    # corruption that a return-None disarm would let through silently.
+    "tests/test_aten_profile.py::test_live_fk_tamper_names_primitive_invariant",
+    # Registry killer for aten_values_consistent (enrolled with the aten_ops="values"
+    # capture): a kept ATen value that disagrees with its facts or its owner Op
+    # must fail validation. Without this row the return-None disarm survives
+    # every file here.
+    "tests/test_aten_values.py::test_invariant_rejects_a_value_that_disagrees_with_its_facts_or_owner",
+    # mutants2 lane (2026-10-01): direct per-arm killers for the shard-4 (and
+    # un-sharded family) survivor list -- one duck-typed-fake test per raise
+    # arm, each proving every earlier arm on the same checker stays silent.
+    "tests/validation_goldens/test_arm_campaign_killers_mutants2.py",
+    # mutants3 lane (2026-10-01): direct per-arm killers for the arm-shard
+    # 1/4, 2/4, and 3/4 survivor list measured against the mutants2 branch
+    # point (shard 4's own survivors are covered by the mutants2 file above).
+    "tests/validation_goldens/test_arm_campaign_killers_mutants3.py",
 ]
 
 #: Known baseline reds, deselected so a mutant verdict is never confounded.
@@ -290,7 +340,7 @@ SUITE = [
 DESELECT: list[str] = []
 
 #: Directories/patterns a sandbox never needs (b9p3 R74p3-F3: without these
-#: --make-sandbox copied 6.0 GB -- 5.3 GB .venv + 127 MB menagerie -- vs
+#: --make-sandbox copied 6.0 GB -- 5.3 GB .venv + a 127 MB model corpus -- vs
 #: ~450 MB with them; --python supplies the interpreter, so the sandbox
 #: needs no venv).
 SANDBOX_IGNORE = (
@@ -299,7 +349,6 @@ SANDBOX_IGNORE = (
     ".ruff_cache",
     "*.egg-info",
     ".venv",
-    "menagerie",
     ".pytest_cache",
     ".mypy_cache",
     "build",
@@ -314,7 +363,7 @@ SANDBOX_IGNORE = (
 #: implementation file.
 _REGISTRY_PROBE = """
 import json, os
-from torchlens.validation.invariants import METADATA_INVARIANT_CONTRACTS
+from torchlens.validation._invariants import METADATA_INVARIANT_CONTRACTS
 rows = {}
 for contract in METADATA_INVARIANT_CONTRACTS:
     code = contract.check.__code__
@@ -460,11 +509,9 @@ def while_exit_arm_keys(src: str, func: str) -> set[tuple[int, int, int]]:
             for stmt in node.orelse:
                 _collect(stmt, in_while_body)
             return
-        if (
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
-            and node is not target
-        ):
-            return
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            if node is not target:
+                return
         for child in ast.iter_child_nodes(node):
             _collect(child, in_while_body)
 
@@ -528,25 +575,25 @@ def derive_executor_mutants(sandbox: Path) -> dict[str, tuple[str, str, str]]:
     """One skip mutant per postprocess-executor step and gate predicate.
 
     r7 R74 (sol b9 HIGH): the census never targeted
-    ``postprocess/_executor.py`` -- 25 ``_run_step_*`` bodies plus the
-    conditional ``_should_run_step_*`` predicates had NO mutation verdict,
-    even though R74 explicitly scopes ``postprocess/``. DERIVED from the
-    module's defs (like the registry family), so a new step enrolls itself:
-    a ``_run_step_*`` neuters to ``return None`` (the step silently skips)
-    and a ``_should_run_step_*`` to ``return False`` (the gate never fires).
-    Import/collection errors stay ERROR verdicts, never kills.
+    ``postprocess/_executor.py`` -- the 25 ``_run_<step name>`` bodies plus
+    the conditional ``_should_run_<step name>`` predicates had NO mutation
+    verdict, even though R74 explicitly scopes ``postprocess/``. DERIVED from
+    the module's defs (like the registry family), so a new step enrolls
+    itself: a ``_run_*`` body neuters to ``return None`` (the step silently
+    skips) and a ``_should_run_*`` predicate to ``return False`` (the gate
+    never fires). Import/collection errors stay ERROR verdicts, never kills.
     """
 
-    rel = "torchlens/postprocess/_executor.py"
+    rel = "torchlens/_postprocess/_executor.py"
     tree = ast.parse((sandbox / rel).read_text(encoding="utf-8"))
     mutants: dict[str, tuple[str, str, str]] = {}
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if node.name.startswith("_run_step_"):
-            mutants[f"executor#{node.name}"] = (rel, node.name, "None")
-        elif node.name.startswith("_should_run_step_"):
+        if node.name.startswith("_should_run_"):
             mutants[f"executor#{node.name}"] = (rel, node.name, "False")
+        elif node.name.startswith("_run_") and node.name != "_run_pipeline":
+            mutants[f"executor#{node.name}"] = (rel, node.name, "None")
     if len(mutants) < 20:
         raise SystemExit(
             f"executor derivation found only {len(mutants)} step functions in "

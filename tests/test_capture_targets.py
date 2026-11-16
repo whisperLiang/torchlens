@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -10,20 +11,9 @@ import pytest
 import torch
 
 import torchlens as tl
-from torchlens.backends.torch.ops import _save_activation_fields
-from torchlens.data_classes import op as op_module
+from torchlens._data_classes import _op_save as op_save_module
+from torchlens.backends.torch._ops_activations import _save_activation_fields
 from torchlens.options import CaptureOptions
-
-
-class _KpiModel(torch.nn.Module):
-    """Tiny model that records a KPI during capture."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run a small forward pass."""
-
-        y = torch.relu(x)
-        tl.record_kpi_in_graph("loss", float(y.sum().detach()))
-        return y
 
 
 class _ConfiguredClassifier(torch.nn.Module):
@@ -67,46 +57,28 @@ def _minimal_activation_fields(label: str) -> dict[str, Any]:
     }
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _data_classes/_trace_groups_capture.py.
 def test_capture_memory_fields_and_forward_source_line() -> None:
     """Populate Phase 4 Op memory fields and forward line number."""
 
     model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.ReLU())
     log = tl.trace(model, torch.ones(1, 2))
-    assert isinstance(log.forward_source_line, int)
-    assert all(hasattr(layer, "bytes_delta_at_call") for layer in log.layer_list)
-    assert all(hasattr(layer, "bytes_peak_at_call") for layer in log.layer_list)
+    assert isinstance(log.source.forward_line, int)
+    assert all(hasattr(layer.cost, "bytes_delta_at_call") for layer in log._layer_list)
+    assert all(hasattr(layer.cost, "bytes_peak_at_call") for layer in log._layer_list)
 
 
-def test_record_kpi_in_graph() -> None:
-    """Attach arbitrary KPI metadata during capture."""
-
-    log = tl.trace(_KpiModel(), torch.ones(1, 2))
-    assert "loss" in log.annotations
-
-
-def test_content_hash_cache_hit_and_miss(tmp_path: Path) -> None:
-    """Reuse a content-hash capture cache entry."""
-
-    model = torch.nn.Linear(2, 2)
-    x = torch.ones(1, 2)
-    capture = CaptureOptions(cache=True, cache_dir=tmp_path)
-    first = tl.trace(model, x, capture=capture)
-    second = tl.trace(model, x, capture=capture)
-    assert first.capture_cache_hit is False
-    assert second.capture_cache_hit is True
-    assert first.capture_cache_key == second.capture_cache_key
-
-
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _trace_selector_helpers.py, campaign mutant kills.
 @pytest.mark.parametrize(
-    ("kwargs", "saved_type"),
+    ("kwargs", "capture_kwargs", "saved_type"),
     [
-        ({"save": tl.func("relu")}, "relu"),
-        ({"layers_to_save": ["relu"]}, "relu"),
+        ({"save": tl.func("relu")}, {}, "relu"),
     ],
 )
 def test_selective_capture_cache_preserves_unsaved_payload_contract(
     tmp_path: Path,
     kwargs: dict[str, Any],
+    capture_kwargs: dict[str, Any],
     saved_type: str,
 ) -> None:
     """Selective capture cache writes should not read unsaved public payloads."""
@@ -114,31 +86,53 @@ def test_selective_capture_cache_preserves_unsaved_payload_contract(
     model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.ReLU())
     x = torch.ones(1, 2)
 
-    first = tl.trace(model, x, cache=True, cache_dir=tmp_path, **kwargs)
-    second = tl.trace(model, x, cache=True, cache_dir=tmp_path, **kwargs)
+    first = tl.trace(
+        model,
+        x,
+        **kwargs,
+        capture=tl.options.CaptureOptions(cache=True, cache_dir=tmp_path, **capture_kwargs),
+    )
+    second = tl.trace(
+        model,
+        x,
+        **kwargs,
+        capture=tl.options.CaptureOptions(cache=True, cache_dir=tmp_path, **capture_kwargs),
+    )
 
-    assert first.capture_cache_hit is False
-    assert second.capture_cache_hit is True
-    assert first.capture_cache_key == second.capture_cache_key
+    assert first.provenance.cache_hit is False
+    assert second.provenance.cache_hit is True
+    assert first.provenance.cache_key == second.provenance.cache_key
     saved = first.find_sites(tl.func(saved_type)).first()
     assert isinstance(saved.out, torch.Tensor)
     with pytest.raises(ValueError, match="was not saved"):
         _ = first["input_1"].out
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _trace_selector_helpers.py.
 def test_absorbed_layers_to_save_cache_key_is_stable(tmp_path: Path) -> None:
     """Identical absorbed ``layers_to_save`` requests should hash equally."""
 
     model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.ReLU())
     x = torch.ones(1, 2)
 
-    first = tl.trace(model, x, cache=True, cache_dir=tmp_path, layers_to_save=["relu"])
-    second = tl.trace(model, x, cache=True, cache_dir=tmp_path, layers_to_save=["relu"])
+    first = tl.trace(
+        model,
+        x,
+        capture=tl.options.CaptureOptions(cache=True, cache_dir=tmp_path),
+        save=["relu"],
+    )
+    second = tl.trace(
+        model,
+        x,
+        capture=tl.options.CaptureOptions(cache=True, cache_dir=tmp_path),
+        save=["relu"],
+    )
 
-    assert first.capture_cache_key == second.capture_cache_key
-    assert second.capture_cache_hit is True
+    assert first.provenance.cache_key == second.provenance.cache_key
+    assert second.provenance.cache_hit is True
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _autoroute/_builtin_output.py.
 def test_config_output_metadata_pickles_into_capture_cache(tmp_path: Path) -> None:
     """HF-style config metadata is captured before cache serialization."""
 
@@ -149,199 +143,97 @@ def test_config_output_metadata_pickles_into_capture_cache(tmp_path: Path) -> No
     first = tl.trace(model, x, capture=capture)
     second = tl.trace(model, x, capture=capture)
 
-    assert first.capture_cache_hit is False
+    assert first.provenance.cache_hit is False
     assert first.output_id2label == {0: "negative", 1: "positive"}
     assert first.output_num_classes == 2
-    assert second.capture_cache_hit is True
+    assert second.provenance.cache_hit is True
     assert second.output_id2label == {0: "negative", 1: "positive"}
     assert second.output_num_classes == 2
 
 
-def test_public_option_spine_changes_capture_cache_key(tmp_path: Path) -> None:
-    """Declared public options participate in the content-hash cache key."""
-
-    model = torch.nn.Linear(2, 2)
-    x = torch.ones(1, 2)
-    first = tl.trace(
-        model,
-        x,
-        capture=CaptureOptions(
-            cache=True,
-            cache_dir=tmp_path,
-            module_identity_mode="torch_module",
-        ),
-    )
-    second = tl.trace(
-        model,
-        x,
-        capture=CaptureOptions(
-            cache=True,
-            cache_dir=tmp_path,
-            payload_policy="full",
-        ),
-    )
-
-    assert first.capture_cache_key != second.capture_cache_key
-
-
-def test_saved_activation_identity_dedup_reuses_same_source_live_fields() -> None:
-    """Live saved activations dedup only when the source tensor object is identical."""
-
-    trace = tl.trace(torch.nn.Identity(), torch.randn(1, 2))
-    source = torch.randn(2, 2)
-    first_fields = _minimal_activation_fields("manual_1")
-    second_fields = _minimal_activation_fields("manual_2")
-
-    _save_activation_fields(trace, first_fields, source, (), {}, None)
-    _save_activation_fields(trace, second_fields, source, (), {}, None)
-
-    assert first_fields["out"] is second_fields["out"]
-    assert first_fields["out"] is not source
-    assert second_fields["annotations"]["dedup_reference_label"] == "manual_1"
-    cached_source = trace._out_identity_cache[id(source)][0]
-    assert cached_source is source
-
-
-def test_trace_releases_identity_dedup_cache_after_pass() -> None:
-    """Public traces release source pins after the capture pass ends."""
-
-    trace = tl.trace(torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.ReLU()), torch.ones(1, 2))
-
-    assert trace._out_identity_cache == {}
-
-
-def test_saved_activation_identity_dedup_ignores_equal_different_sources() -> None:
-    """Equal tensor contents do not dedup by default when source objects differ."""
-
-    trace = tl.trace(torch.nn.Identity(), torch.randn(1, 2))
-    first_source = torch.ones(2, 2)
-    second_source = torch.ones(2, 2)
-    first_fields = _minimal_activation_fields("manual_1")
-    second_fields = _minimal_activation_fields("manual_2")
-
-    _save_activation_fields(trace, first_fields, first_source, (), {}, None)
-    _save_activation_fields(trace, second_fields, second_source, (), {}, None)
-
-    assert first_fields["out"] is not second_fields["out"]
-    assert "dedup_reference_label" not in second_fields["annotations"]
-
-
-def test_saved_activation_identity_dedup_rejects_key_collision() -> None:
-    """A mismatched source under an id key does not false-merge cached payloads."""
-
-    trace = tl.trace(torch.nn.Identity(), torch.randn(1, 2))
-    old_source = torch.zeros(2, 2)
-    new_source = torch.ones(2, 2)
-    stale_out = torch.full((2, 2), 9.0)
-    trace._out_identity_cache[id(new_source)] = (
-        old_source,
-        "old",
-        stale_out,
-        old_source._version,
-        1,
-    )
-    fields = _minimal_activation_fields("manual_new")
-
-    _save_activation_fields(trace, fields, new_source, (), {}, None)
-
-    assert fields["out"] is not stale_out
-    assert "dedup_reference_label" not in fields["annotations"]
-    cached_source = trace._out_identity_cache[id(new_source)][0]
-    assert cached_source is new_source
-
-
-def test_op_save_activation_identity_dedup_reuses_same_source() -> None:
-    """Replay/slow ``Op.save_activation`` uses identity dedup for the same source."""
-
-    trace = tl.trace(torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.ReLU()), torch.ones(1, 2))
-    trace._out_identity_cache.clear()
-    source = torch.randn(1, 2)
-    first_op, second_op = trace.layer_list[:2]
-
-    first_op.save_activation(source, (), {}, save_arg_values=False)
-    second_op.save_activation(source, (), {}, save_arg_values=False)
-
-    assert first_op.out is second_op.out
-    assert second_op.annotations["dedup_reference_label"] == first_op._layer_label_raw
-
-
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _data_classes/op.py, backends/torch/wrappers.py.
 def test_trace_reference_save_mode_raises_if_saved_out_mutates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reference-mode saved outputs fail loudly after mutation."""
 
-    monkeypatch.setattr(op_module, "_WARNED_REFERENCE_SAVE_MODE", False)
+    monkeypatch.setattr(op_save_module, "_WARNED_REFERENCE_SAVE_MODE", False)
     with pytest.warns(UserWarning, match="save_mode='reference'"):
-        log = tl.trace(torch.nn.ReLU(), torch.ones(1, 2), save_mode="reference")
-    op = next(layer for layer in log.layer_list if layer.func_name == "relu")
+        log = tl.trace(
+            torch.nn.ReLU(),
+            torch.ones(1, 2),
+            capture=tl.options.CaptureOptions(save_mode="reference"),
+        )
+    op = next(layer for layer in log._layer_list if layer.func_name == "relu")
     saved_out = op._slot("out")
 
     saved_out.add_(1)
 
-    with pytest.raises(tl.MutatedReferenceError, match="mutated after capture"):
+    with pytest.raises(tl.errors.MutatedReferenceError, match="mutated after capture"):
         _ = op.out
 
 
-def test_trace_reference_save_mode_copies_known_inplace_ops() -> None:
-    """Known in-place outputs fall back to copy under reference save mode."""
+def test_trace_reference_save_mode_keeps_dunder_op_outputs_by_reference() -> None:
+    """Operator dunders (``__add__``) are out-of-place: reference mode keeps the live tensor.
 
-    class InplaceRelu(torch.nn.Module):
-        """Tiny module with a named in-place op."""
+    The in-place spelling ends in one underscore (``add_``); the dunders end in two.
+    The live tensor is the one the rest of the forward consumed, so ``autograd.grad``
+    of the output with respect to it works (the Jacobian-lens recipe's door).
+    """
 
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Run an in-place relu on a non-leaf tensor."""
-
-            return x.clone().relu_()
-
-    log = tl.trace(InplaceRelu(), torch.ones(1, 2), save_mode="reference")
-    op = next(layer for layer in log.layer_list if layer.func_name == "relu_")
-    saved_out = op._slot("out")
-
-    saved_out.add_(1)
-
-    assert "save_mode" not in op.annotations
-    assert torch.equal(op.out, torch.full((1, 2), 2.0))
-
-
-def test_trace_view_save_mode_keeps_saved_out_grad_connected() -> None:
-    """View mode keeps saved activation payloads on the autograd graph."""
-
-    model = torch.nn.Linear(2, 2)
-    log = tl.trace(model, torch.ones(1, 2, requires_grad=True), save_mode="view")
-    op = next(layer for layer in log.layer_list if layer.func_name == "linear")
-
-    assert op.out.requires_grad is True
-    assert op.out.grad_fn is not None
-
-
-def test_tied_parameter_notation_smoke() -> None:
-    """Expose tied-parameter notation when shared storage is detected."""
-
-    class Tied(torch.nn.Module):
-        """Tiny tied-parameter model."""
+    class Residual(torch.nn.Module):
+        """``x + linear(x)``: the block output is an ``__add__``."""
 
         def __init__(self) -> None:
-            """Initialize tied layers."""
-
             super().__init__()
-            self.a = torch.nn.Linear(2, 2, bias=False)
-            self.b = torch.nn.Linear(2, 2, bias=False)
-            self.b.weight = self.a.weight
+            self.linear = torch.nn.Linear(2, 2)
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Run tied layers."""
+            return (x + self.linear(x)).relu()
 
-            return self.b(self.a(x))
+    model = Residual()
+    seen: dict[str, torch.Tensor] = {}
+    handle = model.register_forward_hook(lambda m, i, out: seen.__setitem__("out", out))
+    try:
+        log = tl.trace(
+            model,
+            torch.ones(1, 2, requires_grad=True),
+            capture=tl.options.CaptureOptions(save_mode="reference"),
+        )
+    finally:
+        handle.remove()
+    add_op = next(layer for layer in log._layer_list if layer.func_name == "__add__")
+    relu_op = next(layer for layer in log._layer_list if layer.func_name == "relu")
 
-    log = tl.trace(Tied(), torch.ones(1, 2))
-    tied = [
-        layer.annotations.get("tied_parameter_notation")
-        for layer in log.layer_list
-        if layer.annotations.get("tied_parameter_notation")
-    ]
-    assert tied
+    assert add_op.annotations["save_mode"] == "reference"
+    assert relu_op.annotations["save_mode"] == "reference"
+    # The live model output differentiates with respect to the saved block state:
+    # a clone would raise "appears to not have been used in the graph".
+    (grad,) = torch.autograd.grad(seen["out"].sum(), add_op.out)
+    assert grad.shape == (1, 2)
 
 
+def test_trace_reference_save_mode_copies_inplace_dunder_outputs() -> None:
+    """``__iadd__`` mutates its input: the version-counter flag still forces a copy."""
+
+    class AugmentedAdd(torch.nn.Module):
+        """``y = x * 2; y += 1``: the second op is an in-place dunder."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            y = x * 2
+            y += 1
+            return y
+
+    log = tl.trace(
+        AugmentedAdd(), torch.ones(1, 2), capture=tl.options.CaptureOptions(save_mode="reference")
+    )
+    op = next(layer for layer in log._layer_list if layer.func_name in {"__iadd__", "add_"})
+
+    assert "save_mode" not in op.annotations
+    assert torch.equal(op.out, torch.full((1, 2), 3.0))
+
+
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
 def test_dedup_source_id_is_a_dense_trace_local_ordinal() -> None:
     """``dedup_source_id`` must never be a raw ``id()`` memory address (B3R4-R21-1).
 
@@ -367,3 +259,104 @@ def test_dedup_source_id_is_a_dense_trace_local_ordinal() -> None:
     assert second_hit == 2
     assert first_hit != id(source)
     assert second_hit != id(other)
+
+
+def test_dedup_ordinal_is_fresh_when_a_dead_source_address_is_reused() -> None:
+    """A new source at a dead source's ``id()`` slot gets its own dedup ordinal.
+
+    The identity cache is keyed by ``id()``. When a saved source dies and the
+    heap hands its address to a new tensor, the new tensor replaces the slot
+    without growing the cache. The ordinal must still be fresh: inheriting the
+    dead slot's ordinal gave two distinct sources one persisted
+    ``dedup_source_id`` and shifted every later ordinal with heap reuse.
+    """
+
+    trace = tl.trace(torch.nn.Identity(), torch.randn(1, 2))
+    fields = [_minimal_activation_fields(f"manual_{i}") for i in range(6)]
+    dead = torch.randn(2, 2)
+    _save_activation_fields(trace, fields[0], dead, (), {}, None)
+    _save_activation_fields(trace, fields[1], dead, (), {}, None)
+
+    # Emulate address reuse exactly: the dead source's slot now sits at the
+    # key of the next live tensor, with its weak source reference expired.
+    reused = torch.randn(2, 2)
+    cache = trace._out_identity_cache
+    entry = cache.pop(id(dead))
+    del dead
+    gc.collect()
+    assert entry[0]() is None
+    cache[id(reused)] = entry
+    _save_activation_fields(trace, fields[2], reused, (), {}, None)
+    _save_activation_fields(trace, fields[3], reused, (), {}, None)
+    later = torch.randn(2, 2)
+    _save_activation_fields(trace, fields[4], later, (), {}, None)
+    _save_activation_fields(trace, fields[5], later, (), {}, None)
+
+    ordinals = [fields[i]["annotations"]["dedup_source_id"] for i in (1, 3, 5)]
+    assert ordinals == [1, 2, 3]
+
+
+class _BufferWritingNet(torch.nn.Module):
+    """A repeated layer and a train-mode norm, so buffer reads dedup."""
+
+    def __init__(self) -> None:
+        """Build seeded layers."""
+        super().__init__()
+        torch.manual_seed(0)
+        self.inner = torch.nn.Linear(4, 4)
+        self.norm = torch.nn.BatchNorm1d(4)
+        self.head = torch.nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply a repeated layer, a norm and a residual head."""
+        for _ in range(3):
+            x = torch.relu(self.inner(x))
+        x = self.norm(x * 2 + 1)
+        return self.head(x) + x
+
+
+def _persisted_dedup_record(trace: tl.Trace, path: Path) -> list[tuple[Any, ...]]:
+    """Save ``trace``, load it back and return each op's dedup fields and payload bytes."""
+
+    trace.save(path)
+    loaded = tl.load(path)
+    record: list[tuple[Any, ...]] = []
+    for op in loaded._layer_list:
+        annotations = dict(getattr(op, "annotations", None) or {})
+        payload = op.out if isinstance(op.out, torch.Tensor) else None
+        payload_bytes = (
+            payload.detach().cpu().contiguous().numpy().tobytes() if payload is not None else None
+        )
+        record.append(
+            (
+                op.label,
+                annotations.get("dedup_source_id"),
+                annotations.get("dedup_source_version"),
+                annotations.get("dedup_reference_label"),
+                payload_bytes,
+            )
+        )
+    return record
+
+
+def test_dedup_ordinals_persist_equal_across_repeat_captures(tmp_path: Path) -> None:
+    """Identical captures in one process persist the same dedup ordinals and bytes.
+
+    Garbage allocated between captures perturbs which heap addresses are free,
+    so an ``id()``-derived ordinal would differ from one capture to the next.
+    """
+
+    records = []
+    held: list[torch.Tensor] = []
+    for run in range(6):
+        garbage = [torch.empty(n % 7 + 1) for n in range(32 * (run + 1))]
+        held.extend(garbage[::3])
+        del garbage
+        torch.manual_seed(0)
+        trace = tl.trace(_BufferWritingNet().train(), torch.randn(3, 4))
+        records.append(_persisted_dedup_record(trace, tmp_path / f"run_{run}.tlspec"))
+        del trace
+
+    assert any(row[1] is not None for row in records[0])
+    for record in records[1:]:
+        assert record == records[0]

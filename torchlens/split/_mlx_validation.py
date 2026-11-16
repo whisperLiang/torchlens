@@ -61,4 +61,4 @@ def validate_mlx_equivalence(runtime: Any, model: Any, inputs: Any, **options: A
             )
 
 
-__all__ = ["validate_mlx_equivalence"]
+__all__ = ("validate_mlx_equivalence",)

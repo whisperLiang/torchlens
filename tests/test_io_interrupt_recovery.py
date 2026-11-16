@@ -27,8 +27,6 @@ import torchlens as tl
 from torchlens._io import tlspec as tlspec_mod
 from torchlens.io import cleanup_tmp
 
-pytestmark = pytest.mark.smoke
-
 
 def _trace(seed: int = 0) -> tl.Trace:
     torch.manual_seed(seed)
@@ -126,22 +124,22 @@ def test_bundle_save_recovery_failure_never_masks_the_interrupt(
 
     trace = _trace(3)
     target = tmp_path / "b.tl"
-    tl.save(trace, target)
+    trace.save(target)
     before = sorted(p.name for p in target.iterdir())
 
-    def interrupting_dump(state, handle):  # type: ignore[no-untyped-def]
+    def interrupting_write(*args, **kwargs):  # type: ignore[no-untyped-def]
         raise KeyboardInterrupt
 
     def failing_mark_partial(tmp, *, reason=None):  # type: ignore[no-untyped-def]
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(bundle_mod, "dump_canonical_metadata", interrupting_dump)
+    monkeypatch.setattr(bundle_mod, "write_trace_envelope", interrupting_write)
     monkeypatch.setattr(bundle_mod, "_mark_partial", failing_mark_partial)
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         with pytest.raises(KeyboardInterrupt):
-            tl.save(trace, target, overwrite=True)
+            trace.save(target, overwrite=True)
 
     assert any("recovery step 'mark-partial' itself failed" in str(w.message) for w in caught)
     # The backup restore still ran: the pre-existing bundle is back in place.

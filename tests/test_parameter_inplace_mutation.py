@@ -1,0 +1,607 @@
+"""In-place ops on a prepared ``nn.Parameter`` inside ``forward`` are captured.
+
+MIX-HIC's ``with torch.no_grad(): self.temp.clamp_(0.001, 0.5)`` on
+``self.temp = nn.Parameter(...)`` used to vanish from the graph: the op returns the
+Parameter itself, and Parameter outputs were never logged, so the completeness
+tripwire failed (``3 dispatched vs 2 captured``). The op is now logged with the
+Parameter as its parameter input, and every later read of the Parameter in the pass
+consumes the op's output.
+"""
+
+from __future__ import annotations
+
+import copy
+import warnings
+from typing import Any
+
+import pytest
+import torch
+from torch import nn
+
+import torchlens as tl
+from torchlens._utils.tensor_leaves import iter_tensors
+from torchlens.backends.torch import param_mutation, wrappers
+from torchlens.errors import TorchLensWarning, TraceCaptureError
+from torchlens.options import CaptureOptions
+from torchlens.validation import last_validation_failure
+from torchlens.validation._diagnostics import CHECK_BACKWARD
+from torchlens.validation._invariants import MetadataInvariantError
+
+
+class _ParamMutator(nn.Module):
+    """Mutate a scalar Parameter in place under ``no_grad``, then divide by it."""
+
+    def __init__(self, op: str, init: float = 0.9) -> None:
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+        self.temp = nn.Parameter(init * torch.ones([]))
+        self.op = op
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            if self.op == "clamp_":
+                self.temp.clamp_(0.001, 0.5)
+            elif self.op == "copy_":
+                self.temp.copy_(torch.tensor(0.25))
+            elif self.op == "mul_":
+                self.temp.mul_(0.5)
+            elif self.op == "add_":
+                self.temp.add_(0.125)
+            elif self.op == "twice":
+                self.temp.clamp_(0.001, 0.5)
+                self.temp.mul_(0.5)
+        return self.lin(x) / self.temp
+
+
+def _ops_by_type(trace: Any, op_type: str) -> list[Any]:
+    return [layer for layer in trace.layers if layer.type == op_type]
+
+
+def _parent_labels(trace: Any, layer: Any) -> list[str]:
+    return [trace[parent].label for parent in layer.parents]
+
+
+def _eager_output_and_state(model: nn.Module, x: torch.Tensor) -> tuple[torch.Tensor, dict]:
+    eager = copy.deepcopy(model)
+    with torch.no_grad():
+        out = eager(x)
+    return out, {k: v.detach().clone() for k, v in eager.state_dict().items()}
+
+
+# Kept by the shrink-r4 coverage proof: a sole campaign mutation kill.
+def test_validate_restores_mutated_parameter_like_a_buffer() -> None:
+    """``tl.validate`` leaves model state as it found it (the buffer contract)."""
+
+    model = _ParamMutator("mul_")
+    before = model.temp.detach().clone()
+    assert tl.validate(model, torch.randn(3, 4), scope="forward") is True
+    assert torch.equal(model.temp.detach(), before)
+
+
+def _drop_prepared_parameter_mutations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make capture drop every prepared-Parameter mutation op (the old gap)."""
+
+    original = wrappers._parameter_mutation_output_for_logging
+
+    def _drop(
+        trace: Any, value: Any, *, source: Any, was_inplace: bool, is_storage_rebind: bool = False
+    ) -> Any:
+        if (
+            was_inplace
+            and isinstance(source, nn.Parameter)
+            and not param_mutation.is_unregistered_parameter(trace, source)
+        ):
+            return value
+        return original(
+            trace,
+            value,
+            source=source,
+            was_inplace=was_inplace,
+            is_storage_rebind=is_storage_rebind,
+        )
+
+    monkeypatch.setattr(wrappers, "_parameter_mutation_output_for_logging", _drop)
+
+
+# Kept by the shrink-r4 coverage proof: sole branch coverage of backends/torch/_completeness_finalize.py, validation/_completeness_backstop.py and more and a sole campaign mutation kill.
+def test_validation_still_fails_when_the_parameter_mutation_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The completeness tripwire bites if capture drops the Parameter mutation again."""
+
+    _drop_prepared_parameter_mutations(monkeypatch)
+    with pytest.warns(Warning):
+        assert tl.validate(_ParamMutator("clamp_"), torch.randn(3, 4), scope="forward") is False
+    # The failure is the completeness tripwire on the dropped op, not an unrelated check.
+    failure = tl.validation.last_validation_failure()
+    assert failure is not None
+    assert "bfs_completeness" in failure.summary()
+    assert "dispatched vs" in failure.summary()
+
+
+class _AddThenScale(nn.Module):
+    """Shift a Parameter in place under ``no_grad``, then scale by it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+        self.scale = nn.Parameter(torch.full((4,), 2.0))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            self.scale.add_(1.0)
+        return self.lin(x) * self.scale
+
+
+# Kept by the shrink-r4 coverage proof: a sole campaign mutation kill.
+def test_intervention_on_the_parameter_mutation_op_applies() -> None:
+    """A live intervention on the mutation op lands in the Parameter; the op stays."""
+
+    torch.manual_seed(0)
+    model = _AddThenScale()
+    x = torch.randn(3, 4)
+    trace = tl.trace(model, x, intervene=tl.when(tl.func("add"), tl.zero_ablate()))
+    adds = _ops_by_type(trace, "add")
+    assert len(adds) == 1, [layer.label for layer in trace.layers]
+    mul = _ops_by_type(trace, "mul")[0]
+    assert adds[0].label in _parent_labels(trace, mul)
+    assert "scale" not in [p.address for p in mul.params]
+    # Eager semantics with the hook: the in-place op's result (zeroed) is the
+    # Parameter's new value, so every later read sees zeros.
+    assert torch.equal(model.scale.detach(), torch.zeros(4))
+    assert torch.equal(trace[trace.output_layers[0]].out, torch.zeros(3, 4))
+
+
+class _FrozenMutator(nn.Module):
+    """Mutate a frozen (``requires_grad=False``) Parameter in place with grad mode on."""
+
+    def __init__(self, requires_grad: bool = False) -> None:
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+        self.temp = nn.Parameter(0.9 * torch.ones([]), requires_grad=requires_grad)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.temp.mul_(0.5)
+        return self.lin(x) / self.temp
+
+
+# Kept by the shrink-r4 coverage proof: a sole campaign mutation kill.
+def test_trainable_parameter_mutated_without_no_grad_still_raises_like_eager() -> None:
+    """Narrowness: only frozen Parameters run untracked; eager refuses this one too."""
+
+    x = torch.randn(3, 4)
+    with pytest.raises(RuntimeError, match="leaf Variable that requires grad"):
+        _FrozenMutator(requires_grad=True)(x)
+    with pytest.raises(TraceCaptureError, match="leaf Variable that requires grad") as _tce_info2:
+        tl.trace(_FrozenMutator(requires_grad=True), x)
+    assert isinstance(_tce_info2.value.__cause__, RuntimeError)
+
+
+class _FrozenGradOperandMutator(nn.Module):
+    """Mutate a frozen Parameter in place with an operand that may require grad."""
+
+    def __init__(
+        self, spelling: str, grad_operand: bool = True, through_linear: bool = False
+    ) -> None:
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+        self.temp = nn.Parameter(torch.full((4,), 0.9), requires_grad=False)
+        self.spelling = spelling
+        self.grad_operand = grad_operand
+        self.through_linear = through_linear
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        operand = self.lin.weight.sum(0)
+        if not self.grad_operand:
+            operand = operand.detach()
+        if self.spelling == "keyword":
+            self.temp.add_(other=operand)
+        elif self.spelling == "nested":
+            index = torch.tensor([0, 2])
+            self.temp.index_put_(indices=(index,), values=operand[:2])
+        else:
+            self.temp.add_(operand)
+        if self.through_linear:
+            x = self.lin(x)
+        return x / self.temp
+
+
+_GRAD_OPERAND_OP = {"positional": "add", "keyword": "add", "nested": "indexput"}
+
+
+# Kept by the shrink-r4 coverage proof: a sole campaign mutation kill.
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "positional",
+    ],
+)
+def test_frozen_parameter_with_grad_operand_captures_like_eager(spelling: str) -> None:
+    """Eager makes the frozen Parameter a non-leaf; capture now does the same.
+
+    Capture never changes the receiver's (frozen) ``requires_grad``, so autograd
+    accepts the call exactly as in eager. The Parameter ends as eager leaves
+    it (a non-leaf requiring grad), and the op is logged like any other
+    Parameter mutation. A later capture of the same model still works, as a
+    later eager forward does.
+    """
+
+    torch.manual_seed(0)
+    model = _FrozenGradOperandMutator(spelling)
+    x = torch.randn(3, 4)
+    eager = copy.deepcopy(model)
+    eager_out = eager(x)
+    assert eager.temp.grad_fn is not None
+
+    traced_model = copy.deepcopy(model)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        trace = tl.trace(traced_model, x)
+        assert trace.params["temp"].has_grad is False
+    assert not [w for w in caught if "not a leaf Tensor" in str(w.message)]
+    mutation = _ops_by_type(trace, _GRAD_OPERAND_OP[spelling])[0]
+    assert [p.address for p in mutation.params] == ["temp"]
+    truediv = _ops_by_type(trace, "truediv")[0]
+    assert mutation.label in _parent_labels(trace, truediv)
+    assert "temp" not in [p.address for p in truediv.params]
+    assert torch.allclose(trace[trace.output_layers[0]].out, eager_out.detach())
+    assert torch.equal(traced_model.temp.detach(), eager.temp.detach())
+    assert traced_model.temp.is_leaf is False
+    assert traced_model.temp.requires_grad is True
+    assert traced_model.temp.grad_fn is not None
+
+    second_eager_out = eager(x).detach()
+    second = tl.trace(traced_model, x)
+    assert torch.allclose(second[second.output_layers[0]].out, second_eager_out)
+    assert torch.equal(traced_model.temp.detach(), eager.temp.detach())
+
+    validated = copy.deepcopy(model)
+    assert tl.validate(validated, x, scope="forward") is True
+    assert torch.equal(validated.temp.detach(), model.temp.detach())
+
+
+# Kept by the shrink-r4 coverage proof: a sole campaign mutation kill.
+def test_frozen_parameter_nested_operand_without_grad_runs_untracked() -> None:
+    """Narrowness: with no grad-requiring operand the write stays untracked, as in eager."""
+
+    torch.manual_seed(0)
+    model = _FrozenGradOperandMutator("nested", grad_operand=False)
+    x = torch.randn(3, 4)
+    eager = copy.deepcopy(model)
+    eager_out = eager(x).detach()
+    assert eager.temp.grad_fn is None
+
+    traced_model = copy.deepcopy(model)
+    trace = tl.trace(traced_model, x)
+    mutation = _ops_by_type(trace, "indexput")[0]
+    assert [p.address for p in mutation.params] == ["temp"]
+    assert torch.allclose(trace[trace.output_layers[0]].out, eager_out)
+    assert torch.equal(traced_model.temp.detach(), eager.temp.detach())
+    assert traced_model.temp.is_leaf is True
+    assert traced_model.temp.requires_grad is False
+    assert tl.validate(copy.deepcopy(model), x, scope="forward") is True
+
+
+class _KeywordReceiver(nn.Module):
+    """Mutate a Parameter through ``torch.clamp_`` with the receiver given by name."""
+
+    def __init__(self, spelling: str) -> None:
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+        self.temp = nn.Parameter(0.9 * torch.ones([]))
+        self.spelling = spelling
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            if self.spelling == "keyword":
+                torch.clamp_(input=self.temp, min=0.001, max=0.5)
+            elif self.spelling == "positional":
+                torch.clamp_(self.temp, min=0.001, max=0.5)
+            else:
+                return self.lin(x) / torch.clamp(input=self.temp, min=0.001, max=0.5)
+        return self.lin(x) / self.temp
+
+
+# Kept by the shrink-r4 coverage proof: sole branch coverage of backends/torch/param_mutation.py, backends/torch/wrappers.py and a sole campaign mutation kill.
+def test_keyword_receiver_is_captured_like_a_positional_one() -> None:
+    torch.manual_seed(0)
+    x = torch.randn(3, 4)
+    keyword_model = _KeywordReceiver("keyword")
+    eager_out, eager_state = _eager_output_and_state(keyword_model, x)
+
+    traced_model = copy.deepcopy(keyword_model)
+    trace = tl.trace(traced_model, x)
+    clamp = _ops_by_type(trace, "clamp")[0]
+    assert [p.address for p in clamp.params] == ["temp"]
+    truediv = _ops_by_type(trace, "truediv")[0]
+    assert clamp.label in _parent_labels(trace, truediv)
+    assert "temp" not in [p.address for p in truediv.params]
+    assert torch.allclose(trace[trace.output_layers[0]].out, eager_out)
+    for key, value in traced_model.state_dict().items():
+        assert torch.equal(value, eager_state[key]), key
+
+    positional = tl.trace(_KeywordReceiver("positional"), x)
+    assert [layer.type for layer in trace._layer_list] == [
+        layer.type for layer in positional._layer_list
+    ]
+    assert tl.validate(copy.deepcopy(keyword_model), x, scope="forward") is True
+
+
+# Kept by the shrink-r4 coverage proof: a sole campaign mutation kill.
+def test_operand_scan_reaches_nested_containers() -> None:
+    """The frozen-receiver operand scan descends into tuples, lists and dicts."""
+
+    grad = torch.ones(2, requires_grad=True)
+    plain = torch.ones(2)
+    operand = (plain, [{"values": grad}], 3)
+    found = list(iter_tensors(operand))
+    assert len(found) == 2
+    assert found[0] is plain and found[1] is grad
+
+
+class _LazyThenMutate(nn.Module):
+    """A lazy layer materialized in forward beside an initialized, mutated Parameter."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lazy = nn.LazyLinear(4)
+        self.temp = nn.Parameter(0.9 * torch.ones([]))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            self.temp.clamp_(0.001, 0.5)
+        return self.lazy(x) / self.temp
+
+
+# Kept by the shrink-r4 coverage proof: sole branch coverage of _capture_state_helpers.py, _postprocess/_lazy_param_geometry.py and more and a sole campaign mutation kill.
+def test_lazy_materialization_is_not_a_parameter_mutation() -> None:
+    """Lazy init writes stay out of the graph; an initialized Parameter's write is logged."""
+
+    trace = tl.trace(_LazyThenMutate(), torch.randn(3, 4))
+    assert sorted(layer.type for layer in trace._layer_list) == [
+        "clamp",
+        "input",
+        "linear",
+        "output",
+        "truediv",
+    ]
+    assert trace._num_ops == 3
+    clamp = _ops_by_type(trace, "clamp")[0]
+    assert [p.address for p in clamp.params] == ["temp"]
+    assert clamp.label in _parent_labels(trace, _ops_by_type(trace, "truediv")[0])
+
+
+class _LazyMutatesOwnWeight(nn.Module):
+    """A lazy layer whose own weight is scaled in place between two calls."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lazy = nn.LazyLinear(4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        first = self.lazy(x)
+        with torch.no_grad():
+            self.lazy.weight.mul_(0.5)
+        return first + self.lazy(x)
+
+
+# Kept by the shrink-r4 coverage proof: sole branch coverage of _data_classes/op.py.
+def test_materialized_lazy_parameter_mutation_is_captured() -> None:
+    """The lazy exclusion covers only materialization: a warmed lazy weight's write is an op."""
+
+    torch.manual_seed(0)
+    model = _LazyMutatesOwnWeight()
+    x = torch.randn(3, 4)
+    model(x)  # warm: materializes the lazy weight and bias before any capture
+    eager_out, eager_state = _eager_output_and_state(model, x)
+
+    trace = tl.trace(copy.deepcopy(model), x)
+    # grouping rule row 27: one weighted module called from two lines is one
+    # layer with 2 passes, so the two linear calls are the two passes (ops) of
+    # one layer; address every op per pass.
+    mutations = [op for op in trace._layer_list if op.type == "mul"]
+    assert len(mutations) == 1, [op.label for op in trace._layer_list]
+    mutation = mutations[0]
+    assert [p.address for p in mutation.params] == ["lazy.weight"]
+    linears = [op for op in trace._layer_list if op.type == "linear"]
+    assert len(linears) == 2
+    assert len({op.layer_label for op in linears}) == 1
+    assert mutation.label in _parent_labels(trace, linears[1])
+    assert mutation.label not in _parent_labels(trace, linears[0])
+    assert torch.allclose(trace[trace.output_layers[0]].out, eager_out)
+
+    traced_model = copy.deepcopy(model)
+    tl.trace(traced_model, x)
+    for key, value in traced_model.state_dict().items():
+        assert torch.equal(value, eager_state[key]), key
+
+    assert tl.validate(copy.deepcopy(model), x, scope="forward") is True
+
+
+# Kept by the shrink-r4 coverage proof: a sole campaign mutation kill.
+@pytest.mark.parametrize("spelling", ["nested"])
+def test_frozen_parameter_with_grad_operand_validates_backward(spelling: str) -> None:
+    """Backward validation passes on the parity case and returns the model as it came.
+
+    The stock pass turns the frozen Parameter into a non-leaf whose history chains
+    into that pass; the captured pass must start from the pre-call (leaf) model, or
+    it would differentiate through the stock pass's graph as well. (The model calls
+    ``lin`` so the module-output gradient census has a non-root call to compare.)
+    """
+
+    torch.manual_seed(0)
+    model = _FrozenGradOperandMutator(spelling, through_linear=True)
+    x = torch.randn(3, 4)
+    validated = copy.deepcopy(model)
+    assert tl.validate(validated, x, scope="backward") is True
+    assert validated.temp.is_leaf is True
+    assert validated.temp.requires_grad is False
+    assert torch.equal(validated.temp.detach(), model.temp.detach())
+    assert validated.lin.weight.is_leaf is True
+    assert validated.lin.weight.requires_grad is True
+
+
+# Kept by the shrink-r4 coverage proof: a sole campaign mutation kill.
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "keyword",
+    ],
+)
+def test_frozen_parameter_mutation_op_records_its_gradient(spelling: str) -> None:
+    """The gradient flowing through the mutated Parameter is the mutation op's gradient."""
+
+    torch.manual_seed(0)
+    model = _FrozenGradOperandMutator(spelling, through_linear=True)
+    x = torch.randn(3, 4)
+    eager = copy.deepcopy(model)
+    eager_out = eager(x)
+    eager_temp = eager.temp
+    eager_temp.retain_grad()
+    eager_out.sum().backward()
+
+    trace = tl.trace(copy.deepcopy(model), x, capture=CaptureOptions(save_grads="all"))
+    trace.backward(trace[trace.output_layers[0]].out.sum())
+    mutation = _ops_by_type(trace, _GRAD_OPERAND_OP[spelling])[0]
+    assert mutation.grad is not None
+    assert torch.allclose(mutation.grad, eager_temp.grad)
+
+
+# Kept by the shrink-r4 coverage proof: sole branch coverage of validation/_backward_state.py, validation/_backward.py and a sole campaign mutation kill.
+def test_backward_validation_refuses_an_already_run_model_loudly() -> None:
+    """Narrowness: a Parameter that is a non-leaf BEFORE validation is not compared.
+
+    After one forward the frozen Parameter carries that pass's autograd history (as
+    in eager); no stock pass on this object describes a fresh model, so backward
+    validation fails closed with a reason instead of comparing stale gradients.
+    """
+
+    torch.manual_seed(0)
+    model = _FrozenGradOperandMutator("positional")
+    x = torch.randn(3, 4)
+    model(x)
+    assert model.temp.is_leaf is False
+    with pytest.warns(TorchLensWarning, match="not autograd leaves before validation") as caught:
+        assert tl.validate(model, x, scope="backward") is False
+    codes = [getattr(w.message, "fields", {}).get("code") for w in caught]
+    assert "backward_validation_non_leaf_parameter" in codes
+    failure = last_validation_failure()
+    assert failure is not None and failure.check_name == CHECK_BACKWARD
+    assert failure.extra["reason"] == "non_leaf_parameter"
+    assert model.temp.is_leaf is False
+
+
+# Kept by the shrink-r4 coverage proof: sole branch coverage of _user_public_impls.py, validation/_pristine.py and more.
+def test_forward_validation_of_an_already_run_model_raises_torchs_leaf_error() -> None:
+    """Eager parity: a deepcopy of the run model makes the Parameter a trainable leaf.
+
+    ``Parameter.__deepcopy__`` turns the non-leaf into a leaf requiring grad, so the
+    ground-truth forward on that copy raises torch's own error, exactly as a second
+    eager forward on a deepcopy does.
+    """
+
+    torch.manual_seed(0)
+    model = _FrozenGradOperandMutator("positional")
+    x = torch.randn(3, 4)
+    model(x)
+    eager_copy = copy.deepcopy(model)
+    assert eager_copy.temp.is_leaf is True
+    assert eager_copy.temp.requires_grad is True
+    with pytest.raises(RuntimeError, match="leaf Variable that requires grad"):
+        eager_copy(x)
+    with pytest.raises(RuntimeError, match="leaf Variable that requires grad"):
+        tl.validate(model, x, scope="forward")
+
+
+# Kept by the shrink-r4 coverage proof: sole branch coverage of validation/_invariants_backward_flow.py, validation/_invariants_backward_graph.py and a sole campaign mutation kill.
+def test_backward_validation_still_fails_when_the_frozen_mutation_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backward scope still bites if capture drops the grad-carrying mutation."""
+
+    _drop_prepared_parameter_mutations(monkeypatch)
+    torch.manual_seed(0)
+    model = _FrozenGradOperandMutator("positional", through_linear=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(MetadataInvariantError, match="missing op label"):
+            tl.validate(model, torch.randn(3, 4), scope="backward")
+
+
+def _backward_through_own_output(trace: Any) -> None:
+    trace.backward(trace[trace.output_layers[0]].out.sum())
+
+
+# Kept by the shrink-r4 coverage proof: sole branch coverage of backends/torch/backward.py, backends/torch/tensor_tracking.py and a sole campaign mutation kill.
+def test_mutation_gradient_hook_records_only_its_own_traces_backward() -> None:
+    """The model-state hook never records a later backward into the old trace.
+
+    The hook sits on the capture pass's ``grad_fn`` of the mutated Parameter, which
+    every later forward on the same model chains onto. A second capture's backward
+    and 20 eager training steps (both traces alive) must leave trace 1 with its one
+    pass: ``op.grad`` still works and ``backward_events`` does not grow. Root
+    matching must not open trace 1's managed bracket through that history either,
+    or every op upstream of the Parameter (the operand's ``sum``) would record too.
+    """
+
+    torch.manual_seed(0)
+    model = _FrozenGradOperandMutator("positional", through_linear=True)
+    x = torch.randn(3, 4)
+    capture = CaptureOptions(save_grads="all")
+    trace1 = tl.trace(model, x, capture=capture)
+    _backward_through_own_output(trace1)
+    op1 = _ops_by_type(trace1, "add")[0]
+    grad1 = op1.grad.clone()
+    operand1 = _ops_by_type(trace1, "sum")[0]
+    assert len(operand1.autograd.grads) == 1
+    events_after_own_backward = len(trace1.backward_events)
+
+    trace2 = tl.trace(model, x, capture=capture)
+    _backward_through_own_output(trace2)
+    op2 = _ops_by_type(trace2, "add")[0]
+    assert op2.grad is not None
+    assert len(op2.autograd.grads) == 1
+    assert len(trace1.backward_events) == events_after_own_backward
+    trace2_events = len(trace2.backward_events)
+
+    optimizer = torch.optim.SGD(
+        [p for p in model.parameters() if p.requires_grad and p.is_leaf], lr=0.01
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for _ in range(20):
+            optimizer.zero_grad()
+            model(x).sum().backward()
+            optimizer.step()
+    assert [str(w.message) for w in caught] == []
+    assert len(op1.autograd.grads) == 1
+    assert torch.equal(op1.grad, grad1)
+    assert len(operand1.autograd.grads) == 1
+    assert len(trace1.backward_events) == events_after_own_backward
+    assert len(op2.autograd.grads) == 1
+    assert len(trace2.backward_events) == trace2_events
+
+
+# Kept by the shrink-r4 coverage proof: a sole campaign mutation kill.
+def test_cleanup_removes_the_mutation_gradient_hook() -> None:
+    """``cleanup()`` removes the hook from the model's autograd history.
+
+    The trace stays marked state-entangled, so its remaining op hooks on that
+    history stay gated after cleanup.
+    """
+
+    from torchlens.backends.torch import tensor_tracking
+
+    torch.manual_seed(0)
+    model = _FrozenGradOperandMutator("positional", through_linear=True)
+    x = torch.randn(3, 4)
+    trace = tl.trace(model, x, capture=CaptureOptions(save_grads="all"))
+    handles = list(tensor_tracking._OWNED_STATE_GRAD_HOOK_HANDLES.get(trace, ()))
+    assert len(handles) == 1
+    assert handles[0].id in handles[0].hooks_dict_ref()
+    trace.cleanup()
+    assert tensor_tracking._OWNED_STATE_GRAD_HOOK_HANDLES[trace] == []
+    for handle in handles:
+        hooks = handle.hooks_dict_ref()
+        assert hooks is None or handle.id not in hooks
+    model(x).sum().backward()

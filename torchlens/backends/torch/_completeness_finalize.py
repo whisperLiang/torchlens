@@ -5,34 +5,21 @@ from __future__ import annotations
 import threading
 import warnings
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
 
 from ... import _state
-from ..._errors import TorchLensCaptureGapWarning
-from ...utils._torch_symbols import torch_attr
+from ..._errors import CaptureGapWarning
+from ..._utils._package_frames import external_warning_stacklevel
+from ..._utils._torch_symbols import torch_attr
+from ...errors._base import transparent_contextmanager
+from ._completeness_hop import register_witness_hop_rules
+from ._state_bytes import _whole_storage_uint8
 from .escape_detection import (
     ExpectedOriginalToken,
 )
-
-if TYPE_CHECKING:
-    from .completeness_witness import (
-        _ACTIVE_WITNESS_STATE,
-        _HOST_ESCAPE_MUTABLE_WRITEBACK,
-        CompletenessWitnessMode,
-        _CompletenessDispatchMode,
-        _DispatchCallsite,
-        _event_is_capture_accounted,
-        _finalize_runnable_ledger,
-        _is_expected_opaque_dispatch,
-        _observe_invisible_host_escapes,
-        _register_authorized_caller_namespace,
-        _whole_storage_uint8,
-        _WitnessState,
-    )
 
 __all__ = (
     "_STORAGE_RAW_POINTER_TARGETS",
@@ -41,6 +28,7 @@ __all__ = (
     "_effective_mode",
     "_barcode_text",
     "_finalize_census",
+    "_is_value_free_capture",
     "_reports_include_non_input_boundary",
     "_finalize_input_semantics_without_census",
     "capture_completeness_witness",
@@ -49,16 +37,16 @@ __all__ = (
 
 
 def _STORAGE_RAW_POINTER_TARGETS() -> tuple[Any, ...]:
-    """Return storage classes whose ``data_ptr`` accessor leaks the raw pointer (r16-C1).
+    """Return storage classes whose ``data_ptr`` accessor leaks the raw pointer.
 
     ``tensor.untyped_storage()`` yields a ``torch.UntypedStorage`` and ``tensor.storage()`` a
-    ``torch.TypedStorage``; ``data_ptr()`` on either hands out the same raw pointer the r15 Tensor
+    ``torch.TypedStorage``; ``data_ptr()`` on either hands out the same raw pointer the Tensor
     patch fails closed on. Both are Python-visible classes whose ``data_ptr`` method is patchable.
     """
 
     targets: list[Any] = []
     for name in ("UntypedStorage", "TypedStorage"):
-        cls = torch_attr(name)  # r47 secD_1: no lazy ``torch.__getattr__``
+        cls = torch_attr(name)  # no lazy ``torch.__getattr__``
         if cls is not None and hasattr(cls, "data_ptr"):
             targets.append(cls)
     return tuple(targets)
@@ -87,7 +75,7 @@ def _check_writeback_watch(state: _WitnessState) -> None:
     """Detect a host write-back through any watched mutable zero-copy alias at forward end.
 
     The honest rule is keyed on the WHOLE aliased storage's BYTES, never on the version counter
-    (r14-H1) and never on only the view's element extent (r15-H2). A watched source whose whole
+    and never on only the view's element extent. A watched source whose whole
     storage is UNCHANGED since the mutable-alias exposure was only read: it stays VERIFIED (a pure
     read-only ``.numpy().sum()`` / storage-pointer identity check is not over-triggered). A watched
     source whose storage bytes CHANGED anywhere -- INCLUDING outside the view's own window (a
@@ -99,9 +87,9 @@ def _check_writeback_watch(state: _WitnessState) -> None:
       raw byte comparison is AMBIGUOUS -- the diff could be the tracked op OR an additional host
       write layered on top, and cannot prove the ABSENCE of a host write -> conservatively opaque.
 
-    Gating detection on ``version unchanged`` (the pre-r14 behaviour) let a tracked in-place op
+    Gating detection on ``version unchanged`` would let a tracked in-place op
     that bumps the version AFTER the ``.numpy()`` / ``.data`` snapshot skip the byte compare, so a
-    host write-back on the same storage went undetected and the run falsely VERIFIED. Comparing
+    host write-back on the same storage would go undetected and the run falsely VERIFY. Comparing
     bytes alone closes that gate while keeping read-only exposures honestly VERIFIED.
     """
 
@@ -205,21 +193,22 @@ def _finalize_census(state: _WitnessState) -> None:
                 "function": callsite.function if callsite is not None else None,
                 "owner_thread_id": state.owner_thread_id,
                 "guard_pass_index": state.guard_pass_index,
-                "capture_mode": getattr(trace, "capture_mode", None),
+                "capture_mode": trace._options_mode,
                 "scope": "active_logging",
                 "enforced": False,
                 "in_replacement_hook": event.in_replacement_hook,
                 "mutates": event.mutates,
                 # A ``.data``-property accessor view (``aten.detach``/``aten.alias``) on a
-                # registered buffer -- the intrinsic, legitimately-uncaptured dispatch of the
-                # ``self.b.data.copy_(x)`` buffer-write idiom. The completeness backstop credits
-                # these apples-to-apples against the dispatch census (see
-                # ``validation.core.completeness_backstop_counts``); a genuine untraced op is
-                # never flagged here (unowned + non-mutating + pure-view + buffer only).
+                # registered buffer or pending lazy slot -- the legitimately-uncaptured dispatch
+                # of ``self.b.data.copy_(x)`` or ``UninitializedParameter.materialize``. The
+                # backstop credits these apples-to-apples against the dispatch census (see
+                # ``validation._completeness_backstop.completeness_backstop_counts``); a
+                # genuine untraced op is never flagged here (unowned + non-mutating +
+                # pure-view + buffer or pending lazy slot only).
                 "state_view_accessor": event.state_view_accessor,
             }
         )
-    decompositions = trace.__dict__.setdefault("completeness_decompositions", [])
+    decompositions = trace.__dict__.setdefault("_health_completeness_decompositions", [])
     for owner, operators in owner_events.values():
         owner_scope = (
             "expected_opaque"
@@ -245,25 +234,24 @@ def _finalize_census(state: _WitnessState) -> None:
         )
     reports = trace.__dict__.setdefault("completeness_diagnostics", [])
     reports.extend(diagnostics)
-    trace.completeness_witness_event_count = int(
-        getattr(trace, "completeness_witness_event_count", 0)
+    trace._health_num_witness_events = int(
+        trace.__dict__.get("_health_num_witness_events", 0)
     ) + len(state.events)
-    trace.completeness_witness_accounted_count = (
-        int(getattr(trace, "completeness_witness_accounted_count", 0)) + accounted_count
+    trace._health_num_accounted_witness_events = (
+        int(trace.__dict__.get("_health_num_accounted_witness_events", 0)) + accounted_count
     )
-    trace.completeness_witness_expected_opaque_count = (
-        int(getattr(trace, "completeness_witness_expected_opaque_count", 0)) + expected_opaque_count
-    )
-    trace.completeness_witness_unaccounted_count = int(
-        getattr(trace, "completeness_witness_unaccounted_count", 0)
+    prior = int(trace.__dict__.get("_health_num_expected_opaque_witness_events", 0))
+    trace._health_num_expected_opaque_witness_events = prior + expected_opaque_count
+    trace._health_num_unaccounted_witness_events = int(
+        trace.__dict__.get("_health_num_unaccounted_witness_events", 0)
     ) + len(diagnostics)
-    trace.completeness_witness_callback_ns = (
-        int(getattr(trace, "completeness_witness_callback_ns", 0)) + state.callback_ns
+    trace._health_completeness_callback_ns = (
+        int(trace.__dict__.get("_health_completeness_callback_ns", 0)) + state.callback_ns
     )
-    trace.completeness_witness_verified = not reports
+    trace._health_completeness_verified = not reports
     if reports:
-        trace.capture_verified = False
-        trace.capture_verification_reason = (
+        trace._provenance_verified = False
+        trace._provenance_verification_reason = (
             "dispatch_witness_unaccounted_ops"
             if diagnostics or _reports_include_non_input_boundary(reports)
             else "input_boundary_unverifiable"
@@ -274,31 +262,64 @@ def _finalize_census(state: _WitnessState) -> None:
                 "TorchLens completeness witness observed "
                 f"{len(diagnostics)} unaccounted aten dispatch event(s); first: "
                 f"{first['operator']} ({first['reason']}). The Trace is marked "
-                "capture_verified=False; inspect trace.completeness_diagnostics.",
-                TorchLensCaptureGapWarning,
-                stacklevel=3,
+                "trace.provenance.verified=False; inspect trace.completeness_diagnostics.",
+                CaptureGapWarning,
+                stacklevel=external_warning_stacklevel(),
             )
+            # Gap path only: name a TorchScript or DLPack call behind the gap (no verdict moves).
+            # Imported here so a capture without a gap never pays for the import.
+            from ._opaque_call_advisory import advise_opaque_calls
+
+            advise_opaque_calls(diagnostics)
         return
     if getattr(trace, "_raw_dynamo_region_detected", False):
         # More specific than either reason below: the transform-escape flag is shared with
         # the functorch boundary, and a shadow-mode escape report is a downstream symptom
         # of the same bypassed compiled region.
-        trace.capture_verified = False
-        trace.capture_verification_reason = "dynamo_region_not_logged"
-    elif getattr(trace, "escape_detector_verified", None) is False:
-        trace.capture_verified = False
-        trace.capture_verification_reason = "callable_escape_shadow_report"
+        trace._provenance_verified = False
+        trace._provenance_verification_reason = "dynamo_region_not_logged"
+    elif trace.__dict__.get("_health_escape_detector_verified") is False:
+        trace._provenance_verified = False
+        trace._provenance_verification_reason = "callable_escape_shadow_report"
     elif getattr(trace, "_raw_transform_escape_detected", False):
-        trace.capture_verified = False
-        trace.capture_verification_reason = "transform_call_route_unverified"
+        trace._provenance_verified = False
+        trace._provenance_verification_reason = "transform_call_route_unverified"
+    elif _is_value_free_capture(trace):
+        # A clean census proves dispatch ownership, not values: a value-free
+        # capture stays unverified (completeness_witness_verified keeps the fact).
+        trace._provenance_verified = None
+        trace._provenance_verification_reason = None
     else:
-        trace.capture_verified = True
-        detector_verified = getattr(trace, "escape_detector_verified", None)
-        trace.capture_verification_reason = (
+        trace._provenance_verified = True
+        detector_verified = trace.__dict__.get("_health_escape_detector_verified")
+        trace._provenance_verification_reason = (
             "dispatch_witness_and_detector_verified"
             if detector_verified is True
             else "dispatch_witness_verified"
         )
+
+
+def _is_value_free_capture(trace: Any) -> bool:
+    """Return whether ``trace`` records structure without tensor values.
+
+    Parameters
+    ----------
+    trace:
+        Trace or Recording runtime trace being finalized.
+
+    Returns
+    -------
+    bool
+        ``True`` for a structure-only capture or an admitted meta capture. The
+        admission check is belt-and-braces: an admitted capture that lost its
+        marker still fails the settlement invariant's lost-marker check.
+    """
+
+    if bool(trace._options_structure_only):
+        return True
+    from ..._capture._weightsfree_admission import admission_record_for
+
+    return admission_record_for(trace) is not None
 
 
 def _reports_include_non_input_boundary(reports: Any) -> bool:
@@ -342,24 +363,24 @@ def _finalize_input_semantics_without_census(trace: Any) -> None:
         for report in reports
     ):
         return
-    trace.capture_verified = False
-    trace.capture_verification_reason = "input_boundary_unverifiable"
+    trace._provenance_verified = False
+    trace._provenance_verification_reason = "input_boundary_unverifiable"
 
 
 def _init_witness_fields(trace: Any, mode: str) -> None:
     """Initialize the witness disclosure fields and counters on the trace."""
 
-    trace.completeness_witness_mode = mode
-    if not hasattr(trace, "completeness_witness_verified"):
-        trace.completeness_witness_verified = None
+    trace._health_completeness_mode = mode
+    if "_health_completeness_verified" not in trace.__dict__:
+        trace._health_completeness_verified = None
     trace.__dict__.setdefault("completeness_diagnostics", [])
-    trace.__dict__.setdefault("completeness_decompositions", [])
+    trace.__dict__.setdefault("_health_completeness_decompositions", [])
     for counter_field in (
-        "completeness_witness_event_count",
-        "completeness_witness_accounted_count",
-        "completeness_witness_expected_opaque_count",
-        "completeness_witness_unaccounted_count",
-        "completeness_witness_callback_ns",
+        "_health_num_witness_events",
+        "_health_num_accounted_witness_events",
+        "_health_num_expected_opaque_witness_events",
+        "_health_num_unaccounted_witness_events",
+        "_health_completeness_callback_ns",
     ):
         trace.__dict__.setdefault(counter_field, 0)
 
@@ -385,6 +406,7 @@ def _build_witness_state(
         record_escapes=record_escapes,
         ledger=record_escapes,
         record_aten=record_aten,
+        record_aten_values=trace._options_aten_ops == "values",
         plane_p=plane_p,
         aten_events=event_stream,
         capture_phase="forward",
@@ -394,15 +416,18 @@ def _build_witness_state(
 def _plane_p_requested() -> bool:
     """Whether the distributed opt-in is armed (plane-P observes this capture).
 
-    Merge-ranks C2: plane-P physical dispatch observation rides the shared
+    Plane-P physical dispatch observation rides the shared
     TorchLens dispatch mode for ARMED captures only, so unarmed dense capture
-    keeps its exact pre-C2 dispatch-mode-free path (zero interference).
+    keeps its exact dispatch-mode-free path (zero interference). An
+    armed process with no initialized process group (armed before creating
+    one, or after ``destroy_process_group``) is dormant: no collective can run,
+    so the capture takes the same unarmed path.
     """
 
     try:
-        from torchlens.distributed._lifecycle import armed_state
+        from torchlens._distributed._lifecycle import capture_armed_state
 
-        return armed_state() is not None
+        return capture_armed_state() is not None
     except Exception:
         return False
 
@@ -423,7 +448,50 @@ def _finalize_plane_p(state: _WitnessState) -> None:
     }
 
 
-@contextmanager
+def _resolve_witness_requests(trace: Any) -> tuple[bool, bool, bool, Any]:
+    """Resolve which witness planes a capture requests and arm aten recording on its journal.
+
+    Parameters
+    ----------
+    trace:
+        Trace or Recording runtime trace receiving diagnostics.
+
+    Returns
+    -------
+    tuple[bool, bool, bool, Any]
+        ``(record_escapes, record_aten, plane_p, event_stream)``.
+    """
+
+    # A runnable-eligible (``replayable``) capture always records
+    # tensor->host escape sources so the sparse descriptor can witness the escape
+    # by its producing op, keyed on the ESCAPE EVENT. This is a passive observer:
+    # it records raw op labels only and never alters a captured op, so goldens are
+    # unchanged. The default (non-runnable) capture path installs nothing.
+    # ATen recording is the public ``CaptureOptions(aten_ops=True)`` switch
+    # (``"values"`` also keeps outputs), stamped on the trace at entry;
+    # nothing else arms it.
+    record_escapes = bool(getattr(trace, "is_replayable", False))
+    record_aten = bool(trace._options_aten_ops)
+    plane_p = _plane_p_requested()
+    event_stream = getattr(trace, "capture_events", None)
+    if record_aten and event_stream is not None:
+        event_stream.aten_recording_enabled = True
+    return record_escapes, record_aten, plane_p, event_stream
+
+
+def _finalize_witness(state: _WitnessState, trace: Any, mode: str, *, runnable: bool) -> None:
+    """Run the end-of-forward witness passes in their fixed order."""
+
+    if mode == "shadow":
+        _finalize_census(state)
+    else:
+        _finalize_input_semantics_without_census(trace)
+    if runnable:
+        _finalize_runnable_ledger(state)
+    _finalize_plane_p(state)
+
+
+@transparent_contextmanager
 def capture_completeness_witness(trace: Any) -> Iterator[None]:
     """Optionally run an aten census around one active-logging forward.
 
@@ -440,19 +508,7 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
 
     mode = _effective_mode()
     _init_witness_fields(trace, mode)
-    # A runnable-eligible (``intervention_ready``) capture always records
-    # tensor->host escape sources so the sparse descriptor can witness the escape
-    # by its producing op, keyed on the ESCAPE EVENT. This is a passive observer:
-    # it records raw op labels only and never alters a captured op, so goldens are
-    # unchanged. The default (non-runnable) capture path installs nothing.
-    from ._aten_capture import _aten_recording_requested
-
-    record_escapes = bool(getattr(trace, "intervention_ready", False))
-    record_aten = _aten_recording_requested()
-    plane_p = _plane_p_requested()
-    event_stream = getattr(trace, "capture_events", None)
-    if record_aten and event_stream is not None:
-        event_stream.aten_recording_enabled = True
+    record_escapes, record_aten, plane_p, event_stream = _resolve_witness_requests(trace)
     if mode == "off" and not record_escapes and not record_aten and not plane_p:
         try:
             yield
@@ -476,56 +532,56 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
         # mechanism feeds one uniform source-witness pass. The patch is a pure observer,
         # restored unconditionally, and is skipped entirely for the non-runnable census path.
         if record_escapes:
-            # r35 I2: arm wrapper ownership tokens so raised / host-returning dispatch
+            # Arm wrapper ownership tokens so raised / host-returning dispatch
             # events can be attributed to their exact wrapper owner (the ledger's
             # owner-accounted discharge rule) even with both shadow modes off.
             prior_ledger_armed = _state._runnable_ledger_armed
             _state._runnable_ledger_armed = True
-            # r43: publish the witness state so wrappers.py string-hook interception can
+            # publish the witness state so wrappers.py string-hook interception can
             # classify owner vs non-owner (the ONE place a non-owner thread must not flip
             # the global ``pause_logging`` toggle). Cleared FIRST on exit.
-            global _ACTIVE_WITNESS_STATE
-            prior_active_state = _ACTIVE_WITNESS_STATE
-            _ACTIVE_WITNESS_STATE = state
+            # The slot is owned by the completeness_witness module (its readers,
+            # including wrappers and the function boundary, look it up there).
+            prior_active_state = _hub._ACTIVE_WITNESS_STATE
+            _hub._ACTIVE_WITNESS_STATE = state
             try:
                 with _observe_invisible_host_escapes(state), mode_context:
                     try:
                         yield
                     finally:
-                        if mode == "shadow":
-                            _finalize_census(state)
-                        else:
-                            _finalize_input_semantics_without_census(trace)
-                        _finalize_runnable_ledger(state)
-                        _finalize_plane_p(state)
+                        _finalize_witness(state, trace, mode, runnable=True)
             finally:
-                _ACTIVE_WITNESS_STATE = prior_active_state
+                _hub._ACTIVE_WITNESS_STATE = prior_active_state
                 _state._runnable_ledger_armed = prior_ledger_armed
+                state.release()
             return
-        with mode_context:
-            try:
-                yield
-            finally:
-                if mode == "shadow":
-                    _finalize_census(state)
-                else:
-                    _finalize_input_semantics_without_census(trace)
-                _finalize_plane_p(state)
+        try:
+            with mode_context:
+                try:
+                    yield
+                finally:
+                    _finalize_witness(state, trace, mode, runnable=False)
+        finally:
+            state.release()
 
 
 def _collect_authorized_internal_caller_modules() -> None:
     """Register the witness-family and buffer-write modules' own code objects.
 
-    The witness was one module until the r3 split; every ``_completeness_*``
-    sibling (plus the ``completeness_witness`` facade) holds internal callers
+    The witness was one module until the split; every ``_completeness_*``
+    sibling (plus the ``completeness_witness`` module) holds internal callers
     that must stay on the authorized roster, or the detector self-trips on the
-    witness's own no-observe storage reads (the r3 cluster regression).
+    witness's own no-observe storage reads (the cluster regression).
     """
 
     import importlib
     import pkgutil
 
+    # Imported here, not from this module's bottom block: the completeness_witness
+    # module runs this at its own import, which can happen while a split module
+    # (this one included) is still executing its bottom imports.
     from . import buffer_writes as _buffer_writes_module
+    from ._completeness_escape_state import _register_authorized_caller_namespace
 
     _register_authorized_caller_namespace(globals(), __file__)
     buffer_writes_file = _buffer_writes_module.__file__
@@ -541,3 +597,29 @@ def _collect_authorized_internal_caller_modules() -> None:
         module_file = module.__file__
         assert module_file is not None, "a real source module always has a file"
         _register_authorized_caller_namespace(vars(module), module_file)
+
+
+# Late imports: the split modules of this package import one another (cycles), so each
+# imports its siblings once every definition above exists.
+from . import completeness_witness as _hub  # noqa: E402  (owner of _ACTIVE_WITNESS_STATE)
+from ._completeness_boundaries import (  # noqa: E402
+    _is_expected_opaque_dispatch,
+)
+from ._completeness_dispatch import (  # noqa: E402
+    _event_is_capture_accounted,
+    _finalize_runnable_ledger,
+)
+from ._completeness_patches import (  # noqa: E402
+    _observe_invisible_host_escapes,
+)
+from .completeness_witness import (  # noqa: E402
+    _HOST_ESCAPE_MUTABLE_WRITEBACK,
+    CompletenessWitnessMode,
+    _CompletenessDispatchMode,
+    _DispatchCallsite,
+    _WitnessState,
+)
+
+# Higher-order operators (``torch.cond``, ``while_loop``, ``map``, ``scan``) need a rule per
+# mode type; register the witness mode's rules once its class exists (see _completeness_hop).
+register_witness_hop_rules(_CompletenessDispatchMode)

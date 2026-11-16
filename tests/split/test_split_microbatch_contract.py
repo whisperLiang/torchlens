@@ -462,6 +462,7 @@ def test_previous_suffix_graph_is_released_before_next_microbatch() -> None:
     assert result.loss.grad_fn is None and not result.loss.requires_grad
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA is required for heterogeneous parity"
 )

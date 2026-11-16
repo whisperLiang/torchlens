@@ -1,0 +1,288 @@
+"""Episode-capture and bundle-relation exception families (L2 core).
+
+Stable refusal codes ride ``exc.fields["code"]``; public code branches on the
+code value or the structured report, never on exception text. The exhaustive
+episode code vocabulary is maintained in
+``docs/reference/error_refusal_contract.md``.
+
+Every spelling is DOCUMENTED-UNSTABLE pending the rolling naming session;
+the codes themselves are the stable branch surface.
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+
+from ._base import ConfigurationError, TorchLensError, ValidationError
+
+__all__ = [
+    "BundleRelationError",
+    "ParamEvidenceMissingError",
+    "EpisodeCaptureError",
+    "EpisodeDeclarationError",
+    "EpisodeErrorCode",
+    "EpisodeJoinError",
+    "EpisodeLedgerError",
+]
+
+
+class EpisodeErrorCode(str, Enum):
+    """Frozen episode/bundle-relation refusal codes."""
+
+    #: Ledger geometry violates the monotone prefix law, a coherence arm, or
+    #: the value-mode token presence rule; the outcome derivation degrades
+    #: fail-closed to UNKNOWN.
+    EPISODE_LEDGER_INCOHERENT = "episode_ledger_incoherent"
+
+    #: Declared episode-carried state without snapshot/restore support inside
+    #: the declared checkpoint scope (E-A4/E-B4); refuses at DECLARATION time,
+    #: before execution.
+    EPISODE_STATE_UNSNAPSHOTABLE = "episode_state_unsnapshotable"
+
+    #: An episode ledger is present on a capture that carries no episode
+    #: declaration (an illegal combination: refuse at load).
+    EPISODE_LEDGER_WITHOUT_DECLARATION = "episode_ledger_without_declaration"
+
+    #: A structure-only episode ledger carries token payloads (the token
+    #: presence rule, structure-only direction).
+    EPISODE_LEDGER_PAYLOAD_IN_STRUCTURE_ONLY = "episode_ledger_payload_in_structure_only"
+
+    #: The episode declaration itself is unusable (stepped module not a
+    #: submodule of the episode root, token axis unreadable, forced-token
+    #: declaration malformed, or a structure-only episode was declared —
+    #: TYPED REFUSE per the combination table this sprint).
+    EPISODE_DECLARATION_INVALID = "episode_declaration_invalid"
+
+    #: The declared step count exceeds the wrapped-tier cost ceiling without
+    #: the explicit acknowledgement (the measured cost is SUPERLINEAR:
+    #: gpt2-124M CPU N=100 = 657 s / 5.4 GB peak RSS); refused at declaration
+    #: time, before execution.
+    EPISODE_STEP_CEILING_EXCEEDED = "episode_step_ceiling_exceeded"
+
+    #: A measured cross-step join is broken by UNDECLARED exogenous content:
+    #: the trace is intact and chain-shaped at the join, and
+    #: episode-dependent claims across it (step-series reads, whole-episode
+    #: replay, the blessing fold, escalation) refuse. Also the settlement
+    #: refusal under the ``on_feed_break="refuse"`` arm (partial
+    #: evidence on ``exc.partial_trace``).
+    EPISODE_FEED_BREAK_EXOGENOUS = "episode_feed_break_exogenous"
+
+    #: ``feed="closed"`` was declared and an UNDECLARED crossing was
+    #: measured: the strict arm halts capture at the next step entry (the
+    #: first observable point; one-step detection latency), or settles typed
+    #: when the break is only measurable against the settlement evidence
+    #: column.
+    EPISODE_FEED_CLOSED_VIOLATION = "episode_feed_closed_violation"
+
+    #: ``feed="closed"`` with a DECLARED crossing: capture stops before
+    #: entering the declared crossing step (no observation needed -- the
+    #: crossing is declared).
+    EPISODE_DECLARED_CROSSING_STOP = "episode_declared_crossing_stop"
+
+    #: An episode-SERIES claim was made over unmeasured or unchecked joins
+    #: (absent ``step_join`` envelope, or an ``unchecked`` grade): an
+    #: unmeasured cross-step join can never support a series claim. Per-row
+    #: reads are unaffected.
+    EPISODE_JOIN_UNMEASURED = "episode_join_unmeasured"
+
+    #: An episode-dependent claim crosses a DECLARED crossing:
+    #: disclosed, chain-shaped by declaration, still not one closed feed.
+    EPISODE_JOIN_DECLARED_CROSSING = "episode_join_declared_crossing"
+
+    #: The ledger's persisted capture digest disagrees with the digest
+    #: recomputed from the product it rides: a foreign or
+    #: tampered ledger -- the exact wrongness the binding exists to catch.
+    EPISODE_COUPLING_UNBOUND = "episode_coupling_unbound"
+
+    #: The ledger predates capture-digest minting (no binding exists), so
+    #: the coupling attestation cannot run; re-capture to bind.
+    EPISODE_COUPLING_UNMINTABLE = "episode_coupling_unmintable"
+
+    #: ``run`` on a COUPLED episode product: the ledger attests
+    #: one perturbed execution and no run provider re-arms the capture-time
+    #: intervention, so no engine can derive a fresh ledger -- the verdict's
+    #: refusal arm (re-capturing with episode= x intervene= is the
+    #: fresh-ledger arm).
+    EPISODE_COUPLED_REPLAY_UNDERIVABLE = "episode_coupled_replay_underivable"
+
+    #: A bundle relation row names a member absent from the Bundle (R1:
+    #: no dangling edges, ever).
+    BUNDLE_RELATION_MEMBER_MISSING = "bundle_relation_member_missing"
+
+    #: A bundle mutator would orphan relation rows (R5: cascade explicitly
+    #: or refuse typed; silent orphaning is forbidden).
+    BUNDLE_MEMBER_HAS_RELATIONS = "bundle_member_has_relations"
+
+    #: A relation row is outside the closed relation schema (unknown kind, wrong
+    #: row shape for the kind, or undeclared/missing-required param keys —
+    #: R2, grammar v2's required/optional split included).
+    BUNDLE_RELATION_SCHEMA_INVALID = "bundle_relation_schema_invalid"
+
+    #: A relation row's evidence envelope crosses the per-row canonical-JSON
+    #: byte budget (C07X item 7; the sidecar family default of 1 MiB).
+    #: Evidence envelopes are metadata-sized graded claims — bulk payloads
+    #: belong in a sidecar family, cited by digest.
+    BUNDLE_RELATION_EVIDENCE_OVER_BUDGET = "bundle_relation_evidence_over_budget"
+
+    #: A ``fed_by`` span row reaches past a member's bound token stream
+    #: (harness bundles; ``fields["side"]`` names which).
+    BUNDLE_RELATION_SPAN_OUT_OF_BOUNDS = "bundle_relation_span_out_of_bounds"
+
+    #: A ``fed_by`` row claims ``basis="verified"``/``"matched"`` but its
+    #: members' retained token ids contradict it (re-checked at every door).
+    BUNDLE_RELATION_SPAN_UNVERIFIED = "bundle_relation_span_unverified"
+
+    #: ``token_spans="auto"`` lacks its evidence: no source completion range,
+    #: no reader binding, or token ids not retained.
+    BUNDLE_RELATION_AUTO_SPANS_UNAVAILABLE = "bundle_relation_auto_spans_unavailable"
+
+    #: ``token_spans="auto"`` found several placements of the source output
+    #: (a repeated quote, or a tie between two trims); declare the spans.
+    BUNDLE_RELATION_AUTO_SPANS_AMBIGUOUS = "bundle_relation_auto_spans_ambiguous"
+
+    #: ``token_spans="auto"`` found no run of the source output in the
+    #: reader's prompt, even trimmed; retokenized text needs declared spans.
+    BUNDLE_RELATION_AUTO_SPANS_UNMATCHED = "bundle_relation_auto_spans_unmatched"
+
+    #: A cross-member parameter value/difference/trajectory read with no
+    #: immutable capture-time parameter evidence on every member (A-CKPT).
+    #: Parameter reads resolve through a live model handle (or nothing at
+    #: all after deserialization), so per-member "capture value" claims are
+    #: unprovable; the read refuses BEFORE tensor lookup, keyed on the
+    #: claim, never on Python object identity.
+    CHECKPOINT_SERIES_LIVE_PARAMS = "checkpoint_series_live_params"
+
+
+class EpisodeCaptureError(TorchLensError):
+    """Base class for episode-capture (``capture_kind=episode``) failures.
+
+    Examples
+    --------
+    >>> issubclass(tl.errors.EpisodeJoinError, EpisodeCaptureError)
+    True
+    >>> issubclass(EpisodeCaptureError, tl.errors.TorchLensError)
+    True
+    """
+
+
+class EpisodeDeclarationError(EpisodeCaptureError, ConfigurationError, ValueError):
+    """Episode declaration refused at entry, before execution.
+
+    ``fields["code"]`` carries ``episode_state_unsnapshotable``,
+    ``episode_declaration_invalid``, or
+    ``episode_step_ceiling_exceeded``.
+
+    Examples
+    --------
+    >>> issubclass(EpisodeDeclarationError, tl.errors.EpisodeCaptureError)
+    True
+    >>> issubclass(EpisodeDeclarationError, ValueError)
+    True
+    """
+
+
+class EpisodeLedgerError(EpisodeCaptureError, ValidationError, ValueError):
+    """Episode ledger validation refusal.
+
+    ``fields["code"]`` carries ``episode_ledger_incoherent``,
+    ``episode_ledger_without_declaration``, or
+    ``episode_ledger_payload_in_structure_only``.
+
+    Examples
+    --------
+    >>> issubclass(EpisodeLedgerError, tl.errors.EpisodeCaptureError)
+    True
+    >>> issubclass(EpisodeLedgerError, ValueError)
+    True
+    """
+
+
+class EpisodeJoinError(EpisodeCaptureError, ValidationError, RuntimeError):
+    """Cross-step join (``step_join``) refusal.
+
+    ``fields["code"]`` carries ``episode_feed_break_exogenous``,
+    ``episode_feed_closed_violation``, ``episode_declared_crossing_stop``,
+    ``episode_join_unmeasured``, or ``episode_join_declared_crossing``;
+    ``fields["break_step"]`` names the broken join's step where one exists.
+    Strict-arm instances raised mid-capture carry the settled partial
+    product on ``exc.partial_trace``.
+
+    Examples
+    --------
+    >>> issubclass(EpisodeJoinError, tl.errors.EpisodeCaptureError)
+    True
+    >>> issubclass(EpisodeJoinError, RuntimeError)
+    True
+    """
+
+
+class BundleRelationError(ValidationError, ValueError):
+    """Bundle member-relation table refusal (grammar v2).
+
+    ``fields["code"]`` carries ``bundle_relation_member_missing``,
+    ``bundle_member_has_relations``, ``bundle_relation_schema_invalid``,
+    ``bundle_relation_evidence_over_budget``, or one of the ``fed_by`` span
+    codes: ``bundle_relation_span_out_of_bounds``,
+    ``bundle_relation_span_unverified``,
+    ``bundle_relation_auto_spans_unavailable``,
+    ``bundle_relation_auto_spans_ambiguous``, or
+    ``bundle_relation_auto_spans_unmatched``; ``Bundle.token_divergence``
+    refuses ``bundle_token_divergence_unavailable`` and
+    ``Bundle.add_alternative`` refuses ``alternative_target_missing``,
+    ``alternative_target_unsteered``,
+    ``alternative_capture_position_dependent``,
+    ``alternative_steer_undeclared``, ``alternative_member_name_taken`` or
+    ``alternative_unchanged_call_diverged``.
+
+    Examples
+    --------
+    >>> issubclass(BundleRelationError, tl.errors.ValidationError)
+    True
+    >>> issubclass(BundleRelationError, ValueError)
+    True
+    """
+
+
+class BundleExperimentError(ValidationError, RuntimeError):
+    """Experiment-layer bundle verb refusal or disclosed partial outcome.
+
+    ``fields["code"]`` carries ``vary_mapping_invalid``,
+    ``vary_member_unknown``, ``vary_member_duplicate``,
+    ``vary_coverage_incomplete``, or ``vary_partial_failure`` (whose fields
+    additionally carry ``material_action_completed`` and the per-member
+    ``outcomes`` record — a mid-apply failure claims NO rollback).
+
+    Examples
+    --------
+    >>> issubclass(BundleExperimentError, tl.errors.ValidationError)
+    True
+    >>> issubclass(BundleExperimentError, RuntimeError)
+    True
+    """
+
+
+class ParamEvidenceMissingError(ValidationError, RuntimeError):
+    """Cross-member parameter read refused: no immutable capture-time evidence.
+
+    TorchLens records which parameter a run used, not its bytes, so a
+    parameter read resolves through the live model and returns TODAY'S
+    weights, not the weights at capture; after deserialization the bytes are
+    simply gone. Any cross-member parameter value/difference/trajectory read
+    is therefore an unprovable historical claim until every member carries
+    immutable parameter evidence (capture-time snapshots via R8(b), a
+    runnable artifact bound to immutable weights, or a digest tied to
+    immutable checkpoint bytes).
+
+    ``fields["code"]`` carries ``checkpoint_series_live_params``;
+    ``fields["members"]`` the member names, ``fields["param_address"]`` the
+    parameter address, and ``fields["bases"]`` the per-member derived value
+    bases. The class name is DOCUMENTED-UNSTABLE pending the naming session;
+    branch on the code.
+
+    Examples
+    --------
+    >>> issubclass(ParamEvidenceMissingError, tl.errors.ValidationError)
+    True
+    >>> issubclass(ParamEvidenceMissingError, RuntimeError)
+    True
+    """

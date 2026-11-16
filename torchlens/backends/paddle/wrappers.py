@@ -7,10 +7,23 @@ import inspect
 from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from types import ModuleType
+from typing import Any, cast
+
+from torchlens.backends._errors import BackendUnsupportedError
 
 from ... import _state
-from ...backends import BackendUnsupportedError
+from .._protocols.paddle import (
+    PADDLE_REFUSAL_INPLACE,
+    PADDLE_REFUSAL_SCALAR_ESCAPE,
+    PADDLE_REFUSAL_STOCHASTIC,
+)
+from .conv_layers import (
+    PADDLE_CONV_LAYER_OPS,
+    conv_layer_call,
+    conv_layer_input,
+    paddle_conv_layer_replay,
+)
 
 _ACTIVE_TAP_OBSERVER: object | None = None
 
@@ -70,13 +83,18 @@ _TOP_LEVEL_CORE_OPS = {
     "zeros_like",
 }
 _FUNCTIONAL_CORE_OPS = {
+    "adaptive_avg_pool1d",
+    "adaptive_avg_pool2d",
+    "adaptive_avg_pool3d",
     "avg_pool1d",
     "avg_pool2d",
+    "avg_pool3d",
     "batch_norm",
     "conv1d",
     "conv2d",
     "dropout",
     "gelu",
+    "hardsigmoid",
     "hardswish",
     "identity",
     "layer_norm",
@@ -84,6 +102,7 @@ _FUNCTIONAL_CORE_OPS = {
     "linear",
     "max_pool1d",
     "max_pool2d",
+    "max_pool3d",
     "relu",
     "relu6",
     "sigmoid",
@@ -103,9 +122,15 @@ _C_OPS_CORE_OPS = {
 }
 _TENSOR_CORE_METHODS = {
     "__add__",
+    "__eq__",
+    "__ge__",
     "__getitem__",
+    "__gt__",
+    "__le__",
+    "__lt__",
     "__matmul__",
     "__mul__",
+    "__ne__",
     "__neg__",
     "__pow__",
     "__radd__",
@@ -235,6 +260,7 @@ class _PaddleWrapperRegistry:
         """Initialize an empty wrapper registry."""
 
         self._originals: dict[tuple[object, str], object] = {}
+        self._wrapper_by_original: dict[int, tuple[object, object]] = {}
         self._wrapped = False
         self._inventory = PaddleInventory((), ())
 
@@ -267,6 +293,8 @@ class _PaddleWrapperRegistry:
                         denied.add(op_name)
                     else:
                         wrapped.add(op_name)
+            self._wrap_layer_module_aliases(paddle)
+            wrapped.update(self._wrap_conv_layers(paddle, backend))
         except BaseException:
             self.unwrap()
             raise
@@ -295,8 +323,73 @@ class _PaddleWrapperRegistry:
             self._wrapped = bool(self._originals)
             raise first_failure
         self._originals.clear()
+        self._wrapper_by_original.clear()
         self._wrapped = False
         self._inventory = PaddleInventory((), ())
+
+    def _wrap_layer_module_aliases(self, paddle: object) -> None:
+        """Point Paddle's own Layer modules' import-time aliases at the wrappers.
+
+        ``paddle/nn/layer/norm.py`` runs ``from ..functional import
+        batch_norm, layer_norm, ...`` at import, so ``nn.BatchNorm2D`` calls
+        a module-global bound to the ORIGINAL function and the
+        ``paddle.nn.functional`` wrapper never sees it: every BatchNorm output
+        was an untracked tensor and validation failed its consumer. Each
+        ``paddle.nn.layer.*`` global that IS (by identity) a wrapped original
+        now resolves to that original's wrapper; ``unwrap`` restores it.
+
+        Parameters
+        ----------
+        paddle
+            Imported Paddle module (its ``nn.layer`` package lists the Layer
+            implementation submodules).
+        """
+
+        layer_package = getattr(getattr(paddle, "nn", None), "layer", None)
+        submodules = (
+            [
+                value
+                for value in vars(layer_package).values()
+                if isinstance(value, ModuleType) and value.__name__.startswith("paddle.nn.layer.")
+            ]
+            if layer_package is not None
+            else []
+        )
+        for module in submodules:
+            for name, value in tuple(vars(module).items()):
+                entry = self._wrapper_by_original.get(id(value))
+                if entry is None or entry[0] is not value or (module, name) in self._originals:
+                    continue
+                self._originals[(module, name)] = value
+                setattr(module, name, entry[1])
+
+    def _wrap_conv_layers(self, paddle: object, backend: object) -> set[str]:
+        """Capture ``Conv1D``/``Conv2D``/``Conv3D`` at their ``forward`` (one op each).
+
+        Parameters
+        ----------
+        paddle
+            Imported Paddle module.
+        backend
+            Paddle backend receiving wrapper events.
+
+        Returns
+        -------
+        set[str]
+            Inventory names of the wrapped layer forwards (``nn.Conv2D.forward``).
+        """
+
+        names: set[str] = set()
+        nn = getattr(paddle, "nn", None)
+        for class_name, op_name in PADDLE_CONV_LAYER_OPS.items():
+            layer_cls = getattr(nn, class_name, None)
+            original = getattr(layer_cls, "forward", None) if layer_cls is not None else None
+            if layer_cls is None or original is None or (layer_cls, "forward") in self._originals:
+                continue
+            self._originals[(layer_cls, "forward")] = original
+            layer_cls.forward = _conv_layer_wrapper(original, op_name, backend)
+            names.add(f"nn.{class_name}.forward")
+        return names
 
     def is_wrapped(self) -> bool:
         """Return whether this registry currently has installed wrappers."""
@@ -361,14 +454,12 @@ class _PaddleWrapperRegistry:
 
             observer = _ACTIVE_TAP_OBSERVER
             if observer is not None:
-                observe_call = getattr(observer, "call")
+                observe_call = cast(Any, observer).call
                 return observe_call(original, op_name, args, kwargs)
-            if not _state._logging_enabled:
+            trace, logging_enabled = _state.active_capture()
+            if not logging_enabled or trace is None:
                 return original(*args, **kwargs)
-            trace = _state._active_trace
-            if trace is None:
-                return original(*args, **kwargs)
-            depth = int(getattr(trace, "_paddle_capture_depth", 0))
+            depth = int(trace._paddle_capture_depth)
             if action == "deny":
                 if depth == 0:
                     _raise_denied(op_name)
@@ -380,12 +471,68 @@ class _PaddleWrapperRegistry:
                 output = original(*args, **kwargs)
             finally:
                 trace._paddle_capture_depth = depth
-            module_stack = tuple(getattr(trace, "_paddle_module_stack", ()))
-            emit = getattr(backend, "emit_paddle_operation")
+            module_stack = tuple(trace._paddle_module_stack)
+            emit = cast(Any, backend).emit_paddle_operation
             return emit(trace, op_name, original, args, kwargs, output, module_stack=module_stack)
 
         setattr(owner, name, wrapper)
+        self._wrapper_by_original.setdefault(id(original), (original, wrapper))
         return True
+
+
+def _conv_layer_wrapper(original: Any, op_name: str, backend: object) -> Any:
+    """Build the logging ``forward`` for one convolution layer class.
+
+    Parameters
+    ----------
+    original
+        The class's original ``forward``.
+    op_name
+        ``conv1d``, ``conv2d`` or ``conv3d``.
+    backend
+        Paddle backend receiving the op event.
+
+    Returns
+    -------
+    Any
+        The replacement ``forward``.
+    """
+
+    @functools.wraps(original)
+    def forward(layer: Any, *args: Any, **kwargs: Any) -> Any:
+        """Run the layer forward and emit one layer-level convolution op."""
+
+        observer = _ACTIVE_TAP_OBSERVER
+        if observer is not None and conv_layer_input(args, kwargs) is not None:
+            # Derived-grad replay observes the same single layer-level op capture records.
+            layer_forward = functools.partial(original, layer)
+            return cast(Any, observer).call(layer_forward, op_name, args, kwargs)
+        trace, logging_enabled = _state.active_capture()
+        if not logging_enabled or trace is None or observer is not None:
+            return original(layer, *args, **kwargs)
+        depth = int(trace._paddle_capture_depth)
+        x = conv_layer_input(args, kwargs)
+        if depth > 0 or x is None:
+            return original(layer, *args, **kwargs)
+        trace._paddle_capture_depth = depth + 1
+        try:
+            output = original(layer, *args, **kwargs)
+        finally:
+            trace._paddle_capture_depth = depth
+        call_args, call_kwargs = conv_layer_call(layer, op_name, x)
+        module_stack = tuple(trace._paddle_module_stack)
+        emit = cast(Any, backend).emit_paddle_operation
+        return emit(
+            trace,
+            op_name,
+            paddle_conv_layer_replay,
+            call_args,
+            call_kwargs,
+            output,
+            module_stack=module_stack,
+        )
+
+    return forward
 
 
 @contextmanager
@@ -610,14 +757,19 @@ def _raise_denied(op_name: str) -> None:
     if base_name in _SCALAR_ESCAPE_NAMES:
         raise BackendUnsupportedError(
             "tensor-derived Python scalar/control escape is unsupported in the paddle preview; "
-            "keep it as a paddle.Tensor or pass it as an explicit input"
+            "keep it as a paddle.Tensor or pass it as an explicit input",
+            code=PADDLE_REFUSAL_SCALAR_ESCAPE,
         )
     if base_name in _RNG_NAMES or "rand" in base_name or base_name in {"normal", "uniform"}:
         raise BackendUnsupportedError(
             "Paddle stochastic operations are unsupported in the preview; pass stochastic values "
-            "as explicit inputs."
+            "as explicit inputs.",
+            code=PADDLE_REFUSAL_STOCHASTIC,
         )
-    raise BackendUnsupportedError("Paddle in-place or global-state operations are unsupported.")
+    raise BackendUnsupportedError(
+        "Paddle in-place or global-state operations are unsupported.",
+        code=PADDLE_REFUSAL_INPLACE,
+    )
 
 
 def _import_paddle() -> tuple[object, object, type[Any]]:

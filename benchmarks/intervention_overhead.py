@@ -52,7 +52,7 @@ class TinyMLP(nn.Module):
         return self.net(x)
 
 
-def _zero_hook(activation: torch.Tensor, *, hook: object) -> torch.Tensor:
+def _zero_hook(activation: torch.Tensor, *, ctx: object) -> torch.Tensor:
     """Return a zero-valued activation for hook benchmarks.
 
     Parameters
@@ -68,7 +68,7 @@ def _zero_hook(activation: torch.Tensor, *, hook: object) -> torch.Tensor:
         Zero-valued activation.
     """
 
-    del hook
+    del ctx
     return activation * 0
 
 
@@ -98,7 +98,7 @@ def _time_repeated(label: str, fn: Callable[[], object], repeats: int) -> tuple[
     return label, statistics.mean(samples)
 
 
-def _capture(model: nn.Module, x: torch.Tensor, *, intervention_ready: bool) -> tl.ModelLog:
+def _capture(model: nn.Module, x: torch.Tensor, *, replayable: bool) -> tl.Trace:
     """Capture a TorchLens log for the benchmark model.
 
     Parameters
@@ -107,21 +107,22 @@ def _capture(model: nn.Module, x: torch.Tensor, *, intervention_ready: bool) -> 
         Model to capture.
     x:
         Forward input.
-    intervention_ready:
+    replayable:
         Whether to capture replay metadata.
 
     Returns
     -------
-    tl.ModelLog
-        Captured model log.
+    tl.Trace
+        Captured trace.
     """
 
-    return tl.log_forward_pass(
+    return tl.trace(
         model,
         x,
-        vis_opt="none",
-        intervention_ready=intervention_ready,
-        detach_saved_tensors=True,
+        capture=tl.options.CaptureOptions(
+            replayable=replayable,
+            detach_saved_activations=True,
+        ),
     )
 
 
@@ -164,8 +165,8 @@ def _markdown_table(rows: list[tuple[str, float, str, str]]) -> str:
         "Model: `TinyMLP` with dimensions 8 -> 16 -> 16 -> 8, batch size 32.",
         "",
         "Budget reference: PLAN.md v5.2 section 13.12 is qualitative. It requires "
-        "inactive overhead to stay behind existing cheap gates, replay to scale with "
-        "cone size, rerun to use pre-normalized hook dispatch, fork to stay shallow, "
+        "inactive overhead to stay behind existing cheap gates, push to scale with "
+        "cone size, run to use pre-normalized hook dispatch, fork to stay shallow, "
         "and Bundle supergraph construction to remain lazy.",
         "",
         "| Benchmark | Mean seconds | Ratio | Notes |",
@@ -207,40 +208,44 @@ def run_benchmarks() -> str:
         repeats=100,
     )
     nonready_label, nonready_s = _time_repeated(
-        "log_forward_pass(intervention_ready=False)",
-        lambda: _capture(model, x, intervention_ready=False),
+        "trace(replayable=False)",
+        lambda: _capture(model, x, replayable=False),
         repeats=15,
     )
     ready_label, ready_s = _time_repeated(
-        "log_forward_pass(intervention_ready=True)",
-        lambda: _capture(model, x, intervention_ready=True),
+        "trace(replayable=True)",
+        lambda: _capture(model, x, replayable=True),
         repeats=15,
     )
 
-    replay_log = _capture(model, x, intervention_ready=True)
+    replay_log = _capture(model, x, replayable=True)
     replay_label, replay_s = _time_repeated(
-        "replay(hook=zero relu)",
-        lambda: replay_log.replay(hooks={tl.func("relu"): _zero_hook}),
+        "fork().do(hook=zero relu)",
+        lambda: replay_log.fork().do({tl.func("relu"): _zero_hook}),
         repeats=25,
     )
 
-    rerun_log = _capture(model, x, intervention_ready=True)
-    rerun_log.attach_hooks(tl.func("relu"), _zero_hook, confirm_mutation=True)
+    rerun_log = _capture(model, x, replayable=True)
+    rerun_log.do(
+        tl.func("relu"),
+        _zero_hook,
+        intervention=tl.options.InterventionOptions(engine="set_only"),
+    )
     rerun_label, rerun_s = _time_repeated(
-        "rerun(model, x)",
-        lambda: rerun_log.rerun(model, x),
+        "run(model, x)",
+        lambda: rerun_log.run(model, x),
         repeats=15,
     )
 
-    logs = [_capture(model, x + idx * 0.01, intervention_ready=True) for idx in range(4)]
-    bundle = tl.bundle({f"run_{idx}": log for idx, log in enumerate(logs)})
+    logs = [_capture(model, x + idx * 0.01, replayable=True) for idx in range(4)]
+    bundle = tl.Bundle({f"run_{idx}": log for idx, log in enumerate(logs)})
     first_relu_label = next(
-        layer.layer_label for layer in logs[0].layer_list if layer.func_name == "relu"
+        layer.layer_label for layer in logs[0]._layer_list if layer.func_name == "relu"
     )
     assert bundle._supergraph is None
     bundle_label, bundle_s = _time_repeated(
         "Bundle.node() lazy supergraph build",
-        lambda: bundle.node(tl.label(first_relu_label)),
+        lambda: bundle.at(tl.label(first_relu_label)),
         repeats=1,
     )
 

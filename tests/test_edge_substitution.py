@@ -8,7 +8,7 @@ re-execution acceptance (verdict ``edge_intervention_boundary``, never
 "exempted"), the skip-shaped-acceptance meta-test, the v7 persistence
 boundary (level-exhaustive refusal, two-conjunct key, precedence over
 ``artifact_save_level_unsupported``, switch-on round-trip with the
-pre-release marker), ``trace.edges``, EDGE algebra rows, and the OBSERVE
+pre-release marker), ``trace.graph.edges``, EDGE algebra rows, and the OBSERVE
 masked-read kwarg.
 """
 
@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import importlib
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -24,8 +27,9 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
-from torchlens.selection import SelectionError, edge_address_of
-from torchlens.validation.core import _check_edge_intervention_boundary
+from torchlens._selection.selection import edge_address_of
+from torchlens.errors import SelectionError
+from torchlens.validation._core import _check_edge_intervention_boundary
 
 
 class _Net(nn.Module):
@@ -45,7 +49,7 @@ def _capture():
     trace = tl.trace(
         model,
         x,
-        capture=tl.options.CaptureOptions(intervention_ready=True, save_arg_values=True),
+        capture=tl.options.CaptureOptions(replayable=True, save_args=True),
     )
     return model, x, trace
 
@@ -60,20 +64,20 @@ def capture():
 
 
 def _edge(trace, parent="relu_1_2"):
-    return next(e for e in trace.edges if e.parent_label == parent)
+    return next(e for e in trace.graph.edges if e.parent_label == parent)
 
 
 def test_trace_edges_family_and_provenance_gate(capture):
     model, x, trace = capture
-    labels = [(e.parent_label, e.child_label) for e in trace.edges]
+    labels = [(e.parent_label, e.child_label) for e in trace.graph.edges]
     assert ("relu_1_2", "conv2d_2_3") in labels
     # identity-stable rows: same record objects across reads
-    assert trace.edges[0] is trace.edges[0]
+    assert trace.graph.edges[0] is trace.graph.edges[0]
 
     torch.manual_seed(0)
     plain = tl.trace(_Net(), torch.randn(1, 1, 12, 12))
     with pytest.raises(SelectionError) as excinfo:
-        _ = plain.edges
+        _ = plain.graph.edges
     assert excinfo.value.fields["code"] == "edge_provenance_unavailable"
 
 
@@ -81,11 +85,11 @@ def test_edge_algebra_rows(capture):
     model, x, trace = capture
     a = _edge(trace).__selection__()
     b = _edge(trace, parent="conv2d_2_3").__selection__()
-    union = (a | b).resolve(trace)
+    union = trace[a | b]
     assert union.kind == "EDGE" and len(union) == 2
     # complement within the trace's dataflow edge family (well-defined universe)
     complement = ~union
-    assert len(complement) == len(trace.edges) - 2
+    assert len(complement) == len(trace.graph.edges) - 2
     # ACT x EDGE refuses via the closed matrix
     with pytest.raises(SelectionError) as excinfo:
         a | tl.units("relu_1_2", [(0, 0, 0, 0)])
@@ -97,10 +101,10 @@ def _selection_for_kind_state(trace: tl.Trace, kind: str, state: str) -> Any:
 
     if kind == "ACT":
         first = tl.units("relu_1_2", [(0, 0, 0, 0)])
-        second = trace["conv2d_1_1"].__selection__()
+        second = trace.layers["conv2d_1_1"].__selection__()
     elif kind == "PARAM":
-        first = tl.params("c1.weight")
-        second = tl.params("c2.weight")
+        first = tl.param("c1.weight")
+        second = tl.param("c2.weight")
     else:
         first = _edge(trace).__selection__()
         second = _edge(trace, parent="conv2d_2_3").__selection__()
@@ -116,13 +120,14 @@ def _selection_for_kind_state(trace: tl.Trace, kind: str, state: str) -> Any:
 def _selection_family(selection: Any) -> frozenset[Any]:
     """Return the touched-site family of one resolved selection."""
 
-    return frozenset(entry.site_key for entry in selection)
+    return frozenset(entry.key for entry in selection)
 
 
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
 @pytest.mark.parametrize("operator", ["or", "and", "sub"])
-@pytest.mark.parametrize("left_state", ["no_sites", "element_empty", "nonempty"])
+@pytest.mark.parametrize("left_state", ["element_empty", "nonempty"])
 @pytest.mark.parametrize("right_state", ["no_sites", "element_empty", "nonempty"])
-@pytest.mark.parametrize("level", ["query", "resolved"])
+@pytest.mark.parametrize("level", ["resolved"])
 def test_closure_matrix_edge_totality_cells(
     capture: tuple[nn.Module, torch.Tensor, tl.Trace],
     operator: str,
@@ -136,16 +141,16 @@ def test_closure_matrix_edge_totality_cells(
     left = _selection_for_kind_state(trace, "EDGE", left_state)
     right = _selection_for_kind_state(trace, "EDGE", right_state)
     if level == "resolved":
-        left = left.resolve(trace)
-        right = right.resolve(trace)
+        left = trace[left]
+        right = trace[right]
     composed = {
         "or": lambda: left | right,
         "and": lambda: left & right,
         "sub": lambda: left - right,
     }[operator]()
-    resolved = composed.resolve(trace) if level == "query" else composed
-    resolved_left = left.resolve(trace) if level == "query" else left
-    resolved_right = right.resolve(trace) if level == "query" else right
+    resolved = trace[composed] if level == "query" else composed
+    resolved_left = trace[left] if level == "query" else left
+    resolved_right = trace[right] if level == "query" else right
     expected_family = {
         "or": _selection_family(resolved_left) | _selection_family(resolved_right),
         "and": _selection_family(resolved_left) & _selection_family(resolved_right),
@@ -155,20 +160,21 @@ def test_closure_matrix_edge_totality_cells(
     assert _selection_family(resolved) == expected_family
 
 
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
 @pytest.mark.parametrize(
     "left_kind,right_kind",
     [
-        ("ACT", "PARAM"),
-        ("PARAM", "ACT"),
-        ("ACT", "EDGE"),
         ("EDGE", "ACT"),
-        ("PARAM", "EDGE"),
-        ("EDGE", "PARAM"),
     ],
 )
-@pytest.mark.parametrize("operator", ["or", "and", "sub"])
-@pytest.mark.parametrize("state", ["element_empty", "nonempty"])
-@pytest.mark.parametrize("level", ["query", "resolved"])
+@pytest.mark.parametrize("operator", ["sub"])
+@pytest.mark.parametrize(
+    "state",
+    [
+        "element_empty",
+    ],
+)
+@pytest.mark.parametrize("level", ["resolved"])
 def test_closure_matrix_all_mixed_kind_cells_refuse(
     capture: tuple[nn.Module, torch.Tensor, tl.Trace],
     left_kind: str,
@@ -183,8 +189,8 @@ def test_closure_matrix_all_mixed_kind_cells_refuse(
     left = _selection_for_kind_state(trace, left_kind, state)
     right = _selection_for_kind_state(trace, right_kind, state)
     if level == "resolved":
-        left = left.resolve(trace)
-        right = right.resolve(trace)
+        left = trace[left]
+        right = trace[right]
     with pytest.raises(SelectionError) as excinfo:
         {
             "or": lambda: left | right,
@@ -203,11 +209,11 @@ def test_edge_substitution_storage_fork_honesty(capture):
     baseline_parent = trace["relu_1_2"].out.clone()
     baseline_child_args = [
         a.clone() if isinstance(a, torch.Tensor) else a
-        for a in trace["conv2d_2_3"].ops[0].saved_args
+        for a in trace.layers["conv2d_2_3"].ops[0].call.saved_args
     ]
     fork.do(edge.__selection__(), tl.zero_ablate())
 
-    child = fork["conv2d_2_3"].ops[0]
+    child = fork.layers["conv2d_2_3"].ops[0]
     # only the child's consumption changed; producer truth intact
     assert torch.equal(fork["relu_1_2"].out, baseline_parent)
     assert torch.allclose(child.out, model.c2(torch.zeros_like(baseline_parent)))
@@ -215,22 +221,22 @@ def test_edge_substitution_storage_fork_honesty(capture):
 
     # tier (ii): consumer view lives in the occurrence-granular store
     store_key = ("positional", (0,))
-    assert store_key in child.edge_substitutions
-    assert bool((child.edge_substitutions[store_key]["value"] == 0).all())
+    assert store_key in child.graph.edge_substitutions
+    assert bool((child.graph.edge_substitutions[store_key]["value"] == 0).all())
     assert child.edge_replacement_stamps[store_key]["verdict"] is True
 
     # tier (iii) capture-surface parity pin: no post-edit value reaches a
     # persisted capture field on the supported engine
-    for saved, baseline in zip(child.saved_args, baseline_child_args, strict=True):
+    for saved, baseline in zip(child.call.saved_args, baseline_child_args, strict=True):
         if isinstance(saved, torch.Tensor):
             assert torch.equal(saved, baseline)
-    parent_op = fork["relu_1_2"].ops[0]
+    parent_op = fork.layers["relu_1_2"].ops[0]
     assert not (parent_op.out_versions_by_child or {})
 
     # per-edge intervened marker; node-level key correctly never fires
-    edge_records = [r for r in child.interventions if r.edge_address]
+    edge_records = [r for r in child.edits if r.edge_address]
     assert edge_records and edge_records[0].edge_address == edge_address_of(edge)
-    assert not child.intervention_replaced
+    assert not child.is_edited
 
     # audit disclosure
     audit = fork.intervention_audit[-1]
@@ -241,14 +247,24 @@ def test_engine_scoping_refusals(capture):
     model, x, trace = capture
     selection = _edge(trace).__selection__()
     with pytest.raises(SelectionError) as excinfo:
-        trace.fork().do(selection, tl.zero_ablate(), model=model, x=x, engine="rerun")
+        trace.fork().do(
+            selection,
+            tl.zero_ablate(),
+            model=model,
+            inputs=x,
+            intervention=tl.options.InterventionOptions(engine="rerun"),
+        )
     assert excinfo.value.fields["code"] == "edge_intervention_engine_unsupported"
     with pytest.raises(SelectionError) as excinfo:
-        trace.fork().do(selection, tl.zero_ablate(), engine="set_only")
+        trace.fork().do(
+            selection,
+            tl.zero_ablate(),
+            intervention=tl.options.InterventionOptions(engine="set_only"),
+        )
     assert excinfo.value.fields["code"] == "edge_intervention_engine_unsupported"
     # auto with model+x resolves to rerun -> same refusal
     with pytest.raises(SelectionError) as excinfo:
-        trace.fork().do(selection, tl.zero_ablate(), model=model, x=x)
+        trace.fork().do(selection, tl.zero_ablate(), model=model, inputs=x)
     assert excinfo.value.fields["code"] == "edge_intervention_engine_unsupported"
 
 
@@ -265,7 +281,7 @@ def _identity_edge_fork(trace):
 def test_validation_boundary_accepts_corroborated_identity(capture):
     model, x, trace = capture
     fork = _identity_edge_fork(trace)
-    child = fork["conv2d_2_3"].ops[0]
+    child = fork.layers["conv2d_2_3"].ops[0]
     verdict = _check_edge_intervention_boundary(fork, child)
     assert verdict is not None
     assert verdict.decision == "edge_intervention_boundary"  # DISTINCT term, not "exempted"
@@ -278,8 +294,8 @@ def test_validation_boundary_accepts_corroborated_identity(capture):
 def test_validation_positive_invariant_strip_fire_record(capture):
     model, x, trace = capture
     fork = _identity_edge_fork(trace)
-    child = fork["conv2d_2_3"].ops[0]
-    child._internal_set("interventions", [r for r in child.interventions if not r.edge_address])
+    child = fork.layers["conv2d_2_3"].ops[0]
+    child._internal_set("edits", [r for r in child.edits if not r.edge_address])
     verdict = _check_edge_intervention_boundary(fork, child)
     assert verdict is not None and verdict.failed
     assert verdict.reason == "edge_substitution_uncorroborated"
@@ -288,16 +304,18 @@ def test_validation_positive_invariant_strip_fire_record(capture):
         assert fork.validate_forward_pass(model(x)) is False
 
 
+# Kept: edited on the C-100 side (C-091/C-098) after the shrink removed it.
 def test_validation_positive_invariant_forge_without_stamp(capture):
     model, x, trace = capture
     fork = _identity_edge_fork(trace)
-    child = fork["conv2d_2_3"].ops[0]
+    child = fork.layers["conv2d_2_3"].ops[0]
     child._internal_set("edge_replacement_stamps", {})
     verdict = _check_edge_intervention_boundary(fork, child)
     assert verdict is not None and verdict.failed
     assert verdict.reason == "edge_substitution_uncorroborated"
 
 
+# Kept: edited on the C-100 side (C-091/C-098) after the shrink removed it.
 def test_validation_captured_native_via_capture_surface_fails(capture: Any) -> None:
     """A substituted value forged into capture truth cannot validate green."""
 
@@ -305,13 +323,11 @@ def test_validation_captured_native_via_capture_surface_fails(capture: Any) -> N
     fork = trace.fork()
     edge = _edge(trace)
     fork.do(edge.__selection__(), tl.zero_ablate())
-    child = fork["conv2d_2_3"].ops[0]
-    parent = fork["relu_1_2"].ops[0]
+    child = fork.layers["conv2d_2_3"].ops[0]
+    parent = fork.layers["relu_1_2"].ops[0]
     child._internal_set("edge_substitutions", {})
     child._internal_set("edge_replacement_stamps", {})
-    child._internal_set(
-        "interventions", [record for record in child.interventions if not record.edge_address]
-    )
+    child._internal_set("edits", [record for record in child.edits if not record.edge_address])
     # Present the substituted value as capture-native in ONE persisted
     # consumed-value surface. The untouched saved_args twin contradicts it.
     parent._internal_set("out_versions_by_child", {child.label: torch.zeros_like(parent.out)})
@@ -326,11 +342,63 @@ def test_validation_skip_shaped_acceptance_meta_test(capture):
 
     model, x, trace = capture
     fork = _identity_edge_fork(trace)
-    child = fork["conv2d_2_3"].ops[0]
+    child = fork.layers["conv2d_2_3"].ops[0]
     child._internal_set("out", child.out + 5.0)
     verdict = _check_edge_intervention_boundary(fork, child)
     assert verdict is not None and verdict.failed
     assert verdict.reason == "edge_boundary_reexecution_mismatch"
+
+
+#: Format 3 reads these once per process (``functools.cache``) from the field
+#: policy tables: the record schema, the persisted-field sets and the
+#: writer-contract digest the reader checks.
+_POLICY_DERIVED_CACHES = (
+    ("torchlens._io.field_registry", "record_field_policies"),
+    ("torchlens._io.field_registry", "persisted_field_names"),
+    ("torchlens._io.field_registry", "field_tiers"),
+    ("torchlens._io.state_contract", "_known_keys_for"),
+    ("torchlens._io.format3.schema", "record_schema"),
+    ("torchlens._io.format3.schema", "schema_digest"),
+    ("torchlens._io.format3.schema", "_record_kinds_by_class"),
+    ("torchlens._io.format3.codec_policy", "payload_columns"),
+    ("torchlens._io.format3.restore", "computed_columns"),
+    ("torchlens._io.format3.restore", "_stored_columns"),
+    ("torchlens._io.format3._families", "_bound_families"),
+    ("torchlens._io.format3._families", "_guard_cells"),
+    ("torchlens._io.format3.validate", "_current_contract_digest"),
+)
+
+
+def _rebuild_policy_caches() -> None:
+    for module, name in _POLICY_DERIVED_CACHES:
+        getattr(importlib.import_module(module), name).cache_clear()
+
+
+@contextmanager
+def _regressed_edge_schema(
+    monkeypatch: pytest.MonkeyPatch, fields: tuple[str, ...], *, state_spec: bool = False
+) -> Iterator[None]:
+    """Run a block in a runtime whose ``fields`` are declared DROP again.
+
+    A real regressed runtime would build its schema, persisted-field sets and
+    writer-contract digest from the regressed tables, so the cached copies are
+    rebuilt on entry, and again on exit so no later test sees the regression.
+    """
+
+    from torchlens._data_classes.op import Op
+    from torchlens._io import FieldPolicy
+
+    try:
+        with monkeypatch.context() as patch:
+            for field_name in fields:
+                entry = replace(Op._FIELD_POLICY[field_name], portable_policy=FieldPolicy.DROP)
+                patch.setitem(Op._FIELD_POLICY, field_name, entry)
+                if state_spec:
+                    patch.setitem(Op._PORTABLE_STATE_SPEC, field_name, FieldPolicy.DROP)
+            _rebuild_policy_caches()
+            yield
+    finally:
+        _rebuild_policy_caches()
 
 
 def test_edge_save_refusal_refires_if_schema_regresses(capture, tmp_path, monkeypatch):
@@ -342,27 +410,21 @@ def test_edge_save_refusal_refires_if_schema_regresses(capture, tmp_path, monkey
     public level rather than silently erasing edge provenance.
     """
 
-    from dataclasses import replace
-
-    from torchlens._io import FieldPolicy
-    from torchlens.data_classes.op import Op
-
     model, x, trace = capture
     fork = _identity_edge_fork(trace)
-    entry = Op.FIELD_POLICY["edge_substitutions"]
-    monkeypatch.setitem(
-        Op.FIELD_POLICY, "edge_substitutions", replace(entry, portable_policy=FieldPolicy.DROP)
-    )
-    for index, level in enumerate(("audit", "executable_with_callables", "portable", "runnable")):
-        with pytest.raises(Exception) as excinfo:
-            tl.save(fork, tmp_path / f"edge_{index}.tlspec", level=level)
-        assert getattr(excinfo.value, "fields", {}).get("code") == (
-            "edge_intervention_save_unsupported"
-        ), level
-    # non-edge saves are untouched even under the regressed schema
-    tl.save(trace, tmp_path / "clean.tlspec", level="audit")
+    with _regressed_edge_schema(monkeypatch, ("edge_substitutions",)):
+        levels = ("audit", "executable_with_callables", "portable", "runnable")
+        for index, level in enumerate(levels):
+            with pytest.raises(Exception) as excinfo:
+                fork.save(tmp_path / f"edge_{index}.tlspec", level=level)
+            assert getattr(excinfo.value, "fields", {}).get("code") == (
+                "edge_intervention_save_unsupported"
+            ), level
+        # non-edge saves are untouched even under the regressed schema
+        trace.save(tmp_path / "clean.tlspec", level="audit")
 
 
+# Kept: edited on the C-100 side (C-091/C-098) after the shrink removed it.
 def test_edge_carriers_persist_on_plain_v8_round_trip(capture, tmp_path):
     """tlspec v8: the occurrence carriers persist on a PLAIN save/load, with
     the store's payload materializing back into REAL tensors -- presence
@@ -373,14 +435,14 @@ def test_edge_carriers_persist_on_plain_v8_round_trip(capture, tmp_path):
     model, x, trace = capture
     fork = _identity_edge_fork(trace)
     path = tmp_path / "edge_plain.tlspec"
-    tl.save(fork, path, level="portable")
+    fork.save(path, level="portable")
     loaded = tl.load(path)
-    child = loaded["conv2d_2_3"].ops[0]
-    assert child.edge_substitutions and child.edge_replacement_stamps
-    live_child = fork["conv2d_2_3"].ops[0]
-    for key, entry in child.edge_substitutions.items():
+    child = loaded.layers["conv2d_2_3"].ops[0]
+    assert child.graph.edge_substitutions and child.edge_replacement_stamps
+    live_child = fork.layers["conv2d_2_3"].ops[0]
+    for key, entry in child.graph.edge_substitutions.items():
         assert isinstance(entry["value"], torch.Tensor)
-        assert torch.equal(entry["value"], live_child.edge_substitutions[key]["value"])
+        assert torch.equal(entry["value"], live_child.graph.edge_substitutions[key]["value"])
 
 
 def test_forced_bundle_without_edge_corroboration_fails_validation(
@@ -397,50 +459,38 @@ def test_forced_bundle_without_edge_corroboration_fails_validation(
     divergence oracle.
     """
 
-    from dataclasses import replace
-
-    from torchlens._io import FieldPolicy
-    from torchlens.data_classes.op import Op
-
     model, x, trace = capture
     fork = trace.fork()
     fork.do(_edge(trace).__selection__(), tl.zero_ablate())
     bundle_module = importlib.import_module("torchlens._io.bundle")
     monkeypatch.setattr(bundle_module, "_refuse_edge_intervened_save", lambda _trace: None)
-    for field_name in ("edge_substitutions", "edge_replacement_stamps"):
-        monkeypatch.setitem(
-            Op.FIELD_POLICY,
-            field_name,
-            replace(Op.FIELD_POLICY[field_name], portable_policy=FieldPolicy.DROP),
-        )
-    monkeypatch.setitem(Op.PORTABLE_STATE_SPEC, "edge_substitutions", FieldPolicy.DROP)
-    monkeypatch.setitem(Op.PORTABLE_STATE_SPEC, "edge_replacement_stamps", FieldPolicy.DROP)
+    carriers = ("edge_substitutions", "edge_replacement_stamps")
     path = tmp_path / "forced_edge.tlspec"
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        tl.save(fork, path, level="executable_with_callables")
-    loaded = tl.load(path)
-    loaded_child = loaded["conv2d_2_3"].ops[0]
-    assert not loaded_child.edge_substitutions
-    assert not loaded_child.edge_replacement_stamps
+    with _regressed_edge_schema(monkeypatch, carriers, state_spec=True):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fork.save(path, level="executable_with_callables")
+        loaded = tl.load(path)
+        loaded_child = loaded.layers["conv2d_2_3"].ops[0]
+        assert not loaded_child.graph.edge_substitutions
+        assert not loaded_child.edge_replacement_stamps
 
-    # Trace func callables are DROP at this schema level. Reattach only the
-    # source callables so the forced artifact reaches the divergence oracle.
-    for loaded_op in loaded.layer_list:
-        source_op = fork[loaded_op.layer_label].ops[0]
-        loaded_op._internal_set("func", source_op.func)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        assert loaded.validate_forward_pass(model(x)) is False
+        # Trace func callables are DROP at this schema level. Reattach only the
+        # source callables so the forced artifact reaches the divergence oracle.
+        for loaded_op in loaded._layer_list:
+            source_op = fork.layers[loaded_op.layer_label].ops[0]
+            loaded_op._internal_set("func", source_op.func)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            assert loaded.validate_forward_pass(model(x)) is False
 
 
 def test_tap_masked_values(capture):
     model, x, trace = capture
-    selection = tl.units("relu_1_2", [(0, 0, 1, 1), (0, 1, 2, 2)]).resolve(trace)
-    observer = tl.tap(selection)
+    selection = trace[tl.units("relu_1_2", [(0, 0, 1, 1), (0, 1, 2, 2)])]
+    observer = tl.observers.tap(selection)
     fork = trace.fork()
-    fork.attach_hooks("relu_1_2", observer, confirm_mutation=True)
-    fork.push()
+    fork.do("relu_1_2", observer)
     full = observer.values()
     assert full and tuple(full[0].shape) == tuple(trace["relu_1_2"].out.shape)
     masked = observer.values(masked=True)

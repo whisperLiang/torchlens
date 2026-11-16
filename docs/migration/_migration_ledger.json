@@ -1,0 +1,119 @@
+{
+  "schema": "torchlens.migration_ledger.v1",
+  "seeded": "2026-08-26",
+  "seeded_by": "maintainers (migration ledger seed). Rows were re-verified against this checkout on 2026-08-26 (rows earlier fixes already closed are recorded as fixed, not dropped). This ledger is the work queue for the prose truth sweep, doc consolidation, and the executable docs harness.",
+  "companion": "docs/migration/_claims.json (wording rules + lints for every comparative sentence)",
+  "rows": [
+    {
+      "id": "inseq-hf-wrapper-denied",
+      "doc": "docs/migration/inseq.md",
+      "kind": "undersell-falsehood",
+      "receipt": "Line 14 says HuggingFace convenience wrappers have 'No direct public wrapper ... Deferred to v2.x' while torchlens/bridge/hf.py ships trace_text.",
+      "status": "fixed",
+      "verified_at": "2026-10-05 (wip/next-cleanup; the row now names bridge.hf.trace_text)",
+      "owner_next": "none"
+    },
+    {
+      "id": "saelens-utilities-undersold",
+      "doc": "docs/migration/saelens.md",
+      "kind": "undersell-falsehood",
+      "receipt": "The historical 'deferred' row is gone, but line 6 still says 'TorchLens does not ship SAE training/inference utilities' with no mention of the shipped bridge.sae splice experiment (bridge/sae.py: reconstruction fidelity + causal effect + latents_edit).",
+      "status": "fixed",
+      "verified_at": "2026-10-15 (the page names bridge.sae.splice in its first row; the read-latents row names SpliceResult.latents and SpliceResult.edited_latents, which splice now keeps by default, pinned by tests/test_migration_pages_executed.py)",
+      "owner_next": "none"
+    },
+    {
+      "id": "fused-attention-not-visible-rows",
+      "doc": "docs/migration/baukit.md:14; autocircuit.md:14; inseq.md:13; from_transformerlens.md:13",
+      "kind": "undersell-falsehood",
+      "receipt": "Four pages still say fused attention internals are 'not visible' while verified READ-ONLY SDPA facets ship (docs/facets.md). Correct wording must name eager-vs-fused and facet-vs-captured-op per the attention-picture-scope lint.",
+      "status": "fixed",
+      "verified_at": "2026-10-05 (wip/next-cleanup; baukit, autocircuit, inseq and captum rows now name eager vs fused and captured op vs reconstructed facet; nnsight and repe edit rows name lowered_counterfactual; transformerlens.md was already current)",
+      "owner_next": "none",
+      "cross_refs": [
+        "attention-picture-scope"
+      ]
+    },
+    {
+      "id": "captum-ig-no-equivalent",
+      "doc": "docs/migration/from_captum.md",
+      "kind": "undersell-falsehood",
+      "receipt": "Said integrated gradients has 'no direct equivalent' while torchlens/attribution exports one. The 2026-08-26 'fixed' verdict was wrong (the line was still live at 4bfb8e68b); fixed 2026-10-05 together with the saliency, occlusion and conductance rows.",
+      "status": "fixed",
+      "verified_at": "2026-10-05 (wip/next-cleanup; from_captum.md rows now name tl.attribution methods)",
+      "owner_next": "none (closed by an earlier fix wave; D01 re-verifies in the sweep)"
+    },
+    {
+      "id": "transformerlens-aliases-denied",
+      "doc": "docs/migration/from_transformerlens.md",
+      "kind": "undersell-falsehood",
+      "receipt": "Historically denied component naming while enable_transformerlens_aliases ships (semantic/facets.py). The page still centers manual-eager workarounds; re-verify each row against the shipped alias/facet surface.",
+      "status": "fixed",
+      "verified_at": "2026-10-14 (transformerlens.md names torchlens.mechinterp.resolve_alias with 2.x, 3.x bridge-cache and 4.x canonical names; from_transformerlens.md covers the TransformerBridge refusal for 3.x and 4.x)",
+      "owner_next": "none"
+    },
+    {
+      "id": "baukit-runningstats-missing",
+      "doc": "docs/migration/baukit.md",
+      "kind": "missing-row",
+      "receipt": "No runningstats row while tl.stats / tl.stats.aggregate ship.",
+      "status": "open",
+      "verified_at": "2026-08-26 (mega/A12 checkout; zero 'runningstats' hits)",
+      "owner_next": "D01 (prose truth sweep)"
+    },
+    {
+      "id": "two-doc-generations",
+      "doc": "docs/migration/ (19 files)",
+      "kind": "structural",
+      "receipt": "Ten short stub tables AND seven from_* executable guides coexist; TLens, nnsight, captum, pyvene each have both; the stubs rotted while the guides were maintained. No index.md. Root MIGRATIONS.md is about .tlspec format policy -- a name collision. Two directory files are not competitor pages (scoped_detached_patching.md, v2.0_api_changes.md -- both legitimately so).",
+      "status": "open",
+      "verified_at": "2026-08-26 (mega/A12 checkout; no index.md; MIGRATIONS.md collision live)",
+      "owner_next": "F30 (convert wave-0 item 7: consolidation, tombstones, index.md, MIGRATIONS.md cross-reference)"
+    },
+    {
+      "id": "migration-harness-compares-nothing",
+      "doc": "tests/test_migrations.py",
+      "kind": "harness",
+      "receipt": "Hardcoded 7-file tuple (renamed file silently drops out); all six competitor-side blocks skip (no peer installed anywhere); guard test asserts only that code blocks EXIST in the markdown; assertions are toy literals (both sides assert 2.5) so a wrong translation cannot fail.",
+      "status": "open",
+      "verified_at": "2026-08-26 (receipt carried from the convert panel; harness unchanged on this branch)",
+      "owner_next": "F30 (guide registry + oracle-pair contract + peer legs, convert items 11/15/17-21)"
+    },
+    {
+      "id": "v2-api-changes-old-spellings",
+      "doc": "docs/migration/v2.0_api_changes.md",
+      "kind": "current",
+      "receipt": "Deliberately teaches removed spellings as the OLD column of the rename map (e.g. vis_mode-on-trace at lines 142-148, flat do(confirm_mutation=)). Legitimate; never lint this file for removed spellings without the column context.",
+      "status": "current",
+      "verified_at": "2026-08-26",
+      "owner_next": "none"
+    },
+    {
+      "id": "removed-run-spellings-on-comparison-pages",
+      "doc": "docs/migration/penzai.md; baukit.md; autocircuit.md; inseq.md; repe.md; from_pyvene.md",
+      "kind": "structural",
+      "receipt": "Rows taught the removed replay/rerun spellings (rerun(..., append=True), replay/rerun hooks) after Trace.run and Trace.push replaced them.",
+      "status": "fixed",
+      "verified_at": "2026-10-14 (penzai, baukit, autocircuit, inseq and repe now spell trace.run, .push and steer_generate; the merged from_pyvene.md spells trace.run, trace.push, do() and steer_generate, keep rerun and replay only in the removed-spellings sentence of intervention_explainers.md, and every TorchLens example runs in tests/test_migrations.py)",
+      "owner_next": "none"
+    },
+    {
+      "id": "pyreft-loreft-reader-missing",
+      "doc": "docs/migration/from_pyvene.md",
+      "kind": "missing-row",
+      "receipt": "The 'Trainable interventions' row named only a training loop of your own; a LoReFT artifact trained with pyreft had no way into TorchLens. tl.bridge.pyreft.read now reads one (config.json plus intkey_<key>.bin, dotted or underscored name) into tl.subspace with tl.intervention.affine_source, and the page's 'Reading a pyreft LoReFT artifact' example runs in tests/test_migration_pages_executed.py on a stand-in artifact in pyreft's file layout.",
+      "status": "fixed",
+      "verified_at": "2026-10-15 (tests/test_bridge_pyreft.py and the page example)",
+      "owner_next": "none"
+    },
+    {
+      "id": "landscape-page-current",
+      "doc": "docs/migration/landscape.md",
+      "kind": "current",
+      "receipt": "Comparable-tools page with a checked date and source per row (TransformerLens 4.x and TransformerBridge, nnsight 0.8, interp-engine, vllm-lens, EasySteer, EasyEdit2, VLM-Lens, pyvene and pyreft idle, penzai archived, treescope idle, SAELens), a serving-scale section and a discovery-versus-monitoring section; statuses are pinned by the comparison-landscape-currency lint row in _claims.json.",
+      "status": "current",
+      "verified_at": "2026-11-03 (repository and release metadata checked the same day)",
+      "owner_next": "re-check the status column at the claims gate"
+    }
+  ]
+}

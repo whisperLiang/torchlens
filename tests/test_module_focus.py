@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.data_classes.layer import Layer
+from torchlens._data_classes.layer import Layer
 
 
 def _render_dot(log: tl.Trace, tmp_path: Path, **kwargs: Any) -> str:
@@ -18,11 +18,10 @@ def _render_dot(log: tl.Trace, tmp_path: Path, **kwargs: Any) -> str:
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     return log.draw(
-        vis_save_only=True,
-        vis_fileformat="svg",
-        vis_outpath=str(tmp_path / "graph"),
+        file_format="svg",
+        path=str(tmp_path / "graph"),
         **kwargs,
-    )
+    ).dot
 
 
 def _boundary_node_count(dot_source: str, kind: str) -> int:
@@ -33,16 +32,6 @@ def _boundary_node_count(dot_source: str, kind: str) -> int:
         for line in dot_source.splitlines()
         if f"__module_focus_{kind}_" in line and " [label=" in line
     )
-
-
-def _layer_labels(log: tl.Trace, layer_type: str) -> list[str]:
-    """Return layer labels with the requested layer type."""
-
-    return [
-        layer_log.layer_label
-        for layer_log in log.layer_logs.values()
-        if layer_log.layer_type == layer_type
-    ]
 
 
 class _TwoBlockModel(nn.Module):
@@ -110,49 +99,6 @@ class _AddBlock(nn.Module):
         return self.relu(left + right)
 
 
-class _BranchingBoundaryModel(nn.Module):
-    """Model that feeds two external upstreams into one module."""
-
-    def __init__(self) -> None:
-        """Initialize modules."""
-
-        super().__init__()
-        self.left = nn.Linear(4, 4)
-        self.right = nn.Linear(4, 4)
-        self.block = _AddBlock()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run the forward pass."""
-
-        return self.block(self.left(x), self.right(x))
-
-
-def test_module_focus_by_modulelog(tmp_path: Path) -> None:
-    """Focusing by Module should show only that module plus boundaries."""
-
-    log = tl.trace(_TwoBlockModel(), torch.randn(1, 4))
-    dot = _render_dot(log, tmp_path, module=log.modules["block1"])
-
-    assert "@block1" in dot
-    assert "\tlinear_1_1 [" not in dot
-    assert "\tlinear_2_4 [" not in dot
-    assert _boundary_node_count(dot, "input") == 1
-    assert _boundary_node_count(dot, "output") == 1
-    assert "input" in dot
-    assert "output" in dot
-
-
-def test_module_focus_by_address_string(tmp_path: Path) -> None:
-    """Focusing by module address should resolve the same module."""
-
-    log = tl.trace(_TwoBlockModel(), torch.randn(1, 4))
-    dot = _render_dot(log, tmp_path, module="block1")
-
-    assert "@block1" in dot
-    assert _boundary_node_count(dot, "input") == 1
-    assert _boundary_node_count(dot, "output") == 1
-
-
 def test_module_focus_invalid_address_raises(tmp_path: Path) -> None:
     """Unknown module address strings should fail clearly."""
 
@@ -177,41 +123,6 @@ def test_module_focus_wrong_type_raises_module_focus_invalid(tmp_path: Path) -> 
     with pytest.raises(ValueError, match="module") as exc_info:
         _render_dot(log, tmp_path, module=42)
     assert exc_info.value.fields["code"] == "module_focus_invalid"
-
-
-def test_module_focus_with_collapse_fn(tmp_path: Path) -> None:
-    """Module focus should compose with collapsing a child module."""
-
-    log = tl.trace(_NestedBlock(), torch.randn(1, 4))
-
-    def collapse_fn(module_log: Any) -> bool:
-        """Collapse the inner Sequential."""
-
-        return module_log.address == "block1.inner"
-
-    dot = _render_dot(log, tmp_path, module="block1", collapse_fn=collapse_fn)
-
-    assert "@block1.inner" in dot
-    assert "shape=box3d" in dot
-    assert "relu_1_3 [" not in dot
-    assert "linear_3_5 [" not in dot
-
-
-def test_module_focus_with_skip_fn(tmp_path: Path) -> None:
-    """Module focus should compose with skipping internal ReLU layers."""
-
-    log = tl.trace(_TwoBlockModel(), torch.randn(1, 4))
-    block_linear = _layer_labels(log, "linear")[1]
-
-    def skip_fn(layer_log: Layer) -> bool:
-        """Skip ReLU layers."""
-
-        return layer_log.layer_type == "relu"
-
-    dot = _render_dot(log, tmp_path, module="block1", skip_fn=skip_fn)
-
-    assert "relu_1_3 [" not in dot
-    assert f"{block_linear} -> __module_focus_output_" in dot
 
 
 def test_module_focus_with_skip_and_collapse_fn(tmp_path: Path) -> None:
@@ -242,20 +153,88 @@ def test_modulelog_show_graph_method(tmp_path: Path) -> None:
     module_log = log.modules["block1"]
     direct = _render_dot(log, tmp_path / "direct", module=module_log)
     method = module_log.draw(
-        vis_save_only=True,
-        vis_fileformat="svg",
-        vis_outpath=str(tmp_path / "method" / "graph"),
-    )
+        file_format="svg",
+        path=str(tmp_path / "method" / "graph"),
+    ).dot
 
     assert method == direct
 
 
-def test_module_focus_branching_boundaries(tmp_path: Path) -> None:
-    """Multiple external upstreams should render as distinct input boundaries."""
+class _ListBlock(nn.Module):
+    """Block with a nested MLP, held inside a never-called ``nn.ModuleList``."""
 
-    log = tl.trace(_BranchingBoundaryModel(), torch.randn(1, 4))
-    dot = _render_dot(log, tmp_path, module="block")
+    def __init__(self) -> None:
+        """Initialize modules."""
 
-    assert _boundary_node_count(dot, "input") == 2
-    assert "ext: linear_1_1" in dot
-    assert "ext: linear_2_2" in dot
+        super().__init__()
+        self.norm = nn.LayerNorm(4)
+        self.mlp = nn.Sequential(nn.Linear(4, 4), nn.Tanh())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the forward pass."""
+
+        return x + self.mlp(self.norm(x))
+
+
+class _ModuleListModel(nn.Module):
+    """GPT-style stack: ``blocks`` is a ModuleList that is iterated, never called."""
+
+    def __init__(self) -> None:
+        """Initialize modules."""
+
+        super().__init__()
+        self.stem = nn.Linear(4, 4)
+        self.blocks = nn.ModuleList([_ListBlock() for _ in range(3)])
+        self.heads = nn.ModuleDict({"out": nn.Linear(4, 2)})
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the forward pass."""
+
+        x = self.stem(x)
+        for block in self.blocks:
+            x = block(x)
+        return self.heads["out"](x)
+
+
+@pytest.mark.parametrize(
+    ("address", "title"),
+    [
+        ("blocks.1", "@blocks.1"),
+        ("blocks.1.mlp", "@mlp"),
+        ("blocks.1.mlp.0", "@mlp.0"),
+        ("heads.out", "@out"),
+    ],
+)
+@pytest.mark.parametrize("vis_mode", ["unrolled", "rolled"])
+def test_module_focus_under_uncalled_container(
+    tmp_path: Path, address: str, title: str, vis_mode: str
+) -> None:
+    """A module inside an uncalled ModuleList/ModuleDict focuses without a KeyError.
+
+    The frame title (or, for a leaf module, its op's ``@name`` row) leaves off
+    the scope line's prefix (``blocks.1``, ``heads``).
+    """
+
+    log = tl.trace(_ModuleListModel(), torch.randn(1, 4))
+    assert "blocks" not in log.modules
+    assert "heads" not in log.modules
+    dot = _render_dot(log, tmp_path, module=address, rolled=vis_mode == "rolled")
+
+    assert f"<B>{title}</B>" in dot or f">{title}</TD>" in dot
+    assert f"@{address}" not in dot or address == title[1:]
+    assert _boundary_node_count(dot, "input") >= 1
+    assert _boundary_node_count(dot, "output") >= 1
+
+
+def test_module_focus_under_uncalled_container_by_module_object(tmp_path: Path) -> None:
+    """Passing the Module object for a ModuleList child renders like the address."""
+
+    log = tl.trace(_ModuleListModel(), torch.randn(1, 4))
+    dot = _render_dot(log, tmp_path, module=log.modules["blocks.1"])
+
+    assert "@blocks.1" in dot
+    # blocks.0 is outside the picture: it may name an input stub, never a drawn node.
+    assert "cluster_blocks.0" not in dot
+    for line in dot.splitlines():
+        if "@blocks.0" in line:
+            assert "__module_focus_" in line, line

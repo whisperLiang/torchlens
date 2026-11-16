@@ -5,12 +5,85 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from numbers import Integral
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from .graph import ReplayValueRef, SplitTraceGraph, SplitTraceNode
 
 if TYPE_CHECKING:
     from .shape_program import DimExpr, ShapeRecipe, TensorShapeIR
+
+
+ShapeSemantic = Literal[
+    "reshape",
+    "repeat",
+    "permute",
+    "squeeze",
+    "unsqueeze",
+    "expand",
+    "concat",
+    "stack",
+    "split",
+    "unbind",
+    "slice",
+    "reduction",
+    "matmul",
+    "factory",
+]
+
+
+_TORCH_SHAPE_SEMANTICS: dict[tuple[str, str], ShapeSemantic] = {
+    ("torch.Tensor", "view"): "reshape",
+    ("torch.Tensor", "reshape"): "reshape",
+    ("torch.Tensor", "flatten"): "reshape",
+    ("torch", "reshape"): "reshape",
+    ("torch", "flatten"): "reshape",
+    ("torch.Tensor", "repeat"): "repeat",
+    ("torch", "tile"): "repeat",
+    ("torch.Tensor", "permute"): "permute",
+    ("torch.Tensor", "transpose"): "permute",
+    ("torch", "transpose"): "permute",
+    ("torch.Tensor", "squeeze"): "squeeze",
+    ("torch", "squeeze"): "squeeze",
+    ("torch.Tensor", "unsqueeze"): "unsqueeze",
+    ("torch", "unsqueeze"): "unsqueeze",
+    ("torch.Tensor", "expand"): "expand",
+    ("torch", "broadcast_to"): "expand",
+    ("torch", "cat"): "concat",
+    ("torch", "concat"): "concat",
+    ("torch", "stack"): "stack",
+    ("torch", "split"): "split",
+    ("torch", "chunk"): "split",
+    ("torch.Tensor", "split"): "split",
+    ("torch.Tensor", "chunk"): "split",
+    ("torch", "unbind"): "unbind",
+    ("torch.Tensor", "unbind"): "unbind",
+    ("torch.Tensor", "__getitem__"): "slice",
+    ("torch.Tensor", "select"): "slice",
+    ("torch.Tensor", "narrow"): "slice",
+    ("torch", "index_select"): "slice",
+    ("torch.Tensor", "index_select"): "slice",
+    ("torch", "sum"): "reduction",
+    ("torch.Tensor", "sum"): "reduction",
+    ("torch", "mean"): "reduction",
+    ("torch.Tensor", "mean"): "reduction",
+    ("torch", "amax"): "reduction",
+    ("torch.Tensor", "amax"): "reduction",
+    ("torch", "amin"): "reduction",
+    ("torch.Tensor", "amin"): "reduction",
+    ("torch", "prod"): "reduction",
+    ("torch.Tensor", "prod"): "reduction",
+    ("torch", "matmul"): "matmul",
+    ("torch.Tensor", "matmul"): "matmul",
+    ("torch", "zeros"): "factory",
+    ("torch", "ones"): "factory",
+    ("torch", "empty"): "factory",
+    ("torch", "full"): "factory",
+    ("torch", "new_zeros"): "factory",
+    ("torch", "new_ones"): "factory",
+    ("torch.Tensor", "new_tensor"): "factory",
+    ("torch.Tensor", "new_zeros"): "factory",
+    ("torch.Tensor", "new_ones"): "factory",
+}
 
 
 @dataclass(frozen=True)

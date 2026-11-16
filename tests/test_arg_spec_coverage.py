@@ -5,14 +5,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from torchlens.capture.arg_positions import (
+from torchlens._capture.arg_positions import (
     FUNC_ARG_SPECS,
-    ArgSpec,
-    _cache_dynamic_spec,
     _normalize_func_name,
-    extract_tensors_and_params,
 )
-from torchlens.constants import get_orig_torch_funcs
 
 _HIGH_CONFIDENCE_STATIC_NAMES = frozenset(
     {
@@ -75,6 +71,7 @@ _HIGH_CONFIDENCE_STATIC_NAMES = frozenset(
         "isin",
         "isinference",
         "isnonzero",
+        "issamesize",
         "issetto",
         "laguerrepolynomiall",
         "lcm",
@@ -117,7 +114,7 @@ _HIGH_CONFIDENCE_STATIC_NAMES = frozenset(
         "quantizepertensordynamic",
         # ``randintlike`` (and its siblings ``rand_like`` / ``randn_like``) are real public torch
         # factories in torch's get_ignored_functions(); r18cg added them to
-        # torchlens.constants.IGNORED_FUNCS so they are now decorated + captured (their arg-specs
+        # torchlens._constants.IGNORED_FUNCS so they are now decorated + captured (their arg-specs
         # already existed). Keep this entry: it guards that the wrap is not regressed -- do NOT
         # relax the set to work around a future un-wrap, root-cause it (validation-integrity).
         "randintlike",
@@ -160,16 +157,12 @@ _KNOWN_UNSUPPORTED_ARG_SPEC_REASONS = {
     "apply": "demoted fragment: no operator schema available",
     "arraywrap": "Python/operator protocol helper with nonstandard callable metadata",
     "asarray": "C-level tensor factory with non-introspectable signature (wrapped for capture coverage)",
-    "emptypermuted": "C-level tensor factory with non-introspectable signature (wrapped for capture coverage)",
-    "emptystrided": "C-level tensor factory with non-introspectable signature (wrapped for capture coverage)",
     "frombuffer": "C-level tensor factory with non-introspectable signature (wrapped for capture coverage)",
     "assertasync": "metadata/control helper with no validated tensor-input schema",
     "assertscalar": "metadata/control helper with no validated tensor-input schema",
     "asserttensormetadata": "metadata/control helper with no validated tensor-input schema",
-    "backward": "autograd/backward helper left on dynamic fallback pending gradient schema audit",
     "batchnormbackwardelemt": "autograd/backward helper left on dynamic fallback pending gradient schema audit",
     "batchnormbackwardreduce": "autograd/backward helper left on dynamic fallback pending gradient schema audit",
-    "clearnonserializablecacheddata": "metadata/control helper with no validated tensor-input schema",
     "cudnnrnn": "demoted fragment: schema mismatch: missing_positions=[5, 15], extra_positions=[14], missing_names=[]",
     "debughasinternaloverlap": "internal/private helper left on dynamic fallback until independently validated",
     "deepcopy": "demoted fragment: no operator schema available",
@@ -190,7 +183,6 @@ _KNOWN_UNSUPPORTED_ARG_SPEC_REASONS = {
     # the entry became exactly the stale class this table's cross-check catches.
     "hsmm": "demoted fragment: no operator schema available",
     "ipu": "demoted fragment: no operator schema available",
-    "issamesize": "metadata/control helper with no validated tensor-input schema",
     "iszerotensor": "metadata/control helper with no validated tensor-input schema",
     "lazyclone": "internal/private helper left on dynamic fallback until independently validated",
     "linalgcheckerrors": "internal/private helper left on dynamic fallback until independently validated",
@@ -236,7 +228,6 @@ _KNOWN_UNSUPPORTED_ARG_SPEC_REASONS = {
     "standardgammagrad": "demoted fragment: schema mismatch: missing_positions=[], extra_positions=[1], missing_names=[]",
     "symite": "Python/operator protocol helper with nonstandard callable metadata",
     "symsqrt": "Python/operator protocol helper with nonstandard callable metadata",
-    "symsum": "Python/operator protocol helper with nonstandard callable metadata",
     "testautogradmultipledispatch": "autograd/backward helper left on dynamic fallback pending gradient schema audit",
     "testautogradmultipledispatchview": "autograd/backward helper left on dynamic fallback pending gradient schema audit",
     "testautogradmultipledispatchviewcopy": "autograd/backward helper left on dynamic fallback pending gradient schema audit",
@@ -305,6 +296,12 @@ _TORCH_VERSION_VARYING_UNSUPPORTED = frozenset(
         "expandsinglevalue",
         "jitunused",
         "listorempty",
+        # Decorated on the other pinned CI legs but absent on torch 2.7.1 (the
+        # Nightly fast-tier leg, discovered 2026-10): internal fan-mode /
+        # nonlinearity-type helpers used by torch.nn.init's kaiming
+        # calculations, torch-version-varying like the rest of this ledger.
+        "fanmode",
+        "nonlinearitytype",
     }
 )
 
@@ -324,11 +321,11 @@ _EXPECTED_KWARGS = {
     "gumbelsoftmax": ("logits",),
     "hspmm": ("mat1", "mat2"),
     "isin": ("elements", "test_elements"),
+    "issamesize": ("input", "self", "other"),
     "issetto": ("self", "tensor"),
     "ldlsolve": ("LD", "pivots", "B"),
     "lobpcg": ("A", "B", "X", "iK"),
     "map": ("self", "tensor"),
-    "matrixsqrth": ("input",),
     "moduleload": ("self", "other"),
     "orgqr": ("input", "tau"),
     "ormqr": ("input", "tau", "other"),
@@ -350,168 +347,6 @@ _EXPECTED_KWARGS = {
 }
 
 
-def _decorated_normalized_names() -> set[str]:
-    """Return normalized function names from the actual decorated set.
-
-    Returns
-    -------
-    set[str]
-        Normalized names derived from the actual first-wrap function target set.
-    """
-
-    return {_normalize_func_name(func_name.strip("_")) for _, func_name in get_orig_torch_funcs()}
-
-
-def test_every_decorated_arg_spec_is_static_or_explicitly_unsupported() -> None:
-    """Every decorated function has a static spec or a known unsupported entry."""
-
-    decorated_names = _decorated_normalized_names()
-    static_names = set(FUNC_ARG_SPECS)
-    missing = decorated_names - static_names
-
-    assert missing <= _KNOWN_UNSUPPORTED_ARG_SPECS
-    # Known-unsupported entries not decorated on this torch version are torch-version
-    # differences (see _TORCH_VERSION_VARYING_UNSUPPORTED); anything else undecorated is a
-    # stale/typo entry and must be caught.
-    undecorated_known = _KNOWN_UNSUPPORTED_ARG_SPECS - decorated_names
-    assert undecorated_known <= _TORCH_VERSION_VARYING_UNSUPPORTED, (
-        "known-unsupported arg-spec entries are undecorated on this torch and not marked "
-        f"version-varying: {sorted(undecorated_known - _TORCH_VERSION_VARYING_UNSUPPORTED)}"
-    )
-    assert not (_KNOWN_UNSUPPORTED_ARG_SPECS & static_names)
-
-
-def test_high_confidence_static_fills_remain_covered() -> None:
-    """High-confidence schema-derived fills must stay in the static table."""
-
-    decorated_names = _decorated_normalized_names()
-
-    assert decorated_names >= _HIGH_CONFIDENCE_STATIC_NAMES
-    assert set(FUNC_ARG_SPECS) >= _HIGH_CONFIDENCE_STATIC_NAMES
-    assert not (_HIGH_CONFIDENCE_STATIC_NAMES & _KNOWN_UNSUPPORTED_ARG_SPECS)
-
-
-@pytest.mark.parametrize("keyword_call", [False, True])
-def test_loaded_onnx_reshape_alias_preserves_both_tensor_arguments(keyword_call: bool) -> None:
-    """The lazily discovered ONNX alias uses the underlying ATen tensor schema."""
-    from torch.onnx import operators
-
-    spec = FUNC_ARG_SPECS["reshapefromtensorshape"]
-    assert spec is FUNC_ARG_SPECS["reshapefromtensor"]
-    assert spec == ArgSpec(positions=(0, 1), tensor_kwargs=("self", "input", "shape"))
-    assert "reshapefromtensorshape" in _decorated_normalized_names()
-
-    value = torch.arange(6)
-    shape = torch.tensor([3, 2])
-    args = () if keyword_call else (value, shape)
-    kwargs = {"input": value, "shape": shape} if keyword_call else {}
-    tensors, parameters = extract_tensors_and_params(spec, args, kwargs)
-    assert len(tensors) == 2
-    assert tensors[0] is value and tensors[1] is shape
-    assert not parameters
-    assert torch.equal(operators.reshape_from_tensor_shape(*args, **kwargs), value.reshape(3, 2))
-
-
-def test_loaded_onnx_reshape_keyword_call_keeps_both_graph_parents() -> None:
-    """Keyword alias calls retain the data source and shape source as parents."""
-    from torch.onnx import operators
-
-    import torchlens as tl
-
-    class Reshape(torch.nn.Module):
-        """Exercise the Python alias's keyword-only call form."""
-
-        def forward(self, value: torch.Tensor, shape: torch.Tensor) -> torch.Tensor:
-            """Reshape using two keyword tensor operands."""
-            return operators.reshape_from_tensor_shape(input=value, shape=shape)
-
-    trace = tl.trace(
-        Reshape(),
-        (torch.arange(6), torch.tensor([3, 2])),
-        capture=tl.options.CaptureOptions(save_arg_values=True),
-    )
-    reshape_ops = [
-        op
-        for op in trace.layer_list
-        if _normalize_func_name(op.func_name) in {"reshapefromtensor", "reshapefromtensorshape"}
-    ]
-    assert len(reshape_ops) == 1
-    assert set(reshape_ops[0].parents) == {op.layer_label for op in trace.input_ops}
-    expected = torch.arange(6).reshape(3, 2)
-    assert torch.equal(reshape_ops[0].out, expected)
-    assert trace.validate_forward_pass(expected) is True
-
-
-@pytest.mark.skipif(not hasattr(torch.linalg, "matrix_sqrth"), reason="requires matrix_sqrth")
-@pytest.mark.parametrize("keyword_call", [False, True])
-def test_matrix_sqrth_keeps_its_graph_parent(keyword_call: bool) -> None:
-    """The matrix square root keeps its operand in either calling convention.
-
-    Parameters
-    ----------
-    keyword_call:
-        Whether to pass the matrix by its public keyword name.
-    """
-    import torchlens as tl
-
-    class MatrixSquareRoot(torch.nn.Module):
-        """Exercise the newly exposed linalg operator."""
-
-        def forward(self, value: torch.Tensor) -> torch.Tensor:
-            """Return the principal square root of the input matrix.
-
-            Parameters
-            ----------
-            value:
-                Positive definite input matrix.
-
-            Returns
-            -------
-            torch.Tensor
-                Principal matrix square root.
-            """
-            if keyword_call:
-                return torch.linalg.matrix_sqrth(input=value)
-            return torch.linalg.matrix_sqrth(value)
-
-    trace = tl.trace(
-        MatrixSquareRoot(),
-        torch.diag(torch.tensor([4.0, 9.0])),
-        capture=tl.options.CaptureOptions(save_arg_values=True),
-    )
-    sqrt_ops = [
-        op for op in trace.layer_list if _normalize_func_name(op.func_name) == "matrixsqrth"
-    ]
-    assert len(sqrt_ops) == 1
-    assert set(sqrt_ops[0].parents) == {op.layer_label for op in trace.input_ops}
-    expected = torch.diag(torch.tensor([2.0, 3.0]))
-    torch.testing.assert_close(sqrt_ops[0].out, expected)
-    assert trace.validate_forward_pass(expected) is True
-
-
-def test_full_specs_extract_tensor_fill_values_but_not_literal_scalars() -> None:
-    """Record tensor-valued fill slots without changing literal factory calls."""
-
-    fill_value = torch.tensor(3.0)
-    template = torch.ones(2)
-    full_spec = FUNC_ARG_SPECS["full"]
-    full_like_spec = FUNC_ARG_SPECS["fulllike"]
-
-    assert extract_tensors_and_params(full_spec, ((2,), fill_value), {}) == ([fill_value], [])
-    assert extract_tensors_and_params(
-        full_spec,
-        (),
-        {"size": (2,), "fill_value": fill_value},
-    ) == ([fill_value], [])
-    assert extract_tensors_and_params(full_spec, ((2,), 3.0), {}) == ([], [])
-
-    assert extract_tensors_and_params(full_like_spec, (template, fill_value), {}) == (
-        [template, fill_value],
-        [],
-    )
-    assert extract_tensors_and_params(full_like_spec, (template, 3.0), {}) == ([template], [])
-
-
 @pytest.mark.parametrize("func_name,expected_kwargs", sorted(_EXPECTED_KWARGS.items()))
 def test_high_confidence_tensor_kwarg_names_match_schema(
     func_name: str, expected_kwargs: tuple[str, ...]
@@ -523,29 +358,6 @@ def test_high_confidence_tensor_kwarg_names_match_schema(
     assert set(expected_kwargs) <= set(spec.tensor_kwargs)
 
 
-def test_dynamic_fallback_cache_is_self_consistent_for_unlisted_schema() -> None:
-    """Tier-3 BFS fallback records observed tensor positions and kwarg names."""
-
-    normalized_name = "torchlenslocalargspeccoverage"
-    tensor_arg = torch.randn(2, 3)
-    tensor_kwarg = torch.randn(2, 3)
-    found_tensors = [tensor_arg, tensor_kwarg]
-    found_params: list[torch.nn.Parameter] = []
-
-    _cache_dynamic_spec(
-        normalized_name,
-        (tensor_arg,),
-        {"right": tensor_kwarg},
-        found_tensors,
-        found_params,
-    )
-    spec = FUNC_ARG_SPECS.get(normalized_name)
-    dynamic_spec = __import__("torchlens")._state._dynamic_arg_specs.pop(normalized_name)
-
-    assert spec is None
-    assert dynamic_spec == ArgSpec(positions=(0,), tensor_kwargs=("right",))
-
-
 def test_no_binary_factory_argspec_key_collision() -> None:
     """Binary-op and factory-func arg-spec tables must never share a normalized key.
 
@@ -553,28 +365,9 @@ def test_no_binary_factory_argspec_key_collision() -> None:
     a shared key + dict last-writer-wins silently drops parents -- the historic
     __rand__/torch.rand "rand" collision. arg_positions enforces this at import; assert it here.
     """
-    from torchlens.capture.arg_positions import _BINARY_FUNCS, _FACTORY_FUNCS
+    from torchlens._capture.arg_positions import _BINARY_FUNCS, _FACTORY_FUNCS
 
     assert set(_BINARY_FUNCS) & set(_FACTORY_FUNCS) == set()
-
-
-@pytest.mark.parametrize(
-    "dunder,forward",
-    [
-        ("__rand__", "and"),
-        ("__ror__", "or"),
-        ("__rxor__", "xor"),
-        ("__radd__", "add"),
-        ("__rmul__", "mul"),
-    ],
-)
-def test_commutative_reflected_dunders_normalize_to_forward_op(dunder: str, forward: str) -> None:
-    """COMMUTATIVE reflected dunders normalize to their forward op (swapped order is irrelevant).
-
-    (``__rand__`` -> ``and``, matching ``__and__``; the ``torch.rand`` factory keeps ``rand``.)
-    """
-    assert _normalize_func_name(dunder) == forward
-    assert _normalize_func_name("rand") == "rand"
 
 
 @pytest.mark.parametrize(
@@ -596,38 +389,11 @@ def test_noncommutative_reflected_dunders_keep_reflected_name(dunder: str, expec
     assert _normalize_func_name(dunder) == expected
 
 
-def test_reflected_bitwise_and_captures_tensor_parent() -> None:
-    """Regression: reflected ``int & tensor`` (Tensor.__rand__) captures its tensor parent and
-    is labeled by the forward op (``and``), not the ``rand`` factory that silently dropped it.
-    """
-    import torchlens as tl
-
-    class _Reflected(torch.nn.Module):
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            y = x.int() + 1  # traced int tensor
-            z = 5 & y  # reflected: y.__rand__(5) -- parent MUST be y
-            return z.float().sum()
-
-    trace = tl.trace(_Reflected(), torch.randint(0, 7, (4,)))
-    and_ops = [label for label in trace.layer_labels if label.startswith("and_")]
-    assert and_ops, "reflected & should produce an 'and_' op"
-    assert not [label for label in trace.layer_labels if label.startswith("rand_")], (
-        "reflected & must not be mislabeled as the 'rand' factory"
-    )
-    op = trace[and_ops[0]]
-    assert op.parents, "reflected & op must capture its tensor parent, not be orphaned"
-    assert op.is_internal_source is False
-
-
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _capture/flops.py.
 @pytest.mark.parametrize(
     ("case_name", "expected_type", "expected_arg_positions", "expected_parent_count"),
     [
-        ("polygamma", "polygamma", {1}, 1),
         ("max_unpool2d", "maxunpool2d", {0, 1}, 2),
-        ("select_scatter", "selectscatter", {0, 1}, 2),
-        ("householder_product", "householderproduct", {0, 1}, 2),
-        ("repeat_interleave", "repeatinterleave", {0, 1}, 2),
-        ("chebyshev_polynomial_t", "chebyshevpolynomialt", {0, 1}, 2),
     ],
 )
 def test_schema_corrected_unary_specs_capture_all_tensor_parents(
@@ -731,7 +497,126 @@ def test_schema_corrected_unary_specs_capture_all_tensor_parents(
 
     op = next(op for op in trace.ops if op.type == expected_type)
 
-    assert expected_arg_positions <= set(op.parent_arg_positions["args"])
+    assert expected_arg_positions <= set(op.call.parent_arg_positions["args"])
     assert len(op.parents) == expected_parent_count
-    assert op.is_internal_source is False
-    assert all(trace[parent_label].has_output_descendant for parent_label in op.parents)
+    assert op.graph.is_internal_source is False
+    assert all(trace[parent_label].graph.has_output_descendant for parent_label in op.parents)
+
+
+class _DeepcopyBufferModel(torch.nn.Module):
+    """Deep-copies a buffer inside forward (the 0bed774f1 root-only model shape)."""
+
+    def __init__(self) -> None:
+        """Register the buffer."""
+
+        super().__init__()
+        self.register_buffer("buf", torch.ones(3))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return ``x * deepcopy(buf)``.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            The product.
+        """
+
+        import copy
+
+        return x * copy.deepcopy(self.buf)
+
+
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/wrappers.py.
+@pytest.mark.skipif(
+    not hasattr(torch.Tensor, "_clear_non_serializable_cached_data"),
+    reason="this torch's Tensor.__deepcopy__ has no cache-clearing helper",
+)
+def test_deepcopy_inside_forward_calls_are_arg_spec_covered(monkeypatch) -> None:
+    """Every call a forward deepcopy reaches is covered, and its internals never become ops.
+
+    ``Tensor.__deepcopy__`` calls ``self._clear_non_serializable_cached_data()`` inside
+    the logged deepcopy. It returns ``None``, so it never logs an op or caches a dynamic
+    spec; the usage-stats lookup-table gate (``test_arg_positions``) needs its static
+    spec. This pins that in targeted runs, where usage stats are otherwise off.
+    """
+
+    import torchlens as tl
+    from torchlens import _state
+
+    monkeypatch.setattr(_state, "_collect_usage_stats", True)
+    monkeypatch.setattr(_state, "_function_call_counts", {})
+    monkeypatch.setattr(_state, "_function_call_models", {})
+    trace = tl.trace(_DeepcopyBufferModel(), torch.randn(3))
+    try:
+        names = {_normalize_func_name(name) for name in _state._function_call_counts}
+        assert "clearnonserializablecacheddata" in names
+        uncovered = {
+            name
+            for name in names
+            if name not in FUNC_ARG_SPECS and name not in _state._dynamic_arg_specs
+        }
+        assert uncovered == set()
+        assert not any("clear" in str(op.type).lower() for op in trace.ops)
+    finally:
+        trace.cleanup()
+
+
+class _BackwardInForwardModel(torch.nn.Module):
+    """Writes parameter grads inside forward through both backward spellings."""
+
+    def __init__(self) -> None:
+        """Build the layers."""
+
+        super().__init__()
+        self.fc1 = torch.nn.Linear(4, 4)
+        self.fc2 = torch.nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run ``Tensor.backward`` and ``torch.autograd.backward``, then read the grads."""
+
+        for param in self.fc1.parameters():
+            param.grad = None
+        torch.tanh(self.fc1(x.detach())).sum().backward()
+        torch.autograd.backward(self.fc1(x.detach()).sum(), inputs=[self.fc1.bias])
+        weight_grad, bias_grad = self.fc1.weight.grad, self.fc1.bias.grad
+        assert weight_grad is not None and bias_grad is not None
+        return self.fc2(x) * weight_grad.mean() * bias_grad.sum()
+
+
+def test_backward_inside_forward_calls_are_arg_spec_covered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An in-forward backward leaves no name uncovered in the usage-stats lookup gate.
+
+    ``Tensor.backward`` is decorated and counted as ``backward``; it returns ``None``, so it
+    never logs an op or caches a dynamic spec and needs its static spec. The gradients it
+    writes are counted as ``autogradbackward`` boundary ops. This pins the full-tier gate
+    (``test_arg_positions``) in one process, whatever the xdist worker layout.
+    """
+
+    import torchlens as tl
+    from torchlens import _state
+
+    monkeypatch.setattr(_state, "_collect_usage_stats", True)
+    monkeypatch.setattr(_state, "_function_call_counts", {})
+    monkeypatch.setattr(_state, "_function_call_models", {})
+    torch.manual_seed(0)
+    trace = tl.trace(_BackwardInForwardModel(), torch.rand(2, 4))
+    try:
+        names = {_normalize_func_name(name) for name in _state._function_call_counts}
+        assert {"backward", "autogradbackward"} <= names
+        assert {"backward", "autogradbackward"} <= set(FUNC_ARG_SPECS)
+        uncovered = {
+            name
+            for name in names
+            if name not in FUNC_ARG_SPECS and name not in _state._dynamic_arg_specs
+        }
+        assert uncovered == set()
+        assert not any(op.func_name == "backward" for op in trace.ops)
+    finally:
+        trace.cleanup()

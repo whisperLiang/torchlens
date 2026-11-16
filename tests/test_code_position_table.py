@@ -5,7 +5,7 @@ from types import CodeType
 
 import pytest
 
-from torchlens.utils import _torch_compat, introspection
+from torchlens._utils import _torch_compat, introspection
 
 pytestmark = pytest.mark.skipif(
     not _torch_compat.HAS_CODE_POSITIONS, reason="Code positions require Python 3.11+"

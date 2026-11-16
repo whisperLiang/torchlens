@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from functools import cache
 from typing import Any
 
-from ..registry import BackendUnsupportedError
+from .._errors import BackendUnsupportedError
 
 
 @cache
@@ -28,7 +28,9 @@ def _cuda_driver() -> Any:
             getattr(driver, name).restype = ctypes.c_int
     except (OSError, AttributeError) as exc:
         raise BackendUnsupportedError(
-            "Paddle GPU execution requires CUDA driver context inspection."
+            "Paddle GPU execution requires CUDA driver context inspection.",
+            backend="paddle",
+            code="cuda_driver_unavailable",
         ) from exc
     return driver
 
@@ -38,7 +40,9 @@ def _check_cuda(status: int, operation: str) -> None:
 
     if status:
         raise BackendUnsupportedError(
-            f"Paddle CUDA context operation {operation} failed with driver status {status}."
+            f"Paddle CUDA context operation {operation} failed with driver status {status}.",
+            backend="paddle",
+            code="cuda_context_inspection_failed",
         )
 
 
@@ -105,13 +109,19 @@ def paddle_cuda_scope(*values: Any) -> Iterator[None]:
             driver.cuPointerGetAttribute(ctypes.byref(owner), 1, pointer), "cuPointerGetAttribute"
         )
         if owner.value is None:
-            raise BackendUnsupportedError("Paddle GPU tensor storage has no owning CUDA context.")
+            raise BackendUnsupportedError(
+                "Paddle GPU tensor storage has no owning CUDA context.",
+                backend="paddle",
+                code="cuda_context_unavailable",
+            )
         device = int(value.place.gpu_device_id())
         previous = owners.setdefault(device, owner.value)
         if previous != owner.value:
             raise BackendUnsupportedError(
                 f"Paddle tensors on GPU {device} belong to different CUDA contexts. "
-                "Create inputs and model state in the same context before capturing or replaying."
+                "Create inputs and model state in the same context before capturing or replaying.",
+                backend="paddle",
+                code="cuda_context_mismatch",
             )
     if not owners:
         yield

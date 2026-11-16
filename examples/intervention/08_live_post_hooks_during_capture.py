@@ -33,16 +33,15 @@ def main() -> None:
     """Capture with a live zero-ablation hook."""
 
     x = torch.tensor([[-2.0, 3.0]])
-    clean = tl.trace(ReluAdd(), x, intervention_ready=True)
+    clean = tl.trace(ReluAdd(), x)
     live = tl.trace(
         ReluAdd(),
         x,
-        intervention_ready=True,
-        hooks={tl.func("relu"): tl.zero_ablate()},
+        capture=tl.options.CaptureOptions(hooks={tl.func("relu"): tl.zero_ablate()}),
     )
 
-    assert torch.allclose(live.layer_list[-1].out, torch.ones_like(x))
-    assert not torch.allclose(clean.layer_list[-1].out, live.layer_list[-1].out)
+    assert torch.allclose(live.output_ops[-1].out, torch.ones_like(x))
+    assert not torch.allclose(clean.output_ops[-1].out, live.output_ops[-1].out)
     assert live.last_run_records()[-1].engine == "live"
 
 

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from torchlens.utils._subprocess import run_bounded_subprocess
+from torchlens._utils._subprocess import run_bounded_subprocess
 
 
 @pytest.mark.heavy
@@ -37,6 +37,7 @@ def test_fresh_split_captures_held_activation_once_per_batch(
         calls = []
         activation_name = sys.argv[1]
         held = getattr(functional, activation_name)
+        original_reference = (held,)
 
         class HeldActivation(torch.nn.Module):
             def __init__(self):
@@ -61,10 +62,10 @@ def test_fresh_split_captures_held_activation_once_per_batch(
 
         torch.manual_seed(0)
         model = WindowBlock().eval()
-        assert model.activation.act is held
+        assert model.activation.act is original_reference[0]
         # This environment may lazily load Triton from Torch's Dynamo path;
         # initialize that native extension before TorchLens installs wrappers.
-        from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
+        from torchlens._utils._torch_compat import get_dynamo_optimized_module_type
 
         get_dynamo_optimized_module_type(force_probe=True)
         import torchlens as tl
@@ -78,9 +79,9 @@ def test_fresh_split_captures_held_activation_once_per_batch(
             partition = dag.to_partition(close_call_ids(dag, frozenset(call.call_id for call in dag.nodes[:(len(dag.nodes) - 1) * 50 // 100 + 1])))
             runtime = graph.materialize(graph.analyze(partition))
             assert calls == [1, 2] * (index + 1), calls
-            assert model.activation.act is held
+            assert model.activation.act is original_reference[0]
             assert runtime.batch_validation["status"] == "passed", runtime.batch_validation
-            assert runtime.trace.rescue_rerun is None
+            assert runtime.trace._rescue_rerun is None
             kinds = [node.op_type for node in runtime.trace_graph.compute_nodes]
             assert activation_name in kinds, kinds
             assert "internalsource" not in kinds, kinds
@@ -92,7 +93,7 @@ def test_fresh_split_captures_held_activation_once_per_batch(
                 actual = runtime.replay(values)
             assert actual.shape == (batch * 4, 3, 4)
             torch.testing.assert_close(actual, expected)
-            assert model.activation.act is held
+            assert model.activation.act is original_reference[0]
         print("held-activation-split-ok")
 
         """
@@ -116,7 +117,6 @@ def test_fresh_split_captures_held_activation_once_per_batch(
     assert "held-activation-split-ok" in result.stdout
 
 
-@pytest.mark.smoke
 @pytest.mark.parametrize("fail", [False, True])
 def test_held_function_scope_restores_direct_reference(fail: bool) -> None:
     """Scope teardown preserves the original function even when capture raises.
@@ -154,7 +154,6 @@ def test_held_function_scope_restores_direct_reference(fail: bool) -> None:
     torch.testing.assert_close(model.act(values), expected)
 
 
-@pytest.mark.smoke
 def test_held_function_scope_keeps_user_reassignment() -> None:
     """A forward's deliberate reassignment is not overwritten by scope teardown."""
 
@@ -169,7 +168,6 @@ def test_held_function_scope_keeps_user_reassignment() -> None:
     assert model.act is replacement
 
 
-@pytest.mark.smoke
 def test_held_function_scope_ignores_foreign_namespace_patches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

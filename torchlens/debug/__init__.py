@@ -1,59 +1,149 @@
-"""Power-user debugging helpers for completed TorchLens traces."""
+"""Debugging tools for completed TorchLens traces, grouped by the symptom they answer.
+
+- First NaN or Inf in the forward pass: ``tl.debug.bisect_nan(trace)`` finds the first
+  non-finite op of a trace, ``tl.debug.find_nan(model, inputs)`` captures and finds it,
+  and ``tl.debug.nonfinite_origin(trace)`` names where it started and why.
+- First NaN or Inf in the backward pass: ``tl.debug.bisect_nan_backward(trace)``.
+- Precision loss (fp16, bf16, TF32): ``tl.debug.bisect_precision(model, inputs)`` finds
+  the first op whose low-precision output drifts; ``tl.debug.dtype_range(trace)`` flags
+  overflow headroom and subnormal outputs.
+- Where a tensor came from: ``tl.debug.lineage(trace, ...)``.
+- The input shape a model expects: ``tl.debug.guess_input_shape(model)``.
+- Two runs or two models differ: ``tl.debug.compare(...)``,
+  ``tl.debug.first_divergence(...)`` and ``tl.debug.compare_params(...)``.
+- Runs that do not repeat: ``tl.debug.check_determinism(model, inputs)``.
+- Dead neurons, gradient flow and parameter health: ``tl.debug.dead_neurons(trace)``,
+  ``tl.debug.grad_health(trace)`` and ``tl.debug.param_health(model)``; mixed-precision
+  gradients that go non-finite under a grad scaler: ``tl.debug.amp_scaled_grads_hint()``.
+- Training-loop checks (capture-free, standalone): ``tl.debug.ChecksSession(model, optimizer)``
+  with its step-check registrations, ``tl.debug.RangeProbe`` and ``tl.debug.LivenessProbe``
+  for output ranges, and the clip, scale and watchdog ledgers (``tl.debug.ClipLedger``,
+  ``tl.debug.ScaleLedger``, ``tl.debug.Watchdog``); findings collect into a
+  ``tl.debug.CheckReport``. See ``docs/reference/checks_kit.md``.
+- Autograd graph structure: ``tl.debug.walk_grad_fn(...)`` and
+  ``tl.debug.sketch_grad_fn(...)``.
+- Compilation and speed: ``tl.debug.count_compiles(...)``, ``tl.debug.graph_breaks(...)``,
+  ``tl.debug.hot_path(trace)`` and ``tl.debug.recompute_candidates(trace)``.
+- Re-running a capture in isolation: ``tl.debug.isolated_capture(...)``,
+  ``tl.debug.preserved_rng_state()`` and ``tl.debug.clone_input_tree(...)``.
+
+Whole-trace health is ``trace.health``; the FLOPs cross-check is
+``tl.report.flops_vs_dispatch``. Every report-shaped result is a
+:class:`tl.report.Report` (DOCUMENTED-UNSTABLE): ``report_type``/``subject``/``status``,
+``to_dict()``, ``to_pandas()`` and a bounded printed card.
+"""
 
 from __future__ import annotations
 
-from ._audit import AuditFinding, TraceAudit, audit_trace
-from ._compile_counter import (
-    CompileCounts,
-    CompileCountsUnavailableError,
-    count_compiles,
+from ._audit import AuditFinding as AuditFinding
+from ._checks import (
+    CheckFinding,
+    CheckReport,
+    ChecksSession,
+    ClipLedger,
+    ClipLedgerSnapshot,
+    LivenessProbe,
+    OptimizerFacts,
+    RangeProbe,
+    ScaleLedger,
+    ScaleLedgerSnapshot,
+    ScanRow,
+    Watchdog,
+    WatchdogSnapshot,
 )
-from ._cost import hot_path
-from ._dtype_range import DTypeRangeAudit, dtype_range_audit
-from ._gradients import gradient_flow_audit
-from ._graph import LineageResult, compare, dead_neurons, lineage
+from ._checks._audit import ParamHealthReport, param_health
+from ._compile_counter import CompileCounts as CompileCounts, count_compiles
+from ._cost import hot_path, hot_path_rows
+from ._determinism import DeterminismReport, check_determinism
+from ._dtype_range import DTypeRangeReport, dtype_range
+from ._first_bad import FirstBadThing, amp_scaled_grads_hint
+from ._grad_fn_walk import (
+    GradFnNode,
+    GradFnSketch,
+    sketch_grad_fn,
+    walk_grad_fn,
+)
+from ._gradients import grad_health
+from ._graph import (
+    LineageReport,
+    compare,
+    dead_neurons,
+    first_divergence,
+    lineage,
+)
 from ._graph_breaks import (
-    GraphBreak,
-    GraphBreakReport,
-    GraphBreaksNormalizationError,
-    GraphBreaksUnavailableError,
+    GraphBreak as GraphBreak,
+    GraphBreakReport as GraphBreakReport,
     graph_breaks,
 )
-from ._infer_input_shape import InferInputShapeResult, infer_input_shape
-from ._nan import BisectNanResult, FindNanResult, bisect_nan, find_nan
+from ._infer_input_shape import guess_input_shape
+from ._infer_report import GuessInputShapeReport
+from ._nan import (
+    BisectNanReport,
+    FindNanReport,
+    NonfiniteReport,
+    bisect_nan,
+    find_nan,
+    nonfinite_origin,
+)
+from ._nan_backward import BackwardNanReport, BackwardTransition, bisect_nan_backward
 from ._params import compare_params
-from ._precision import BisectPrecisionResult, PrecisionRow, bisect_precision
+from ._precision import BisectPrecisionReport, PrecisionRow as PrecisionRow, bisect_precision
 from ._recompute import recompute_candidates
+from ._rerun import clone_input_tree, isolated_capture, preserved_rng_state
 
 __all__ = [
-    "BisectNanResult",
-    "BisectPrecisionResult",
-    "PrecisionRow",
-    "AuditFinding",
-    "CompileCounts",
-    "CompileCountsUnavailableError",
-    "DTypeRangeAudit",
-    "FindNanResult",
-    "GraphBreak",
-    "GraphBreakReport",
-    "GraphBreaksNormalizationError",
-    "GraphBreaksUnavailableError",
-    "InferInputShapeResult",
-    "LineageResult",
-    "TraceAudit",
-    "audit_trace",
+    "CheckFinding",
+    "CheckReport",
+    "ChecksSession",
+    "ClipLedger",
+    "ClipLedgerSnapshot",
+    "LivenessProbe",
+    "OptimizerFacts",
+    "RangeProbe",
+    "ScaleLedger",
+    "ScaleLedgerSnapshot",
+    "ScanRow",
+    "Watchdog",
+    "WatchdogSnapshot",
+    "DTypeRangeReport",
+    "DeterminismReport",
+    "NonfiniteReport",
+    "ParamHealthReport",
+    "check_determinism",
+    "dtype_range",
+    "grad_health",
+    "nonfinite_origin",
+    "param_health",
+    "BackwardNanReport",
+    "BackwardTransition",
+    "BisectNanReport",
+    "BisectPrecisionReport",
+    "FirstBadThing",
+    "GradFnNode",
+    "GradFnSketch",
+    "GuessInputShapeReport",
+    "LineageReport",
+    "FindNanReport",
+    "amp_scaled_grads_hint",
     "bisect_nan",
+    "bisect_nan_backward",
     "bisect_precision",
-    "find_nan",
+    "clone_input_tree",
     "compare",
     "compare_params",
     "count_compiles",
     "dead_neurons",
-    "dtype_range_audit",
-    "gradient_flow_audit",
+    "find_nan",
+    "first_divergence",
+    "preserved_rng_state",
+    "walk_grad_fn",
     "graph_breaks",
     "hot_path",
-    "infer_input_shape",
+    "hot_path_rows",
+    "guess_input_shape",
+    "isolated_capture",
     "lineage",
     "recompute_candidates",
+    "sketch_grad_fn",
 ]

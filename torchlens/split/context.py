@@ -8,7 +8,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
-from ..capture import flops as capture_flops
+from torchlens.errors import ArgumentTypeError
+from torchlens.split.errors import SplitRequestError
+
+from .._capture import flops as capture_flops
 from .adapters.base import SegmentBundle, SplitBackendAdapter
 from .batching import BatchSpec
 from .errors import SplitErrorContext, SplitUnsupportedError
@@ -26,7 +29,16 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class PartitionAnalysis:
-    """Validated native partition and programs, without backend executables."""
+    """Validated native partition and programs, without backend executables.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> partition = graph.compute_dag().to_partition(())
+    >>> analysis = graph.analyze(partition)
+    >>> analysis.capability_report.preflight_ok
+    True
+    """
 
     source_graph: SplitTraceGraph = field(repr=False, compare=False)
     request: SplitRequest
@@ -43,6 +55,12 @@ class SplitGraph:
 
     This context has no executable segments or mutable client training replicas.
     Materialization creates fresh segments and binds the live model state.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> graph.traced_batch_size, len(graph.compute_dag().nodes) > 0
+    (1, True)
     """
 
     def __init__(
@@ -139,6 +157,7 @@ class SplitGraph:
                     split_point=self.request.boundary,
                     reason="diagnostic_trace_not_retained",
                 ),
+                code=SplitUnsupportedError.code,
             )
         return self._trace
 
@@ -188,7 +207,10 @@ class SplitGraph:
         from .graph_profile import build_graph_profile
 
         if batch_size is not None and (type(batch_size) is not int or batch_size < 1):
-            raise ValueError("batch_size must be a positive integer")
+            raise SplitRequestError(
+                "batch_size must be a positive integer",
+                code=SplitRequestError.code,
+            )
         self._check_cache_graph()
         key = (batch_size, capture_flops._rule_revision)
         if key not in self._profile_cache:
@@ -224,7 +246,11 @@ class SplitGraph:
     def analyze(self, partition: GraphPartition) -> PartitionAnalysis:
         """Validate a GraphPartition without building segments or binding current state."""
         if not isinstance(partition, GraphPartition):
-            raise TypeError("partition must be a GraphPartition")
+            raise ArgumentTypeError(
+                "partition must be a GraphPartition",
+                code="split_argument_type",
+                remedy="pass a GraphPartition created by dag.to_partition",
+            )
         with self._temporary_segment_state_snapshots() as state_snapshots:
             return self._analyze_partition(partition, state_snapshots=state_snapshots)
 

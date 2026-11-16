@@ -7,18 +7,17 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
-from ..utils.tensor_utils import layer_grad_tolerances_for_dtype
+from .._utils.tensor_utils import layer_grad_tolerances_for_dtype
+from . import _influence  # noqa: F401  (registers the resolver behind .of())
+
+# Importing the package executes built-in rule decorators once, before any public
+# descriptor, projective, or validation path can reach the geometry engines.
+from ._builtin_rules import __all__ as _builtin_rule_modules  # noqa: F401
 from ._errors import (
-    AmbiguousCallError,
     AmbiguousInputError,
-    AmbiguousPassError,
-    AmbiguousTargetError,
     BackendUnsupportedError,
-    NoInfluencePathError,
     ReceptiveFieldConfigurationError,
     ReceptiveFieldError,
-    ReceptiveFieldUnavailableError,
-    ReceptiveFieldValidationError,
 )
 from ._rules import (
     ReceptiveFieldRule,
@@ -27,7 +26,7 @@ from ._rules import (
     rules as _registered_rules,
 )
 from ._types import (
-    GradientReceptiveField,
+    GradReceptiveField,
     GridLayout,
     ReceptiveField,
     ReceptiveFieldAlignment,
@@ -43,23 +42,59 @@ from ._types import (
 )
 from ._validation import cross_validate
 from ._view import ReceptiveFieldView
-from ._viz import node_spec
-
-# Importing the package executes built-in rule decorators once, before any public
-# descriptor, projective, or validation path can reach the geometry engines.
-from .rules import __all__ as _builtin_rule_modules  # noqa: F401
 
 rules = _registered_rules
 
 
 if TYPE_CHECKING:
-    from ..data_classes.op import Op
-    from ..data_classes.trace import Trace
+    from .._data_classes.op import Op
+    from .._data_classes.trace import Trace
+    from ._viz import node_spec
+
+
+def __getattr__(name: str) -> object:
+    """Resolve the Pillow-backed drawing helper ``node_spec`` on first access.
+
+    ``_viz`` imports Pillow at module level, and forward validation imports
+    this package for its error types, so an eager import would make
+    ``tl.validate`` fail where Pillow is not installed.
+
+    Parameters
+    ----------
+    name:
+        Attribute requested from the package.
+
+    Returns
+    -------
+    object
+        The resolved attribute.
+
+    Raises
+    ------
+    AttributeError
+        If ``name`` is not a lazily resolved attribute.
+    """
+
+    if name == "node_spec":
+        from ._viz import node_spec  # deferred: startup cost
+
+        return node_spec
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @dataclass(frozen=True)
 class EmpiricalAdjointCheck:
-    """One sampled comparison of receptive and projective empirical derivatives."""
+    """One sampled comparison of receptive and projective empirical derivatives.
+
+    Examples
+    --------
+    >>> net = nn.Conv2d(1, 1, 3, padding=1)
+    >>> armed = tl.trace(net, torch.randn(1, 1, 6, 6, requires_grad=True),
+    ...     capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"))
+    >>> checks = tl.receptive_field.verify(armed, units="center").empirical_adjoint
+    >>> (len(checks) > 0, all(isinstance(check, EmpiricalAdjointCheck) for check in checks))
+    (True, True)
+    """
 
     source_label: str
     target_label: str
@@ -73,7 +108,17 @@ class EmpiricalAdjointCheck:
 
 @dataclass(frozen=True)
 class ReceptiveFieldVerification:
-    """Combined containment and empirical-adjoint diagnostic report."""
+    """Combined containment and empirical-adjoint diagnostic report.
+
+    Examples
+    --------
+    >>> net = nn.Conv2d(1, 1, 3, padding=1)
+    >>> armed = tl.trace(net, torch.randn(1, 1, 6, 6, requires_grad=True),
+    ...     capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"))
+    >>> report = tl.receptive_field.verify(armed, units="center")
+    >>> (isinstance(report, ReceptiveFieldVerification), len(report.containment) > 0)
+    (True, True)
+    """
 
     containment: tuple[ReceptiveFieldValidation, ...]
     empirical_adjoint: tuple[EmpiricalAdjointCheck, ...]
@@ -132,7 +177,7 @@ def _op_by_label(trace: Trace, label: str) -> Op | None:
         Canonical captured operation when present.
     """
 
-    return next((op for op in trace.layer_list if op.label == label), None)
+    return next((op for op in trace._layer_list if op.label == label), None)
 
 
 def _empirical_adjoint_checks(
@@ -163,14 +208,14 @@ def _empirical_adjoint_checks(
         One reported comparison or graceful skip per receptive empirical result.
     """
 
-    from ._gradient import gradient_for_unit
-    from ._gradient_forward import projective_gradient_for_unit
+    from ._gradient import gradient_for_unit  # deferred: cycle receptive_field
+    from ._gradient_forward import projective_gradient_for_unit  # deferred: cycle receptive_field
 
     checks: list[EmpiricalAdjointCheck] = []
     for validation in containment:
-        for role, receptive in validation.gradient.items():
+        for role, receptive in validation.grad.items():
             far_label = next(
-                (op.label for op in trace.layer_list if str(op.io_role or op.label) == role),
+                (op.label for op in trace._layer_list if str(op.graph.io_role or op.label) == role),
                 "",
             )
             support = torch.nonzero(receptive.support_mask, as_tuple=False)
@@ -220,7 +265,7 @@ def _empirical_adjoint_checks(
                 else:
                     # A single source selects a single field, never the role mapping.
                     receptive_probe = cast(
-                        GradientReceptiveField,
+                        GradReceptiveField,
                         gradient_for_unit(
                             target,
                             target_unit,
@@ -245,8 +290,8 @@ def _empirical_adjoint_checks(
                     )
                 )
                 continue
-            if not isinstance(projective, GradientReceptiveField) or not isinstance(
-                receptive_probe, GradientReceptiveField
+            if not isinstance(projective, GradReceptiveField) or not isinstance(
+                receptive_probe, GradReceptiveField
             ):
                 checks.append(
                     EmpiricalAdjointCheck(
@@ -344,6 +389,15 @@ def verify(
     ReceptiveFieldVerification
         Containment results together with one empirical-adjoint report for each
         sampled receptive gradient.
+
+    Examples
+    --------
+    >>> net = nn.Conv2d(1, 1, 3, padding=1)
+    >>> armed = tl.trace(net, torch.randn(1, 1, 6, 6, requires_grad=True),
+    ...     capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"))
+    >>> report = verify(armed, units="center")
+    >>> (report.verdict.value, report.passed)
+    ('pass', True)
     """
 
     if (empirical_adjoint_atol is not None and empirical_adjoint_atol < 0) or (
@@ -371,48 +425,22 @@ def verify(
     )
 
 
-def self_check(
-    trace: Trace,
-    *,
-    empirical_adjoint_atol: float | None = None,
-    empirical_adjoint_rtol: float | None = None,
-    **kwargs: object,
-) -> ReceptiveFieldVerification:
-    """Alias :func:`verify` for interactive RF self-consistency diagnostics."""
-
-    return verify(
-        trace,
-        empirical_adjoint_atol=empirical_adjoint_atol,
-        empirical_adjoint_rtol=empirical_adjoint_rtol,
-        **kwargs,
-    )
-
-
 __all__ = [
-    "AmbiguousCallError",
     "AmbiguousInputError",
-    "AmbiguousTargetError",
-    "AmbiguousPassError",
-    "BackendUnsupportedError",
     "EmpiricalAdjointCheck",
-    "GradientReceptiveField",
+    "GradReceptiveField",
     "GridLayout",
     "ReceptiveField",
     "ReceptiveFieldAlignment",
     "ReceptiveFieldAxis",
     "ReceptiveFieldBox",
     "ReceptiveFieldBoxAxis",
-    "ReceptiveFieldConfigurationError",
     "ReceptiveFieldDirection",
-    "ReceptiveFieldError",
-    "NoInfluencePathError",
     "ReceptiveFieldProfile",
     "ReceptiveFieldRule",
     "ReceptiveFieldRuleContext",
     "ReceptiveFieldStatus",
-    "ReceptiveFieldUnavailableError",
     "ReceptiveFieldValidation",
-    "ReceptiveFieldValidationError",
     "ReceptiveFieldValidationStatus",
     "ReceptiveFieldVerification",
     "ReceptiveFieldView",
@@ -420,7 +448,6 @@ __all__ = [
     "register_rf_rule",
     "cross_validate",
     "node_spec",
-    "self_check",
     "verify",
     "rules",
 ]

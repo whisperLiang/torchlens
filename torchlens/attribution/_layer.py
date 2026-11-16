@@ -6,32 +6,57 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
 import torch
-import torch.nn.functional as F
 from PIL import Image
 from torch import Tensor
 from torch.nn import Module
 from torch.utils.hooks import RemovableHandle
 
+from torchlens._plots import node_plots
+from torchlens._utils._display_errors import lookup_message
+from torchlens._utils._numpy_bridge import tensor_to_numpy
+from torchlens.attribution._cam_grid import _layer_tensor
 from torchlens.attribution._core import (
+    _DOCS_POINTER as _INTEGER_DOCS_POINTER,
+    Attribution,
     AttributionError,
-    AttributionResult,
     InputKwargs,
     _AttributionTarget,
     _call_model,
+    _Caller,
+    _completeness_extra,
     _interned_path_leaves,
     _make_input_leaves,
     _normalize_model_inputs,
     _PreparedInputs,
     _scalarize_output,
+    _stacked_path_leaves,
     _target_repr,
     _temporarily_eval,
     _validate_baselines,
     _validate_positive_int,
 )
+from torchlens.attribution._entry import _entry_baselines
+from torchlens.attribution._site import _target_spelling
+from torchlens.attribution._steps import (
+    _chunk_steps,
+    _midpoint_alphas,
+    _scalarize_stacked_output,
+    _StepAuditor,
+    _validate_step_audit,
+    _validate_step_batch_size,
+)
 from torchlens.receptive_field._viz import _blend_heatmap
-from torchlens.viz.node_plots import render_heatmap
 
 LayerAttributionMethod: TypeAlias = Literal["activation_x_grad", "grad"]
+
+# A layer-space completeness residual is expected near zero
+# only when the selected layer output is a true bottleneck for the scored
+# path; on non-bottleneck layers the residual measures the bypassed signal,
+# not an implementation defect.
+_LAYER_COMPLETENESS_CAVEAT = (
+    "layer-space residual is expected near zero only when the selected layer "
+    "output is a true bottleneck for the scored path"
+)
 
 
 @dataclass
@@ -41,12 +66,11 @@ class _LayerCapture:
     Attributes
     ----------
     activations
-        Distinct forward activations emitted by the target layer, one entry per
-        distinct output tensor object, in firing order. A module that returns
-        the very tensor object it received (``nn.Identity``) contributes one
-        entry no matter how often it fires: autograd already accumulates every
-        use of that node into one gradient, so a second entry would
-        double-count its contribution.
+        Distinct forward activations emitted by the target layer, one entry per distinct output
+        tensor object, in firing order. A module that returns the very tensor object it received
+        (``nn.Identity``) contributes one entry no matter how often it fires: autograd already
+        accumulates every use of that node into one gradient, so a second entry would double-count
+        its contribution.
     """
 
     activations: list[Tensor] = field(default_factory=list)
@@ -57,7 +81,7 @@ class _LayerCapture:
         Parameters
         ----------
         output
-            Value returned by the target layer for this firing.
+            Target layer output for this firing; a one-element tuple or list records its element.
 
         Raises
         ------
@@ -65,6 +89,7 @@ class _LayerCapture:
             If the layer emitted a non-tensor output.
         """
 
+        output = _layer_tensor(output)
         if not isinstance(output, Tensor):
             raise AttributionError("target layer must return a tensor activation")
         if not any(output is existing for existing in self.activations):
@@ -214,17 +239,30 @@ def _autograd_leaf_variable_ids(activations: tuple[Tensor, ...]) -> set[int]:
     """
 
     found: set[int] = {id(activation) for activation in activations}
-    # grad_fn Python wrappers may be freed as traversal advances. Keep the
-    # wrappers alive for this walk so their ids cannot be reused by ancestors.
-    seen: dict[int, Any] = {}
+    # ``grad_fn.next_functions`` mints a FRESH Python wrapper around the
+    # underlying autograd node on every access; nothing else keeps that
+    # wrapper alive once it is popped off ``stack`` and only its ``id()`` is
+    # retained. CPython is then free to recycle that exact address for the
+    # NEXT node constructed during the same walk (observed on torch 2.7.1
+    # for a 3+-hop chain such as Conv2d->ReLU->AvgPool2d: the freed
+    # ``ReluBackward0`` wrapper's address was reused by the input leaf's own
+    # ``AccumulateGrad`` wrapper), which makes an `id()`-keyed "seen" set
+    # falsely treat the brand-new node as already visited and silently
+    # prune the real leaf out of the walk. Keeping the node OBJECTS
+    # themselves (not their bare ids) in ``seen`` fixes both problems at
+    # once: it holds a strong reference for the rest of the traversal (no
+    # address can be recycled out from under it) and still deduplicates
+    # correctly, since these wrapper types use default identity-based
+    # ``__eq__``/``__hash__``.
+    seen: set[Any] = set()
     stack: list[Any] = [
         activation.grad_fn for activation in activations if activation.grad_fn is not None
     ]
     while stack:
         node = stack.pop()
-        if node is None or id(node) in seen:
+        if node is None or node in seen:
             continue
-        seen[id(node)] = node
+        seen.add(node)
         variable = getattr(node, "variable", None)
         if isinstance(variable, Tensor):
             found.add(id(variable))
@@ -271,7 +309,7 @@ def _feeding_original_leaves(
     return tuple(feeding)
 
 
-def _format_layer_options(model: Module) -> str:
+def _format_layer_options(model: Module) -> list[str]:
     """Return a compact list of useful layer-name suggestions.
 
     Parameters
@@ -281,8 +319,8 @@ def _format_layer_options(model: Module) -> str:
 
     Returns
     -------
-    str
-        Comma-separated module names suitable for an error message.
+    list[str]
+        Module names suitable for a bounded candidate row.
     """
 
     named_modules = dict(model.named_modules())
@@ -291,12 +329,7 @@ def _format_layer_options(model: Module) -> str:
         for name, module in named_modules.items()
         if name and ("conv" in name.lower() or "conv" in type(module).__name__.lower())
     ]
-    options = conv_like[:5]
-    if not options:
-        options = [name for name in named_modules if name][:5]
-    if not options:
-        return "<no named child modules>"
-    return ", ".join(options)
+    return conv_like or [name for name in named_modules if name]
 
 
 def _resolve_named_layer(model: Module, layer: str) -> Module:
@@ -327,7 +360,11 @@ def _resolve_named_layer(model: Module, layer: str) -> Module:
     if layer not in named_modules:
         options = _format_layer_options(model)
         raise AttributionError(
-            f"layer {layer!r} was not found; available conv-like layers include: {options}"
+            lookup_message(
+                f"layer {layer!r} was not found.",
+                options,
+                "Pass a layer name from dict(model.named_modules()).",
+            )
         )
     return named_modules[layer]
 
@@ -412,7 +449,8 @@ def _capture_layer_activation_for_leaves(
     input_leaves: tuple[Tensor, ...],
     *,
     require_gradient: bool,
-) -> tuple[tuple[Tensor, ...], tuple[Tensor, ...] | None]:
+    n_rows: int = 1,
+) -> tuple[tuple[Tensor, ...], tuple[Tensor, ...] | None, Tensor]:
     """Capture every distinct layer firing and optionally the target gradients.
 
     Parameters
@@ -429,12 +467,15 @@ def _capture_layer_activation_for_leaves(
         Differentiable leaves substituted into the model call.
     require_gradient
         Whether to compute ``dTarget / dActivation`` per firing.
+    n_rows
+        Number of path points stacked on the batch axis of ``input_leaves``;
+        callable targets are applied per logical path point and summed.
 
     Returns
     -------
-    tuple[tuple[Tensor, ...], tuple[Tensor, ...] | None]
-        Detached per-firing activations and optional aligned per-firing
-        gradients with respect to them.
+    tuple[tuple[Tensor, ...], tuple[Tensor, ...] | None, Tensor]
+        Detached per-firing activations, optional aligned per-firing gradients with respect to
+        them, and the detached scalarized target value at this path point.
 
     Raises
     ------
@@ -453,17 +494,21 @@ def _capture_layer_activation_for_leaves(
 
     hook_handles.append(target_layer.register_forward_hook(_forward_hook))
     try:
-        output = _call_model(model, inputs, input_leaves)
+        output = _call_model(model, inputs, input_leaves, n_rows=n_rows)
         activations = tuple(capture.activations)
         if not activations:
             raise AttributionError(f"layer {layer!r} did not run during the forward pass")
+        scalar = _scalarize_stacked_output(output, target, n_rows, _scalarize_output)
         if not require_gradient:
-            return tuple(activation.detach() for activation in activations), None
+            return (
+                tuple(activation.detach() for activation in activations),
+                None,
+                scalar.detach(),
+            )
         if not any(activation.requires_grad for activation in activations):
             raise AttributionError(
                 f"layer {layer!r} activation is not differentiable with respect to target"
             )
-        scalar = _scalarize_output(output, target)
         gradients = _layer_gradients(scalar, activations, layer)
     finally:
         for handle in hook_handles:
@@ -472,24 +517,101 @@ def _capture_layer_activation_for_leaves(
     return (
         tuple(activation.detach() for activation in activations),
         tuple(gradient.detach() for gradient in gradients),
+        scalar.detach(),
     )
 
 
-def _layer_path_basics(
+def _split_stacked_firings(
+    stacked: tuple[Tensor, ...],
+    n_rows: int,
+) -> list[tuple[Tensor, ...]]:
+    """Split per-firing stacked tensors back into per-path-point firing tuples.
+
+    Parameters
+    ----------
+    stacked
+        Per-firing tensors whose leading dimension stacks ``n_rows`` path
+        points.
+    n_rows
+        Number of stacked path points.
+
+    Returns
+    -------
+    list[tuple[Tensor, ...]]
+        Per-path-point tuples of per-firing tensors, in stacking order.
+    """
+
+    per_firing_rows = [tensor.chunk(n_rows, dim=0) for tensor in stacked]
+    return [tuple(rows[row] for rows in per_firing_rows) for row in range(n_rows)]
+
+
+def _validate_stacked_firings(
+    reference: tuple[Tensor, ...],
+    observed: tuple[Tensor, ...],
+    layer: str,
+    n_rows: int,
+) -> None:
+    """Require stacked firings to mirror the reference firing geometry.
+
+    Parameters
+    ----------
+    reference
+        Per-firing activations at an unstacked reference path point.
+    observed
+        Per-firing stacked tensors from one chunked path run.
+    layer
+        Layer name used for error reporting.
+    n_rows
+        Number of stacked path points.
+
+    Raises
+    ------
+    AttributionError
+        If the firing count or any per-firing stacked shape is inconsistent.
+    """
+
+    if len(observed) != len(reference):
+        raise AttributionError(
+            f"layer {layer!r} fired {len(observed)} times on a stacked path chunk and "
+            f"{len(reference)} times at the path endpoints; step batching requires "
+            "consistent control flow along the path. "
+            "Remedy: run with step_batch_size=1.",
+            code="step_batch_layer_firings_inconsistent",
+        )
+    for reference_item, observed_item in zip(reference, observed, strict=True):
+        expected_shape = (reference_item.shape[0] * n_rows, *reference_item.shape[1:])
+        if tuple(observed_item.shape) != expected_shape:
+            raise AttributionError(
+                f"layer {layer!r} produced a stacked activation of shape "
+                f"{tuple(observed_item.shape)} where {expected_shape} was expected; "
+                "the layer does not carry the stacked batch axis, so step batching "
+                "cannot split its firings. Remedy: run with step_batch_size=1.",
+                code="step_batch_layer_firings_inconsistent",
+            )
+
+
+def _layer_path_run(
     model: Module,
     inputs: _PreparedInputs,
     target: _AttributionTarget,
     layer: str,
     baseline_tensors: tuple[Tensor, ...],
     n_steps: int,
-) -> tuple[tuple[Tensor, ...], tuple[Tensor, ...], list[tuple[Tensor, ...]], tuple[Tensor, ...]]:
-    """Capture per-firing endpoint activations and midpoint gradients along an input path.
+    *,
+    chunk_size: int = 1,
+    audit_mode: str = "off",
+    audit_seed: int | None = None,
+    capture_right_activations: bool = False,
+) -> dict[str, Any]:
+    """Capture endpoint activations and midpoint gradients along an input path.
 
     Every path point captures ALL distinct firings of the target layer. The
     firing count and per-firing shapes are validated to be consistent across
     path points (pairing firing ``i`` across points is otherwise meaningless)
     and uniform across firings (per-firing contributions are accumulated into
-    one activation-shaped result).
+    one activation-shaped result). With ``chunk_size > 1`` path points are
+    stacked on the ordinary batch axis and the randomized
+    audit ladder guards row coupling.
 
     Parameters
     ----------
@@ -505,12 +627,23 @@ def _layer_path_basics(
         Baseline leaves matching attributed inputs.
     n_steps
         Number of midpoint Riemann samples.
+    chunk_size
+        Validated number of path points stacked per forward/backward.
+    audit_mode
+        Resolved audit-ladder rung.
+    audit_seed
+        Optional deterministic seed for the audit's own (chunk, row) draw.
+    capture_right_activations
+        Whether to additionally capture the no-grad activations at the RIGHT
+        interval edges ``(step + 1) / n_steps`` (layer conductance needs them).
 
     Returns
     -------
-    tuple
-        Per-firing baseline activations, per-firing input activations,
-        per-step tuples of per-firing midpoint gradients, and input deltas.
+    dict[str, Any]
+        ``baseline_activations``, ``input_activations``, ``gradients_by_step``,
+        ``right_activations_by_step`` (``None`` unless requested), ``deltas``,
+        ``endpoint_scalars`` (baseline, input), ``physical_forward_calls``,
+        and the ``audit`` record.
     """
 
     deltas = tuple(
@@ -519,17 +652,25 @@ def _layer_path_basics(
             inputs.attributed_leaves, baseline_tensors, strict=True
         )
     )
+    alphas = _midpoint_alphas(n_steps)
+    chunks = _chunk_steps(alphas, chunk_size)
+    auditor = _StepAuditor(
+        audit_mode, len(chunks), [len(chunk) for chunk in chunks], seed=audit_seed
+    )
+    physical_calls = 2
     with _temporarily_eval(model):
-        baseline_activations, _baseline_gradients = _capture_layer_activation_for_leaves(
-            model,
-            inputs,
-            target,
-            layer,
-            _interned_path_leaves(inputs, baseline_tensors, deltas, 0.0),
-            require_gradient=False,
+        baseline_activations, _baseline_gradients, baseline_scalar = (
+            _capture_layer_activation_for_leaves(
+                model,
+                inputs,
+                target,
+                layer,
+                _interned_path_leaves(inputs, baseline_tensors, deltas, 0.0),
+                require_gradient=False,
+            )
         )
         _validate_uniform_firing_shapes(baseline_activations, layer)
-        input_activations, _input_gradients = _capture_layer_activation_for_leaves(
+        input_activations, _input_gradients, input_scalar = _capture_layer_activation_for_leaves(
             model,
             inputs,
             target,
@@ -539,96 +680,168 @@ def _layer_path_basics(
         )
         _validate_matching_firings(baseline_activations, input_activations, layer)
         gradients_by_step: list[tuple[Tensor, ...]] = []
-        for step in range(n_steps):
-            alpha = (step + 0.5) / n_steps
-            _activations, gradients = _capture_layer_activation_for_leaves(
+        for chunk_index, chunk_alphas in enumerate(chunks):
+            if len(chunk_alphas) == 1:
+                _activations, gradients, _scalar = _capture_layer_activation_for_leaves(
+                    model,
+                    inputs,
+                    target,
+                    layer,
+                    _interned_path_leaves(inputs, baseline_tensors, deltas, chunk_alphas[0]),
+                    require_gradient=True,
+                )
+                physical_calls += 1
+                if gradients is None:
+                    raise AttributionError(
+                        "internal error: missing layer path gradient from a "
+                        "require-gradient capture. This is a TorchLens contract "
+                        "breach, not a user error. Remedy: report this as a bug.",
+                        code="layer_path_gradient_missing",
+                    )
+                _validate_matching_firings(baseline_activations, gradients, layer)
+                gradients_by_step.append(gradients)
+                continue
+            stacked_leaves = _stacked_path_leaves(inputs, baseline_tensors, deltas, chunk_alphas)
+            _stacked_acts, stacked_gradients, _scalar = _capture_layer_activation_for_leaves(
                 model,
                 inputs,
                 target,
                 layer,
-                _interned_path_leaves(inputs, baseline_tensors, deltas, alpha),
+                stacked_leaves,
                 require_gradient=True,
+                n_rows=len(chunk_alphas),
             )
-            if gradients is None:
-                raise AttributionError("internal error: missing layer path gradient")
-            _validate_matching_firings(baseline_activations, gradients, layer)
-            gradients_by_step.append(gradients)
-    return baseline_activations, input_activations, gradients_by_step, deltas
+            physical_calls += 1
+            if stacked_gradients is None:
+                raise AttributionError(
+                    "internal error: missing layer path gradient from a "
+                    "require-gradient capture. This is a TorchLens contract "
+                    "breach, not a user error. Remedy: report this as a bug.",
+                    code="layer_path_gradient_missing",
+                )
+            _validate_stacked_firings(
+                baseline_activations, stacked_gradients, layer, len(chunk_alphas)
+            )
+            chunk_gradients = _split_stacked_firings(stacked_gradients, len(chunk_alphas))
+            audit_row = auditor.row_for_chunk(chunk_index)
+            if audit_row is not None:
+                _acts, sequential_gradients, _scalar = _capture_layer_activation_for_leaves(
+                    model,
+                    inputs,
+                    target,
+                    layer,
+                    _interned_path_leaves(
+                        inputs, baseline_tensors, deltas, chunk_alphas[audit_row]
+                    ),
+                    require_gradient=True,
+                )
+                physical_calls += 1
+                if sequential_gradients is None:
+                    raise AttributionError(
+                        "internal error: missing layer path gradient from a "
+                        "require-gradient capture. This is a TorchLens contract "
+                        "breach, not a user error. Remedy: report this as a bug.",
+                        code="layer_path_gradient_missing",
+                    )
+                auditor.check(
+                    chunk_index,
+                    audit_row,
+                    chunk_gradients[audit_row],
+                    sequential_gradients,
+                )
+            gradients_by_step.extend(chunk_gradients)
+        right_activations_by_step: list[tuple[Tensor, ...]] | None = None
+        if capture_right_activations:
+            right_activations_by_step = []
+            right_alphas = [(step + 1) / n_steps for step in range(n_steps)]
+            for chunk_alphas in _chunk_steps(right_alphas, chunk_size):
+                if len(chunk_alphas) == 1:
+                    activations, _gradients, _scalar = _capture_layer_activation_for_leaves(
+                        model,
+                        inputs,
+                        target,
+                        layer,
+                        _interned_path_leaves(inputs, baseline_tensors, deltas, chunk_alphas[0]),
+                        require_gradient=False,
+                    )
+                    physical_calls += 1
+                    _validate_matching_firings(baseline_activations, activations, layer)
+                    right_activations_by_step.append(activations)
+                    continue
+                stacked_leaves = _stacked_path_leaves(
+                    inputs, baseline_tensors, deltas, chunk_alphas
+                )
+                stacked_activations, _gradients, _scalar = _capture_layer_activation_for_leaves(
+                    model,
+                    inputs,
+                    target,
+                    layer,
+                    stacked_leaves,
+                    require_gradient=False,
+                    n_rows=len(chunk_alphas),
+                )
+                physical_calls += 1
+                _validate_stacked_firings(
+                    baseline_activations, stacked_activations, layer, len(chunk_alphas)
+                )
+                right_activations_by_step.extend(
+                    _split_stacked_firings(stacked_activations, len(chunk_alphas))
+                )
+    return {
+        "baseline_activations": baseline_activations,
+        "input_activations": input_activations,
+        "gradients_by_step": gradients_by_step,
+        "right_activations_by_step": right_activations_by_step,
+        "deltas": deltas,
+        "endpoint_scalars": (baseline_scalar, input_scalar),
+        "physical_forward_calls": physical_calls,
+        "audit": auditor.record(),
+    }
 
 
-def _spatial_reference_tensor(
+def _layer_path_baselines(
+    model: Module,
     inputs: _PreparedInputs,
-    feeding_leaves: tuple[Tensor, ...],
+    baseline: Any | None,
+    *,
+    target: _AttributionTarget,
     layer: str,
-) -> Tensor:
-    """Return the input tensor whose grid the Grad-CAM should be upsampled onto.
+) -> tuple[Tensor, ...]:
+    """Return baseline values where the input path of a layer method starts.
 
-    The CAM lives in the coordinate system of the input that actually feeds the
-    target layer. Upsampling onto any other input would place the attribution
-    in an unrelated coordinate space, so candidates are restricted to
-    dependency-proven feeders and ambiguity between different grids is refused
-    rather than resolved by traversal order.
-
-    Parameters
-    ----------
-    inputs
-        Normalized attribution inputs.
-    feeding_leaves
-        Unique original attributed leaves proven to feed the target layer.
-    layer
-        Layer name used for error reporting.
-
-    Returns
-    -------
-    Tensor
-        Spatial (``ndim >= 4``) feeding leaf; when several feed the layer they
-        must share one spatial grid.
+    Floating-point inputs keep their own baselines. Integer inputs start the
+    path at the embedding outputs: zeros by default, or the embeddings of
+    caller baseline ids.
 
     Raises
     ------
     AttributionError
-        If no attributed leaf has spatial dimensions, no spatial leaf feeds the
-        layer, or the feeding spatial grids are heterogeneous.
+        ``layer_path_no_embedding`` when integer inputs reach no module that
+        turns them into floats, so no path can be laid.
     """
 
-    if not any(input_tensor.ndim >= 4 for input_tensor in inputs.attributed_leaves):
-        raise AttributionError("grad_cam requires an input tensor with spatial dimensions")
-    candidates = [input_tensor for input_tensor in feeding_leaves if input_tensor.ndim >= 4]
-    if not candidates:
+    entry = inputs.entry
+    if entry is None:
+        return _validate_baselines(inputs, baseline)
+    if not entry.sites:
         raise AttributionError(
-            f"grad_cam found no spatial (ndim >= 4) input tensor feeding layer {layer!r}; "
-            "the CAM has no input coordinate system to upsample onto"
+            "the input path of a path method cannot start from integer inputs here: no "
+            "module takes only the integer inputs and returns floats (an embedding), so "
+            "there is no floating-point point to interpolate from. Remedy: attribute "
+            f"without a path, e.g. tl.attribution.layer_attribution(model, inputs, "
+            f"{_target_spelling(target)}, layer={layer!r}), or pass floating-point inputs. "
+            f"{_INTEGER_DOCS_POINTER}",
+            code="layer_path_no_embedding",
         )
-    grids = {tuple(candidate.shape[-2:]) for candidate in candidates}
-    if len(grids) > 1:
-        raise AttributionError(
-            f"grad_cam target layer {layer!r} is fed by spatial inputs with different "
-            f"grids {sorted(grids)}; the upsampling target is ambiguous"
-        )
-    return candidates[0]
+    return _entry_baselines(model, entry, inputs.positional, inputs.kwargs, baseline)
 
 
-def _validate_conv_activation(activation: Tensor, layer: str) -> None:
-    """Validate that an activation is a 2D convolution-style feature map.
+def _integer_input_layers(inputs: _PreparedInputs) -> tuple[str, ...]:
+    """Return the modules whose outputs stood in for integer inputs (empty for floats)."""
 
-    Parameters
-    ----------
-    activation
-        Captured target-layer activation.
-    layer
-        Layer name used for error reporting.
-
-    Raises
-    ------
-    AttributionError
-        If ``activation`` is not shaped ``N, C, H, W``.
-    """
-
-    if activation.ndim != 4:
-        raise AttributionError(
-            f"grad_cam requires layer {layer!r} to produce a 4D N,C,H,W feature map; "
-            f"got shape {tuple(activation.shape)}"
-        )
+    if inputs.entry is None:
+        return ()
+    return tuple(site.layer for site in inputs.entry.sites)
 
 
 def _cam_base_image(spatial_reference: Tensor, image: Image.Image | None) -> Image.Image:
@@ -655,13 +868,12 @@ def _cam_base_image(spatial_reference: Tensor, image: Image.Image | None) -> Ima
         channels = data[:3]
         if channels.shape[0] == 1:
             channels = channels.expand(3, -1, -1)
-        low = channels.amin()
-        high = channels.amax()
+        low, high = channels.amin(), channels.amax()
         normalized = torch.zeros_like(channels) if high == low else (channels - low) / (high - low)
-        array = (normalized.permute(1, 2, 0).clamp(0, 1) * 255).to(torch.uint8).numpy()
+        array = tensor_to_numpy((normalized.permute(1, 2, 0).clamp(0, 1) * 255).to(torch.uint8))
         return Image.fromarray(array, mode="RGB")
     reduced = data.abs().mean(dim=0) if data.ndim == 3 else data.abs()
-    return render_heatmap(reduced.numpy(), width=width, height=height, cmap="gray")
+    return node_plots.heatmap(tensor_to_numpy(reduced), width=width, height=height, cmap="gray")
 
 
 def _cam_overlay(
@@ -696,119 +908,11 @@ def _cam_overlay(
     if not 0.0 <= alpha <= 1.0:
         raise AttributionError("alpha must be between 0 and 1")
     base = _cam_base_image(spatial_reference, image)
-    data = native_cam.detach().float().cpu().mean(dim=(0, 1))
-    heatmap = render_heatmap(data.numpy(), width=base.width, height=base.height, cmap=cmap)
+    data = tensor_to_numpy(native_cam.detach().float().cpu().mean(dim=(0, 1)))
+    heatmap = node_plots.heatmap(data, width=base.width, height=base.height, cmap=cmap)
     native_height, native_width = (int(value) for value in native_cam.shape[-2:])
     disclosure = f"CAM native map: {native_height}x{native_width}; display interpolated"
     return _blend_heatmap(base, heatmap, alpha=alpha, disclosure=disclosure)
-
-
-def grad_cam(
-    model: Module,
-    inputs: Any,
-    input_kwargs: InputKwargs = None,
-    *,
-    target: _AttributionTarget,
-    layer: str,
-    relu: bool = True,
-    overlay: bool = True,
-    image: Image.Image | None = None,
-    alpha: float = 0.6,
-    cmap: str = "magma",
-) -> AttributionResult:
-    """Compute Grad-CAM for a named convolution-style layer.
-
-    Parameters
-    ----------
-    model
-        PyTorch module to attribute.
-    inputs
-        Bare tensor for v1 behavior, or tuple/list of positional model arguments.
-        Floating-point or complex tensor leaves are threaded through the model call.
-    input_kwargs
-        Optional keyword arguments for ``model``.
-    target
-        Integer class index selecting ``output[..., target]`` and summing the
-        selected values, or callable ``output -> scalar tensor``.
-    layer
-        Name from ``dict(model.named_modules())`` identifying the target layer.
-        The layer must fire exactly once during the forward pass; Grad-CAM has
-        no defined semantics for a reused layer, so multi-fire raises rather
-        than silently attributing one arbitrary call.
-    relu
-        Whether to apply ReLU to the channel-reduced CAM.
-    overlay
-        Whether to render the CAM over the dependency-proven spatial input.
-    image
-        Optional source image override for the rendered overlay.
-    alpha
-        Heatmap opacity in ``[0, 1]``.
-    cmap
-        Heatmap colormap.
-
-    Returns
-    -------
-    AttributionResult
-        Grad-CAM values upsampled to the spatial size of the input that feeds
-        the target layer, with shape ``N, 1, Hin, Win``. Metadata reports the
-        measured native map resolution separately from the interpolated display
-        resolution. When requested, ``extra["overlay"]`` is a PIL image whose
-        visible footer discloses that native resolution.
-
-    Raises
-    ------
-    AttributionError
-        If the target layer fired more than once, no spatial input feeds it,
-        or several feeding spatial inputs have different grids.
-    """
-
-    prepared_inputs = _normalize_model_inputs(inputs, input_kwargs)
-    activations, gradients, feeding_leaves = _capture_layer_activation(
-        model, prepared_inputs, target, layer
-    )
-    if len(activations) != 1:
-        raise AttributionError(
-            f"grad_cam requires layer {layer!r} to fire exactly once during the forward "
-            f"pass; it fired {len(activations)} times"
-        )
-    activation, gradient = activations[0], gradients[0]
-    _validate_conv_activation(activation, layer)
-    spatial_reference = _spatial_reference_tensor(prepared_inputs, feeding_leaves, layer)
-    channel_weights = gradient.mean(dim=(2, 3), keepdim=True)
-    cam = (channel_weights * activation).sum(dim=1, keepdim=True)
-    if relu:
-        cam = torch.relu(cam)
-    native_resolution = tuple(int(value) for value in cam.shape[-2:])
-    rendered_resolution = tuple(int(value) for value in spatial_reference.shape[-2:])
-    upsampled_cam = F.interpolate(
-        cam,
-        size=spatial_reference.shape[-2:],
-        mode="bilinear",
-        align_corners=False,
-    )
-    return AttributionResult(
-        method="grad_cam",
-        values=upsampled_cam.detach(),
-        target_repr=_target_repr(target),
-        extra={
-            "layer": layer,
-            "relu": relu,
-            "native_map_resolution": native_resolution,
-            "rendered_map_resolution": rendered_resolution,
-            "upsampling": "bilinear_display_only",
-            "overlay": (
-                _cam_overlay(
-                    cam,
-                    spatial_reference,
-                    image=image,
-                    alpha=alpha,
-                    cmap=cmap,
-                )
-                if overlay
-                else None
-            ),
-        },
-    )
 
 
 def layer_integrated_gradients(
@@ -819,8 +923,11 @@ def layer_integrated_gradients(
     target: _AttributionTarget,
     layer: str,
     baseline: Any | None = None,
-    n_steps: int = 50,
-) -> AttributionResult:
+    num_steps: int = 50,
+    step_batch_size: int | None = None,
+    step_audit: str | None = None,
+    step_audit_seed: int | None = None,
+) -> Attribution:
     """Compute Layer Integrated Gradients for a named intermediate layer.
 
     The input path is the straight line from baseline leaves to input leaves.
@@ -838,32 +945,71 @@ def layer_integrated_gradients(
         Optional keyword arguments for ``model``.
     target
         Integer class index selecting ``output[..., target]`` and summing the
-        selected values, or callable ``output -> scalar tensor``.
+        selected values, a callable ``output -> scalar tensor``, or a
+        :class:`SiteTarget` naming a hidden layer's output (and unit) to
+        attribute instead of the model output.
     layer
         Name from ``dict(model.named_modules())`` identifying the target layer.
     baseline
         Optional baseline tree matching attributed input leaves. A bare tensor is
         accepted when there is exactly one attributed leaf.
-    n_steps
-        Number of midpoint Riemann samples along the straight input path.
+    num_steps
+        Number of midpoint Riemann samples along the straight input path
+        (Captum's default rule is Gauss-Legendre, so values at equal
+        ``num_steps`` differ slightly; see :func:`integrated_gradients`).
+    step_batch_size
+        Optional number of path points stacked per forward/backward; ``None``
+        (default) and ``1`` run sequentially. Strictly opt-in throughput.
+    step_audit
+        Audit-ladder rung when batching is on (``"per_call"`` default,
+        ``"per_chunk"``, or the explicit expert ``"off"``).
+    step_audit_seed
+        Optional deterministic seed for the audit's own (chunk, row) draw;
+        ``None`` draws a fresh disclosed seed riding ``extra["step_audit"]``.
 
     Returns
     -------
     AttributionResult
         Layer attribution values with the same shape as the captured activation.
+        ``extra`` carries the layer-space completeness fields with the
+        bottleneck caveat, plus cost and audit disclosure.
+
+    Examples
+    --------
+    >>> result = tl.attribution.layer_integrated_gradients(
+    ...     model, x, target=0, layer="0", num_steps=4
+    ... )
+    >>> tuple(result.values.shape)
+    (1, 4, 8, 8)
+    >>> result.extra["layer"]
+    '0'
     """
 
-    _validate_positive_int("n_steps", n_steps)
-    prepared_inputs = _normalize_model_inputs(inputs, input_kwargs)
-    baseline_tensors = _validate_baselines(prepared_inputs, baseline)
-    baseline_activations, input_activations, gradients_by_step, _deltas = _layer_path_basics(
+    _validate_positive_int("n_steps", num_steps)
+    chunk_size = _validate_step_batch_size(step_batch_size)
+    audit_mode = _validate_step_audit(step_audit, chunk_size)
+    prepared_inputs = _normalize_model_inputs(
+        inputs,
+        input_kwargs,
+        _Caller("layer_integrated_gradients", model, target, integer_route=True),
+    )
+    baseline_tensors = _layer_path_baselines(
+        model, prepared_inputs, baseline, target=target, layer=layer
+    )
+    run = _layer_path_run(
         model,
         prepared_inputs,
         target,
         layer,
         baseline_tensors,
-        n_steps,
+        num_steps,
+        chunk_size=chunk_size,
+        audit_mode=audit_mode,
+        audit_seed=step_audit_seed,
     )
+    baseline_activations = run["baseline_activations"]
+    input_activations = run["input_activations"]
+    gradients_by_step = run["gradients_by_step"]
     # A layer reused N times contributes through every firing; the honest total
     # sums the per-firing (activation delta) x (mean path gradient) terms.
     values = torch.zeros_like(baseline_activations[0])
@@ -874,13 +1020,23 @@ def layer_integrated_gradients(
             [step_gradients[firing_index] for step_gradients in gradients_by_step], dim=0
         ).mean(dim=0)
         values = values + (input_activation - baseline_activation) * mean_gradient
-    return AttributionResult(
+    values = values.detach()
+    baseline_scalar, input_scalar = run["endpoint_scalars"]
+    target_delta = input_scalar - baseline_scalar
+    return Attribution(
         method="layer_integrated_gradients",
-        values=values.detach(),
+        values=values,
         target_repr=_target_repr(target),
         extra={
             "layer": layer,
-            "n_steps": n_steps,
+            "integer_input_layers": _integer_input_layers(prepared_inputs),
+            "n_steps": num_steps,
+            "path_evaluations_logical": num_steps,
+            "physical_forward_calls": run["physical_forward_calls"],
+            "step_batch_size": chunk_size,
+            "step_audit": run["audit"].to_extra(),
+            "completeness_caveat": _LAYER_COMPLETENESS_CAVEAT,
+            **_completeness_extra(values.sum(), target_delta),
         },
     )
 
@@ -893,8 +1049,11 @@ def layer_conductance(
     target: _AttributionTarget,
     layer: str,
     baseline: Any | None = None,
-    n_steps: int = 50,
-) -> AttributionResult:
+    num_steps: int = 50,
+    step_batch_size: int | None = None,
+    step_audit: str | None = None,
+    step_audit_seed: int | None = None,
+) -> Attribution:
     """Compute Layer Conductance for a named intermediate layer.
 
     Conductance decomposes input Integrated Gradients onto hidden units by
@@ -913,60 +1072,106 @@ def layer_conductance(
         Optional keyword arguments for ``model``.
     target
         Integer class index selecting ``output[..., target]`` and summing the
-        selected values, or callable ``output -> scalar tensor``.
+        selected values, a callable ``output -> scalar tensor``, or a
+        :class:`SiteTarget` naming a hidden layer's output (and unit) to
+        attribute instead of the model output.
     layer
         Name from ``dict(model.named_modules())`` identifying the target layer.
     baseline
         Optional baseline tree matching attributed input leaves. A bare tensor is
         accepted when there is exactly one attributed leaf.
-    n_steps
-        Number of midpoint Riemann samples along the straight input path.
+    num_steps
+        Number of midpoint Riemann samples along the straight input path
+        (Captum's default rule is Gauss-Legendre, so values at equal
+        ``num_steps`` differ slightly; see :func:`integrated_gradients`).
+    step_batch_size
+        Optional number of path points stacked per forward/backward; ``None``
+        (default) and ``1`` run sequentially. Strictly opt-in throughput.
+    step_audit
+        Audit-ladder rung when batching is on (``"per_call"`` default,
+        ``"per_chunk"``, or the explicit expert ``"off"``).
+    step_audit_seed
+        Optional deterministic seed for the audit's own (chunk, row) draw;
+        ``None`` draws a fresh disclosed seed riding ``extra["step_audit"]``.
 
     Returns
     -------
     AttributionResult
         Layer conductance values with the same shape as the captured activation.
+        ``extra`` carries the layer-space completeness fields with the
+        bottleneck caveat, plus cost and audit disclosure.
+
+    Examples
+    --------
+    >>> result = tl.attribution.layer_conductance(
+    ...     model, x, target=0, layer="0", num_steps=4
+    ... )
+    >>> tuple(result.values.shape)
+    (1, 4, 8, 8)
+    >>> result.method
+    'layer_conductance'
     """
 
-    _validate_positive_int("n_steps", n_steps)
-    prepared_inputs = _normalize_model_inputs(inputs, input_kwargs)
-    baseline_tensors = _validate_baselines(prepared_inputs, baseline)
-    baseline_activations, _input_activations, gradients_by_step, deltas = _layer_path_basics(
+    _validate_positive_int("n_steps", num_steps)
+    chunk_size = _validate_step_batch_size(step_batch_size)
+    audit_mode = _validate_step_audit(step_audit, chunk_size)
+    prepared_inputs = _normalize_model_inputs(
+        inputs, input_kwargs, _Caller("layer_conductance", model, target, integer_route=True)
+    )
+    baseline_tensors = _layer_path_baselines(
+        model, prepared_inputs, baseline, target=target, layer=layer
+    )
+    run = _layer_path_run(
         model,
         prepared_inputs,
         target,
         layer,
         baseline_tensors,
-        n_steps,
+        num_steps,
+        chunk_size=chunk_size,
+        audit_mode=audit_mode,
+        audit_seed=step_audit_seed,
+        capture_right_activations=True,
     )
+    baseline_activations = run["baseline_activations"]
+    gradients_by_step = run["gradients_by_step"]
+    right_activations_by_step = run["right_activations_by_step"]
+    if right_activations_by_step is None:
+        raise AttributionError(
+            "internal error: missing conductance right-edge activations from a "
+            "capture_right_activations=True path run. This is a TorchLens "
+            "contract breach, not a user error. Remedy: report this as a bug.",
+            code="layer_conductance_edge_missing",
+        )
     # A layer reused N times contributes through every firing; the honest total
     # sums the per-firing gradient x (activation interval) terms.
     activations_left = baseline_activations
     conductance = torch.zeros_like(baseline_activations[0])
-    with _temporarily_eval(model):
-        for step, gradients in enumerate(gradients_by_step):
-            alpha_right = (step + 1) / n_steps
-            activations_right, _right_gradients = _capture_layer_activation_for_leaves(
-                model,
-                prepared_inputs,
-                target,
-                layer,
-                _interned_path_leaves(prepared_inputs, baseline_tensors, deltas, alpha_right),
-                require_gradient=False,
-            )
-            _validate_matching_firings(baseline_activations, activations_right, layer)
-            for gradient, activation_right, activation_left in zip(
-                gradients, activations_right, activations_left, strict=True
-            ):
-                conductance = conductance + gradient * (activation_right - activation_left)
-            activations_left = activations_right
-    return AttributionResult(
+    for gradients, activations_right in zip(
+        gradients_by_step, right_activations_by_step, strict=True
+    ):
+        for gradient, activation_right, activation_left in zip(
+            gradients, activations_right, activations_left, strict=True
+        ):
+            conductance = conductance + gradient * (activation_right - activation_left)
+        activations_left = activations_right
+    conductance = conductance.detach()
+    baseline_scalar, input_scalar = run["endpoint_scalars"]
+    target_delta = input_scalar - baseline_scalar
+    return Attribution(
         method="layer_conductance",
-        values=conductance.detach(),
+        values=conductance,
         target_repr=_target_repr(target),
         extra={
             "layer": layer,
-            "n_steps": n_steps,
+            "integer_input_layers": _integer_input_layers(prepared_inputs),
+            "n_steps": num_steps,
+            "path_evaluations_logical": num_steps,
+            "physical_forward_calls": run["physical_forward_calls"],
+            "step_batch_size": chunk_size,
+            "step_audit": run["audit"].to_extra(),
+            "completeness_caveat": _LAYER_COMPLETENESS_CAVEAT,
+            **_completeness_extra(conductance.sum(), target_delta),
         },
     )
 
@@ -979,7 +1184,7 @@ def layer_attribution(
     target: _AttributionTarget,
     layer: str,
     method: LayerAttributionMethod = "activation_x_grad",
-) -> AttributionResult:
+) -> Attribution:
     """Compute attribution for a named intermediate layer.
 
     Parameters
@@ -993,7 +1198,9 @@ def layer_attribution(
         Optional keyword arguments for ``model``.
     target
         Integer class index selecting ``output[..., target]`` and summing the
-        selected values, or callable ``output -> scalar tensor``.
+        selected values, a callable ``output -> scalar tensor``, or a
+        :class:`SiteTarget` naming a hidden layer's output (and unit) to
+        attribute instead of the model output.
     layer
         Name from ``dict(model.named_modules())`` identifying the target layer.
     method
@@ -1012,12 +1219,22 @@ def layer_attribution(
     AttributionError
         If ``method`` is unsupported, or a reused layer produced mismatched
         activation shapes across firings.
+
+    Examples
+    --------
+    >>> result = tl.attribution.layer_attribution(model, x, target=0, layer="0")
+    >>> tuple(result.values.shape)
+    (1, 4, 8, 8)
+    >>> result.method
+    'layer_activation_x_grad'
     """
 
     if method not in ("activation_x_grad", "grad"):
         raise AttributionError("method must be 'activation_x_grad' or 'grad'")
 
-    prepared_inputs = _normalize_model_inputs(inputs, input_kwargs)
+    prepared_inputs = _normalize_model_inputs(
+        inputs, input_kwargs, _Caller("layer_attribution", model, target, integer_route=True)
+    )
     activations, gradients, _feeding_leaves = _capture_layer_activation(
         model, prepared_inputs, target, layer
     )
@@ -1028,9 +1245,9 @@ def layer_attribution(
             values = values + activation * gradient
         else:
             values = values + gradient.abs()
-    return AttributionResult(
+    return Attribution(
         method=f"layer_{method}",
         values=values.detach(),
         target_repr=_target_repr(target),
-        extra={"layer": layer},
+        extra={"layer": layer, "integer_input_layers": _integer_input_layers(prepared_inputs)},
     )

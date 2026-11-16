@@ -1,0 +1,762 @@
+"""Steps 1-3: Output nodes, ancestry tracing, orphan removal (step 4 is ``_layer_depths``).
+
+Step 1 (_add_output_layers): Creates dedicated output Op nodes, copying
+    metadata from the original output tensors but stripping params and module info.
+Step 2 (_find_output_ancestors): DFS backward from outputs marking has_output_descendant.
+Step 3 (_remove_orphan_nodes): Bidirectional flood from inputs AND outputs to find
+    connected nodes; any node unreachable from both is removed as an orphan.
+Step 4 (_mark_layer_depths, in the sibling module ``_layer_depths``): Optional
+    forward/backward BFS recording min/max hop counts from input and output nodes.
+"""
+
+from collections import OrderedDict
+from typing import TYPE_CHECKING, cast
+
+import torch
+
+from .._data_classes.op import Op, _dtype_or_none, _memory_or_none, _shape_or_none
+from .._ir._output_occurrences import output_container_path_meta
+from .._ir.op_record import amend_late_buffer_output_parent
+from .._quantities import Bytes, Duration
+from .._utils._record_group_table import record_member
+from .._utils._tensor_label import clear_tensor_label, get_tensor_label
+from .._utils.display import identity
+from .._utils.introspection import _get_code_context
+from .._utils.rng import aten_qualname_is_seeded_rng, log_current_rng_states
+from .._utils.tensor_utils import (
+    get_memory_amount_from_metadata,
+    safe_copy,
+    safe_to,
+    tensor_nanequal,
+)
+from ..backends.torch._completeness_escape_state import (
+    alias_mutation_candidate_labels,
+    host_escape_source_labels,
+    record_pruned_alias_mutation_source,
+    record_pruned_rng_control_source,
+)
+from ..backends.torch._storage_exports import mark_alias_rebound_output
+from ..backends.torch.sources import log_source_tensor
+from . import _column_passes, _column_passes_graph
+from ._buffer_addresses import _recorded_buffer_address
+from ._orphan_predicates import (
+    _orphan_is_uninit_alloc_source,
+    _rng_orphan_drove_control_or_output,
+)
+from ._orphan_seeds import (
+    _expand_seen_nodes_to_complete_func_call_groups,
+    _orphan_flood_seeds,
+    _remember_orphan_rows,
+)
+from ._output_payload import (
+    output_copy_detaches,
+    output_payload_aliases_parent as output_payload_aliases_parent,  # re-exported for tests
+    output_rides_parent_payload,
+)
+
+if TYPE_CHECKING:
+    from .._data_classes.trace import Trace
+
+
+def _resolve_output_parent_labels(
+    self: "Trace", output_tensors: list[torch.Tensor]
+) -> list["str | None"]:
+    """Resolve the raw graph parent label for every model output tensor.
+
+    When every output was attributed during capture, ``self.output_layers``
+    already pairs positionally with the output tensors and is returned as-is.
+    Otherwise some outputs have no graph entry, and the historical positional
+    pairing silently shifted every value/address binding. This walks the
+    outputs explicitly, keeping capture-attributed labels in output order, and
+    handles the one attributable gap: a registered buffer returned directly
+    from ``forward()`` without ever being touched by a traced op. Such a
+    buffer has no label and no graph node, so a buffer-only model used to
+    "trace" with an empty ``output_layers`` list and then fail
+    ``validate_forward_pass`` with "No output layers found". For exactly that
+    case the buffer is logged as a late source node through the same pathway
+    as capture-time buffer reads, so Step 1 can bind a proper ``output_N``
+    node to the buffer's value.
+
+    Must run BEFORE Step 0 event materialization: the late source node is
+    appended to the capture event stream and materializes with every other op.
+
+    Parameters
+    ----------
+    self:
+        Trace being postprocessed.
+    output_tensors:
+        The actual output tensors returned by the model's ``forward()``.
+
+    Returns
+    -------
+    list[str | None]
+        One raw parent label per output tensor. ``None`` is retained only for
+        legacy callers; the normal torch backend fails loud on non-buffer
+        unattributable outputs before Step 1.
+    """
+    from collections import deque
+
+    # Common case: capture attributed every output -- the existing positional
+    # pairing is exact, and nothing needs synthesizing.
+    if len(self.output_layers) == len(output_tensors):
+        return list(self.output_layers)
+
+    capture_events = getattr(self, "capture_events", None)
+    pending_labels = deque(self.output_layers)
+    buffer_label_set = set(self.buffer_layers)
+    parent_labels: list[str | None] = []
+    buffer_addresses_by_id: dict[int, str] | None = None
+    late_buffer_labels_by_tensor_id: dict[int, str | None] = {}
+    for output_tensor in output_tensors:
+        parent_label = get_tensor_label(output_tensor)
+        if parent_label is not None:
+            # Attributed at capture and still tagged; keep the queue in step.
+            if pending_labels and pending_labels[0] == parent_label:
+                pending_labels.popleft()
+            parent_labels.append(parent_label)
+            continue
+
+        # Lazily index the source model's registered buffers by identity.
+        if buffer_addresses_by_id is None:
+            model_ref = self._source_model_ref
+            model = model_ref() if model_ref is not None else None
+            buffer_addresses_by_id = (
+                {id(buffer): address for address, buffer in model.named_buffers()}
+                if model is not None
+                else {}
+            )
+        buffer_address = buffer_addresses_by_id.get(id(output_tensor))
+        if buffer_address is None:
+            from .._errors import OutputAttributionError
+
+            try:
+                shape_text = str(tuple(output_tensor.shape))
+            except RuntimeError:
+                # Shapeless variants (nested) raise from ``.shape``; the refusal
+                # must stay typed instead of crashing on its own message (R65 --
+                # same guard as the backend.py twin, which also discloses the
+                # output address this site does not hold).
+                shape_text = "<unavailable>"
+            from ..backends.torch.backend import output_attribution_remedy
+
+            raise OutputAttributionError(
+                "TorchLens could not attribute a model output tensor to any traced op "
+                f"(shape={shape_text}, dtype={output_tensor.dtype}). "
+                "This may indicate an opaque execution boundary or a pre-bound torch "
+                "function that escaped wrapping.",
+                code="output_attribution_failed",
+                remedy=output_attribution_remedy(self),
+            )
+
+        # The tensor IS a registered buffer with no live label. Session
+        # cleanup strips capture labels from model state, so a capture-time
+        # attribution for this position would be waiting at the queue head as
+        # a buffer node for the same address.
+        head_label = pending_labels[0] if pending_labels else None
+        if (
+            head_label is not None
+            and head_label in buffer_label_set
+            and _event_buffer_address_matches(self, head_label, buffer_address)
+        ):
+            parent_labels.append(pending_labels.popleft())
+            continue
+
+        if capture_events is None:
+            parent_labels.append(None)
+            continue
+
+        tensor_id = id(output_tensor)
+        if tensor_id in late_buffer_labels_by_tensor_id:
+            parent_labels.append(late_buffer_labels_by_tensor_id[tensor_id])
+            continue
+
+        # Genuinely unlogged static buffer returned as a model output: log it
+        # as a late buffer source so it materializes with everything else.
+        log_source_tensor(self, output_tensor, "buffer", buffer_address)
+        parent_label = get_tensor_label(output_tensor)
+        late_buffer_labels_by_tensor_id[tensor_id] = parent_label
+        # Don't leak this session's label onto the model's live buffer: a
+        # stale label would make the NEXT capture skip re-registering it.
+        clear_tensor_label(output_tensor)
+        # Mirror capture-time output marking on the synthesized event.
+        if parent_label is not None:
+            event = capture_events.op_event_by_label_raw.get(parent_label)
+            if event is not None:
+                capture_events.append_amendment(
+                    amend_late_buffer_output_parent(event.seq, parent_label, is_output_parent=True)
+                )
+        parent_labels.append(parent_label)
+    return parent_labels
+
+
+def _event_buffer_address_matches(self: "Trace", label_raw: str, buffer_address: str) -> bool:
+    """Return whether a raw buffer node was logged for one buffer address.
+
+    Parameters
+    ----------
+    self:
+        Trace being postprocessed.
+    label_raw:
+        Raw label of a candidate buffer source node.
+    buffer_address:
+        Registered-buffer address to compare against.
+
+    Returns
+    -------
+    bool
+        ``True`` when the node's buffer equivalence class names the address.
+    """
+
+    capture_events = getattr(self, "capture_events", None)
+    if capture_events is None:
+        return False
+    event = capture_events.op_event_by_label_raw.get(label_raw)
+    if event is None or event.kind != "source" or event.layer_type != "buffer":
+        return False
+    return _recorded_buffer_address(event) == buffer_address
+
+
+def _strip_output_node_params_and_modules(new_output_node: Op, output_node: Op) -> None:
+    """Clear the parameter and module fields a synthetic output node cloned.
+
+    Parameters
+    ----------
+    new_output_node:
+        Output node built by ``_add_output_layers`` from its producing op.
+    output_node:
+        The producing op; its module stack becomes the output node's
+        ``output_of_modules``/``output_of_module_calls``.
+    """
+
+    # Strip any params:
+
+    new_output_node._graph_parent_params = []
+    new_output_node._param_barcodes = []
+    new_output_node._graph_parent_param_ops = {}
+    new_output_node._param_logs = []
+    new_output_node.param_shapes = []
+    new_output_node.num_params = 0
+    new_output_node.num_params_trainable = 0
+    new_output_node.num_params_frozen = 0
+    new_output_node._cost_param_memory = Bytes(0)
+
+    # Strip module info:
+
+    new_output_node.module = None
+    new_output_node.modules = []
+    new_output_node._module_context_call_stack = []
+    new_output_node._module_context_input_to_module_calls = []
+    new_output_node._module_context_output_of_modules = [
+        mod_pass[0] for mod_pass in output_node.modules
+    ]
+    new_output_node._module_context_output_of_module_calls = output_node.modules
+    new_output_node._module_context_is_module_output = False
+    new_output_node._module_context_is_atomic_module = False
+    new_output_node._module_context_atomic_module_call = None
+
+
+def _add_output_layers(
+    self: "Trace",
+    output_tensors: list[torch.Tensor],
+    output_addresses: list[str],
+    output_parent_labels: "list[str | None] | None" = None,
+) -> None:
+    """Step 1: Add dedicated output nodes to the graph.
+
+    For each tensor in the model's output, creates a new Op that acts
+    as a terminal "output" node. The new node copies tensor metadata from the
+    original output tensor but resets function, parameter, and module information
+    to reflect that this is a synthetic bookkeeping node (func=identity,
+    no params, no containing module). The original output tensor becomes the
+    parent of the new output node.
+
+    Output tensors are paired with their graph parents through
+    ``output_parent_labels`` (one entry per output tensor, ``None`` for
+    unattributable tensors, which are skipped). This keeps tensors, addresses,
+    and parents aligned even when some outputs have no graph entry --
+    previously a leading unlabeled output silently shifted every pairing.
+
+    Also detects child_tensor_variations: if the actual output tensor differs
+    from the parent's saved out (e.g., due to in-place ops or transform),
+    the difference is recorded for validation.
+    """
+    if output_parent_labels is None:
+        # Legacy alignment: callers that predate per-tensor parent resolution
+        # paired ``self.output_layers`` positionally with the output tensors.
+        # That list may be SHORTER than the outputs (unattributed outputs have
+        # no entry), so normalize it to one slot per output tensor here. Padding
+        # with None is behavior-identical to the truncating zip this replaces:
+        # the padded slots are dropped by the ``is not None`` filter below, and
+        # surplus labels were already discarded. Normalizing lets the pairing be
+        # strict, which is what actually matters -- a labels/tensors/addresses
+        # length mismatch on the modern path must fail loud rather than yield a
+        # silently shorter, entirely plausible set of output nodes.
+        legacy_labels = list(self.output_layers)[: len(output_tensors)]
+        output_parent_labels = legacy_labels + [None] * (len(output_tensors) - len(legacy_labels))
+
+    paired_outputs = [
+        (parent_label, output_tensor, output_address)
+        for parent_label, output_tensor, output_address in zip(
+            output_parent_labels, output_tensors, output_addresses, strict=True
+        )
+        if parent_label is not None
+    ]
+    new_output_layers = []
+    _core = self.__dict__.get("_trace_core")
+    _op_store = _core.ops if _core is not None else None
+    if _op_store is not None and _op_store.frozen:
+        _op_store = None
+    for i, (output_layer_label, output_tensor, output_address_suffix) in enumerate(paired_outputs):
+        output_node = self[output_layer_label]
+        # Internal output-node synthesis is a builder row append on the
+        # trace's own store (detached only for legacy/preview traces).
+        new_output_node = cast(Op, output_node._copy_for_output(_store=_op_store))
+        new_output_node.type = "output"
+        new_output_node.is_output = True
+        new_output_node.is_input = False
+        new_output_node._graph_is_buffer = False
+        new_output_node._internal_set("edits", [])
+        new_output_node._internal_set("is_edited", False)
+        if i == len(paired_outputs) - 1:
+            new_output_node._graph_is_final_output = True
+        self._raw_graph_ws.layer_counter += 1
+        new_output_node._label_raw = f"output_{i + 1}_raw"
+        new_output_node._layer_label_raw = new_output_node._label_raw
+        new_output_node.raw_index = self._raw_graph_ws.layer_counter
+        output_address = "output"
+        if output_address_suffix != "":
+            output_address += f".{output_address_suffix}"
+        new_output_node._graph_io_role = output_address
+        path_meta = output_container_path_meta(self, output_node._label_raw, output_address_suffix)
+        if path_meta is not None:
+            new_output_node.container_path, new_output_node.container_spec = path_meta
+
+        # Tensor metadata must describe the tensor the model actually returned,
+        # not the parent op's recorded output: after an in-place mutation
+        # through a view (``y = x[...]; y.zero_(); return x``) the returned
+        # base tensor's label is advanced to the mutating op, whose recorded
+        # output is the VIEW — copying its shape would make the output node
+        # claim the view's shape for the full base tensor.
+        new_output_node.shape = tuple(output_tensor.shape)
+        new_output_node.dtype = output_tensor.dtype
+        new_output_node._cost_activation_memory = Bytes(
+            get_memory_amount_from_metadata(
+                output_tensor, new_output_node.shape, new_output_node.dtype
+            )
+        )
+
+        # Fix function information:
+        new_output_node.func = identity
+        new_output_node.func_name = "none"
+        # Identity partition (A1): a synthetic output node is a BOUNDARY
+        # bookkeeping row -- it executed nothing, so it OWNS no compute. The
+        # wholesale clone previously inherited the producing op's FLOPs,
+        # double-counting the terminal op in every total (+31% on gpt2, where
+        # the duplicated row is the tied vocabulary projection). The producing
+        # op owns the output tensor and its compute; the alias row displays
+        # shape only and carries not-applicable (None) compute.
+        new_output_node._cost_flops_forward = None
+        new_output_node._cost_flops_backward = None
+        new_output_node._source_frames = _get_code_context(
+            self.num_context_lines,
+            source_loading_enabled=self._options_save_source_context,
+            disable_col_offset=False,
+        )
+        new_output_node._source_var_names = []
+        new_output_node._cost_duration = Duration(0)
+        new_output_node._call_rng_states = (
+            log_current_rng_states(torch_only=True) if self._options_save_rng else {}
+        )
+        new_output_node._call_arg_names = ()
+        new_output_node._call_num_args_total = 0
+        new_output_node._call_num_pos_args = 0
+        new_output_node._call_num_kwargs = 0
+        new_output_node._call_non_tensor_pos_args = []
+        new_output_node._call_non_tensor_kwargs = {}
+        new_output_node._call_non_tensor_args = []
+        new_output_node._autograd_grad_fn_class_name = None
+        new_output_node._cost_autograd_memory = None
+        new_output_node._autograd_num_autograd_tensors = None
+        # An output pseudo-node runs no kernel: "not measured" is None, never
+        # a fabricated 0 B (observe item 15 zero-site sweep).
+        new_output_node._cost_bytes_delta_at_call = None
+        new_output_node._cost_bytes_peak_at_call = None
+        new_output_node._internal_set("saved_args", [output_tensor])
+        new_output_node._internal_set("saved_kwargs", {})
+
+        _strip_output_node_params_and_modules(new_output_node, output_node)
+
+        # Fix ancestry information:
+
+        new_output_node._graph_is_internal_source = False
+        new_output_node._graph_has_output_descendant = True
+        new_output_node.output_descendants = {new_output_node._label_raw}
+        new_output_node.children = []
+        new_output_node._graph_has_children = False
+        new_output_node.parents = [output_node._label_raw]
+        new_output_node._call_parent_arg_positions = {
+            "args": {0: output_node._label_raw},
+            "kwargs": {},
+        }
+        # internal_source_parents is a DIRECT-PARENT relation ("the subset of MY parents
+        # whose producers carry internal-source ancestry"), so it must be re-derived like
+        # parents/parent_arg_positions above. It used to survive the wholesale clone
+        # verbatim, which was wrong in BOTH directions on every model with a buffer or
+        # factory-tensor ancestry (i.e. any BatchNorm net): it named labels that are not
+        # parents of the output node at all, and omitted the output node's ONE real
+        # parent, which does carry that ancestry.
+        new_output_node._graph_internal_source_parents = (
+            [output_node._label_raw] if output_node._graph_has_internal_source_ancestor else []
+        )
+        # root_ancestors must be re-derived the same way: the output node is NOT an
+        # internal source (set above), so the armed ancestry-closure convention
+        # requires root_ancestors == input_ancestors | internal_source_ancestors.
+        # The wholesale clone inherited the DIRECT parent's root_ancestors verbatim,
+        # which is the empty set when that parent is a parentless factory source
+        # (arange/zeros/... returned straight from forward) — the one source-minting
+        # convention that leaves root_ancestors empty on the exempt source row.
+        new_output_node._graph_root_ancestors = set(output_node.input_ancestors) | set(
+            output_node._graph_internal_source_ancestors
+        )
+        new_output_node._edge_uses = []
+
+        # Synthetic output nodes start with an EMPTY annotations namespace: the
+        # wholesale clone otherwise inherits the terminal op's per-op payloads,
+        # and when the model returns a collective boundary's result directly
+        # that duplicated the portable collective_boundary_v1 payload INCLUDING
+        # its correlation key onto a second op record (N ops advertising N-1
+        # boundaries, breaking per-rank correlation-key uniqueness). The
+        # journal's op_labels_raw is the boundary->op mapping authority; a
+        # bookkeeping node is never a boundary carrier.
+        new_output_node.annotations = {}
+
+        # Clear func_config on synthetic output nodes:
+        new_output_node._call_config = {}
+        new_output_node._call_is_func_transform = False
+        new_output_node._call_func_transform_kind = None
+        new_output_node._call_func_transform_chain = ()
+        new_output_node._call_func_transform_config = {}
+        new_output_node._call_func_transform_fn_name = None
+        new_output_node._call_func_transform_fn_qualname = None
+        new_output_node._call_func_transform_fn_source = None
+        new_output_node._call_unattributed_tensor_args = ()
+        new_output_node._call_dropped_edge_tensor_args = ()
+
+        # Fix layer equivalence information:
+        new_output_node.pass_number = 1
+        new_output_node.num_passes = 1
+        new_output_node._graph_equivalent_ops = {new_output_node._label_raw}
+        new_output_node._graph_recurrent_ops = []
+        equiv_type = (
+            f"output_{i + 1}_{'_'.join(tuple(str(s) for s in new_output_node.shape))}_"
+            f"{str(new_output_node.dtype)}"
+        )
+        new_output_node._graph_equivalence_class = equiv_type
+        self._graph_op_equivalence_classes[equiv_type].add(new_output_node._label_raw)
+
+        # Track child tensor variations for output nodes.
+        new_output_node.has_out_variations = False
+        new_output_node.out_versions_by_child = {}
+        if output_node.has_saved_activation:
+            # The recomputed payload inherits the PARENT payload's detachment: cooked/sparse
+            # traces store detached payloads (a retained graph would poison later captures);
+            # live traces keep the graph-attached output, the handle backward() differentiates
+            # through, also when it gained its history after the producer (_output_payload).
+            _parent_payload = (
+                output_node.out
+                if output_node.out is not None
+                else output_node._payload_transformed_out
+            )
+            _detach_payload = output_copy_detaches(output_tensor, _parent_payload, self)
+            if output_rides_parent_payload(output_tensor, output_node.out, self):
+                # HONESTY 13-R1: the producer already retains this exact value, so the output
+                # pseudo-row rides that ONE retained payload instead of a second physical copy
+                # (the byte model charged both: a full duplicate of the logits on large
+                # models). The A1 identity partition already says the producer owns the bytes;
+                # the payload now agrees. Differing values (an in-place mutation after the
+                # producer) still copy below and record the variation.
+                actual_output_raw = output_node.out
+            else:
+                actual_output_raw = safe_copy(output_tensor, detach_tensor=_detach_payload)
+                if output_node._output_device not in [str(actual_output_raw.device), "same"]:
+                    actual_output_raw = safe_to(actual_output_raw, output_node._output_device)
+            actual_output_transformed = None
+            if self._options_activation_transform is not None:
+                actual_output_transformed = output_node._apply_transform(
+                    actual_output_raw,
+                    self._options_activation_transform,
+                    transform_kind="out",
+                    streaming_active=getattr(self, "_out_writer", None) is not None,
+                )
+                output_node._validate_streaming_transform_output(
+                    actual_output_transformed,
+                    transform_kind="out",
+                    streaming_active=getattr(self, "_out_writer", None) is not None,
+                )
+            raw_retained = output_node.out is not None
+            new_output_node._internal_set("out", actual_output_raw if raw_retained else None)
+            new_output_node._internal_set("transformed_out", actual_output_transformed)
+            new_output_node._payload_transformed_out_shape = _shape_or_none(
+                actual_output_transformed
+            )
+            new_output_node._payload_transformed_out_dtype = _dtype_or_none(
+                actual_output_transformed
+            )
+            new_output_node._cost_transformed_activation_memory = _memory_or_none(
+                actual_output_transformed
+            )
+
+            comparison_output = (
+                output_node.out if raw_retained else output_node._payload_transformed_out
+            )
+            actual_comparison = actual_output_raw if raw_retained else actual_output_transformed
+            if (
+                comparison_output is not None
+                and actual_comparison is not None
+                and not tensor_nanequal(actual_comparison, comparison_output)
+            ):
+                _record_output_variation(
+                    self, output_node, new_output_node, output_address_suffix, actual_comparison
+                )
+
+        # Change original output node:
+
+        output_node.children.append(new_output_node._label_raw)
+
+        self._raw_graph_ws.raw_layer_dict[new_output_node._label_raw] = new_output_node
+        self._raw_graph_ws.raw_layer_labels_list.append(new_output_node._label_raw)
+
+        new_output_layers.append(new_output_node._label_raw)
+
+    self.output_layers = new_output_layers
+
+
+def _record_output_variation(
+    self: "Trace", output_node: Op, new_output_node: Op, address: str, actual: torch.Tensor
+) -> None:
+    """Record an output node's differing parent snapshot and its capture alias mark, if any.
+
+    A returned sibling view that a view write relabeled onto ``output_node`` is bound to
+    the write; capture recorded that relabel for the output's ``address`` and the forward
+    validation tripwire accepts the snapshot only with the mark.
+    """
+
+    output_node.out_versions_by_child[new_output_node._label_raw] = actual
+    output_node.has_out_variations = True
+    mark_alias_rebound_output(self, address, (output_node._label_raw, new_output_node._label_raw))
+
+
+def _find_output_ancestors(self: "Trace") -> None:
+    """Step 2: Mark every output ancestor (column-view body in ``_column_passes``)."""
+
+    _column_passes.find_output_ancestors(self)
+
+
+def _remove_foreign_kernel_interiors(self: "Trace") -> None:
+    """Drop the interior ops of every collapsed foreign-kernel ``autograd.Function``.
+
+    ``backends.torch._function_boundary`` records a Function whose forward left torch
+    as one ``autogradfunction`` boundary op and lists the raw labels of the ops logged
+    inside its ``apply`` on the session-time attribute
+    ``_foreign_kernel_interior_labels``. Those ops are the boundary's interior, not
+    graph nodes: they go before the reachability flood so an input-side chain such as
+    ``detach -> numpy()`` is neither kept as a dead end nor reported as an internal
+    sink. Their aten dispatches were re-owned to the boundary token at capture time,
+    so the completeness census needs no pruned-op credit for them.
+    """
+
+    labels = self.__dict__.pop("_foreign_kernel_interior_labels", None)
+    if not labels:
+        return
+    raw_layer_dict = self._raw_graph_ws.raw_layer_dict
+    present = [label for label in self._raw_graph_ws.raw_layer_labels_list if label in labels]
+    if not present:
+        return
+    self._batch_remove_log_entries(
+        [raw_layer_dict[label] for label in present], remove_references=True
+    )
+    removed = set(present)
+    new_layer_dict = OrderedDict()
+    new_layer_list = []
+    for tensor_label in self._raw_graph_ws.raw_layer_labels_list:
+        if tensor_label not in removed:
+            new_layer_dict[tensor_label] = raw_layer_dict[tensor_label]
+            new_layer_list.append(tensor_label)
+    self._raw_graph_ws.raw_layer_labels_list = new_layer_list
+    self._raw_graph_ws.raw_layer_dict = new_layer_dict
+
+
+def _remove_orphan_nodes(self: "Trace") -> None:
+    """Step 3: Remove orphan nodes unreachable from both inputs and outputs.
+
+    Floods BIDIRECTIONALLY from input and output nodes simultaneously. A node is
+    reachable if it can be reached by following children OR parents from
+    any starting node. This bidirectional approach is necessary because:
+    - Forward-only (from inputs) would miss nodes reachable only backward from outputs
+      (e.g., internally-initialized tensors that only feed into outputs).
+    - Backward-only (from outputs) would miss input-side dead ends.
+
+    Any non-output node with no children is logged as an internally-terminated tensor
+    (it produced a value that was never used by downstream computation reaching an output).
+    """
+    _remove_foreign_kernel_interiors(self)
+    orig_nodes = set(self._raw_graph_ws.raw_layer_labels_list)
+    # Flood body (column view, facade fallback) lives in ``_column_passes_graph``.
+    nodes_seen = _column_passes_graph.flood_orphan_reachability(self, _orphan_flood_seeds(self))
+
+    nodes_seen = _expand_seen_nodes_to_complete_func_call_groups(self, nodes_seen)
+    orphan_nodes = orig_nodes - nodes_seen
+    _remember_orphan_rows(self, orphan_nodes)
+    # Record pruned torch-RNG ops that DROVE control flow before the orphan
+    # metadata is stripped: an ``if torch.rand(()) > 0.5`` predicate is
+    # input-disconnected and orphaned away, so the runnable descriptor would
+    # otherwise never learn the taken branch was nondeterministic + unwitnessed.
+    _record_pruned_rng_control_flow(self, orphan_nodes)
+    # Record pruned in-place ops that mutated an UNLABELLED (invisible ``.data`` / foreign)
+    # alias: their write targets storage the sparse DAG cannot model, so dropping the op
+    # silently loses the mutation. Recording it lets the runnable descriptor stay honestly
+    # UNVERIFIABLE instead of VERIFYING a replay that omits the write.
+    _record_pruned_alias_mutation(self, orphan_nodes)
+    if self._options_keep_orphans:
+        for orphan_label in orphan_nodes:
+            self._raw_graph_ws.raw_layer_dict[orphan_label]._graph_is_orphan = True
+        return
+
+    # Record the ``func_call_id``s of the ops being INTENTIONALLY orphan-pruned
+    # here (dead computation that never reaches an output). The completeness
+    # backstop uses this so that captured-then-orphan-pruned dispatchable ops are
+    # accounted for on the captured side rather than false-firing as an untraced
+    # dispatch. This is a plain runtime attribute (never serialized / in a
+    # ``*_FIELD_ORDER``) and is only recorded on the removal path -- ``keep_orphans``
+    # leaves the ops in the final trace, so nothing is pruned. Read now, before
+    # removal, while the raw entries still carry their capture-time ``func_call_id``.
+    self._orphan_pruned_func_call_ids = {
+        func_call_id
+        for label in orphan_nodes
+        for func_call_id in (
+            record_member(self._raw_graph_ws.raw_layer_dict[label], "func_call_id", None),
+        )
+        if isinstance(func_call_id, int)
+    }
+
+    _record_pruned_source_less_witness(self, orphan_nodes)
+
+    # Batch-remove orphaned nodes and rebuild the ordered layer dict/list.
+    orphan_entries = [self._raw_graph_ws.raw_layer_dict[label] for label in orphan_nodes]
+    self._batch_remove_log_entries(orphan_entries, remove_references=True)
+    # Removal strips these records. Retain their labels and payload evidence,
+    # not empty shells that no longer have an op identity to serialize.
+    self._orphan_logs = ()
+
+    new_layer_dict = OrderedDict()
+    new_layer_list = []
+    for tensor_label in self._raw_graph_ws.raw_layer_labels_list:
+        if tensor_label not in orphan_nodes:
+            new_layer_dict[tensor_label] = self._raw_graph_ws.raw_layer_dict[tensor_label]
+            new_layer_list.append(tensor_label)
+    self._raw_graph_ws.raw_layer_labels_list = new_layer_list
+    self._raw_graph_ws.raw_layer_dict = new_layer_dict
+
+
+def _record_pruned_rng_control_flow(self: "Trace", orphan_nodes: set[str]) -> None:
+    """Flag pruned nondeterministic-source ops that drove control flow (runnable descriptor).
+
+    An orphaned op is a nondeterministic value source when its captured
+    callable maps to an ATen ``nondeterministic_seeded`` overload OR to the
+    uninitialized-memory family (shared predicate). When such an
+    op's value reached a control decision (or, defensively, an output) through
+    the sanitized child walk, the recorded taken branch is nondeterministic yet
+    fully pruned from the visible graph. Recording its raw label in the
+    weak-keyed side table lets the runnable producer downgrade witness
+    completeness so the model is honestly UNVERIFIABLE + NOT_APPLICABLE
+    instead of falsely VERIFIED + ATTESTED. This only reads orphan metadata and
+    records a side-channel fact; it never alters the visible graph.
+    """
+
+    escape_sources = host_escape_source_labels(self)
+    for label in orphan_nodes:
+        op = self._raw_graph_ws.raw_layer_dict.get(label)
+        if op is None:
+            continue
+        func_id = record_member(op, "func_id", None)
+        if func_id is None:
+            continue
+        if not aten_qualname_is_seeded_rng(
+            getattr(func_id, "namespace", None), getattr(func_id, "qualname", None)
+        ) and not _orphan_is_uninit_alloc_source(self, op):
+            continue
+        if _rng_orphan_drove_control_or_output(self, label, escape_sources):
+            record_pruned_rng_control_source(self, label)
+
+
+def _record_pruned_source_less_witness(self: "Trace", orphan_nodes: set[str]) -> None:
+    """Keep the source-less-argument witness of pruned ops that steered control or output.
+
+    Removal strips the pruned ops' fields, and the provenance disclosure step
+    (``_warn_unattributed_tensor_args``) runs later, so a source-less tensor whose
+    only consumer is pruned (``x + G.sum().item()``, a branch predicate on a
+    closure tensor) would lose its ``unattributed_tensor_args`` witness with the op.
+    The witness is kept for exactly the pruned ops whose value reached a recorded
+    tensor->host escape or an output, through the same sanitized child walk the
+    pruned-RNG control-flow record uses; a genuinely dead op (its result feeds
+    nothing the outputs depend on) leaves no gap in the outputs' provenance.
+    ``keep_orphans`` leaves the ops, and their per-op witness, in the trace.
+    """
+
+    escape_sources: frozenset[str] | None = None
+    witness: list[str] = []
+    for label in self._raw_graph_ws.raw_layer_labels_list:
+        if label not in orphan_nodes:
+            continue
+        op = self._raw_graph_ws.raw_layer_dict[label]
+        positions = tuple(record_member(op, "unattributed_tensor_args", ()) or ())
+        if not positions:
+            continue
+        if escape_sources is None:
+            # Armed captures record escapes in the completeness witness; plain
+            # captures in the scalar-escape belt.
+            escape_sources = host_escape_source_labels(self) | frozenset(
+                self.__dict__.get("_plain_scalar_escape_labels", ())
+            )
+        if _rng_orphan_drove_control_or_output(self, label, escape_sources):
+            witness.append(f"{label} ({', '.join(positions)}, pruned)")
+    if witness:
+        self.__dict__["_orphan_unattributed_tensor_args"] = witness
+
+
+def _record_pruned_alias_mutation(self: "Trace", orphan_nodes: set[str]) -> None:
+    """Flag orphan-pruned in-place ops that mutated an unlabelled alias, for the runnable descriptor.
+
+    Capture records (in a weak-keyed side table) every in-place op whose mutation TARGET carried no
+    resolvable capture label -- an invisible ``.data`` / foreign alias (``y.data.add_(5.0)``). Such
+    an op's output slot feeds nothing in the tensor graph, so orphan removal drops it and the write
+    to the aliased storage is silently lost: a sparse replay recomputes the PRE-mutation value and
+    would falsely report VERIFIED. Recording the raw label of each candidate that is ACTUALLY pruned
+    lets the runnable producer downgrade witness completeness so the model is honestly UNVERIFIABLE +
+    NOT_APPLICABLE. A candidate op that survives pruning is graph-represented (replayed) and never
+    recorded. This only reads orphan metadata and records a side-channel fact; it never alters the
+    visible graph.
+    """
+
+    candidates = alias_mutation_candidate_labels(self)
+    if not candidates:
+        return
+    for label in candidates & orphan_nodes:
+        record_pruned_alias_mutation_source(self, label)
+
+
+def _log_internally_terminated_tensor(
+    self: "Trace",
+    tensor_label: str,
+    *,
+    seen_sink_labels: set[str],
+    seen_terminated_bool_labels: set[str],
+) -> None:
+    """Mark a tensor as terminated inside the model (body in ``_column_passes_graph``)."""
+
+    _column_passes_graph.log_internally_terminated_tensor(
+        self,
+        tensor_label,
+        seen_sink_labels=seen_sink_labels,
+        seen_terminated_bool_labels=seen_terminated_bool_labels,
+    )

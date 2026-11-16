@@ -24,7 +24,9 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
-import torchlens.backends.torch.ops as tlops
+import torchlens.backends.torch._ops_exhaustive
+import torchlens.backends.torch._ops_predicate_events
+import torchlens.backends.torch._ops_shared_fields
 
 
 class _MaskedFillBoolMask(nn.Module):
@@ -132,7 +134,7 @@ def drop_edge_injector(
     ``tl.validate``.
     """
 
-    original = tlops._build_graph_relationship_fields
+    original = torchlens.backends.torch._ops_predicate_events._build_graph_relationship_fields
     state: dict[str, Any] = {"active": False, "func_name": None, "pred": None, "dropped": 0}
 
     def patched(
@@ -153,7 +155,13 @@ def drop_edge_injector(
             self, fields_dict, parent_layer_labels, parent_layer_entries, args, kwargs, out_orig
         )
 
-    monkeypatch.setattr(tlops, "_build_graph_relationship_fields", patched)
+    # The home module and every module that bound the function by import.
+    for module in (
+        torchlens.backends.torch._ops_predicate_events,
+        torchlens.backends.torch._ops_exhaustive,
+        torchlens.backends.torch._ops_shared_fields,
+    ):
+        monkeypatch.setattr(module, "_build_graph_relationship_fields", patched)
 
     def arm(func_name: str, pred: Callable[..., bool]) -> dict:
         """Activate the injector for one wrapped function name."""
@@ -164,15 +172,14 @@ def drop_edge_injector(
     return arm
 
 
-def _parent_out_is_bool(_label: str, entry: Any) -> bool:
-    """Return whether the candidate parent's out is a bool tensor."""
-
-    out = getattr(entry, "out", None)
-    return isinstance(out, torch.Tensor) and out.dtype == torch.bool
-
-
 def _parent_label_prefix(prefix: str) -> Callable[..., bool]:
-    """Return a predicate matching parent labels by prefix."""
+    """Return a predicate matching parent labels by prefix.
+
+    Labels are capture metadata kept for every op. A predicate on a parent's saved
+    ``out`` would not do: validation's reproducibility re-trace saves only the
+    outputs its structure hash reads, so it would drop the edge in the first
+    capture and keep it in the re-trace.
+    """
 
     def pred(label: str, _entry: Any) -> bool:
         """Match the injected parent label."""
@@ -185,7 +192,7 @@ def _parent_label_prefix(prefix: str) -> Callable[..., bool]:
 @pytest.mark.parametrize(
     "model,func_name,pred_factory",
     [
-        (_MaskedFillBoolMask, "masked_fill", lambda: _parent_out_is_bool),
+        (_MaskedFillBoolMask, "masked_fill", lambda: _parent_label_prefix("gt_")),
         (_MulByAllOnes, "__mul__", lambda: _parent_label_prefix("add_")),
         (_AddAllZeros, "__add__", lambda: _parent_label_prefix("mul_")),
     ],
@@ -218,13 +225,13 @@ def test_fn_capture_witness_records_dropped_edge_positions(
 
     torch.manual_seed(0)
     x = torch.randn(4)
-    state = drop_edge_injector("masked_fill", _parent_out_is_bool)
+    state = drop_edge_injector("masked_fill", _parent_label_prefix("gt_"))
     trace = tl.trace(_MaskedFillBoolMask().eval(), x)
     masked_op = next(op for op in trace.ops if op.func_name == "masked_fill")
 
     assert state["dropped"] > 0
-    assert "arg1" in tuple(masked_op.dropped_edge_tensor_args)
-    assert "arg1" in tuple(masked_op.unattributed_tensor_args)
+    assert "arg1" in tuple(masked_op.call.dropped_edge_tensor_args)
+    assert "arg1" in tuple(masked_op.call.unattributed_tensor_args)
 
 
 @pytest.mark.filterwarnings("ignore:TorchLens found tensor arguments:UserWarning")
@@ -233,7 +240,7 @@ def test_fn6_wrong_parent_between_value_identical_producers_fails(
 ) -> None:
     """A consistent wrong-parent swap to a value-identical producer fails."""
 
-    original = tlops._build_graph_relationship_fields
+    original = torchlens.backends.torch._ops_predicate_events._build_graph_relationship_fields
     state = {"hits": 0}
 
     def patched(
@@ -262,7 +269,13 @@ def test_fn6_wrong_parent_between_value_identical_producers_fails(
                     positions[domain][key] = replacements[0]
         return result
 
-    monkeypatch.setattr(tlops, "_build_graph_relationship_fields", patched)
+    # The home module and every module that bound the function by import.
+    for module in (
+        torchlens.backends.torch._ops_predicate_events,
+        torchlens.backends.torch._ops_exhaustive,
+        torchlens.backends.torch._ops_shared_fields,
+    ):
+        monkeypatch.setattr(module, "_build_graph_relationship_fields", patched)
     torch.manual_seed(0)
     x = torch.randn(4)
 

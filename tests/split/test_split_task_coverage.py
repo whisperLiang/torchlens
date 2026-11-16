@@ -255,6 +255,7 @@ def test_semantic_segmentation_deeplabv3_replay_and_train() -> None:
         assert id(runtime.trace) == capture_id
 
 
+@pytest.mark.cuda
 def test_resnet18_cpu_prefix_cuda_suffix_when_available() -> None:
     """ResNet18 heterogeneous placement: CPU prefix, CUDA suffix."""
 

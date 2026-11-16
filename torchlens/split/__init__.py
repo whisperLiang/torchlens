@@ -60,7 +60,7 @@ from .program import (
 from .runtime import SplitRuntime
 from .shape_program import DimExpr, ShapeBinding, ShapeProgram, ShapeRecipe, TensorShapeIR
 
-__all__ = [
+__all__ = (
     "ComputeDAG",
     "BoundarySchema",
     "BoundaryLayout",
@@ -118,4 +118,4 @@ __all__ = [
     "profile_cache_dir",
     "register_model_profile",
     "resolve_model_profile",
-]
+)

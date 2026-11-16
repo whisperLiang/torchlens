@@ -30,7 +30,6 @@ def _grad_transform(value: torch.Tensor) -> torch.Tensor:
 
 
 # --------------------------------------------------------------------------- F2
-@pytest.mark.smoke
 def test_cache_with_activation_transform_roundtrips(tmp_path):
     """cache=True + activation_transform must not raise and must cache-hit.
 
@@ -42,16 +41,25 @@ def test_cache_with_activation_transform_roundtrips(tmp_path):
     x = torch.randn(2, 4)
     cache_dir = str(tmp_path / "cache")
 
-    first = tl.trace(model, x, cache=True, cache_dir=cache_dir, activation_transform=_act_transform)
-    assert first.capture_cache_hit is False
+    first = tl.trace(
+        model,
+        x,
+        capture=tl.options.CaptureOptions(
+            cache=True, cache_dir=cache_dir, activation_transform=_act_transform
+        ),
+    )
+    assert first.provenance.cache_hit is False
 
     second = tl.trace(
-        model, x, cache=True, cache_dir=cache_dir, activation_transform=_act_transform
+        model,
+        x,
+        capture=tl.options.CaptureOptions(
+            cache=True, cache_dir=cache_dir, activation_transform=_act_transform
+        ),
     )
-    assert second.capture_cache_hit is True
+    assert second.provenance.cache_hit is True
 
 
-@pytest.mark.smoke
 def test_cache_with_grad_transform_roundtrips(tmp_path):
     """The sibling grad_transform path must also survive cache serialization."""
     model = _tiny_model()
@@ -61,81 +69,105 @@ def test_cache_with_grad_transform_roundtrips(tmp_path):
     first = tl.trace(
         model,
         x,
-        cache=True,
-        cache_dir=cache_dir,
-        grad_transform=_grad_transform,
-        save_grads=True,
-        backward_ready=True,
+        capture=tl.options.CaptureOptions(
+            cache=True,
+            cache_dir=cache_dir,
+            save_grads=True,
+            backward_ready=True,
+            grad_transform=_grad_transform,
+        ),
     )
-    assert first.capture_cache_hit is False
+    assert first.provenance.cache_hit is False
 
     second = tl.trace(
         model,
         x,
-        cache=True,
-        cache_dir=cache_dir,
-        grad_transform=_grad_transform,
-        save_grads=True,
-        backward_ready=True,
+        capture=tl.options.CaptureOptions(
+            cache=True,
+            cache_dir=cache_dir,
+            save_grads=True,
+            backward_ready=True,
+            grad_transform=_grad_transform,
+        ),
     )
-    assert second.capture_cache_hit is True
+    assert second.provenance.cache_hit is True
 
 
 # --------------------------------------------------------------------------- F3
-@pytest.mark.smoke
 def test_cache_key_distinguishes_intervention_ready(tmp_path):
     """A capability change must MISS the cache -- never silently return a stale trace.
 
-    Fail-before: the cache key omitted intervention_ready, so the second call
-    (intervention_ready=True) returned the earlier cached trace whose
-    intervention_ready was False -- silent wrongness with no warning.
+    Fail-before: the cache key omitted replayable, so the second call
+    (replayable=True) returned the earlier cached trace whose
+    replayable was False -- silent wrongness with no warning.
     """
     model = _tiny_model()
     x = torch.randn(2, 4)
     cache_dir = str(tmp_path / "cache")
 
-    first = tl.trace(model, x, cache=True, cache_dir=cache_dir, intervention_ready=False)
-    assert first.capture_cache_hit is False
-    assert first.intervention_ready is False
+    first = tl.trace(
+        model,
+        x,
+        capture=tl.options.CaptureOptions(cache=True, cache_dir=cache_dir, replayable=False),
+    )
+    assert first.provenance.cache_hit is False
+    assert first.is_replayable is False
 
-    second = tl.trace(model, x, cache=True, cache_dir=cache_dir, intervention_ready=True)
-    # Different capability => must not reuse the intervention_ready=False trace.
-    assert second.capture_cache_hit is False
-    assert second.intervention_ready is True
+    second = tl.trace(
+        model,
+        x,
+        capture=tl.options.CaptureOptions(cache=True, cache_dir=cache_dir, replayable=True),
+    )
+    # Different capability => must not reuse the replayable=False trace.
+    assert second.provenance.cache_hit is False
+    assert second.is_replayable is True
 
 
-@pytest.mark.smoke
 def test_cache_key_distinguishes_save_raw_input(tmp_path):
     """Sibling payload-policy option: save_raw_input must also key the cache."""
     model = _tiny_model()
     x = torch.randn(2, 4)
     cache_dir = str(tmp_path / "cache")
 
-    first = tl.trace(model, x, cache=True, cache_dir=cache_dir, save_raw_input=False)
-    assert first.capture_cache_hit is False
+    first = tl.trace(
+        model,
+        x,
+        capture=tl.options.CaptureOptions(cache=True, cache_dir=cache_dir, save_raw_input=False),
+    )
+    assert first.provenance.cache_hit is False
 
-    second = tl.trace(model, x, cache=True, cache_dir=cache_dir, save_raw_input=True)
-    assert second.capture_cache_hit is False
+    second = tl.trace(
+        model,
+        x,
+        capture=tl.options.CaptureOptions(cache=True, cache_dir=cache_dir, save_raw_input=True),
+    )
+    assert second.provenance.cache_hit is False
 
 
-@pytest.mark.smoke
 def test_cache_hit_preserved_for_identical_capability(tmp_path):
     """Fix must not break caching: identical options still cache-hit."""
     model = _tiny_model()
     x = torch.randn(2, 4)
     cache_dir = str(tmp_path / "cache")
 
-    first = tl.trace(model, x, cache=True, cache_dir=cache_dir, intervention_ready=True)
-    assert first.capture_cache_hit is False
-    assert first.intervention_ready is True
+    first = tl.trace(
+        model,
+        x,
+        capture=tl.options.CaptureOptions(cache=True, cache_dir=cache_dir, replayable=True),
+    )
+    assert first.provenance.cache_hit is False
+    assert first.is_replayable is True
 
-    second = tl.trace(model, x, cache=True, cache_dir=cache_dir, intervention_ready=True)
-    assert second.capture_cache_hit is True
-    assert second.intervention_ready is True
+    second = tl.trace(
+        model,
+        x,
+        capture=tl.options.CaptureOptions(cache=True, cache_dir=cache_dir, replayable=True),
+    )
+    assert second.provenance.cache_hit is True
+    assert second.is_replayable is True
 
 
 # ------------------------------------------------------------------------- DOC1
-@pytest.mark.smoke
 def test_trace_docstring_has_no_self_referential_aliases():
     """trace() docstring must not brand a live canonical kwarg its own 'alias'.
 
@@ -145,23 +177,32 @@ def test_trace_docstring_has_no_self_referential_aliases():
     """
     import inspect
 
-    doc = tl.trace.__doc__ or ""
+    # Python 3.13 dedents docstrings at compile time (every leading-whitespace
+    # column that is common to every line is stripped from co_consts), so the
+    # raw __doc__ no longer carries the source's 4-space numpydoc indentation
+    # there -- `inspect.cleandoc` normalizes BOTH representations to the same
+    # canonical (zero-indent-for-the-first-level) form, so the check below is
+    # Python-version-agnostic rather than tied to the literal source spelling.
+    doc = inspect.cleandoc(tl.trace.__doc__ or "")
     signature_params = set(inspect.signature(tl.trace).parameters)
 
-    for name in ("activation_transform", "grad_transform", "recurrence_detection"):
+    # activation_transform, recurrence_detection and grad_transform moved into
+    # the grouped options with the flat-kwarg removals; stop_after stays a real
+    # param (its former spelling was halt).
+    for name in ("stop_after",):
         # No second spelling exists, so any "alias for <itself>" line is a lie.
         assert f"{name}: Alias for ``{name}``" not in doc
         assert f"{name}: Deprecated alias for ``{name}``" not in doc
         # The real canonical parameter still exists and stays documented
-        # exactly once. The count uses the 4-space numpydoc entry spelling
-        # (``    name:``), which also matches the historical 8-space inline
-        # spelling as a substring, so the check is style-agnostic.
+        # exactly once, as its own numpydoc entry (a line starting with
+        # "name:", after cleandoc normalization).
         assert name in signature_params
-        assert doc.count(f"    {name}:") == 1
+        assert doc.count(f"\n{name}:") == 1
+    for removed in ("activation_transform", "recurrence_detection", "grad_transform"):
+        assert removed not in signature_params
 
 
 # -------------------------------------------------------------------- SOL-A5-002
-@pytest.mark.smoke
 def test_pre_forward_failure_resets_capture_runtime_context(monkeypatch):
     """A pre-forward setup failure must not leak capture-global runtime state.
 
@@ -170,7 +211,8 @@ def test_pre_forward_failure_resets_capture_runtime_context(monkeypatch):
     _capture_replay_templates=True and the relationship model/input identity
     stale until the next trace() happened to reset at its start.
     """
-    from torchlens import _state, user_funcs as uf
+    from torchlens import _state
+    from torchlens._capture import _run_setup as uf
 
     real_trace_cls = uf.Trace
 
@@ -185,7 +227,7 @@ def test_pre_forward_failure_resets_capture_runtime_context(monkeypatch):
     try:
         monkeypatch.setattr(uf, "Trace", _ExplodingTrace)
         with pytest.raises(RuntimeError, match="boom-in-ctor"):
-            tl.trace(model, x, intervention_ready=True)
+            tl.trace(model, x, capture=tl.options.CaptureOptions(replayable=True))
         # The pre-forward failure window must have reset the capture-global state.
         assert _state._capture_replay_templates is False
         assert _state._relationship_model_id is None
@@ -222,8 +264,10 @@ def test_unpicklable_capture_degrades_to_uncached(tmp_path):
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        trace = tl.trace(model, x, cache=True, cache_dir=cache_dir)
-    assert trace.num_ops > 0
+        trace = tl.trace(
+            model, x, capture=tl.options.CaptureOptions(cache=True, cache_dir=cache_dir)
+        )
+    assert trace._num_ops > 0
     degrade = [w for w in caught if "Not caching this capture" in str(w.message)]
     assert degrade, "expected the not-cached degrade warning"
     assert "unaffected" in str(degrade[0].message)
@@ -231,5 +275,7 @@ def test_unpicklable_capture_degrades_to_uncached(tmp_path):
     # The failed store must not poison later captures either (still warning,
     # never raising -- pytest's warnings-as-errors needs the explicit expect).
     with pytest.warns(UserWarning, match="Not caching this capture"):
-        second = tl.trace(model, x, cache=True, cache_dir=cache_dir)
-    assert second.num_ops == trace.num_ops
+        second = tl.trace(
+            model, x, capture=tl.options.CaptureOptions(cache=True, cache_dir=cache_dir)
+        )
+    assert second._num_ops == trace._num_ops

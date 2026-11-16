@@ -8,20 +8,21 @@ from typing import Any
 
 import pytest
 import torch
+from _forward_stash import stashed
 from torch import nn
 
 import torchlens as tl
 from torchlens import _state
-from torchlens.backends._protocol import CaptureBackend
-from torchlens.backends.torch._tl import get_tensor_label
-from torchlens.data_classes.trace import Trace
-from torchlens.ir.workspaces import (
+from torchlens._data_classes.trace import Trace
+from torchlens._ir.workspaces import (
     LEGACY_TRACE_BUILD_STATE_KEYS,
     ModuleCaptureWorkspace,
     RawGraphWorkspace,
     WrapperRuntimeWorkspace,
 )
-from torchlens.visualization._summary_internal._builder import _live_op_count, _live_op_rows
+from torchlens._utils._tensor_label import get_tensor_label
+from torchlens._visualization._summary_internal._builder import _live_op_count
+from torchlens.backends._protocol import CaptureBackend
 
 
 class _MidForwardProbe(nn.Module):
@@ -44,7 +45,6 @@ class _MidForwardProbe(nn.Module):
         label = get_tensor_label(y)
         assert isinstance(label, str)
         live_view = trace[label]
-        rows = _live_op_rows(trace)
         self.observations = {
             "raw_dict_len": len(trace._raw_graph_ws.raw_layer_dict),
             "raw_labels_len": len(trace._raw_graph_ws.raw_layer_labels_list),
@@ -53,8 +53,12 @@ class _MidForwardProbe(nn.Module):
             "getitem_label": live_view._label_raw,
             "getitem_shape": live_view.shape,
             "summary_count": _live_op_count(trace),
-            "summary_rows": rows,
+            "live_repr": repr(trace),
         }
+        try:
+            trace.summary(level="op")
+        except Exception as exc:  # noqa: BLE001 - recorded for the test to assert on
+            self.observations["summary_error"] = exc
         return torch.relu(y)
 
 
@@ -108,12 +112,12 @@ def test_negative_gate_no_live_mutation_during_forward() -> None:
     """A real forward pass should not populate mutable live-op structures."""
 
     model = _MidForwardProbe()
-    tl.trace(model, torch.randn(1, 3), layers_to_save="all")
+    log = tl.trace(model, torch.randn(1, 3), save="all")
 
-    assert model.observations["raw_dict_len"] == 0
-    assert model.observations["raw_labels_len"] == 0
-    assert model.observations["event_count"] > 0
-    assert model.observations["live_index_has_label"] is True
+    assert stashed(log, "observations")["raw_dict_len"] == 0
+    assert stashed(log, "observations")["raw_labels_len"] == 0
+    assert stashed(log, "observations")["event_count"] > 0
+    assert stashed(log, "observations")["live_index_has_label"] is True
 
 
 def test_no_hot_path_liveoprecord_construction_or_field_writes() -> None:
@@ -125,9 +129,17 @@ def test_no_hot_path_liveoprecord_construction_or_field_writes() -> None:
         *sorted((root / "torchlens/backends/torch").glob("_ops_*.py")),
         root / "torchlens/backends/torch/model_prep.py",
         root / "torchlens/backends/torch/buffer_writes.py",
+        root / "torchlens/backends/torch/_held_tensor_scan.py",
         root / "torchlens/backends/torch/tensor_tracking.py",
-        root / "torchlens/capture/trace.py",
-        root / "torchlens/user_funcs.py",
+        root / "torchlens/_capture/trace.py",
+        root / "torchlens/_capture/run.py",
+        root / "torchlens/_capture/_forward_helpers.py",
+        root / "torchlens/_capture/_input_records.py",
+        root / "torchlens/_capture/finalize/settle.py",
+        root / "torchlens/_user_funcs.py",
+        root / "torchlens/_capture/run_entry.py",
+        *sorted((root / "torchlens/_capture/prepare").glob("*.py")),
+        *sorted((root / "torchlens/_capture/finalize").glob("*.py")),
     ]
     hot_source = "\n".join(path.read_text() for path in hot_files)
 
@@ -140,24 +152,41 @@ def test_in_pass_getitem_returns_event_backed_op() -> None:
     """In-pass raw-label lookup should return the current event-backed op."""
 
     model = _MidForwardProbe()
-    tl.trace(model, torch.randn(1, 3), layers_to_save="all")
+    log = tl.trace(model, torch.randn(1, 3), save="all")
 
-    assert model.observations["getitem_label"].startswith("linear_")
-    assert model.observations["getitem_shape"] == (1, 4)
+    assert stashed(log, "observations")["getitem_label"].startswith("linear_")
+    assert stashed(log, "observations")["getitem_shape"] == (1, 4)
 
 
-def test_live_preview_summary_reads_events_during_capture() -> None:
-    """Live preview rows should be rendered from emitted events."""
+def test_live_repr_reads_events_during_capture() -> None:
+    """The mid-capture repr counts ops from emitted events."""
 
     model = _MidForwardProbe()
-    tl.trace(model, torch.randn(1, 3), layers_to_save="all")
+    log = tl.trace(model, torch.randn(1, 3), save="all")
 
-    rows = model.observations["summary_rows"]
-    assert model.observations["summary_count"] == model.observations["event_count"]
-    assert rows
-    assert rows[-1]["name"].startswith("linear_")
-    assert rows[-1]["shape"] == "[1,4]"
-    assert rows[-1]["dtype"] == "float32"
+    count = stashed(log, "observations")["summary_count"]
+    assert count == stashed(log, "observations")["event_count"]
+    assert f"{count} op events" in stashed(log, "observations")["live_repr"]
+    assert "capture in progress" in stashed(log, "observations")["live_repr"]
+
+
+def test_mid_forward_summary_refuses_typed() -> None:
+    """summary() during an active forward refuses with trace_not_finished.
+
+    The removed legacy renderer printed a partial live table; the rebuilt
+    summary has no partial form, so the call must refuse typed instead of
+    running over a half-built trace.
+    """
+
+    from torchlens._errors import CaptureNotActiveError
+
+    model = _MidForwardProbe()
+    log = tl.trace(model, torch.randn(1, 3), save="all")
+
+    error = stashed(log, "observations").get("summary_error")
+    assert isinstance(error, CaptureNotActiveError)
+    assert error.fields["code"] == "trace_not_finished"
+    assert "repr(trace)" in str(error)
 
 
 def test_atomic_module_classification_matches_phase1_expectation() -> None:
@@ -169,12 +198,16 @@ def test_atomic_module_classification_matches_phase1_expectation() -> None:
     the detector was restored, which is why this once expected ``False``.)
     """
 
-    log = tl.trace(_AtomicBlockModel(), torch.randn(1, 3), layers_to_save="all")
+    log = tl.trace(
+        _AtomicBlockModel(),
+        torch.randn(1, 3),
+        save="all",
+    )
     by_func = {op.func_name: op for op in log.ops if op.func_name in {"linear", "relu"}}
 
-    assert by_func["linear"].is_module_output is True
-    assert by_func["linear"].is_atomic_module is True
-    assert by_func["linear"].atomic_module_call == "block.0:1"
-    assert by_func["relu"].is_module_output is True
-    assert by_func["relu"].is_atomic_module is True
-    assert by_func["relu"].atomic_module_call == "block.1:1"
+    assert by_func["linear"].module_context.is_module_output is True
+    assert by_func["linear"].module_context.is_atomic_module is True
+    assert by_func["linear"].module_context.atomic_module_call == "block.0:1"
+    assert by_func["relu"].module_context.is_module_output is True
+    assert by_func["relu"].module_context.is_atomic_module is True
+    assert by_func["relu"].module_context.atomic_module_call == "block.1:1"

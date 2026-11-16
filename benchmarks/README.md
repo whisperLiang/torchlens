@@ -1,91 +1,12 @@
 # TorchLens Benchmarks
 
-This directory contains standalone benchmark scripts. Generate result artifacts
-locally when measuring a change; historical run outputs are not committed.
-
-## Native split acceptance and repartition
-
-Run a fresh process for each model, mode and placement. Strict acceptance writes
-JSON before exiting and returns zero only for `passed`:
-
-```bash
-python benchmarks/split_graph_partition.py --model resnet18 --training --strict --output resnet-eval.json
-python benchmarks/split_graph_partition.py --model transformer --model-mode train --strict --output distilbert-train.json
-python benchmarks/split_graph_partition.py --model yolov8 --model-mode train --strict --output yolo-train.json
-python benchmarks/split_graph_partition.py --model rfdetr --weights /trusted/rf-detr-nano.pth --training --strict --output rfdetr-eval.json
-python benchmarks/split_graph_partition.py --model resnet18 --training --strict --prefix-device cpu --suffix-device cuda:0 --output resnet-heterogeneous.json
-```
-
-The report separates sequential/noncontiguous partitions, forward, backward,
-optimizer, dynamic batch, repartition, cross-device and actual train-mode checks.
-Unsupported or unexecuted checks never count as passing. Training acceptance
-uses plain SGD (`lr=0.01`) and FP64 by default, with fixed `atol=1e-8`,
-`rtol=1e-7`. Eval-mode AD uses a synthetic objective; actual detection training
-uses the official criterion and synthetic annotations. Explicit float32
-compatibility runs retain their declared precision and the same checks.
-
-`--deterministic` requires deterministic native algorithms and records the
-execution settings in JSON. Unsupported kernels remain failures. Neither this
-option nor float64 changes tolerances or makes a failed float32 run pass.
-
-Recognized native stochastic replay calls execute on their captured generator
-device, then copy outputs and autograd edges to segment placement. This preserves
-native masks across CPU/CUDA placement and can add transfer/compute cost.
-
-Collect synchronized raw repartition samples and separate memory evidence:
-
-```bash
-python benchmarks/split_repartition.py --device cuda --repeats 50 --output repartition-cuda.json
-python benchmarks/split_repartition.py --model transformer --prefix-device cpu --suffix-device cuda:0 --repeats 50 --output transformer-heterogeneous.json
-python benchmarks/split_repartition.py --device cuda --memory-policy retain --memory-iterations 100 --output retain.json
-python benchmarks/split_repartition.py --device cuda --memory-policy clear --memory-iterations 100 --output clear.json
-```
-
-The default memory policy keeps only the latest runtime. `retain` deliberately
-holds every measured runtime until the final GC checkpoint; `clear` invalidates
-analysis/profile caches on each iteration. All policies assert that only one
-measured runtime survives release and GC. Cache counts, RSS, tracemalloc and
-CUDA allocated/reserved/peak memory are separate metrics. Run policies and
-Before/After revisions in separate processes using identical environments and
-arguments; `--source-root` selects the implementation under measurement.
-The `device_transfer` status is based on observed state-copy samples; different
-placement strings alone do not establish that a recut copied state.
-
-The [repair and validation report](../docs/reference/split_runtime_repairs.md)
-lists current fixes and resumed GPU evidence. The earlier
-[acceptance report](../docs/reference/split_runtime_acceptance.md) preserves
-historical CPU measurements and their source provenance.
-
-The facet-indirection benchmark reads a locally generated capture-spine measurement.
-Run these in order to create the ignored JSON files under `benchmarks/perf/`:
-
-```bash
-python benchmarks/s2_capture_spine_overhead.py
-python benchmarks/f1_facet_indirection.py
-```
-
-## Split memory
-
-`split_memory.py` measures RF-DETR-N preparation and representative split replays
-in a fresh process, with numerical checks against native outputs. It requires
-the already-cached official checkpoint and never downloads weights.
-
-```bash
-CUDA_VISIBLE_DEVICES='' python benchmarks/split_memory.py --device cpu
-python benchmarks/split_memory.py --device cuda
-```
-
-Use `--source-root /path/to/another/checkout` for a same-environment comparison
-between revisions supporting the `SplitRuntime.retains_trace` API.
-Use `--capture-grad` to measure caller-enabled autograd instead of inference
-capture. Default Torch inference is compact; use `--retain-trace` to measure the
-complete diagnostic capture on revisions supporting that option. Compare modes
-in separate processes with identical inputs and runtime versions; process RSS
-includes libraries and allocator caches, not just retained tensor storage.
+This directory contains standalone benchmark scripts and generated benchmark
+artifacts.
 
 ## Performance benchmark suite
 
-`perf_suite.py` drives the performance benchmark matrix. It launches `perf_runner.py` in a fresh
+`perf_suite.py` drives the 2026-05-14 performance benchmark matrix described in
+a private benchmark plan. It launches `perf_runner.py` in a fresh
 subprocess for each operation/model/device/pass cell, writes
 `perf_results_2026-05-14.json`, and renders `perf_results_2026-05-14.md`.
 
@@ -103,11 +24,22 @@ Supporting files:
 - `perf_peers.py` contains peer-tool hook/capture implementations and structured
   import skips.
 - `perf_runner.py` executes one timing or memory pass cell and writes JSON.
+- `host_label.py` names the machine in every record: the `hostname` field holds
+  `TORCHLENS_BENCH_HOST_LABEL` (default `benchmark-host`), never the real hostname, and
+  captured output spells the checkout as `<repo>`.
+
+## Capture benchmarks
+
+`capture/` holds the matched-contract suites (A: every arm produces the same output;
+B: what each TorchLens operation keeps), the operation fixtures, the real-model panel,
+the mech-interp workloads and the "what hooks miss" census, all writing one JSON result
+format. See `capture/README.md`.
 
 ## Intervention overhead
 
 `intervention_overhead.py` is the earlier focused benchmark for TorchLens
-intervention primitives. Running it writes `intervention_overhead_results.md` locally.
+intervention primitives. Its committed output lives in
+`intervention_overhead_results.md`.
 
 ## Pre-hook provenance overhead
 
@@ -117,4 +49,34 @@ pre-hook. It prints JSON suitable for comparing revisions:
 
 ```bash
 PYTHONPATH=$PWD python benchmarks/prehook_provenance_overhead.py
+```
+
+## Live-index re-seen labels
+
+`live_index_append_counters.py` counts what a re-seen raw label costs the
+`LiveIndex` (a multi-pass `Recorder` fold, a failed-partial concatenation, an
+amendment replace): full edge rebuilds, child-list operations against the old
+plus new parent count, and total Python calls per forward, with a digest of the
+index state after every pass. Counters gate; wall time is context only:
+
+```bash
+python benchmarks/live_index_append_counters.py --out live_index_counters.json
+```
+
+## Save-path counters
+
+`save_path_counters.py` counts the work one `trace.save` of the `tinynet` capture
+does on the default portable path (saved format 3): record-table write passes and
+encoder calls, verifying re-reads of the record tables, `fsync` calls, Python-level
+opens (direct opens, and opens routed through `pathlib` counted apart, so the
+split is the same on every Python), and the files and bytes written (split into manifest, metadata and blobs).
+Byte counts hold each wall-clock timing float (`TIMING_FLOAT_PATHS`) at a fixed
+width, since format 3 writes floats by exact repr; every other byte counts as
+written, and the raw size is information only. The pinned values
+sit beside the `aux_save` row of `perf_baselines/linux-cpu-provisional.json`
+(`metadata.save_path_counters`) and `tests/test_save_path_counters.py` holds them.
+Counters gate; wall time and the profiled call count are context only:
+
+```bash
+python benchmarks/save_path_counters.py --out save_counters.json
 ```

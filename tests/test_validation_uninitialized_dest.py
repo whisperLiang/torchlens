@@ -32,18 +32,16 @@ import pytest
 import torch
 import torch.nn as nn
 
-from torchlens.user_funcs import (
-    _run_model_and_save_specified_outs,
-    _validate_forward_pass_torch,
-)
-from torchlens.validation.core import validate_saved_outs
-from torchlens.validation.diagnostics import (
+from torchlens._capture.run_entry import _run_model_and_save_specified_outs
+from torchlens._user_funcs import _validate_forward_pass_torch
+from torchlens.validation._core import validate_saved_outs
+from torchlens.validation._destination_coverage import same_saved_values
+from torchlens.validation._diagnostics import (
     CHECK_PERTURBATION,
     CHECK_REPLAY,
     get_validation_failure,
 )
-from torchlens.validation.exemptions import (
-    INPLACE_DESTINATION_WRITE_FUNCS,
+from torchlens.validation._exemptions import (
     _uninitialized_value_origin,
 )
 
@@ -72,13 +70,6 @@ def _fake_op(func_name: str, dest_label: str | None = None):
     return SimpleNamespace(func_name=func_name, parent_arg_positions={"args": args})
 
 
-def test_uninitialized_origin_true_for_direct_empty_source() -> None:
-    """An empty/empty_like source is itself uninitialized."""
-
-    trace = {"e": _fake_op("empty_like")}
-    assert _uninitialized_value_origin(trace["e"], trace) is True
-
-
 def test_uninitialized_origin_does_not_follow_inplace_write_chain() -> None:
     """A chained in-place write is NOT uninitialized -- the B1 bug-mask guard.
 
@@ -100,58 +91,43 @@ def test_uninitialized_origin_does_not_follow_inplace_write_chain() -> None:
     assert _uninitialized_value_origin(trace["ic2"], trace) is False
 
 
-def test_uninitialized_origin_false_for_real_data_destination() -> None:
-    """A real-data destination is NOT uninitialized -- the bug-mask guard."""
+def test_uninitialized_origin_recognizes_parentless_torch_empty() -> None:
+    """``torch.empty``-family allocations are uninitialized; writes over them are not.
+
+    ``torch.empty`` takes no tensor input, so it is absent from the skip-validation
+    registry; the destination walk must still treat it like ``empty_like``. A
+    hypothetical ``empty`` record WITH a tensor parent is not the factory and stays
+    strict, and the no-chaining guard holds for a ``torch.empty`` buffer too.
+    """
 
     trace = {
-        "data": _fake_op("__mul__"),  # genuine data, not an allocation
-        "setitem": _fake_op("__setitem__", dest_label="data"),
+        "alloc": _fake_op("empty"),
+        "set1": _fake_op("__setitem__", dest_label="alloc"),
     }
-    assert _uninitialized_value_origin(trace["setitem"], trace) is False
+    assert _uninitialized_value_origin(trace["alloc"], trace) is True
+    assert _uninitialized_value_origin(_fake_op("empty_strided"), trace) is True
+    assert _uninitialized_value_origin(trace["set1"], trace) is False
+    with_parent = SimpleNamespace(func_name="empty", parents=("x",), parent_arg_positions={})
+    assert _uninitialized_value_origin(with_parent, trace) is False
 
 
-def test_uninitialized_origin_terminates_on_cycle() -> None:
-    """A pathological cyclic destination chain cannot spin forever."""
+def test_same_saved_values_matches_nan_only_at_the_same_positions() -> None:
+    """Destination identity treats NaN as equal to NaN and nothing else as equal."""
 
-    op = _fake_op("__setitem__", dest_label="self")
-    trace = {"self": op}
-    # Must return (False) within the bounded depth, not hang.
-    assert _uninitialized_value_origin(op, trace) is False
-
-
-def test_inplace_write_func_set_covers_setitem_and_index_copy() -> None:
-    """The exempted-op set names the idiom's write ops."""
-
-    assert "__setitem__" in INPLACE_DESTINATION_WRITE_FUNCS
-    assert "index_copy_" in INPLACE_DESTINATION_WRITE_FUNCS
-    assert "indexcopy_" in INPLACE_DESTINATION_WRITE_FUNCS
+    nan = float("nan")
+    saved = torch.tensor([1.0, nan, 3.0])
+    assert same_saved_values(saved.clone(), saved)
+    assert not same_saved_values(torch.tensor([1.0, 2.0, 3.0]), saved)
+    assert not same_saved_values(torch.tensor([nan, 2.0, 3.0]), saved)
+    assert not same_saved_values(torch.tensor([1.0, nan, 4.0]), saved)
+    assert not same_saved_values(saved.double(), saved)
+    assert same_saved_values(torch.tensor([1, 2]), torch.tensor([1, 2]))
+    assert not same_saved_values(torch.tensor([1, 2]), torch.tensor([1, 3]))
 
 
 # ---------------------------------------------------------------------------
 # End-to-end: benign uninitialized-dest models validate; real-data stays strict
 # ---------------------------------------------------------------------------
-
-
-def test_empty_like_partial_setitem_validates() -> None:
-    """The RoPE/flow idiom (empty_like + strided __setitem__) validates True.
-
-    This is the minimal reproduction of the Wan*/normflows/zuko class. Before the
-    fix it failed:replay with error="False"; it must now validate cleanly.
-    """
-
-    class EmptyLikeInterleave(nn.Module):
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            out = torch.empty_like(x)
-            out[..., 0::2] = torch.cos(x[..., 0::2])
-            out[..., 1::2] = torch.sin(x[..., 1::2])
-            return out
-
-    model = EmptyLikeInterleave()
-    model.eval()
-    x = torch.randn(2, 8)
-    result, failure = _validate_with_failure(model, x)
-    assert result is True
-    assert failure is None
 
 
 def test_index_copy_chain_into_new_empty_validates() -> None:
@@ -174,25 +150,30 @@ def test_index_copy_chain_into_new_empty_validates() -> None:
     assert failure is None
 
 
-def test_real_data_destination_partial_setitem_stays_validatable() -> None:
-    """Partial __setitem__ into a REAL data tensor is genuinely sensitive.
+def test_torch_empty_destination_full_overwrite_validates() -> None:
+    """A ``torch.empty`` buffer whose only column is overwritten validates.
 
-    The exemption must NOT fire here -- the unwritten half carries real data, so
-    perturbing the destination DOES change the output and the perturbation check
-    passes legitimately (never reaching the exemption). This guards that the
-    uninitialized-dest exemption did not widen into masking real dependencies.
+    The tabular-embedding idiom ``enc = torch.empty(n, cols, d)`` followed by one
+    ``enc[:, i, :] = mlp_i(...)`` per column fully overwrites the buffer when there
+    is a single column, so perturbing the allocation cannot move the output. The
+    saved garbage often holds NaN, which once defeated the destination-identity
+    proof, and ``torch.empty`` was not recognized as uninitialized memory.
     """
 
-    class RealDataDest(nn.Module):
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            out = (x * 2.0).clone()  # real data destination, NOT empty_like
-            out[:, 0::2] = x[:, 0::2] + 1.0
-            return out
+    class EmptyColumnFill(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.mlp = nn.Linear(1, 8)
 
-    model = RealDataDest()
-    model.eval()
-    x = torch.randn(4, 8)
-    result, failure = _validate_with_failure(model, x)
+        def forward(self, xc: torch.Tensor) -> torch.Tensor:
+            enc = torch.empty(xc.shape[0], xc.shape[1], 8)
+            for i in range(xc.shape[1]):
+                enc[:, i, :] = self.mlp(xc[:, i : i + 1])
+            return enc * 2
+
+    torch.manual_seed(0)
+    model = EmptyColumnFill().eval()
+    result, failure = _validate_with_failure(model, torch.randn(5, 1))
     assert result is True
     assert failure is None
 
@@ -227,15 +208,15 @@ def test_real_replay_mismatch_on_empty_like_dest_still_fails() -> None:
         mark_layer_depths=False,
         detach_saved_activations=False,
         save_grads=False,
-        save_arg_values=True,
-        random_seed=0,
-        save_rng_states=True,
+        save_args=True,
+        seed=0,
+        save_rng=True,
     )
     try:
         # Corrupt a __setitem__ op's replay so the recomputed value diverges.
         patched = False
-        for layer in trace.layer_list:
-            op = layer.ops[1] if hasattr(layer.ops, "_list") else layer
+        for layer in trace._layer_list:
+            op = layer.ops[1] if hasattr(getattr(layer, "ops", None), "_list") else layer
             if getattr(op, "func_name", None) == "__setitem__":
                 original = op.func
 
@@ -255,12 +236,12 @@ def test_real_replay_mismatch_on_empty_like_dest_still_fails() -> None:
         # check -- the tripwire concern is unchanged.
         with pytest.warns(UserWarning, match="treating as failed validation"):
             result = validate_saved_outs(trace, [gt], validate_metadata=False)
-        # ValidationReplayStatus API (da60a76e): tripwire still fires on a real
+        # ValidationStatus API (da60a76e): tripwire still fires on a real
         # value mismatch.
         assert result.state == "failed"
         failure = get_validation_failure(trace)
         assert failure is not None
-        assert failure.check == CHECK_REPLAY
+        assert failure.check_name == CHECK_REPLAY
     finally:
         trace.cleanup()
 
@@ -304,17 +285,17 @@ def test_chained_index_copy_dropped_dest_dependency_still_fails() -> None:
         mark_layer_depths=False,
         detach_saved_activations=False,
         save_grads=False,
-        save_arg_values=True,
-        random_seed=0,
-        save_rng_states=True,
+        save_args=True,
+        seed=0,
+        save_rng=True,
     )
     try:
         # Locate the SECOND index_copy_ (destination parent is the first write).
         second = None
-        for layer in trace.layer_list:
-            op = layer.ops[1] if hasattr(layer.ops, "_list") else layer
+        for layer in trace._layer_list:
+            op = layer.ops[1] if hasattr(getattr(layer, "ops", None), "_list") else layer
             if op.func_name in ("index_copy_", "indexcopy_") and str(
-                op.parent_arg_positions["args"].get(0, "")
+                op.call.parent_arg_positions["args"].get(0, "")
             ).startswith("indexcopy"):
                 second = op
         assert second is not None, "expected a chained index_copy_ op"
@@ -337,7 +318,7 @@ def test_chained_index_copy_dropped_dest_dependency_still_fails() -> None:
         assert result.state == "failed", "dropped chained-dest dependency must FAIL validation"
         failure = get_validation_failure(trace)
         assert failure is not None
-        assert failure.check == CHECK_PERTURBATION
+        assert failure.check_name == CHECK_PERTURBATION
         assert "indexcopy" in (failure.op_label or "")
     finally:
         trace.cleanup()

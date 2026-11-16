@@ -19,10 +19,9 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.ir.events import OpEvent
-from torchlens.ir.op_record import OpRecord
-
-pytestmark = pytest.mark.smoke
+from torchlens._ir.events import OpEvent
+from torchlens._ir.op_record import OpRecord
+from torchlens._utils._record_group_table import record_member
 
 
 def test_torch_capture_journals_records_unconditionally() -> None:
@@ -39,7 +38,7 @@ def test_torch_capture_journals_records_unconditionally() -> None:
     assert all(seq > 0 for seq in seqs), "unstamped record reached the journal"
     assert seqs == sorted(seqs)
     # grad-fn single ownership: no record carries a handle attribute at all.
-    assert all(getattr(event, "grad_fn_handle", None) is None for event in events)
+    assert all(record_member(event, "grad_fn_handle", None) is None for event in events)
 
 
 def test_environment_switch_is_dead(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -53,8 +52,8 @@ def test_environment_switch_is_dead(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_s15_compat_surfaces_retained() -> None:
     """OpEvent + adapter + fold guard + replay clone survive until S15."""
 
-    from torchlens.ir.capture_events import _clone_op_event_for_replay
-    from torchlens.ir.op_record import PATH_TO_FLAT, op_record_from_event
+    from torchlens._ir.capture_events import _clone_op_event_for_replay
+    from torchlens._ir.op_record import PATH_TO_FLAT, op_record_from_event
 
     assert OpEvent is not None
     assert callable(op_record_from_event)

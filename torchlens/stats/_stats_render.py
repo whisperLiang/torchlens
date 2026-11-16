@@ -1,0 +1,248 @@
+"""Stats-line renderers: the core grammar over TensorStats.
+
+The core (fixed semantic order):
+
+``<dtype><shape>@<device>  <n= if rank>=2>  <IEC bytes if >=1KiB>
+<distribution>  <health>  <evidence deviations>``
+
+ASCII is CANONICAL; the unicode upgrade differs ONLY through the declared
+glyph table (the 9-glyph ramp), and CI asserts
+``ascii == degrade(unicode)`` byte-for-byte. The precision law:
+4 significant digits with trailing zeros KEPT, scientific outside
+[1e-4, 1e4), exact integers never gain a decimal point, and a sampled
+scalar prints only the digits its own standard error supports.
+
+Pure formatters: nothing here touches a tensor.
+"""
+
+from __future__ import annotations
+
+import math
+
+from .._utils._display_numbers import format_count, format_iec_bytes, format_sig
+from ._tensor_stats import TensorStats
+
+#: The package glyph table IS the ramp and nothing else: nine ASCII
+#: glyphs and their unicode upgrades, plus nothing.
+GLYPH_RAMP_ASCII = " .:-=+*#%"
+GLYPH_RAMP_UNICODE = " ▁▂▃▄▅▆▇█"
+#: unicode -> ascii degrade map (CI-checked byte-for-byte).
+DEGRADE_TABLE = {
+    unicode_glyph: ascii_glyph
+    for unicode_glyph, ascii_glyph in zip(GLYPH_RAMP_UNICODE, GLYPH_RAMP_ASCII, strict=True)
+    if unicode_glyph != ascii_glyph
+}
+
+
+def degrade(text: str) -> str:
+    """Degrade a unicode render to its ASCII form through the glyph table."""
+
+    return "".join(DEGRADE_TABLE.get(char, char) for char in text)
+
+
+def format_sampled(value: float, se: float | None, digits: int = 4) -> str:
+    """Sampled-scalar precision law.
+
+    Bound form below ``2*se``; otherwise ``clamp(1, 4,
+    floor(log10(|v|/se)))`` supported digits. The ``~`` method mark is the
+    caller's (it discloses METHOD; this law bounds MAGNITUDE).
+    """
+
+    if se is None or se <= 0:
+        return format_sig(value, digits)
+    if abs(value) < 2 * se:
+        return f"~0 (+-{format_sig(2 * se, 1)})"
+    supported = int(math.floor(math.log10(abs(value) / se)))
+    return format_sig(value, max(1, min(digits, supported)))
+
+
+def sparkline(counts: tuple[int, ...], *, style: str = "ascii") -> str:
+    """Render histogram counts through the declared ramp.
+
+    An occupied bin never renders as the empty glyph: the lowest nonzero
+    rank is the first ramp step (the end-bin repair upstream keeps
+    extreme-proven bins nonzero).
+    """
+
+    ramp = GLYPH_RAMP_ASCII if style == "ascii" else GLYPH_RAMP_UNICODE
+    peak = max(counts) if counts else 0
+    if peak == 0:
+        return ramp[0] * len(counts)
+    glyphs = []
+    for count in counts:
+        if count == 0:
+            glyphs.append(ramp[0])
+            continue
+        rank = 1 + int((len(ramp) - 2) * (count / peak))
+        rank = min(rank, len(ramp) - 1)
+        glyphs.append(ramp[rank])
+    return "".join(glyphs)
+
+
+def _zero_field(stats: TensorStats) -> str | None:
+    """The zero field: FORM is the control, never a threshold."""
+
+    if stats.num_zero is None or stats.num_zero == 0 or stats.num_true is not None:
+        return None
+    if stats.is_all_zero:
+        return None
+    if stats.numel >= 1000 and stats.num_zero / stats.numel >= 0.01:
+        return f"zero={100.0 * stats.num_zero / stats.numel:.3g}%"
+    return f"zero={stats.num_zero}/{format_count(stats.numel)}"
+
+
+def _health_fields(stats: TensorStats) -> list[str]:
+    """NaN / +Inf / -Inf, separate, printed whenever nonzero."""
+
+    if stats.nonfinite_evidence.policy == "verdict":
+        return ["nonfinite present"]
+    if stats.nonfinite_evidence.policy != "exact":
+        return []
+    fields = []
+    for name, count in (
+        ("nan", stats.num_nan),
+        ("+inf", stats.num_posinf),
+        ("-inf", stats.num_neginf),
+    ):
+        if count is None or count == 0:
+            continue
+        fraction = count / stats.numel
+        if fraction >= 0.001:
+            fields.append(f"{name}={100.0 * fraction:.3g}%!")
+        else:
+            fields.append(f"{name}={count}/{format_count(stats.numel)}!")
+    return fields
+
+
+def _distribution_zone(stats: TensorStats, style: str, *, spark: bool = True) -> list[str]:
+    """The distribution zone: special cases, sparkline bracket, moments.
+
+    ``spark=False`` is the width-degradation form: the bracket keeps the
+    EXTREMA (never droppable) and loses only the ramp glyphs.
+    """
+
+    integer_family = stats.dtype.startswith(("i8", "i16", "i32", "i64", "u8"))
+
+    def value_token(value: float) -> str:
+        """Format one value under the integer-family exactness rule."""
+
+        # Exact integers never gain a decimal point: "i64 constant=
+        # 1.0000 is a number that cannot exist".
+        if integer_family and float(value).is_integer():
+            return str(int(value))
+        return format_sig(value)
+
+    special: str | None = None
+    constant = stats.constant_value
+    if stats.is_empty:
+        special = "empty"
+    elif stats.numel == 1 and stats.finite_min is not None:
+        token = (
+            str(int(stats.finite_min))
+            if integer_family and float(stats.finite_min).is_integer()
+            else format_sig(stats.finite_min, 5)
+        )
+        special = f"= {token}"
+    elif stats.is_all_true:
+        special = "all_true"
+    elif stats.is_all_false:
+        special = "all_false"
+    elif stats.num_true is not None:
+        special = f"true={stats.num_true}/{format_count(stats.numel)}"
+    elif stats.has_no_finite_values:
+        special = "no_finite_values"
+    elif stats.is_all_zero:
+        special = "all_zero"
+    elif constant is not None and stats.std == 0:
+        special = f"constant={value_token(constant)}"
+    if special is not None:
+        return [special]
+    parts: list[str] = []
+    # Small-n raw values inline when they fit the ~40-column distribution
+    # budget: at that size the values ARE the summary; integer
+    # families show ONLY the values (moments of 8 ints are noise dressed
+    # as a distribution, but exact integer moments still print
+    # when the values do not fit).
+    if stats.small_values is not None:
+        inline = "[" + " ".join(value_token(value) for value in stats.small_values) + "]"
+        if len(inline) <= 40:
+            parts.append(inline)
+    if not parts:
+        if (
+            spark
+            and stats.histogram_counts is not None
+            and stats.finite_min is not None
+            and stats.finite_max is not None
+        ):
+            mark = "~" if stats.histogram_evidence.is_sampled else ""
+            parts.append(
+                f"[{format_sig(stats.finite_min)} {mark}"
+                f"{sparkline(stats.histogram_counts, style=style)} "
+                f"{format_sig(stats.finite_max)}]"
+            )
+        elif stats.finite_min is not None and stats.finite_max is not None:
+            parts.append(f"[{format_sig(stats.finite_min)} .. {format_sig(stats.finite_max)}]")
+    label = "|mean|" if stats.is_magnitude_based else "mean"
+    sd_label = "|sd|" if stats.is_magnitude_based else "sd"
+    if stats.mean is not None:
+        if stats.mean_evidence.is_sampled:
+            parts.append(f"{label}=~{format_sampled(stats.mean, stats.mean_se)}")
+        else:
+            parts.append(f"{label}={format_sig(stats.mean)}")
+    elif stats.mean_evidence.policy == "unavailable" and stats.mean_evidence.reason:
+        parts.append(f"{label}=unavailable({stats.mean_evidence.reason})")
+    if stats.std is not None:
+        if stats.std_evidence.is_sampled:
+            parts.append(f"{sd_label}=~{format_sampled(stats.std, stats.std_se)}")
+        else:
+            parts.append(f"{sd_label}={format_sig(stats.std)}")
+    return parts
+
+
+def render_core_line(
+    stats: TensorStats,
+    *,
+    style: str = "ascii",
+    max_width: int | None = None,
+) -> str:
+    """Render the core stats line.
+
+    Width degradation drops bytes, then ``n=``, then the sparkline --
+    never shape/dtype/extrema/health.
+    """
+
+    def assemble(include_bytes: bool, include_n: bool, include_spark: bool) -> str:
+        """Assemble one candidate line at the given degradation rung."""
+
+        head = f"{stats.dtype}[{','.join(str(dim) for dim in stats.shape)}]@{stats.device}"
+        parts = [head]
+        if include_n and len(stats.shape) >= 2:
+            parts.append(f"n={format_count(stats.numel)}")
+        if include_bytes and stats.nbytes is not None and stats.nbytes >= 1024:
+            parts.append(f"({format_iec_bytes(stats.nbytes)})")
+        parts.extend(_distribution_zone(stats, style, spark=include_spark))
+        zero_field = _zero_field(stats)
+        if zero_field:
+            parts.append(zero_field)
+        parts.extend(_health_fields(stats))
+        if stats.std_evidence.is_sampled and stats.std_evidence.sample_size:
+            parts.append(
+                f"(sampled {format_count(stats.std_evidence.sample_size)}/"
+                f"{format_count(stats.numel)})"
+            )
+        if stats.role is not None:
+            parts.append(f"role={stats.role}")
+        return " ".join(parts)
+
+    line = assemble(True, True, True)
+    if max_width is None or len(line) <= max_width:
+        return line
+    for include_bytes, include_n, include_spark in (
+        (False, True, True),
+        (False, False, True),
+        (False, False, False),
+    ):
+        line = assemble(include_bytes, include_n, include_spark)
+        if len(line) <= max_width:
+            return line
+    return line

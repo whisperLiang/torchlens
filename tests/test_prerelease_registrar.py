@@ -21,9 +21,9 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._data_classes.trace import Trace
 from torchlens._io import FieldPolicy, PreReleaseArtifactError
 from torchlens._io.prerelease import (
-    PRERELEASE_MARKER,
     PRERELEASE_STATE_KEY,
     activate_prerelease_fields,
     prerelease_fields_active,
@@ -32,10 +32,6 @@ from torchlens._io.prerelease import (
     unregister_prerelease_field,
     validate_prerelease_state,
 )
-from torchlens._io.scrub import scrub_for_save
-from torchlens.data_classes.trace import Trace
-
-pytestmark = pytest.mark.smoke
 
 #: Existing declared-DROP scalar Trace field used as the planted gated field.
 #: Any declared-DROP field works; this one is a plain session-time int.
@@ -45,11 +41,16 @@ _PLANT_FIELD = "_tl_save_selector_fire_count"
 #: time and retired only at the coordinated tlspec bump. Inventory assertions
 #: are made RELATIVE to this ledger so each new writer lane lands here as a
 #: reviewed one-line diff (registrar keeps the live inventory). The tlspec v8
-#: coordinated bump (2026-08-17) retired the entire feature-megasprint
-#: inventory (FireRecord/HelperSpec edge families, the AtenOp primitive
+#: coordinated bump (2026-08-17) retired the entire feature-work
+#: inventory (FireRecord/Edit edge families, the AtenOp primitive
 #: profile constellation, kernel telemetry, Op site_key + edge stores, the
 #: eight Trace markers, and the episode/_kernel_telemetry annotation keys):
 #: the registry is EMPTY again until the next sprint gates a new family.
+# The C01 sidecar seam's "sidecar" annotations sub-key persisted plainly at
+# the C07 tlspec v9 write; the registry is empty again (import kept so the
+# inventory pins stay import-order-deterministic either way).
+import torchlens._io.sidecar  # noqa: F401,E402
+
 _STANDING_REGISTRATIONS: dict[str, tuple[str, ...]] = {}
 
 
@@ -74,7 +75,7 @@ def _tiny_trace() -> Trace:
 
 def test_registration_requires_declared_drop_policy() -> None:
     keep_field = next(
-        name for name, policy in Trace.PORTABLE_STATE_SPEC.items() if policy is FieldPolicy.KEEP
+        name for name, policy in Trace._PORTABLE_STATE_SPEC.items() if policy is FieldPolicy.KEEP
     )
     with pytest.raises(ValueError, match="not 'drop'"):
         register_prerelease_field(Trace, keep_field)
@@ -96,26 +97,9 @@ def test_registry_inventory_and_unregister(planted_field: str) -> None:
     # Fixture teardown unregisters again; must be idempotent.
 
 
-def test_annotations_keys_retired_at_the_bump() -> None:
-    # The S7 episode-ledger home and the L3 telemetry relation persisted
-    # plainly at the tlspec v8 bump; their gated annotation sub-keys are
-    # retired and no synthetic "Trace.annotations" owner remains.
-    assert "Trace.annotations" not in registered_prerelease_fields()
-
-
 # ---------------------------------------------------------------------------
 # (a) DROP fields do not persist by default
 # ---------------------------------------------------------------------------
-
-
-def test_gated_field_does_not_persist_by_default(planted_field: str) -> None:
-    assert not prerelease_fields_active()
-    trace = _tiny_trace()
-    setattr(trace, planted_field, 7)
-    scrubbed_state, _, _ = scrub_for_save(trace)
-    assert scrubbed_state[planted_field] is None
-    assert PRERELEASE_STATE_KEY not in scrubbed_state
-    assert scrubbed_state["tlspec_version"] == tl._io.TLSPEC_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -146,17 +130,7 @@ def test_switch_scopes_and_restores() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_switched_write_persists_field_and_carries_marker(planted_field: str) -> None:
-    trace = _tiny_trace()
-    setattr(trace, planted_field, 7)
-    with activate_prerelease_fields():
-        scrubbed_state, _, _ = scrub_for_save(trace)
-    assert scrubbed_state[planted_field] == 7
-    marker = scrubbed_state[PRERELEASE_STATE_KEY]
-    assert marker["marker"] == PRERELEASE_MARKER
-    assert f"Trace.{planted_field}" in marker["fields"]
-
-
+@pytest.mark.smoke
 def test_marked_artifact_refuses_to_load_as_real_current_version(
     planted_field: str, tmp_path
 ) -> None:
@@ -164,7 +138,7 @@ def test_marked_artifact_refuses_to_load_as_real_current_version(
     setattr(trace, planted_field, 7)
     marked_path = tmp_path / "marked.tlspec"
     with activate_prerelease_fields():
-        tl.save(trace, str(marked_path))
+        trace.save(str(marked_path))
     # Without the switch the marked artifact refuses typed.
     with pytest.raises(PreReleaseArtifactError, match="pre-release field marker"):
         tl.load(str(marked_path))
@@ -178,7 +152,7 @@ def test_unmarked_artifact_loads_clean_with_no_marker(planted_field: str, tmp_pa
     trace = _tiny_trace()
     setattr(trace, planted_field, 7)
     plain_path = tmp_path / "plain.tlspec"
-    tl.save(trace, str(plain_path))
+    trace.save(str(plain_path))
     loaded = tl.load(str(plain_path))
     # Default write: field dropped, no marker, loads with or without switch.
     assert getattr(loaded, planted_field, None) in (None, 0)

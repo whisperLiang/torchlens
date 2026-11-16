@@ -13,7 +13,10 @@ def validate_mlx_optimizer(optimizer: Any) -> None:
     """Require the native functional optimizer interface when an optimizer is supplied."""
 
     if optimizer is not None and not callable(getattr(optimizer, "apply_gradients", None)):
-        raise SplitUnsupportedError("MLX split training requires an apply_gradients optimizer.")
+        raise SplitUnsupportedError(
+            "MLX split training requires an apply_gradients optimizer.",
+            code=SplitUnsupportedError.code,
+        )
 
 
 @dataclass
@@ -65,14 +68,20 @@ def _validate_update(adapter: Any, parameters: dict[str, Any], updated: Any) -> 
     """Check the complete optimizer output before any segment parameter is committed."""
 
     if not isinstance(updated, dict) or updated.keys() != parameters.keys():
-        raise SplitUnsupportedError("MLX optimizer returned a different parameter inventory.")
+        raise SplitUnsupportedError(
+            "MLX optimizer returned a different parameter inventory.",
+            code=SplitUnsupportedError.code,
+        )
     for name, value in updated.items():
         if (
             not adapter.is_tensor(value)
             or value.shape != parameters[name].shape
             or value.dtype != parameters[name].dtype
         ):
-            raise SplitUnsupportedError(f"MLX optimizer changed parameter {name!r} shape or dtype.")
+            raise SplitUnsupportedError(
+                f"MLX optimizer changed parameter {name!r} shape or dtype.",
+                code=SplitUnsupportedError.code,
+            )
 
 
 def _parameter_sources(binding: Any) -> dict[str, int]:
@@ -197,4 +206,4 @@ def finish_prefix_step(
     }
 
 
-__all__ = ["finish_prefix_step", "stage_suffix_step", "validate_mlx_optimizer"]
+__all__ = ("finish_prefix_step", "stage_suffix_step", "validate_mlx_optimizer")

@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
 import torch
 
 import torchlens as tl
@@ -118,9 +117,8 @@ def _render_dot(model: torch.nn.Module, tmp_path: Path, name: str) -> str:
     trace = tl.trace(model, torch.randn(2, 3))
     return str(
         trace.draw(
-            vis_outpath=str(tmp_path / name),
-            vis_fileformat="svg",
-            vis_save_only=True,
+            path=str(tmp_path / name),
+            file_format="svg",
             order_siblings=False,
         )
     )
@@ -167,7 +165,6 @@ def _matching_edge_lines(dot_source: str, target_func: str) -> list[str]:
     return [line for line in _dataflow_edge_lines(dot_source) if pattern.search(line)]
 
 
-@pytest.mark.smoke
 def test_add_same_parent_arg_slots_render_two_unlabeled_edges(tmp_path: Path) -> None:
     """``x + x`` renders one arrow per arg-slot occurrence without labels."""
 
@@ -178,18 +175,23 @@ def test_add_same_parent_arg_slots_render_two_unlabeled_edges(tmp_path: Path) ->
     assert all("label=" not in edge and "headlabel=" not in edge for edge in edges)
 
 
-@pytest.mark.smoke
-def test_cat_same_parent_sequence_slots_render_two_unlabeled_edges(tmp_path: Path) -> None:
-    """``torch.cat([x, x])`` renders one arrow per sequence-slot occurrence."""
+def test_cat_same_parent_sequence_slots_render_two_labeled_edges(tmp_path: Path) -> None:
+    """``torch.cat([x, x])`` renders one slot-labeled arrow per occurrence.
+
+    Pin superseded by vizmech memo D14 (megaplan row C05): ``torch.cat`` is
+    NOT commutative, so it left ``COMMUTE_FUNCS`` and its repeated-parent
+    edges must SHOW slot-self-identifying ``arg (0, k)`` labels instead of
+    rendering unlabeled (the old pin asserted the pre-D14 suppression).
+    """
 
     dot_source = _render_dot(_CatTwice(), tmp_path, "cat_twice")
     edges = _matching_edge_lines(dot_source, "cat")
 
     assert len(edges) == 2
-    assert all("label=" not in edge and "headlabel=" not in edge for edge in edges)
+    assert any("arg (0, 0)" in edge for edge in edges)
+    assert any("arg (0, 1)" in edge for edge in edges)
 
 
-@pytest.mark.smoke
 def test_single_use_edges_render_once(tmp_path: Path) -> None:
     """Ordinary single-use render edges are not overdrawn."""
 
@@ -204,7 +206,6 @@ def test_single_use_edges_render_once(tmp_path: Path) -> None:
     assert all(count == 1 for count in edge_counts.values())
 
 
-@pytest.mark.smoke
 def test_non_commutative_same_parent_arg_slots_render_labeled_edges(tmp_path: Path) -> None:
     """``torch.sub(x, x)`` renders two per-slot-labeled arrows."""
 

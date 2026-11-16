@@ -76,12 +76,18 @@ graph.json True
 
 ### `netron`
 
-`tl.export.netron(log, path)` writes a lossy ONNX `ModelProto` JSON graph that Netron opens
-through its ONNX JSON reader (the artifact parses into `onnx.ModelProto` via strict protobuf
-JSON — that acceptance contract plus Netron 9.2.2's format sniffer are pinned in
-`tests/test_exports.py`). It deliberately is not a runnable ONNX model: ops keep their
-captured TorchLens names under the custom `ai.torchlens.lossy` domain; use it only for graph
-inspection.
+`tl.export.netron(log, path)` writes an enriched, lossy ONNX `ModelProto` JSON graph
+(schema v2, irVersion 10) that Netron opens fully lit: typed shapes on every edge, native
+graph inputs/outputs, the module hierarchy as drill-down FunctionProtos (the default
+`granularity="module"` view), curated panel facts, a `netron:attachment` metrics
+companion written beside the file by default (`attachment=False` opts out), and, with
+`baseline=<reference Trace>`, per-node diff facts from `torchlens.report.diff`.
+The acceptance contract — strict protobuf-JSON parse into
+`onnx.ModelProto` plus `onnx.checker.check_model(full_check=True)` — is pinned in
+`tests/test_netron_export_contract.py`, and Netron 9.2.2's own parser is executed over the
+artifact in `tests/test_netron_export_vendor.py`. It deliberately is not a runnable ONNX
+model: ops keep their captured TorchLens names under the custom `ai.torchlens.lossy`
+domain; use it only for graph inspection. Full guide: `docs/reference/netron_export.md`.
 
 ```python
 from pathlib import Path
@@ -126,7 +132,13 @@ trace.json True
 ### `chrome_trace_diff`
 
 `tl.export.chrome_trace_diff(bundle, path)` writes one Chrome timeline comparing the members of a
-TorchLens `Bundle`.
+TorchLens `Bundle`. Its per-node deltas are the relative L2 distances from the baseline (what `bundle.compare(baseline, member, metric="relative_l2")` reads per pair), so they need members that pass the
+Bundle comparison gate (one shared graph, and sites that line up: equal input values, or for
+members on different inputs equal graph-shape hashes) and equal shapes at every compared site.
+Members that do not still export their timelines; only the deltas are refused: every event's
+`delta` is `None` and `metadata["deltas"]` records the refusal code (for example
+`bundle_gate_input_values_differ` for graphs that do not line up, or `metric_shape_mismatch` for
+inputs of different shapes).
 
 ```python
 from pathlib import Path
@@ -134,7 +146,8 @@ import torch
 from torch import nn
 import torchlens as tl
 
-bundle = tl.bundle({"first": tl.trace(nn.ReLU(), torch.ones(1, 2)), "second": tl.trace(nn.ReLU(), torch.zeros(1, 2))})
+x = torch.ones(1, 2)
+bundle = tl.Bundle({"first": tl.trace(nn.ReLU(), x), "second": tl.trace(nn.ReLU(), x)})
 path = tl.export.chrome_trace_diff(bundle, Path(globals().get("DOCS_TMPDIR", "/tmp")) / "diff.json")
 print(path.name, path.exists())
 ```
@@ -276,16 +289,24 @@ trace.json True
 
 ### `xarray`
 
-`tl.export.xarray(log)` returns an `xarray.DataArray` of saved tensor outputs with
-`presentation` and `neuroid` dimensions. All exported outputs must have the same presentation
-count; xarray must be installed.
+`tl.export.xarray(log)` returns an `xarray.Dataset`. Its `out` variable is the
+NeuroidAssembly-shaped `xarray.DataArray` of saved non-buffer tensor outputs with
+`presentation` and `neuroid` dimensions; all of them must have the same presentation count.
+Every saved buffer layer (module state such as BatchNorm running statistics, retained whatever
+`save=` selects) is its own data variable named by its layer label, with its own dimensions
+`<label>_dim_<i>`, no presentation axis, its values unchanged, and the variable attribute
+`torchlens_kind="module_state"` (plus `layer_label` and `buffer_address`);
+`dataset.attrs["module_state_variables"]` lists them. A save-all trace and a partial trace
+export buffers the same way; a partial trace's unsaved layers get no data variable and are
+listed in `attrs["skipped_unsaved_layers"]`. xarray must be installed.
 
 ```python
 import torch
 from torch import nn
 import torchlens as tl
 
-assembly = tl.export.xarray(tl.trace(nn.ReLU(), torch.ones(1, 2)))
+dataset = tl.export.xarray(tl.trace(nn.ReLU(), torch.ones(1, 2)))
+assembly = dataset["out"]
 print(assembly.dims, assembly.shape)
 ```
 
@@ -299,8 +320,11 @@ Output:
 
 ### `tensorboard`
 
-`tl.export.tensorboard(log, writer, step=0, prefix="torchlens")` writes scalar and text summaries
-to an existing object with TensorBoard's `add_scalar` interface, then returns that writer.
+`tl.export.tensorboard(log, writer, step=<int>, prefix="torchlens")` writes scalar and text
+summaries to an existing object with TensorBoard's `add_scalar` interface, then returns that
+writer. `step` is required and keyword-only: every emission path carries the caller's own
+global step (the historical `step=0` default silently piled every export onto one x-axis
+coordinate and was removed).
 
 ```python
 import torch
@@ -314,14 +338,14 @@ class Writer:
     def flush(self): pass
 
 writer = Writer()
-tl.export.tensorboard(tl.trace(nn.ReLU(), torch.ones(1, 2)), writer)
+tl.export.tensorboard(tl.trace(nn.ReLU(), torch.ones(1, 2)), writer, step=0)
 print(len(writer.calls))
 ```
 
 Output:
 
 ```text
-3
+5
 ```
 
 ### `wandb`
@@ -346,8 +370,17 @@ Output:
 
 ### `mlflow`
 
-`tl.export.mlflow(log, client=None, prefix="torchlens")` prepares summary metrics and sends them
-to an optional existing object with `log_metric`; it returns the metrics either way.
+`tl.export.mlflow(log, client=None, prefix="torchlens", *, run_id=None)` logs, to an existing
+run: the three summary metrics, the per-layer statistics table as the artifact
+`<prefix>/layers.json`, the report (honesty preamble, fact block, trace summary) as the text
+artifact `<prefix>/report.txt`, and every capture-honesty fact as a string run tag
+`<prefix>.capture_honesty.<fact>` (strings verbatim, other facts as compact sorted JSON; a tag
+over MLflow's 5000-character limit is replaced by a marker naming the report). Pass the fluent
+`mlflow` module to log into the active run (or `run_id=` of another run), or an
+`mlflow.MlflowClient` together with `run_id=`. The client must offer `log_metric`, `log_table`,
+`log_text` and `set_tag`, or the call raises `TypeError` before writing anything. It returns the
+metrics plus `table`, `report`, `tags`, `artifacts` and `capture_honesty`, with or without a
+client.
 
 ```python
 import torch
@@ -361,13 +394,18 @@ print(sorted(metrics))
 Output:
 
 ```text
-['num_layers', 'num_saved_ops', 'total_activation_memory']
+['artifacts', 'capture_honesty', 'num_layers', 'num_saved_ops', 'report', 'table', 'tags', 'total_activation_memory']
 ```
 
 ### `aim`
 
-`tl.export.aim(log, run=None, prefix="torchlens")` prepares summary metrics and sends them to an
-optional existing object with `track`; it returns the metrics either way.
+`tl.export.aim(log, run=None, prefix="torchlens")` tracks the three summary metrics on an
+existing run, writes the per-layer table as the run param `<prefix>.layers` (one dict per layer)
+and as one series per numeric column (`<prefix>.layers.<column>`, context `{"table": "layers"}`,
+step = row index), the report as the run param `<prefix>.report`, the full fact block as
+`<prefix>.capture_honesty` and each fact as a run tag `<prefix>.capture_honesty.<fact>=<value>`.
+The run must offer `track`, `add_tag` and item assignment. It returns the metrics plus `table`,
+`report`, `tags` and `capture_honesty`.
 
 ```python
 import torch
@@ -381,5 +419,5 @@ print(sorted(metrics))
 Output:
 
 ```text
-['num_layers', 'num_saved_ops', 'total_activation_memory']
+['capture_honesty', 'num_layers', 'num_saved_ops', 'report', 'table', 'tags', 'total_activation_memory']
 ```

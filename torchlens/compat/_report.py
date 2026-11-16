@@ -9,181 +9,40 @@ import multiprocessing
 import textwrap
 import threading
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 import torch
 from torch import nn
 
+from torchlens import _state
+from torchlens._capture_state_helpers import compiled_plain_callable_sites
 from torchlens._distributed import DistributedFinding, detect_distributed_state
+from torchlens._doctor_types import DoctorCheck, Severity, Status
 from torchlens._robustness import _iter_tensors
-from torchlens.utils._torch_compat import (
+from torchlens._utils import _torch_compat
+from torchlens._utils._torch_compat import (
     get_dynamo_optimized_module_type,
     get_fp8_dtypes,
     get_fx_graph_module_type,
-    get_torch_capability_snapshot,
 )
-
-Status = Literal["pass", "known_broken", "scope", "not_tested"]
-Severity = Literal["ok", "info", "warning", "error"]
+from torchlens.backends.torch.belt import belt_report
 
 
-@dataclass(frozen=True)
-class CompatRow:
-    """One row in the TorchLens compatibility truth table.
-
-    Parameters
-    ----------
-    key:
-        Stable machine-readable row key.
-    label:
-        Human-readable row label.
-    status:
-        Compatibility status for this model/input pair.
-    severity:
-        User-facing severity for the row.
-    detected:
-        Whether the row's condition was detected in the supplied model/input.
-    details:
-        Explanation of the finding.
-    suggestion:
-        Suggested workaround or next action.
-    """
-
-    key: str
-    label: str
-    status: Status
-    severity: Severity
-    detected: bool
-    details: str
-    suggestion: str = ""
-
-
-@dataclass(frozen=True)
-class CompatReport:
-    """Compatibility report returned by :func:`torchlens.compat.report`.
-
-    Parameters
-    ----------
-    model_type:
-        Qualified type name for the inspected model.
-    torch_version:
-        PyTorch version used for the inspection.
-    rows:
-        Truth-table rows for the inspected model/input pair.
-    """
-
-    model_type: str
-    torch_version: str
-    rows: tuple[CompatRow, ...]
-
-    def row(self, key: str) -> CompatRow:
-        """Return one report row by stable key.
-
-        Parameters
-        ----------
-        key:
-            Row key to look up.
-
-        Returns
-        -------
-        CompatRow
-            Matching report row.
-
-        Raises
-        ------
-        KeyError
-            If ``key`` is not present in this report.
-        """
-
-        for report_row in self.rows:
-            if report_row.key == key:
-                return report_row
-        raise KeyError(key)
-
-    def to_markdown(self) -> str:
-        """Render this report as a GitHub-flavored Markdown table.
-
-        Returns
-        -------
-        str
-            Markdown representation of the report.
-        """
-
-        lines = [
-            f"### TorchLens compatibility report for `{self.model_type}`",
-            "",
-            f"- PyTorch: `{self.torch_version}`",
-            f"- Rows: {len(self.rows)}",
-            "",
-            "| Row | Status | Severity | Detected | Details | Suggestion |",
-            "| --- | --- | --- | --- | --- | --- |",
-        ]
-        for row in self.rows:
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        _escape_markdown(row.label),
-                        f"`{row.status}`",
-                        f"`{row.severity}`",
-                        "yes" if row.detected else "no",
-                        _escape_markdown(row.details),
-                        _escape_markdown(row.suggestion),
-                    ]
-                )
-                + " |"
-            )
-        return "\n".join(lines)
-
-    def show(self) -> str:
-        """Render this report as a fixed-width text table.
-
-        Returns
-        -------
-        str
-            Text table suitable for terminals and notebook display.
-        """
-
-        headers = ("Row", "Status", "Severity", "Detected", "Details", "Suggestion")
-        body = [
-            (
-                row.label,
-                row.status,
-                row.severity,
-                "yes" if row.detected else "no",
-                row.details,
-                row.suggestion,
-            )
-            for row in self.rows
-        ]
-        widths = _column_widths([headers, *body])
-        lines = [
-            f"TorchLens compatibility report for {self.model_type}",
-            f"PyTorch: {self.torch_version}",
-            "",
-            _format_table_line(headers, widths),
-            _format_table_line(tuple("-" * width for width in widths), widths),
-        ]
-        lines.extend(_format_table_line(row, widths) for row in body)
-        return "\n".join(lines)
-
-
-def report(model: nn.Module, input: Any) -> CompatReport:  # noqa: A002
+def _model_checks(model: nn.Module, inputs: Any) -> tuple[DoctorCheck, ...]:
     """Probe a model/input pair against TorchLens compatibility rows.
 
     Parameters
     ----------
     model:
         Model or wrapper to inspect.
-    input:
+    inputs:
         Example model input. The report inspects the input tree but does not
-        execute ``model(input)``.
+        execute ``model(inputs)``.
 
     Returns
     -------
-    CompatReport
-        Structured compatibility report.
+    tuple[DoctorCheck, ...]
+        Model compatibility findings.
     """
 
     rows = (
@@ -191,83 +50,28 @@ def report(model: nn.Module, input: Any) -> CompatReport:  # noqa: A002
         _accelerate_dispatch_row(model),
         _accelerate_offload_row(model),
         _bitsandbytes_row(model),
+        _gptq_awq_row(model),
+        _cuda_graphs_row(model),
+        _serving_engine_row(model),
+        _peft_row(model),
         _tied_parameters_row(model),
         _multi_gpu_rng_row(),
         _data_parallel_row(model),
         _ddp_row(model),
         _fsdp_row(model),
-        *_distributed_rows(model, input),
+        *_distributed_rows(model, inputs),
         _deepspeed_row(model),
         _torch_compile_row(model),
         _fx_row(model),
-        _torch_capabilities_row(),
         _mechanical_belt_row(),
         _lightning_row(model),
         _functorch_row(model),
-        _quantized_row(model, input),
-        _fp8_dtype_row(model, input),
+        _quantized_row(model, inputs),
+        _fp8_dtype_row(model, inputs),
         _device_context_row(),
         _single_thread_row(),
     )
-    return CompatReport(
-        model_type=_qualified_type_name(model),
-        torch_version=str(torch.__version__),
-        rows=rows,
-    )
-
-
-def _escape_markdown(value: str) -> str:
-    """Escape table separators in Markdown cells.
-
-    Parameters
-    ----------
-    value:
-        Cell value.
-
-    Returns
-    -------
-    str
-        Escaped cell value.
-    """
-
-    return value.replace("|", "\\|").replace("\n", " ")
-
-
-def _column_widths(rows: Sequence[Sequence[str]]) -> tuple[int, ...]:
-    """Compute fixed-width table column sizes.
-
-    Parameters
-    ----------
-    rows:
-        Table rows.
-
-    Returns
-    -------
-    tuple[int, ...]
-        Width for each column.
-    """
-
-    column_count = len(rows[0])
-    return tuple(max(len(row[index]) for row in rows) for index in range(column_count))
-
-
-def _format_table_line(row: Sequence[str], widths: Sequence[int]) -> str:
-    """Format one fixed-width table row.
-
-    Parameters
-    ----------
-    row:
-        Cell values.
-    widths:
-        Column widths.
-
-    Returns
-    -------
-    str
-        Formatted row.
-    """
-
-    return "  ".join(value.ljust(widths[index]) for index, value in enumerate(row))
+    return rows
 
 
 def _qualified_type_name(value: Any) -> str:
@@ -362,7 +166,7 @@ def _class_in_namespace(value: Any, module_prefixes: Sequence[str]) -> bool:
     return False
 
 
-def _hf_transformers_row(model: nn.Module) -> CompatRow:
+def _hf_transformers_row(model: nn.Module) -> DoctorCheck:
     """Build the Hugging Face Transformers wrapper row.
 
     Parameters
@@ -372,7 +176,7 @@ def _hf_transformers_row(model: nn.Module) -> CompatRow:
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
@@ -388,7 +192,7 @@ def _hf_transformers_row(model: nn.Module) -> CompatRow:
         if detected
         else ""
     )
-    return CompatRow(
+    return DoctorCheck(
         "hf_transformers",
         "HF Transformers wrapper",
         "pass",
@@ -399,7 +203,7 @@ def _hf_transformers_row(model: nn.Module) -> CompatRow:
     )
 
 
-def _accelerate_dispatch_row(model: nn.Module) -> CompatRow:
+def _accelerate_dispatch_row(model: nn.Module) -> DoctorCheck:
     """Build the Accelerate device-map dispatch row.
 
     Parameters
@@ -409,31 +213,63 @@ def _accelerate_dispatch_row(model: nn.Module) -> CompatRow:
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
     device_map = getattr(model, "hf_device_map", None)
     detected = bool(device_map)
-    status: Status = "known_broken" if detected else "pass"
-    details = (
-        "Accelerate device_map dispatch detected; parameters may materialize on different "
-        "devices during forward, so TorchLens cannot validate a single coherent eager trace."
-        if detected
-        else "No Accelerate device_map dispatch detected."
-    )
-    return CompatRow(
+    # Execution devices are map values other than the offload targets
+    # ("cpu"/"disk" backing stores) and "meta". ONE execution device (or none:
+    # a pure cpu/disk map executes on CPU) is the supported envelope: hook
+    # infrastructure runs under pause_logging and offloaded weights re-stamp
+    # (verified CPU-side). Two or more real devices mean cross-device
+    # activation moves the capture path has not yet verified -- a GPU
+    # campaign is the acceptance authority there.
+    real_devices: set[str] = set()
+    if detected and device_map is not None:
+        real_devices = {
+            str(device)
+            for device in device_map.values()
+            if str(device) not in ("cpu", "disk", "meta")
+        }
+    multi_device = len(real_devices) > 1
+    if not detected:
+        status: Status = "pass"
+        severity: Severity = "ok"
+        details = "No Accelerate device_map dispatch detected."
+        suggestion = ""
+    elif multi_device:
+        status = "known_broken"
+        severity = "error"
+        details = (
+            "Accelerate device_map dispatch across multiple execution devices "
+            f"detected ({sorted(real_devices)}); cross-device activation moves are "
+            "not yet capture-verified."
+        )
+        suggestion = "Dispatch to a single execution device (cpu/disk offload is supported)."
+    else:
+        status = "pass"
+        severity = "info"
+        details = (
+            "Accelerate device_map dispatch on a single execution device detected; "
+            "eager capture is supported (hook infrastructure excluded from the op "
+            "graph, offloaded weights re-attributed). Verified at small scale on "
+            "CPU; see docs/reference/deployment_envelope.md for the scale ledger."
+        )
+        suggestion = ""
+    return DoctorCheck(
         "accelerate_device_map_auto",
         "Accelerate device_map='auto'",
         status,
-        "error" if detected else "ok",
+        severity,
         detected,
         details,
-        "Run on a single materialized device before logging." if detected else "",
+        suggestion,
     )
 
 
-def _accelerate_offload_row(model: nn.Module) -> CompatRow:
+def _accelerate_offload_row(model: nn.Module) -> DoctorCheck:
     """Build the Accelerate CPU/disk offload row.
 
     Parameters
@@ -443,11 +279,12 @@ def _accelerate_offload_row(model: nn.Module) -> CompatRow:
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
     detected = False
+    buffers_offloaded = False
     for module in _iter_modules(model):
         hook = getattr(module, "_hf_hook", None)
         if hook is None:
@@ -456,28 +293,48 @@ def _accelerate_offload_row(model: nn.Module) -> CompatRow:
         # present for plain single-device dispatch too, and using its truthiness
         # both false-positives (offload=False + a device) and false-negatives
         # (device index 0 is falsy), so it is not an offload signal.
-        if bool(getattr(hook, "offload", False)) or bool(getattr(hook, "offload_buffers", False)):
+        if bool(getattr(hook, "offload", False)):
             detected = True
+        if bool(getattr(hook, "offload_buffers", False)):
+            detected = True
+            buffers_offloaded = True
+        if detected and buffers_offloaded:
             break
-    status: Status = "known_broken" if detected else "pass"
-    details = (
-        "Accelerate CPU/disk offload hooks detected; lazy parameter movement can bypass "
-        "TorchLens' assumptions about tensor identity and device placement."
-        if detected
-        else "No Accelerate CPU/disk offload hooks detected."
-    )
-    return CompatRow(
+    if not detected:
+        details = "No Accelerate CPU/disk offload hooks detected."
+        severity: Severity = "ok"
+        suggestion = ""
+    elif buffers_offloaded:
+        details = (
+            "Accelerate CPU/disk offload with BUFFER offload detected; parameter "
+            "capture is supported (hook internals excluded, weights re-attributed) "
+            "but offloaded-buffer reads may stay unattributed in the graph "
+            "(disclosed residual)."
+        )
+        severity = "warning"
+        suggestion = "Prefer offload_buffers=False when buffer attribution matters."
+    else:
+        details = (
+            "Accelerate CPU/disk offload hooks detected; eager capture is supported: "
+            "hook weight materialization runs outside the op graph and materialized "
+            "parameters re-attribute to their prep-time records. Verified at small "
+            "scale on CPU (op parity, logits parity, forward replay validation); see "
+            "docs/reference/deployment_envelope.md for the scale ledger."
+        )
+        severity = "info"
+        suggestion = ""
+    return DoctorCheck(
         "accelerate_cpu_disk_offload",
         "Accelerate CPU/disk offload",
-        status,
-        "error" if detected else "ok",
+        "pass",
+        severity,
         detected,
         details,
-        "Disable offload or log a fully materialized copy." if detected else "",
+        suggestion,
     )
 
 
-def _bitsandbytes_row(model: nn.Module) -> CompatRow:
+def _bitsandbytes_row(model: nn.Module) -> DoctorCheck:
     """Build the bitsandbytes quantization row.
 
     Parameters
@@ -487,7 +344,7 @@ def _bitsandbytes_row(model: nn.Module) -> CompatRow:
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
@@ -496,18 +353,20 @@ def _bitsandbytes_row(model: nn.Module) -> CompatRow:
     )
     if not detected:
         detected = any("bitsandbytes" in _class_identity(module) for module in _iter_modules(model))
-    status: Status = "known_broken" if detected else "pass"
     details = (
-        "bitsandbytes 8-bit/4-bit modules detected; custom parameter wrappers and kernels "
-        "are outside TorchLens' dense eager tensor contract."
+        "bitsandbytes 8-bit/4-bit modules detected; activation capture works with "
+        "value parity (verified at small scale on CPU) and is disclosed as degraded: "
+        "quantization-state reads (state.CB/SCB, packed payloads) may appear "
+        "unattributed, FLOPs are best-effort, and tl.validate's metadata invariants "
+        "may honestly flag those reads. See docs/reference/deployment_envelope.md."
         if detected
         else "No bitsandbytes 8-bit/4-bit modules detected."
     )
-    return CompatRow(
+    return DoctorCheck(
         "bitsandbytes_8bit_4bit",
         "bitsandbytes 8-bit/4-bit",
-        status,
-        "error" if detected else "ok",
+        "pass",
+        "warning" if detected else "ok",
         detected,
         details,
         "Log an unquantized reference model when exact out metadata is required."
@@ -516,7 +375,191 @@ def _bitsandbytes_row(model: nn.Module) -> CompatRow:
     )
 
 
-def _tied_parameters_row(model: nn.Module) -> CompatRow:
+#: GPTQ/AWQ quantization methods as Hugging Face configs name them.
+_GPTQ_AWQ_METHODS = ("gptq", "awq")
+#: Module namespaces of the GPTQ/AWQ kernel packages and integrations.
+_GPTQ_AWQ_NAMESPACES = ("auto_gptq", "gptqmodel", "awq", "optimum.gptq")
+#: Qualified name of the forward ``torch.cuda.make_graphed_callables`` installs.
+_GRAPHED_FORWARD_QUALNAME = "make_graphed_callables.<locals>.make_graphed_forward.<locals>.new_fwd"
+#: Serving-engine namespaces whose models run outside eager PyTorch modules.
+_SERVING_NAMESPACES = ("vllm", "sglang")
+
+
+def _gptq_awq_row(model: nn.Module) -> DoctorCheck:
+    """Build the GPTQ/AWQ packed-weight quantization row (N-SC-2).
+
+    Parameters
+    ----------
+    model:
+        Model to inspect.
+
+    Returns
+    -------
+    DoctorCheck
+        Report row.
+    """
+
+    quant_config = getattr(getattr(model, "config", None), "quantization_config", None)
+    method = (
+        quant_config.get("quant_method")
+        if isinstance(quant_config, dict)
+        else getattr(quant_config, "quant_method", None)
+    )
+    detected = str(getattr(method, "value", method)).lower() in _GPTQ_AWQ_METHODS or any(
+        _class_in_namespace(module, _GPTQ_AWQ_NAMESPACES) for module in _iter_modules(model)
+    )
+    details = (
+        "GPTQ/AWQ packed-int weights detected (qweight/qzeros/scales buffers, dense "
+        "weights rebuilt inside the kernel). Capture of these modules is NOT verified "
+        "on any venue: parameter counts, bytes, FLOPs and weight attribution describe "
+        "the packed buffers, and the kernels need a GPU. See "
+        "docs/reference/deployment_envelope.md."
+        if detected
+        else "No GPTQ/AWQ quantization detected."
+    )
+    return DoctorCheck(
+        "gptq_awq_quantized",
+        "GPTQ/AWQ quantization",
+        "not_tested" if detected else "pass",
+        "warning" if detected else "ok",
+        detected,
+        details,
+        "Log the unquantized checkpoint when exact weights, counts or FLOPs matter."
+        if detected
+        else "",
+    )
+
+
+def _cuda_graphs_row(model: nn.Module) -> DoctorCheck:
+    """Build the CUDA-graphs entry row (N-SC-3).
+
+    Parameters
+    ----------
+    model:
+        Model to inspect.
+
+    Returns
+    -------
+    DoctorCheck
+        Report row.
+    """
+
+    graphed = any(
+        getattr(getattr(module, "__dict__", {}).get("forward"), "__qualname__", "")
+        == _GRAPHED_FORWARD_QUALNAME
+        for module in _iter_modules(model)
+    )
+    capturing = False
+    if _torch_compat.HAS_CUDA_GRAPHS:
+        try:
+            capturing = bool(torch.cuda.is_current_stream_capturing())
+        except RuntimeError:
+            capturing = False
+    detected = graphed or capturing
+    details = (
+        "CUDA-graph entry detected ("
+        + ("a make_graphed_callables forward" if graphed else "an active stream capture")
+        + "). Graph replay runs recorded kernels without Python, so TorchLens' "
+        "function wrappers see none of it; capture of graphed models is NOT verified "
+        "on any venue."
+        if detected
+        else "No CUDA-graph entry detected"
+        + ("." if _torch_compat.HAS_CUDA_GRAPHS else " (this torch build has no CUDA graphs).")
+    )
+    return DoctorCheck(
+        "cuda_graphs",
+        "CUDA graphs",
+        "not_tested" if detected else "pass",
+        "warning" if detected else "ok",
+        detected,
+        details,
+        "Trace an eager copy of the module, built without make_graphed_callables and "
+        "outside any torch.cuda.graph() capture."
+        if detected
+        else "",
+    )
+
+
+def _serving_engine_row(model: nn.Module) -> DoctorCheck:
+    """Build the serving-engine posture row (N-SC-4).
+
+    Parameters
+    ----------
+    model:
+        Model or engine object to inspect.
+
+    Returns
+    -------
+    DoctorCheck
+        Report row.
+    """
+
+    detected = _class_in_namespace(model, _SERVING_NAMESPACES) or any(
+        _class_in_namespace(module, _SERVING_NAMESPACES) for module in _iter_modules(model)
+    )
+    details = (
+        "vLLM/SGLang serving model detected; serving engines run fused kernels, paged "
+        "KV caches and CUDA graphs outside eager PyTorch, which is outside TorchLens' "
+        "capture scope."
+        if detected
+        else "No vLLM/SGLang serving engine detected."
+    )
+    return DoctorCheck(
+        "serving_engine",
+        "Serving engines (vLLM/SGLang)",
+        "scope" if detected else "pass",
+        "warning" if detected else "ok",
+        detected,
+        details,
+        "Capture the Hugging Face twin: load the same checkpoint and revision with "
+        "transformers.AutoModelForCausalLM.from_pretrained and trace that (recipe in "
+        "docs/reference/deployment_envelope.md)."
+        if detected
+        else "",
+    )
+
+
+def _peft_row(model: nn.Module) -> DoctorCheck:
+    """Build the PEFT/LoRA adapter row.
+
+    Detection is structural: a ``peft``-namespaced wrapper class or any
+    ``peft``-namespaced submodule (LoRA/IA3/prefix layers), never an import
+    of ``peft`` itself.
+
+    Parameters
+    ----------
+    model:
+        Model to inspect.
+
+    Returns
+    -------
+    DoctorCheck
+        Report row.
+    """
+
+    detected = "peft." in _class_identity(model) or any(
+        "peft." in _class_identity(module) for module in _iter_modules(model)
+    )
+    details = (
+        "PEFT adapter wrapper detected (LoRA-style layers are ordinary eager "
+        "modules); capture is supported and verified: adapter modules appear in "
+        "the module hierarchy, adapter parameters attribute to their addresses, "
+        "outputs match the bare forward, and forward replay validation passes."
+        if detected
+        else "No PEFT adapter modules detected."
+    )
+    return DoctorCheck(
+        "peft_lora_adapters",
+        "PEFT/LoRA adapters",
+        "pass",
+        "info" if detected else "ok",
+        detected,
+        details,
+        "",
+    )
+
+
+def _tied_parameters_row(model: nn.Module) -> DoctorCheck:
     """Build the tied/shared parameter row.
 
     Parameters
@@ -526,7 +569,7 @@ def _tied_parameters_row(model: nn.Module) -> CompatRow:
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
@@ -552,7 +595,7 @@ def _tied_parameters_row(model: nn.Module) -> CompatRow:
         )
     else:
         details = "No tied/shared parameter objects detected."
-    return CompatRow(
+    return DoctorCheck(
         "tied_parameters",
         "Tied/shared parameters",
         "pass",
@@ -600,12 +643,12 @@ def _iter_named_parameters_no_dedup(model: nn.Module) -> Iterable[tuple[str, nn.
             yield (f"{module_name}.{param_name}" if module_name else param_name), parameter
 
 
-def _multi_gpu_rng_row() -> CompatRow:
+def _multi_gpu_rng_row() -> DoctorCheck:
     """Build the multi-GPU RNG row.
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
@@ -620,7 +663,7 @@ def _multi_gpu_rng_row() -> CompatRow:
         if detected
         else f"{device_count} CUDA device(s) visible; multi-GPU RNG replay was not exercised."
     )
-    return CompatRow(
+    return DoctorCheck(
         "multi_gpu_rng",
         "Multi-GPU RNG",
         "pass",
@@ -631,7 +674,7 @@ def _multi_gpu_rng_row() -> CompatRow:
     )
 
 
-def _data_parallel_row(model: nn.Module) -> CompatRow:
+def _data_parallel_row(model: nn.Module) -> DoctorCheck:
     """Build the ``nn.DataParallel`` row.
 
     Parameters
@@ -641,7 +684,7 @@ def _data_parallel_row(model: nn.Module) -> CompatRow:
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
@@ -653,7 +696,7 @@ def _data_parallel_row(model: nn.Module) -> CompatRow:
         if detected
         else "nn.DataParallel not detected."
     )
-    return CompatRow(
+    return DoctorCheck(
         "data_parallel",
         "nn.DataParallel",
         status,
@@ -666,7 +709,7 @@ def _data_parallel_row(model: nn.Module) -> CompatRow:
     )
 
 
-def _ddp_row(model: nn.Module) -> CompatRow:
+def _ddp_row(model: nn.Module) -> DoctorCheck:
     """Build the DistributedDataParallel row.
 
     Parameters
@@ -676,7 +719,7 @@ def _ddp_row(model: nn.Module) -> CompatRow:
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
@@ -687,7 +730,7 @@ def _ddp_row(model: nn.Module) -> CompatRow:
         if detected
         else "DistributedDataParallel not detected."
     )
-    return CompatRow(
+    return DoctorCheck(
         "distributed_data_parallel",
         "DistributedDataParallel",
         "pass",
@@ -698,7 +741,7 @@ def _ddp_row(model: nn.Module) -> CompatRow:
     )
 
 
-def _fsdp_row(model: nn.Module) -> CompatRow:
+def _fsdp_row(model: nn.Module) -> DoctorCheck:
     """Build the FSDP row.
 
     Parameters
@@ -708,7 +751,7 @@ def _fsdp_row(model: nn.Module) -> CompatRow:
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
@@ -721,7 +764,7 @@ def _fsdp_row(model: nn.Module) -> CompatRow:
         if detected
         else "FSDP not detected."
     )
-    return CompatRow(
+    return DoctorCheck(
         "fsdp",
         "FSDP",
         status,
@@ -760,7 +803,7 @@ _DISTRIBUTED_ROW_SPECS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def _distributed_rows(model: nn.Module, input_value: Any) -> tuple[CompatRow, ...]:
+def _distributed_rows(model: nn.Module, input_value: Any) -> tuple[DoctorCheck, ...]:
     """Build the DTensor / device-mesh / TP / PP rows.
 
     Parameters
@@ -772,7 +815,7 @@ def _distributed_rows(model: nn.Module, input_value: Any) -> tuple[CompatRow, ..
 
     Returns
     -------
-    tuple[CompatRow, ...]
+    tuple[DoctorCheck, ...]
         One row per distributed condition, in stable order, whether or not the
         condition was detected.
 
@@ -795,7 +838,7 @@ def _distributed_row(
     label: str,
     clear_details: str,
     finding: DistributedFinding | None,
-) -> CompatRow:
+) -> DoctorCheck:
     """Build one distributed-detection row from an optional finding.
 
     Parameters
@@ -811,12 +854,12 @@ def _distributed_row(
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
     if finding is None:
-        return CompatRow(key, label, "pass", "ok", False, clear_details, "")
+        return DoctorCheck(key, label, "pass", "ok", False, clear_details, "")
     details = finding.detail
     sites = finding.describe_sites()
     if sites:
@@ -831,11 +874,11 @@ def _distributed_row(
             f"{details} torchlens.trace() refuses this model with "
             "DistributedCaptureUnsupportedError rather than returning a wrong trace."
         )
-        return CompatRow(key, label, "scope", "error", True, details, finding.suggestion)
-    return CompatRow(key, label, "scope", "warning", True, details, finding.suggestion)
+        return DoctorCheck(key, label, "scope", "error", True, details, finding.suggestion)
+    return DoctorCheck(key, label, "scope", "warning", True, details, finding.suggestion)
 
 
-def _deepspeed_row(model: nn.Module) -> CompatRow:
+def _deepspeed_row(model: nn.Module) -> DoctorCheck:
     """Build the DeepSpeed row.
 
     Parameters
@@ -845,7 +888,7 @@ def _deepspeed_row(model: nn.Module) -> CompatRow:
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
@@ -856,7 +899,7 @@ def _deepspeed_row(model: nn.Module) -> CompatRow:
         if detected
         else "DeepSpeed not detected."
     )
-    return CompatRow(
+    return DoctorCheck(
         "deepspeed",
         "DeepSpeed",
         status,
@@ -867,7 +910,7 @@ def _deepspeed_row(model: nn.Module) -> CompatRow:
     )
 
 
-def _torch_compile_row(model: nn.Module) -> CompatRow:
+def _torch_compile_row(model: nn.Module) -> DoctorCheck:
     """Build the ``torch.compile`` row.
 
     Parameters
@@ -877,12 +920,9 @@ def _torch_compile_row(model: nn.Module) -> CompatRow:
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
-
-    from .._capture_state_helpers import compiled_plain_callable_sites
-    from ..utils import _torch_compat
 
     optimized_module_type = get_dynamo_optimized_module_type()
     optimized_detected = optimized_module_type is not None and isinstance(
@@ -892,15 +932,15 @@ def _torch_compile_row(model: nn.Module) -> CompatRow:
     detected = optimized_detected or bool(plain_callable_sites)
     # The coexistence contract shipped by the rung-2 stance integration (torch
     # >= 2.6): compiled callables run their original eager Python during
-    # capture with zero graph breaks, compiled caches stay intact with at most
-    # one bounded recompile on the next compiled call afterward, and
-    # unwrap_torch() reverts torch for free.
+    # capture with zero graph breaks, compiled caches stay intact with a
+    # bounded burst of recompilations on the first compiled call after
+    # each capture, then steady state, and unwrap_torch() reverts torch for free.
     stance_available = bool(_torch_compat.HAS_SET_STANCE)
     contract = (
-        "Coexistence contract: zero graph breaks during capture, at most one bounded "
-        "recompile on the next compiled call afterward, and unwrap_torch() reverts "
-        "torch for free. Captured values are eager-path values, not compiled-path "
-        "numerics."
+        "Coexistence contract: zero graph breaks during capture, a bounded "
+        "burst of recompilations on the first compiled call after each capture, then "
+        "steady state, and unwrap_torch() reverts torch for free. Captured values are "
+        "eager-path values, not compiled-path numerics."
     )
     if stance_available:
         status: Status = "pass"
@@ -926,7 +966,7 @@ def _torch_compile_row(model: nn.Module) -> CompatRow:
                 "are logged. One exception: the stance engages only when Dynamo is already "
                 "imported at capture entry, so a compiled callable CREATED inside the "
                 "forward of a process whose first torch._dynamo import happens mid-capture "
-                "is bypassed and disclosed (capture_verified=False, reason "
+                "is bypassed and disclosed (trace.provenance.verified=False, reason "
                 "dynamo_region_not_logged), not logged."
             )
         suggestion = (
@@ -936,7 +976,7 @@ def _torch_compile_row(model: nn.Module) -> CompatRow:
             if detected
             else ""
         )
-        return CompatRow(
+        return DoctorCheck(
             "torch_compile",
             "torch.compile",
             status,
@@ -963,7 +1003,7 @@ def _torch_compile_row(model: nn.Module) -> CompatRow:
             "callables reached only through globals/free-function references remain outside "
             "this structural preflight."
         )
-    return CompatRow(
+    return DoctorCheck(
         "torch_compile",
         "torch.compile",
         status,
@@ -978,7 +1018,7 @@ def _torch_compile_row(model: nn.Module) -> CompatRow:
     )
 
 
-def _fx_row(model: nn.Module) -> CompatRow:
+def _fx_row(model: nn.Module) -> DoctorCheck:
     """Build the FX GraphModule row.
 
     Parameters
@@ -988,7 +1028,7 @@ def _fx_row(model: nn.Module) -> CompatRow:
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
@@ -1001,7 +1041,7 @@ def _fx_row(model: nn.Module) -> CompatRow:
         if detected
         else "FX GraphModule not detected."
     )
-    return CompatRow(
+    return DoctorCheck(
         "fx_graph_module",
         "FX GraphModule",
         status,
@@ -1014,7 +1054,7 @@ def _fx_row(model: nn.Module) -> CompatRow:
     )
 
 
-def _lightning_row(model: nn.Module) -> CompatRow:
+def _lightning_row(model: nn.Module) -> DoctorCheck:
     """Build the Lightning training-step row.
 
     Parameters
@@ -1024,7 +1064,7 @@ def _lightning_row(model: nn.Module) -> CompatRow:
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
@@ -1039,7 +1079,7 @@ def _lightning_row(model: nn.Module) -> CompatRow:
         if detected
         else "Lightning training_step not detected in an active training-mode LightningModule."
     )
-    return CompatRow(
+    return DoctorCheck(
         "lightning_training_step",
         "Lightning training_step mid-loop",
         status,
@@ -1052,7 +1092,7 @@ def _lightning_row(model: nn.Module) -> CompatRow:
     )
 
 
-def _functorch_row(model: nn.Module) -> CompatRow:
+def _functorch_row(model: nn.Module) -> DoctorCheck:
     """Build the vmap/functorch row.
 
     Parameters
@@ -1062,7 +1102,7 @@ def _functorch_row(model: nn.Module) -> CompatRow:
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
@@ -1078,7 +1118,7 @@ def _functorch_row(model: nn.Module) -> CompatRow:
             "functional tensors created inside forward remain outside that preflight."
         )
     )
-    return CompatRow(
+    return DoctorCheck(
         "vmap_functorch",
         "vmap/functorch",
         status,
@@ -1133,7 +1173,7 @@ def _forward_references_functorch(model: nn.Module) -> bool:
     return False
 
 
-def _quantized_row(model: nn.Module, input_value: Any) -> CompatRow:
+def _quantized_row(model: nn.Module, input_value: Any) -> DoctorCheck:
     """Build the quantized tensor/model row.
 
     Parameters
@@ -1145,7 +1185,7 @@ def _quantized_row(model: nn.Module, input_value: Any) -> CompatRow:
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
@@ -1161,7 +1201,7 @@ def _quantized_row(model: nn.Module, input_value: Any) -> CompatRow:
         if detected
         else "No quantized tensors or quantized nn modules detected."
     )
-    return CompatRow(
+    return DoctorCheck(
         "quantized_tensor",
         "Quantized tensors/modules",
         status,
@@ -1172,7 +1212,7 @@ def _quantized_row(model: nn.Module, input_value: Any) -> CompatRow:
     )
 
 
-def _fp8_dtype_row(model: nn.Module, input_value: Any) -> CompatRow:
+def _fp8_dtype_row(model: nn.Module, input_value: Any) -> DoctorCheck:
     """Build the fp8 (``float8_*``) dtype row.
 
     Parameters
@@ -1184,7 +1224,7 @@ def _fp8_dtype_row(model: nn.Module, input_value: Any) -> CompatRow:
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
 
     Notes
@@ -1198,7 +1238,7 @@ def _fp8_dtype_row(model: nn.Module, input_value: Any) -> CompatRow:
 
     fp8_dtypes = get_fp8_dtypes(force_probe=True)
     if not fp8_dtypes:
-        return CompatRow(
+        return DoctorCheck(
             "fp8_dtype",
             "fp8 (float8_*) tensors",
             "pass",
@@ -1225,7 +1265,7 @@ def _fp8_dtype_row(model: nn.Module, input_value: Any) -> CompatRow:
             if inspected_state
             else " Parameter/buffer enumeration failed, so model state was NOT inspected."
         )
-        return CompatRow(
+        return DoctorCheck(
             "fp8_dtype",
             "fp8 (float8_*) tensors",
             "pass" if inspected_state else "not_tested",
@@ -1237,7 +1277,7 @@ def _fp8_dtype_row(model: nn.Module, input_value: Any) -> CompatRow:
     where = " and ".join(
         label for label, hit in (("inputs", fp8_input), ("parameters/buffers", fp8_state)) if hit
     )
-    return CompatRow(
+    return DoctorCheck(
         "fp8_dtype",
         "fp8 (float8_*) tensors",
         "scope",
@@ -1279,16 +1319,16 @@ def _is_quantized_module(module: nn.Module) -> bool:
     return any(identity.startswith(prefix) for prefix in prefixes)
 
 
-def _device_context_row() -> CompatRow:
+def _device_context_row() -> DoctorCheck:
     """Build the DeviceContext factory row.
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
-    return CompatRow(
+    return DoctorCheck(
         "device_context_factory",
         "DeviceContext factory injection",
         "pass",
@@ -1299,66 +1339,21 @@ def _device_context_row() -> CompatRow:
     )
 
 
-def _torch_capabilities_row() -> CompatRow:
-    """Build the runtime capability snapshot row.
-
-    Returns
-    -------
-    CompatRow
-        Report row summarizing private runtime capability probes.
-    """
-
-    from ..utils._torch_compat import OPTIONAL_CAPABILITY_FLAGS
-
-    snapshot = _runtime_capability_snapshot()
-    absent = [name for name, available in snapshot.items() if not available]
-    # r-b4 R26-4: only genuine DEGRADATIONS drive the warning severity; an
-    # absent optional feature keeps its true value in the details but leaves a
-    # healthy install at pass/ok.
-    missing = [name for name in absent if name not in OPTIONAL_CAPABILITY_FLAGS]
-    optional_absent = [name for name in absent if name in OPTIONAL_CAPABILITY_FLAGS]
-    status: Status = "not_tested" if missing else "pass"
-    severity: Severity = "warning" if missing else "ok"
-    details = "Runtime capabilities: " + _format_capability_snapshot(snapshot)
-    if missing:
-        details += "; missing=" + ", ".join(missing)
-    if optional_absent:
-        details += "; optional_absent=" + ", ".join(optional_absent)
-    suggestion = (
-        "Run torchlens.utils.doctor() for the same snapshot; missing flags indicate graceful "
-        "degradation of private runtime integration points."
-        if missing
-        else ""
-    )
-    return CompatRow(
-        "torch_capabilities",
-        "Runtime capability snapshot",
-        status,
-        severity,
-        bool(missing),
-        details,
-        suggestion,
-    )
-
-
-def _mechanical_belt_row() -> CompatRow:
+def _mechanical_belt_row() -> DoctorCheck:
     """Build the protocol-invisible belt coverage row.
 
     Returns
     -------
-    CompatRow
-        Disclosure row for belt probe failures and unprobed candidates
-        (grind-r6 b3 R02, sol MED). A candidate whose mode visibility could
+    DoctorCheck
+        Disclosure row for belt probe failures and unprobed candidates.
+        A candidate whose mode visibility could
         not be measured is neither belt-patched nor proven protocol-visible,
         so a stale pre-wrap reference to it can drop ops with zero signal
         while the capture still reports ``capture_verified=True``.
     """
 
-    from torchlens import _state
-    from torchlens.backends.torch.belt import belt_report
-
     if not _state._is_decorated:
-        return CompatRow(
+        return DoctorCheck(
             "mechanical_belt",
             "Protocol-invisible belt coverage",
             "not_tested",
@@ -1369,7 +1364,7 @@ def _mechanical_belt_row() -> CompatRow:
         )
     report_data = belt_report()
     if report_data is None:
-        return CompatRow(
+        return DoctorCheck(
             "mechanical_belt",
             "Protocol-invisible belt coverage",
             "not_tested",
@@ -1380,12 +1375,12 @@ def _mechanical_belt_row() -> CompatRow:
         )
     # Unprobed candidates are a STANDING recipe-coverage limitation (hundreds
     # of in-place variants have no probe recipe on every healthy build):
-    # disclosed as a count, never a warning (r-b4 R26-4 false-alarm rule).
+    # disclosed as a count, never a warning (a false-alarm rule).
     # A probe FAILURE is unexpected breakage on this build and drives the
     # warning severity.
     unprobed_detail = f"unprobed_candidates={report_data.unprobed_candidate_count}"
     if not report_data.probe_failures:
-        return CompatRow(
+        return DoctorCheck(
             "mechanical_belt",
             "Protocol-invisible belt coverage",
             "pass",
@@ -1400,7 +1395,7 @@ def _mechanical_belt_row() -> CompatRow:
         f"unmeasured): {failure_names}; {unprobed_detail}. A stale pre-wrap reference "
         "to an unmeasured candidate can silently drop ops from the trace."
     )
-    return CompatRow(
+    return DoctorCheck(
         "mechanical_belt",
         "Protocol-invisible belt coverage",
         "scope",
@@ -1408,51 +1403,16 @@ def _mechanical_belt_row() -> CompatRow:
         True,
         details,
         "Avoid holding pre-wrap references to the named functions; "
-        "see torchlens.utils.doctor() for per-failure exception details.",
+        "see torchlens.report.doctor() for per-failure exception details.",
     )
 
 
-def _runtime_capability_snapshot() -> dict[str, bool]:
-    """Return all runtime compatibility capability flags.
-
-    Returns
-    -------
-    dict[str, bool]
-        Mapping from capability flag names to availability.
-    """
-
-    snapshot = get_torch_capability_snapshot()
-    try:
-        from torchlens.backends.tf._tf_compat import get_tf_capability_snapshot
-    except ImportError:
-        return snapshot
-    snapshot.update(get_tf_capability_snapshot())
-    return snapshot
-
-
-def _format_capability_snapshot(snapshot: dict[str, bool]) -> str:
-    """Format capability flags as a stable comma-separated list.
-
-    Parameters
-    ----------
-    snapshot:
-        Capability flags to format.
-
-    Returns
-    -------
-    str
-        Stable ``name=value`` list.
-    """
-
-    return ", ".join(f"{name}={available}" for name, available in sorted(snapshot.items()))
-
-
-def _single_thread_row() -> CompatRow:
+def _single_thread_row() -> DoctorCheck:
     """Build the single-thread design row.
 
     Returns
     -------
-    CompatRow
+    DoctorCheck
         Report row.
     """
 
@@ -1466,7 +1426,7 @@ def _single_thread_row() -> CompatRow:
         if detected
         else "Running in MainProcess/MainThread; this matches TorchLens' single-thread design."
     )
-    return CompatRow(
+    return DoctorCheck(
         "single_thread_design",
         "Single-thread design",
         status,
@@ -1477,4 +1437,4 @@ def _single_thread_row() -> CompatRow:
     )
 
 
-__all__ = ["CompatReport", "CompatRow", "Severity", "Status", "report"]
+__all__: list[str] = []

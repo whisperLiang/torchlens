@@ -7,7 +7,7 @@ from dataclasses import replace
 import pytest
 import torch
 
-from torchlens.intervention.types import CapturedArgTemplate
+from torchlens.intervention._types import CapturedArgTemplate
 from torchlens.split._torch_liveness import release_schedule
 from torchlens.split.graph import ReplayValueRef, SplitTraceGraph, SplitTraceNode
 

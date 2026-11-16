@@ -6,6 +6,8 @@ from typing import Any
 
 import torch
 
+from .._utils._record_group_table import record_member
+
 
 def _tensor_from(obj: Any) -> torch.Tensor:
     """Extract a tensor from a TorchLens object or tensor.
@@ -23,7 +25,7 @@ def _tensor_from(obj: Any) -> torch.Tensor:
 
     if isinstance(obj, torch.Tensor):
         return obj
-    out = getattr(obj, "transformed_out", None)
+    out = record_member(obj, "transformed_out", None)
     if isinstance(out, torch.Tensor):
         return out
     out = getattr(obj, "out", None)
@@ -46,6 +48,13 @@ def show(obj: Any, *args: Any, **kwargs: Any) -> Any:
     -------
     Any
         Downstream torchshow result.
+
+    Examples
+    --------
+    >>> # requires: torchshow
+    >>> import matplotlib
+    >>> matplotlib.use("Agg")
+    >>> _ = show(torch.rand(3, 8, 8))
     """
 
     try:

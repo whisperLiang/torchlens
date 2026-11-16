@@ -17,17 +17,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.backends.torch import completeness_witness as cw
+import torchlens.backends.torch._completeness_dispatch
+from torchlens._runnable import NumericAttestationStatus, PathFaithfulness
 from torchlens.options import CaptureOptions
-from torchlens.runnable import NumericAttestationStatus, PathFaithfulness
 
 _CAPTURE = CaptureOptions(
-    intervention_ready=True,
+    replayable=True,
     capture_container_structure=True,
     cache=False,
 )
@@ -38,7 +37,7 @@ def _save_and_run(model: nn.Module, x: torch.Tensor, path: Path) -> tl.RunResult
 
     trace = tl.trace(model, x, capture=_CAPTURE)
     trace.save(path, level="runnable", include_weights=True)
-    return tl.load(path).run(inputs=x.clone(), seed=0, on_divergence="return_diverged")
+    return tl.load(path).run_transaction(inputs=x.clone(), seed=0, on_divergence="return")
 
 
 class ParamRebindMutateRestore(nn.Module):
@@ -113,7 +112,6 @@ class SubclassParamMutateRestore(nn.Module):
         return out
 
 
-@pytest.mark.smoke
 def test_param_storage_rebind_mutate_consume_restore_is_unverifiable(tmp_path: Path) -> None:
     """A mid-forward ``p.data`` storage rebind consumed by a traced op must fail closed."""
 
@@ -124,7 +122,6 @@ def test_param_storage_rebind_mutate_consume_restore_is_unverifiable(tmp_path: P
     assert result.report.numeric_attestation is not NumericAttestationStatus.ATTESTED
 
 
-@pytest.mark.smoke
 def test_subclass_param_transient_mutation_is_unverifiable(tmp_path: Path) -> None:
     """A transient mutation of a subclass-typed param must still fail closed (verbatim path)."""
 
@@ -154,7 +151,9 @@ def _reference_matches(items: tuple[tuple[str, object], ...], consumed_ptrs: set
 def _split_matches(items: tuple[tuple[str, object], ...], consumed_ptrs: set[int]) -> list[str]:
     """Matching decisions produced by the batched split plus its verbatim leftover path."""
 
-    hits, leftovers = cw._split_consumed_state_items(items, consumed_ptrs)
+    hits, leftovers = torchlens.backends.torch._completeness_dispatch._split_consumed_state_items(
+        items, consumed_ptrs
+    )
     matched = [address for address, _ in hits]
     matched.extend(_reference_matches(tuple(leftovers), consumed_ptrs))
     return matched
@@ -190,6 +189,8 @@ def test_split_consumed_state_items_is_decision_identical() -> None:
     assert _split_matches(items, consumed_none) == []
 
     # Exotic classes must be routed to the verbatim leftover path, never raw-read.
-    hits, leftovers = cw._split_consumed_state_items(items, consumed)
+    hits, leftovers = torchlens.backends.torch._completeness_dispatch._split_consumed_state_items(
+        items, consumed
+    )
     assert {address for address, _ in leftovers} == {"sub", "junk"}
     assert {address for address, _ in hits} == {"plain", "meta"}

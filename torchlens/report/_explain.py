@@ -2,42 +2,65 @@
 
 from __future__ import annotations
 
-import traceback
 from collections import Counter
+from collections.abc import Mapping
 from typing import Any, Literal
 
-import torch
+from torchlens._utils._record_group_table import record_member
 
-from ..data_classes._nonfinite import (
-    coverage_gap_note,
-    first_nonfinite_layer,
-    nonfinite_layers,
+from .._capture_honesty import (
+    capture_advisories,
+    capture_verification,
+    episode_facts,
+    intervention_facts,
+    poison_facts,
+    refuse_presenter_subject,
 )
+from .._data_classes._trace_missing_attrs import is_live_trace
+from .._partial import PartialTrace
+from ._explain_partial import (
+    _partial_diagnosis,
+    _partial_sections,
+)
+from ._summary_columns import attention_full_square_line, counted_attention_ops
 
 Audience = Literal["researcher", "practitioner", "auto"]
-ExplainFormat = Literal["text", "json"]
+
+
+class ExplainReport(str):
+    """The plain-language report ``trace.explain()`` returns (DOCUMENTED-UNSTABLE).
+
+    A ``str``: print it, search it or slice it like the prose it is. The
+    machine-readable projection of the same facts is ``trace.to_agent_json()``.
+
+    Examples
+    --------
+    >>> report = tl.trace(model, x).explain()
+    >>> isinstance(report, str)
+    True
+    >>> "Capture status" in report
+    True
+    """
+
+    __slots__ = ()
 
 
 def explain(
-    log: Any,
+    trace: Any,
     audience: Audience = "auto",
-    format: ExplainFormat = "text",
     *,
     max_tokens: int | None = None,
-) -> str | dict[str, Any]:
-    """Explain a TorchLens log in plain language.
+) -> ExplainReport:
+    """Explain a TorchLens log in plain language (the body of ``trace.explain()``).
 
     Parameters
     ----------
-    log:
+    trace:
         Completed ``Trace``-like object.
     audience:
         Report style. ``"researcher"`` includes graph-pattern detail,
         ``"practitioner"`` emphasizes operational status, and ``"auto"``
         selects a balanced report.
-    format:
-        ``"text"`` for the existing prose report or ``"json"`` for a
-        structured dictionary.
     max_tokens:
         Optional token budget for the text report (DOCUMENTED-UNSTABLE
         spelling, naming ratification pending). Whole sections are dropped in
@@ -45,77 +68,61 @@ def explain(
         token) fits, and every drop is disclosed in a trailing ``Truncation``
         section. The ``Capture status`` honesty section is never dropped: a
         budget below that floor returns the floor plus a disclosure rather
-        than a misleading fragment. Not supported with ``format="json"``
-        (that schema is fixed-shape and already minimal).
+        than a misleading fragment.
 
     Returns
     -------
-    str | dict[str, Any]
-        Multi-section prose, or the stable flat schema documented below.
+    ExplainReport
+        Multi-section prose (a ``str``).
 
     Raises
     ------
     ValueError
-        If ``audience``, ``format``, or ``max_tokens`` is not supported.
+        If ``audience`` or ``max_tokens`` is not supported.
 
     Notes
     -----
-    The JSON schema is identified by ``schema="torchlens.explain.v1"`` and
-    contains these stable snake-case keys: ``schema``, ``audience``,
-    ``capture_status``, ``capture_verified``, ``capture_verification_reason``,
-    ``rescue_rerun``, ``model_class``, ``layer_count``, ``operation_count``,
-    ``saved_tensor_count``, ``total_tensor_count``, ``has_backward_pass``,
-    ``exception_type``, ``exception_message``, ``last_completed_op_label``,
-    ``last_completed_op_shape``, ``last_completed_op_dtype``,
-    ``last_completed_op_device``, ``failing_boundary``, and
-    ``first_nonfinite``. Evidence unavailable from the supplied log is reported
-    as ``"unknown"`` rather than inferred. ``capture_status`` is the log's
-    settled ``CaptureOutcome`` status value (``"partial"`` for a failed
-    partial capture), never assumed complete; ``capture_verified`` is the
-    tri-state stored fact (``None`` = no ceiling recorded).
+    This report is prose only. The machine-readable projection of the same
+    facts is ``trace.to_agent_json()`` (the one machine core); the former
+    ``format="json"`` form of this report is removed.
     """
 
+    refuse_presenter_subject(trace, "trace.explain")
     if audience not in {"researcher", "practitioner", "auto"}:
         raise ValueError("audience must be 'researcher', 'practitioner', or 'auto'.")
-    if format not in {"text", "json"}:
-        raise ValueError("format must be 'text' or 'json'.")
-    if max_tokens is not None:
-        if format == "json":
-            raise ValueError(
-                "max_tokens applies to format='text' only: the "
-                "torchlens.explain.v1 JSON schema is fixed-shape and already "
-                "minimal. Drop max_tokens, or use format='text'."
-            )
-        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
-            raise ValueError(
-                "max_tokens must be a positive integer token budget for the "
-                "text report; omit it for the full report."
-            )
+    if max_tokens is not None and (
+        isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1
+    ):
+        raise ValueError(
+            "max_tokens must be a positive integer token budget for the "
+            "text report; omit it for the full report."
+        )
 
-    if _is_partial_trace(log):
-        diagnosis = _partial_diagnosis(log)
-        if format == "json":
-            return _partial_json(log, audience, diagnosis)
-        return _budgeted_report(_partial_sections(diagnosis), max_tokens, drop_order=())
-
-    if format == "json":
-        return _full_json(log, audience)
+    if _is_partial_trace(trace):
+        diagnosis = _partial_diagnosis(trace)
+        return ExplainReport(
+            _budgeted_report(_partial_sections(diagnosis), max_tokens, drop_order=())
+        )
 
     sections = [
-        ("Capture status", _capture_status_lines(log)),
-        ("Model summary", _model_summary_lines(log)),
-        ("Capture summary", _capture_summary_lines(log)),
-        ("Backward summary", _backward_summary_lines(log)),
-        ("Anomalies", _anomaly_lines(log)),
-        ("Interventions", _intervention_lines(log)),
-        ("Notable patterns", _pattern_lines(log, audience=audience)),
+        ("Capture status", _capture_status_lines(trace)),
+        ("Model summary", _model_summary_lines(trace)),
+        ("Capture summary", _capture_summary_lines(trace)),
+        ("Backward summary", _backward_summary_lines(trace)),
+        ("Anomalies", _anomaly_lines(trace)),
+        ("Interventions", _intervention_lines(trace)),
+        ("Notable patterns", _pattern_lines(trace, audience=audience)),
     ]
-    return _budgeted_report(sections, max_tokens, drop_order=_SECTION_DROP_ORDER)
+    logged_value_lines = _logged_value_lines(trace)
+    if logged_value_lines:
+        sections.append(("Logged values", logged_value_lines))
+    return ExplainReport(_budgeted_report(sections, max_tokens, drop_order=_SECTION_DROP_ORDER))
 
 
 #: Low-value-first order in which ``max_tokens`` drops report sections.
 #: ``Capture status`` is deliberately absent: the honesty facts never drop.
 _SECTION_DROP_ORDER: tuple[str, ...] = (
+    "Logged values",
     "Notable patterns",
     "Interventions",
     "Backward summary",
@@ -138,52 +145,7 @@ def _estimate_tokens(text: str) -> int:
     int
         Conservative whole-token estimate (always at least 1).
     """
-
     return max(1, (len(text) + 3) // 4)
-
-
-def _partial_sections(diagnosis: dict[str, Any]) -> list[tuple[str, list[str]]]:
-    """Return the section structure of a partial-capture report.
-
-    Parameters
-    ----------
-    diagnosis:
-        Evidence fields from :func:`_partial_diagnosis`.
-
-    Returns
-    -------
-    list[tuple[str, list[str]]]
-        Ordered (title, bullet lines) sections; all are budget-undroppable
-        because every line is failure evidence.
-    """
-
-    return [
-        (
-            "Capture status",
-            [
-                "- This is a partial capture; only operations completed"
-                " before the failure are known.",
-            ],
-        ),
-        (
-            "Failure diagnosis",
-            [
-                (
-                    "- Last completed op: "
-                    f"{diagnosis['last_completed_op_label']} "
-                    f"(shape={diagnosis['last_completed_op_shape']}, "
-                    f"dtype={diagnosis['last_completed_op_dtype']}, "
-                    f"device={diagnosis['last_completed_op_device']})."
-                ),
-                f"- Failing boundary: {diagnosis['failing_boundary']}.",
-                (
-                    "- Captured exception: "
-                    f"{diagnosis['exception_type']}: {diagnosis['exception_message']}"
-                ),
-                f"- First non-finite evidence: {diagnosis['first_nonfinite']}",
-            ],
-        ),
-    ]
 
 
 def _render_report(
@@ -283,97 +245,7 @@ def _is_partial_trace(log: Any) -> bool:
         Whether the object is a failed partial capture wrapper.
     """
 
-    from ..partial import PartialTrace
-
     return isinstance(log, PartialTrace)
-
-
-def _last_partial_op(log: Any) -> Any | None:
-    """Return the last recorded completed operation in a partial capture.
-
-    Parameters
-    ----------
-    log:
-        Partial capture wrapper.
-
-    Returns
-    -------
-    Any | None
-        Last raw operation, or ``None`` when none completed.
-    """
-
-    raw_layers = tuple(getattr(log, "raw_layers", ()))
-    return raw_layers[-1] if raw_layers else None
-
-
-def _partial_boundary(log: Any) -> str:
-    """Return the nearest evidence-backed failure boundary description.
-
-    Parameters
-    ----------
-    log:
-        Partial capture wrapper.
-
-    Returns
-    -------
-    str
-        Recorded exception field or traceback location, otherwise ``"unknown"``.
-    """
-
-    exception = log.original_exception
-    fields = getattr(exception, "fields", {})
-    if isinstance(fields, dict) and (fields.get("layer") or fields.get("op")):
-        return f"layer={fields.get('layer', 'unknown')}, op={fields.get('op', 'unknown')}"
-    extracted = traceback.extract_tb(exception.__traceback__)
-    forward_frames = [frame for frame in extracted if frame.name == "forward"]
-    if forward_frames:
-        frame = forward_frames[-1]
-        return f"forward at {frame.filename}:{frame.lineno}"
-    if extracted:
-        frame = extracted[-1]
-        return f"{frame.name} at {frame.filename}:{frame.lineno}"
-    return "unknown"
-
-
-def _partial_diagnosis(log: Any) -> dict[str, Any]:
-    """Collect evidence-backed fields for a failed partial capture.
-
-    Parameters
-    ----------
-    log:
-        Partial capture wrapper.
-
-    Returns
-    -------
-    dict[str, Any]
-        Last-op, boundary, exception, and non-finite evidence.
-    """
-
-    op = _last_partial_op(log)
-    output = getattr(op, "out", None) if op is not None else None
-    label = (
-        str(getattr(op, "_label_raw", getattr(op, "_layer_label_raw", "unknown")))
-        if op is not None
-        else "unknown"
-    )
-    shape = getattr(op, "shape", None) if op is not None else None
-    dtype = getattr(op, "dtype", None) if op is not None else None
-    device = getattr(op, "device", None) if op is not None else None
-    if isinstance(output, torch.Tensor):
-        shape = tuple(output.shape) if shape is None else shape
-        dtype = output.dtype if dtype is None else dtype
-        device = output.device if device is None else device
-    exception = log.original_exception
-    return {
-        "last_completed_op_label": label,
-        "last_completed_op_shape": tuple(shape) if shape is not None else "unknown",
-        "last_completed_op_dtype": str(dtype) if dtype is not None else "unknown",
-        "last_completed_op_device": str(device) if device is not None else "unknown",
-        "failing_boundary": _partial_boundary(log),
-        "exception_type": type(exception).__name__,
-        "exception_message": str(exception),
-        "first_nonfinite": str(log.first_nonfinite()),
-    }
 
 
 def _capture_verification(log: Any) -> dict[str, Any]:
@@ -381,9 +253,9 @@ def _capture_verification(log: Any) -> dict[str, Any]:
 
     The report layer's honesty contract (report/AGENTS.md) requires a rescued
     or ceilinged capture (``capture_verified=False``) to stay visible in every
-    report surface. ``capture_status`` used to be HARDCODED ``"complete"`` for
-    every non-partial log (round-7 R67/R88 HIGH), so a HALTED or rescued
-    capture explained as clean.
+    report surface. ``capture_status`` is read from the log, never hardcoded
+    ``"complete"`` for every non-partial log, which would explain a HALTED
+    or rescued capture as clean.
 
     Parameters
     ----------
@@ -395,19 +267,66 @@ def _capture_verification(log: Any) -> dict[str, Any]:
     dict[str, Any]
         ``capture_status`` (the settled ``CaptureOutcome`` status value, or
         ``"unknown"`` when the log carries none), tri-state
-        ``capture_verified`` (``None`` = no ceiling recorded),
+        ``capture_verified`` (``None`` = not checked, witness not armed),
         ``capture_verification_reason``, and ``rescue_rerun``.
     """
 
-    outcome = getattr(log, "outcome", None)
-    status = getattr(outcome, "status", None)
-    status_value = getattr(status, "value", None)
-    return {
-        "capture_status": str(status_value) if status_value is not None else "unknown",
-        "capture_verified": getattr(log, "capture_verified", None),
-        "capture_verification_reason": getattr(log, "capture_verification_reason", None),
-        "rescue_rerun": bool(getattr(log, "rescue_rerun", None) or False),
-    }
+    # Delegates to the ONE shared source (torchlens._capture_honesty) so
+    # explain, to_agent_json, and every exporter preamble read identical facts.
+    return capture_verification(log)
+
+
+def _episode_status_lines(episode: Mapping[str, Any]) -> list[str]:
+    """Return the episode-capture disclosure bullets (F40b/F40c families).
+
+    Parameters
+    ----------
+    episode:
+        The ``episode_facts`` mapping (non-``None``).
+
+    Returns
+    -------
+    list[str]
+        Bullet lines for the episode declaration, step-join claim, and
+        forced-tokens disclosure.
+    """
+
+    basis = episode.get("fidelity_basis")
+    lines = [
+        "- Episode capture: "
+        f"{episode.get('n_steps_declared')} declared step(s), "
+        f"token_feed={episode.get('token_feed')}, "
+        f"fidelity_basis={basis}; per-step ledger at "
+        "trace.annotations['episode']."
+    ]
+    step_join = str(episode.get("step_join"))
+    if step_join == "unmeasured":
+        lines.append(
+            "- Cross-step continuity is DECLARED, not measured: "
+            "token_feed reflects the declaration only; this artifact "
+            "carries no step_join envelope."
+        )
+    elif step_join.startswith("broken_at_step_") or step_join.startswith(
+        "declared_crossing_at_step_"
+    ):
+        lines.append(
+            f"- Cross-step join BREAK measured ({step_join}): the trace "
+            "is intact but chain-shaped at that join; step-series reads, "
+            "whole-episode replay, and the blessing fold refuse across "
+            "it, per-segment reads are unaffected."
+        )
+    elif step_join == "measured_with_unchecked_joins":
+        lines.append(
+            "- Cross-step joins measured with UNCHECKED gaps (reasons in "
+            "the step_join envelope): series claims refuse across the "
+            "unchecked joins."
+        )
+    if basis == "forced":
+        lines.append(
+            "- Forced-tokens episode: a disclosed NON-VERIFYING mode; "
+            "emitted tokens were supplied, not generated."
+        )
+    return lines
 
 
 def _capture_status_lines(log: Any) -> list[str]:
@@ -426,8 +345,8 @@ def _capture_status_lines(log: Any) -> list[str]:
 
     facts = _capture_verification(log)
     lines = [f"- Capture outcome: {facts['capture_status']}."]
-    # L7a G3 render honesty (memo sec 3.4).
-    if bool(getattr(log, "structure_only", False)):
+    # Render honesty: say so when shapes/dtypes are hypotheses.
+    if bool(log._options_structure_only if is_live_trace(log) else False):
         lines.append(
             "- Structure-only capture: shapes/dtypes are HYPOTHESES, not "
             "measurements; discharge against a real capture to corroborate."
@@ -442,128 +361,46 @@ def _capture_status_lines(log: Any) -> list[str]:
     elif facts["capture_verified"] is True:
         lines.append("- Capture verification: verified.")
     else:
-        lines.append("- Capture verification: no ceiling recorded.")
+        # The default capture never arms the completeness witness, so an
+        # absent verdict must not read as a clean bill -- host escapes the
+        # wrappers cannot see (from_numpy/as_tensor/from_dlpack round-trips,
+        # numpy-backed autograd.Functions, storage writes) leave no ceiling here.
+        lines.append(
+            "- Capture verification: not checked (the completeness witness is not "
+            "armed on the default capture; wrap_torch(completeness_witness=True) or "
+            "tl.validate arm it). Absence of a ceiling is not a clean bill."
+        )
+    interventions = intervention_facts(log)
+    if interventions is not None:
+        lines.append(
+            f"- INTERVENED capture: {interventions['fire_count']} intervention fire(s) "
+            f"replaced {interventions['replaced_op_count']} op(s) "
+            f"{interventions['replaced_ops']}; values at those sites and downstream are "
+            "counterfactual edits, not the model's own forward."
+        )
     if facts["rescue_rerun"]:
         lines.append(
             "- This result came from the disclosed rescue re-run "
             "(mode_rescue_rerun), not the primary capture."
         )
+    poison = poison_facts(log)
+    if poison["poisoned"]:
+        lines.append(
+            "- POISONED sparse run (path_faithfulness="
+            f"{poison.get('path_faithfulness', 'unknown')}): this trace was "
+            "returned via return_diverged=True and its values are NOT "
+            "model-faithful; inspect the divergence, do not publish the numbers."
+        )
+    episode = episode_facts(log)
+    if episode is not None:
+        lines.extend(_episode_status_lines(episode))
+    for advisory in capture_advisories(log):
+        lines.append(
+            f"- Capture advisory: {advisory.get('kind')} "
+            f"x{advisory.get('count')} (first at "
+            f"{advisory.get('first_location') or 'unknown location'})."
+        )
     return lines
-
-
-def _base_json(log: Any, audience: Audience) -> dict[str, Any]:
-    """Return fields common to complete and partial JSON reports.
-
-    Parameters
-    ----------
-    log:
-        Capture object.
-    audience:
-        Requested audience label.
-
-    Returns
-    -------
-    dict[str, Any]
-        Common stable-schema fields.
-    """
-
-    return {
-        "schema": "torchlens.explain.v1",
-        "audience": audience,
-        **_capture_verification(log),
-        "model_class": getattr(log, "model_class_name", type(log).__name__),
-        "layer_count": _safe_len(getattr(log, "layer_list", None)),
-        "operation_count": int(getattr(log, "num_ops", 0) or 0),
-        "saved_tensor_count": int(getattr(log, "num_saved_ops", 0) or 0),
-        "total_tensor_count": int(getattr(log, "num_tensors", 0) or 0),
-        "has_backward_pass": bool(getattr(log, "has_backward_pass", False)),
-        "exception_type": "unknown",
-        "exception_message": "unknown",
-        "last_completed_op_label": "unknown",
-        "last_completed_op_shape": "unknown",
-        "last_completed_op_dtype": "unknown",
-        "last_completed_op_device": "unknown",
-        "failing_boundary": "unknown",
-        "first_nonfinite": _first_nonfinite_summary(log),
-    }
-
-
-def _full_json(log: Any, audience: Audience) -> dict[str, Any]:
-    """Build the stable JSON schema for a completed trace.
-
-    Parameters
-    ----------
-    log:
-        Completed trace.
-    audience:
-        Requested audience label.
-
-    Returns
-    -------
-    dict[str, Any]
-        Stable full-trace report dictionary.
-    """
-
-    return _base_json(log, audience)
-
-
-def _partial_json(
-    log: Any,
-    audience: Audience,
-    diagnosis: dict[str, Any],
-) -> dict[str, Any]:
-    """Build the stable JSON schema for a partial trace.
-
-    Parameters
-    ----------
-    log:
-        Partial capture wrapper.
-    audience:
-        Requested audience label.
-    diagnosis:
-        Evidence fields from :func:`_partial_diagnosis`.
-
-    Returns
-    -------
-    dict[str, Any]
-        Stable failed-capture report dictionary.
-    """
-
-    result = _base_json(log, audience)
-    result.update(diagnosis)
-    result.update(
-        {
-            "capture_status": "partial",
-            "model_class": getattr(log.trace, "model_class_name", type(log.trace).__name__),
-            "layer_count": len(log.raw_layers),
-            "operation_count": len(log.raw_layers),
-            "saved_tensor_count": sum(
-                bool(getattr(op, "has_saved_activation", False)) for op in log.raw_layers
-            ),
-            "total_tensor_count": len(log.raw_layers),
-        }
-    )
-    return result
-
-
-def _first_nonfinite_summary(log: Any) -> str:
-    """Return a saved-output non-finite summary without speculation.
-
-    Parameters
-    ----------
-    log:
-        Completed trace-like object.
-
-    Returns
-    -------
-    str
-        First recorded non-finite detail, or a scoped clean statement.
-    """
-
-    layer = first_nonfinite_layer(log, kind="saved")
-    if layer is None:
-        return f"No non-finite values found in saved outputs{coverage_gap_note(log, kind='saved')}."
-    return _first_nonfinite_detail(log, str(getattr(layer, "layer_label", "unknown")))
 
 
 def _first_nonfinite_detail(log: Any, saved_label: str) -> str:
@@ -571,7 +408,7 @@ def _first_nonfinite_detail(log: Any, saved_label: str) -> str:
 
     ``log.first_nonfinite()`` re-asks the trace under its own scan contract and can
     itself raise ``ValueError`` on a selective-save trace (it reads unsaved ``.out``
-    payloads, saved or not, and revalidating a memo reads them too). explain() must
+    payloads, saved or not, and revalidating its scan reads them too). explain() must
     not propagate that: fall back to the scoped saved-output statement so the
     report always honors its ``unknown``/clean contract.
 
@@ -592,7 +429,11 @@ def _first_nonfinite_detail(log: Any, saved_label: str) -> str:
     if not hasattr(log, "first_nonfinite"):
         return scoped
     try:
-        return str(log.first_nonfinite())
+        # Explicit link_format: report text is publishable data, so the source
+        # location must stay plain ``path:line`` -- never an OSC 8 escape or a
+        # resolved-absolute-path URI. Duck-typed logs without the kwarg fall
+        # into the TypeError arm and keep the scoped statement.
+        return str(log.first_nonfinite(link_format="text"))
     except (ValueError, RuntimeError, TypeError):
         return scoped
 
@@ -611,21 +452,48 @@ def _model_summary_lines(log: Any) -> list[str]:
         Bullet lines for the model section.
     """
 
-    model_class_name = getattr(log, "model_class_name", type(log).__name__)
-    num_params = int(getattr(log, "num_params", 0) or 0)
-    trainable_params = int(getattr(log, "num_params_trainable", 0) or 0)
-    frozen_params = int(getattr(log, "num_params_frozen", 0) or 0)
-    total_flops = int(getattr(log, "total_flops_forward", getattr(log, "total_flops", 0)) or 0)
-    module_count = _safe_len(getattr(log, "modules", None))
-    return [
+    from ._factcore import factcore  # deferred: cycle report
+
+    model_class_name = log._source_class_name if is_live_trace(log) else type(log).__name__
+    # Single-source law: headline facts come from
+    # FactCore, never raw trace attributes. A husked/foreign log that cannot
+    # serve the substrate degrades to the legacy zero-shape (explain is the
+    # one member that never refuses).
+    try:
+        core = factcore(log)
+    except Exception:  # noqa: BLE001 -- cleaned/foreign logs keep the degraded report
+        num_params = int(getattr(log, "num_params", 0) or 0)
+        return [
+            f"- Architecture: {model_class_name}.",
+            f"- Parameters: {_format_count(num_params)} unique.",
+            "- Forward FLOPs: unavailable on this object.",
+            f"- Modules represented: {_safe_len(getattr(log, 'modules', None))}.",
+        ]
+    num_params = core.params.total or 0
+    trainable_params = core.params.trainable or 0
+    frozen_params = core.params.frozen or 0
+    total_flops = int(core.compute.partition_total)
+    lines = [
         f"- Architecture: {model_class_name}.",
         (
-            f"- Parameters: {_format_count(num_params)} total "
+            f"- Parameters: {_format_count(num_params)} unique "
             f"({_format_count(trainable_params)} trainable, {_format_count(frozen_params)} frozen)."
         ),
-        f"- Forward FLOPs: {_format_count(total_flops)}.",
-        f"- Modules represented: {_format_count(module_count)}.",
     ]
+    for group in core.params.tied_groups:
+        lines.append(f"- Tied parameters: {' == '.join(group)}.")
+    flops_line = f"- Forward FLOPs (actual-path analytic): {_format_count(total_flops)}."
+    if core.compute.coverage.unknown:
+        flops_line += (
+            f" LOWER BOUND: {core.compute.coverage.unknown} op(s) carry no cost rule "
+            "(see trace.unknown_flop_ops)."
+        )
+    if attention_ops := counted_attention_ops(core.compute):
+        note = attention_full_square_line(attention_ops)
+        flops_line += f" {note[:1].upper()}{note[1:]}."
+    lines.append(flops_line)
+    lines.append(f"- Modules represented: {_format_count(core.counts.modules)}.")
+    return lines
 
 
 def _capture_summary_lines(log: Any) -> list[str]:
@@ -642,20 +510,36 @@ def _capture_summary_lines(log: Any) -> list[str]:
         Bullet lines for the capture section.
     """
 
-    layer_count = _safe_len(getattr(log, "layer_list", None))
-    operation_count = int(getattr(log, "num_ops", 0) or 0)
-    tensor_total = int(getattr(log, "num_tensors", 0) or 0)
-    tensor_saved = int(getattr(log, "num_saved_ops", 0) or 0)
+    from ._factcore import factcore  # deferred: cycle report
+
+    # Counts come from the explicit grain vocabulary: the bare
+    # word "operations" cannot denote both the compute ops and the tracked
+    # tensor rows, so both grains print under their names. Husked/foreign
+    # logs degrade to the legacy zero-shape.
+    try:
+        core = factcore(log)
+    except Exception:  # noqa: BLE001 -- cleaned/foreign logs keep the degraded report
+        return [
+            f"- Layers logged: {_safe_len(log._layer_list if is_live_trace(log) else None)}.",
+            f"- Operations logged: {int((log._num_ops if is_live_trace(log) else 0) or 0)}.",
+        ]
     pass_counts = [
         int(value)
-        for value in (getattr(log, "layer_num_calls", {}) or {}).values()
+        for value in ((log._layer_num_calls if is_live_trace(log) else None) or {}).values()
         if isinstance(value, int)
     ]
     max_ops = max(pass_counts, default=1)
     return [
-        f"- Layers logged: {_format_count(layer_count)}.",
-        f"- Operations logged: {_format_count(operation_count)}.",
-        f"- Tensors saved: {_format_count(tensor_saved)} of {_format_count(tensor_total)}.",
+        f"- Layers logged: {_format_count(core.counts.layers)}.",
+        (
+            f"- Compute ops logged: {_format_count(core.counts.compute_ops)} "
+            f"({_format_count(core.counts.tracked_tensor_rows)} tracked tensor rows incl. "
+            f"{_format_count(core.counts.alias_rows)} boundary/buffer rows)."
+        ),
+        (
+            f"- Tensors saved at capture: {_format_count(core.memory.captured_saved_ops)} "
+            f"of {_format_count(core.counts.tracked_tensor_rows)}."
+        ),
         f"- Maximum observed ops for one layer: {_format_count(max_ops)}.",
     ]
 
@@ -674,13 +558,13 @@ def _backward_summary_lines(log: Any) -> list[str]:
         Bullet lines for the backward section.
     """
 
-    if not bool(getattr(log, "has_backward_pass", False)):
+    if not bool(log._autograd_has_backward_pass if is_live_trace(log) else False):
         return ["- No backward passes are recorded on this log."]
-    pass_count = int(getattr(log, "num_backward_passes", 0) or 0)
-    grad_fn_count = int(getattr(log, "num_grad_fns", 0) or 0)
-    grad_fn_call_count = int(getattr(log, "num_grad_fn_calls", 0) or 0)
+    pass_count = int((log._num_backward_passes if is_live_trace(log) else 0) or 0)
+    grad_fn_count = len(getattr(getattr(log, "autograd", None), "grad_fns", None) or ())
+    grad_fn_call_count = len(getattr(getattr(log, "autograd", None), "grad_fn_calls", None) or ())
     saved_grad_count = _safe_len(getattr(log, "saved_grad_ops", None))
-    total_backward_memory = getattr(log, "total_backward_memory", None)
+    total_backward_memory = log._cost_total_backward_memory if is_live_trace(log) else None
     memory_line = (
         f"- Unique backward payload memory: {total_backward_memory}."
         if total_backward_memory is not None
@@ -711,22 +595,75 @@ def _anomaly_lines(log: Any) -> list[str]:
         Bullet lines describing non-finite outs.
     """
 
-    nonfinite_labels = [
-        str(getattr(layer, "layer_label", "unknown"))
-        for layer in nonfinite_layers(log, kind="saved")
-    ]
-    if not nonfinite_labels:
-        # This bullet stands alone in the report -- the hedged ``first_nonfinite``
-        # evidence line only appears in the failure diagnosis -- so the scan's
-        # coverage gaps have to be disclosed right here or a selective-save (or
-        # quantized-payload) capture reads as an audited clean bill of health.
-        return [f"- No NaN or Inf values were found in saved outs{coverage_gap_note(log)}."]
-    first = nonfinite_labels[0]
+    from ._health import health_facts  # deferred: cycle report
+
+    # Bare explain renders the THREE health states
+    # from whatever basis is in hand and NEVER scans -- and it says "not
+    # audited" with the spelling. The false negative this kills: a
+    # payload-stripped all-NaN artifact reading as clean.
+    facts = health_facts(log, allow_scan=False)
+    verdict = facts.verdict
+    basis = facts.source_basis or facts.basis
+    if verdict == "found":
+        labels = facts.nonfinite_labels or facts.alias_nonfinite_labels
+        first = labels[0]
+        lines = [
+            (
+                f"- FOUND: {len(facts.nonfinite_labels)} op output(s) contain NaN or Inf "
+                f"values (basis: {basis})."
+            ),
+            f"- First affected op: {first}.",
+        ]
+        if facts.alias_nonfinite_labels:
+            lines.append(
+                f"- Alias-view hits (boundary/buffer rows): {len(facts.alias_nonfinite_labels)}."
+            )
+        detail = _first_nonfinite_detail(log, str(first).rsplit(":", 1)[0])
+        lines.append(f"- Detail: {detail}")
+        lines.append("- Not audited: judgments (severity, follow-ups) come from tl.audit(trace).")
+        return lines
+    if verdict == "checked_and_clean":
+        return [
+            (
+                f"- CHECKED-AND-CLEAN: {facts.num_checked_ops} op output(s) examined, none "
+                f"non-finite (basis: {basis})."
+            ),
+            "- Not audited: judgments (severity, follow-ups) come from tl.audit(trace).",
+        ]
+    if basis not in ("unscanned", "underivable"):
+        # A basis exists but coverage has gaps (disk-backed, inference-mode,
+        # uncheckable dtypes, unsaved outputs): disclose the exact gaps
+        # through the shared wording -- safe, no new scan runs.
+        from .._data_classes._nonfinite import coverage_gap_note
+
+        return [
+            (
+                "- NOT-CHECKED overall: no non-finite values in the examined outputs"
+                f"{coverage_gap_note(log, kind='saved')} (basis: {basis})."
+            ),
+            *_track_nonfinite_hint_lines(log),
+            "- Not audited: judgments (severity, follow-ups) come from tl.audit(trace).",
+        ]
     return [
-        f"- {len(nonfinite_labels)} saved out(s) contain NaN or Inf values.",
-        f"- First affected layer: {first}.",
-        f"- Detail: {_first_nonfinite_detail(log, first)}",
+        (
+            f"- NOT-CHECKED: non-finite health has not been established on this object "
+            f"({facts.num_unexamined_ops} saved output(s) unexamined; basis: {basis})."
+        ),
+        (
+            "- To scan retained payloads (payload_scan cost): "
+            "trace.health_facts or trace.nonfinite_ops."
+        ),
+        *_track_nonfinite_hint_lines(log),
     ]
+
+
+def _track_nonfinite_hint_lines(log: Any) -> list[str]:
+    """The partial-coverage hint line, while track_nonfinite is off."""
+
+    from ._health import nonfinite_option_hint  # deferred: cycle report
+
+    hint = nonfinite_option_hint(log, "not_checked")
+    return [f"- To check every op as it runs: {hint}."] if hint else []
 
 
 def _intervention_lines(log: Any) -> list[str]:
@@ -754,6 +691,42 @@ def _intervention_lines(log: Any) -> list[str]:
         f"- Hook edits: {_format_count(len(hook_specs))}.",
         f"- Recorded intervention operations: {_format_count(len(history))}.",
     ]
+
+
+#: Rendering bounds for the Logged values section: user values are arbitrary
+#: objects, and report text must stay bounded no matter what was logged.
+_LOGGED_VALUE_MAX_ENTRIES = 10
+_LOGGED_VALUE_MAX_REPR = 80
+
+
+def _logged_value_lines(log: Any) -> list[str]:
+    """Return capture-time ``log_value`` read-back lines, bounded.
+
+    Parameters
+    ----------
+    log:
+        Model log to inspect.
+
+    Returns
+    -------
+    list[str]
+        Bullet lines for recorded values (empty when none were recorded);
+        entries beyond the cap are disclosed by count, never silently dropped.
+    """
+
+    values = (getattr(log, "annotations", {}) or {}).get("logged_values", {})
+    if not isinstance(values, dict) or not values:
+        return []
+    lines = []
+    for name, value in list(values.items())[:_LOGGED_VALUE_MAX_ENTRIES]:
+        rendered = repr(value)
+        if len(rendered) > _LOGGED_VALUE_MAX_REPR:
+            rendered = rendered[: _LOGGED_VALUE_MAX_REPR - 3] + "..."
+        lines.append(f"- {name} = {rendered}")
+    omitted = len(values) - _LOGGED_VALUE_MAX_ENTRIES
+    if omitted > 0:
+        lines.append(f"- ... and {omitted} more (read them all via trace.logged_values).")
+    return lines
 
 
 def _pattern_lines(log: Any, *, audience: Audience) -> list[str]:
@@ -810,7 +783,7 @@ def _shared_parameter_line(log: Any) -> str:
     """
 
     shared = 0
-    for param_log in getattr(log, "param_logs", []) or []:
+    for param_log in (log._param_logs if is_live_trace(log) else None) or []:
         used_by_ops = set(getattr(param_log, "used_by_ops", ()) or ())
         try:
             num_calls = int(getattr(param_log, "num_calls", 0) or 0)
@@ -840,7 +813,7 @@ def _recurrent_loop_line(log: Any) -> str:
         Recurrent-loop summary.
     """
 
-    max_loops = int(getattr(log, "max_layer_op_count", 1) or 1)
+    max_loops = int(getattr(getattr(log, "graph", None), "max_ops_per_layer", 1) or 1)
     if max_loops > 1:
         return f"- Recurrent loops: at least one layer was observed across {max_loops} ops."
     return "- Recurrent loops: no repeated layer ops were detected."
@@ -860,8 +833,8 @@ def _dynamic_control_flow_line(log: Any) -> str:
         Dynamic-control-flow summary.
     """
 
-    event_count = _safe_len(getattr(log, "conditional_records", None))
-    has_branching = bool(getattr(log, "has_conditional_branching", False))
+    event_count = _safe_len(log._graph_conditional_records if is_live_trace(log) else None)
+    has_branching = bool(getattr(getattr(log, "graph", None), "has_conditional_branching", False))
     if event_count or has_branching:
         return (
             f"- Dynamic control flow: {_format_count(event_count)} conditional event(s) recorded."
@@ -885,7 +858,7 @@ def _operation_mix_line(log: Any) -> str:
 
     names = [
         str(getattr(layer, "func_name", "unknown"))
-        for layer in getattr(log, "layer_list", []) or []
+        for layer in (log._layer_list if is_live_trace(log) else None) or []
         if str(getattr(layer, "func_name", "none")) != "none"
     ]
     if not names:
@@ -908,12 +881,12 @@ def _operational_status_line(log: Any) -> str:
         Operational status summary.
     """
 
-    cache_hit = bool(getattr(log, "capture_cache_hit", False))
+    cache_hit = bool(log._provenance_cache_hit if is_live_trace(log) else False)
     streamed = sum(
         1
-        for layer in getattr(log, "layer_list", []) or []
-        if getattr(layer, "out_ref", None) is not None
-        or getattr(layer, "grad_ref", None) is not None
+        for layer in (log._layer_list if is_live_trace(log) else None) or []
+        if record_member(layer, "out_ref", None) is not None
+        or record_member(layer, "grad_ref", None) is not None
     )
     return f"- Operational status: cache_hit={cache_hit}, streamed_ops={streamed}."
 

@@ -4,8 +4,6 @@ import pytest
 
 from . import _snapshot
 
-pytestmark = pytest.mark.smoke
-
 
 @pytest.mark.parametrize("separator", ["/", "\\"])
 def test_repository_source_locations_use_portable_separators(

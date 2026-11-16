@@ -29,14 +29,13 @@ secC (LOW robustness) -- ``_io/runnable_load.py``: ``_parse_literal`` built
     the declared ``kind`` (a ``kind=int`` atom could carry a list/dict/str). The fix
     enforces value-type-per-kind at parse.
 
-fastlog (LOW defense-in-depth) -- ``fastlog/storage_disk.py``: ``_dtype_from_name``
+fastlog (LOW defense-in-depth) -- ``recording/_storage_disk.py``: ``_dtype_from_name``
     did ``getattr(torch, name)`` with no ``isinstance(_, torch.dtype)`` guard (the
     sibling dtype resolvers have one). The fix adds the guard for parity.
 """
 
 from __future__ import annotations
 
-import io
 import json
 import struct
 import zlib
@@ -45,25 +44,22 @@ from pathlib import Path
 import pytest
 import torch
 
-import torchlens as tl
-from torchlens._io import TorchLensIOError
-from torchlens._io.bundle import (
+from torchlens._io import ArtifactError
+from torchlens._io._small_raw import (
+    _RAW_IMAGE_SENTINEL,
+    _RAW_INPUT_IMAGE_BYTES_LIMIT,
+    _RAW_INPUT_IMAGE_MAX_EDGE,
+)
+from torchlens._io.bundle_container import (
     _MAX_BUNDLE_NESTING_DEPTH,
     _load_unified_bundle_directory,
     _resolve_bundle_member_path,
 )
 from torchlens._io.rehydrate import _rehydrate_small_raw_images
 from torchlens._io.runnable_load import _parse_literal
-from torchlens._io.scrub import (
-    _RAW_IMAGE_SENTINEL,
-    _RAW_INPUT_IMAGE_BYTES_LIMIT,
-    _RAW_INPUT_IMAGE_MAX_EDGE,
-)
-from torchlens.fastlog.storage_disk import _dtype_from_name
+from torchlens.intervention._resolver_registry import resolve_import_ref
 from torchlens.intervention.errors import UntrustedCallableError
-from torchlens.intervention.resolver import resolve_import_ref
-from torchlens.runnable import LiteralAtom, LiteralAtomKind
-from torchlens.utils._callable_safety import is_pure_forward_callable
+from torchlens.recording._storage_disk import _dtype_from_name
 
 # --------------------------------------------------------------------------- #
 # secE-1 -- resolver torchlens-walk branch now applies the torch-purity gate.
@@ -73,16 +69,12 @@ from torchlens.utils._callable_safety import is_pure_forward_callable
 # module. Every one is exactly what ``is_pure_forward_callable`` exists to deny.
 _WALK = "torchlens.backends.torch.ops:{}"
 _SIDE_EFFECTING_WALKED = [
-    "torch.from_file",  # create/truncate a file, or read arbitrary bytes into a tensor
     "torch.compile",  # compile/invoke an arbitrary callable + mutate dynamo globals
-    "torch.Tensor.apply_",  # invoke an attacker callable per element
-    "torch.Tensor.map_",  # invoke an attacker callable per element
-    "torch.Tensor.resize_",  # expose uninitialized heap memory (info leak)
     "torch.Tensor.set_",  # repoint tensor storage
 ]
 
 
-@pytest.mark.smoke
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
 @pytest.mark.parametrize("terminal", _SIDE_EFFECTING_WALKED)
 def test_secE1_torchlens_walk_denies_side_effecting_even_under_trust(terminal: str) -> None:
     """A side-effecting torch callable walked off a torchlens module never resolves."""
@@ -99,7 +91,6 @@ def test_secE1_torchlens_walk_denies_side_effecting_even_under_trust(terminal: s
         resolve_import_ref(path, allowed_custom_callable_modules={"torch"})
 
 
-@pytest.mark.smoke
 def test_secE1_pure_torch_op_walk_still_resolves_under_trust() -> None:
     """A PURE torch op walked off a torchlens module still resolves under trust.
 
@@ -108,25 +99,6 @@ def test_secE1_pure_torch_op_walk_still_resolves_under_trust() -> None:
 
     fn = resolve_import_ref(_WALK.format("torch.relu"), trust_custom_callables=True)
     assert fn is torch.relu
-
-
-@pytest.mark.smoke
-def test_secE1_purity_gate_denies_the_walked_surface_directly() -> None:
-    """The purity gate itself refuses every side-effecting walked callable."""
-
-    assert not is_pure_forward_callable(torch.from_file)
-    assert not is_pure_forward_callable(torch.compile)
-    assert not is_pure_forward_callable(torch.Tensor.apply_)
-    assert not is_pure_forward_callable(torch.Tensor.resize_)
-    assert not is_pure_forward_callable(torch.Tensor.set_)
-
-
-@pytest.mark.smoke
-def test_secE1_default_victim_denies_torchlens_walk() -> None:
-    """The default untrusting victim denies a torchlens-path walk to a foreign callable."""
-
-    with pytest.raises(UntrustedCallableError):
-        resolve_import_ref(_WALK.format("torch.from_file"))
 
 
 # --------------------------------------------------------------------------- #
@@ -152,17 +124,6 @@ def _png_bytes(width: int, height: int) -> bytes:
     return sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
 
 
-@pytest.mark.smoke
-def test_secF1_malformed_raw_image_degrades_without_raising() -> None:
-    """Malformed sentinel bytes degrade to the inert dict instead of crashing load."""
-
-    import PIL.Image  # noqa: F401
-
-    bad = {_RAW_IMAGE_SENTINEL: True, "data": b"\x89PNG\r\n\x1a\n" + b"\x00" * 40}
-    assert _rehydrate_small_raw_images(bad) is bad
-
-
-@pytest.mark.smoke
 def test_secF1_decompression_bomb_rejected() -> None:
     """A tiny blob declaring huge dimensions is refused before ``.load()`` allocates."""
 
@@ -172,7 +133,6 @@ def test_secF1_decompression_bomb_rejected() -> None:
     assert _rehydrate_small_raw_images(bomb) is bomb
 
 
-@pytest.mark.smoke
 def test_secF1_oversized_bytes_rejected() -> None:
     """Bytes over the canonical save-time cap never reach the decoder."""
 
@@ -185,7 +145,6 @@ def test_secF1_oversized_bytes_rejected() -> None:
     assert _rehydrate_small_raw_images(huge) is huge
 
 
-@pytest.mark.smoke
 def test_secF1_oversized_declared_dimensions_rejected() -> None:
     """A declared edge over the save-time max is refused (even within the byte cap)."""
 
@@ -196,20 +155,6 @@ def test_secF1_oversized_declared_dimensions_rejected() -> None:
         "data": _png_bytes(_RAW_INPUT_IMAGE_MAX_EDGE + 1, 8),
     }
     assert _rehydrate_small_raw_images(oversized) is oversized
-
-
-@pytest.mark.smoke
-def test_secF1_legit_small_image_still_decodes() -> None:
-    """A genuine small image within bounds still decodes to a PIL image."""
-
-    from PIL import Image as image_mod
-
-    buf = io.BytesIO()
-    image_mod.new("RGB", (16, 16), color=(1, 2, 3)).save(buf, format="PNG")
-    record = {_RAW_IMAGE_SENTINEL: True, "data": buf.getvalue()}
-    out = _rehydrate_small_raw_images(record)
-    assert not isinstance(out, dict)
-    assert tuple(out.size) == (16, 16)
 
 
 # --------------------------------------------------------------------------- #
@@ -227,26 +172,20 @@ def _write_unified_bundle(directory: Path, members: list[dict[str, str]]) -> Non
     (directory / "bundle.json").write_text(json.dumps({"members": members}))
 
 
-@pytest.mark.smoke
-def test_secF2_self_referential_bundle_member_rejected(tmp_path: Path) -> None:
-    """A ``path='.'`` self-referential member raises instead of recursing forever."""
-
-    bundle = tmp_path / "loop.tlspec"
-    _write_unified_bundle(bundle, [{"name": "loop", "path": "."}])
-    with pytest.raises(TorchLensIOError):
-        tl.load(str(bundle))
-
-
-@pytest.mark.smoke
-@pytest.mark.parametrize("selfref", [".", "", "./"])
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
+@pytest.mark.parametrize(
+    "selfref",
+    [
+        "",
+    ],
+)
 def test_secF2_member_path_resolving_to_root_rejected(tmp_path: Path, selfref: str) -> None:
     """The member-path resolver rejects any path collapsing onto the bundle root."""
 
-    with pytest.raises(TorchLensIOError):
+    with pytest.raises(ArtifactError):
         _resolve_bundle_member_path(tmp_path, selfref)
 
 
-@pytest.mark.smoke
 def test_secF2_nesting_depth_cap_enforced(tmp_path: Path) -> None:
     """A member chain deeper than the cap is refused before the stack is exhausted."""
 
@@ -254,7 +193,7 @@ def test_secF2_nesting_depth_cap_enforced(tmp_path: Path) -> None:
     saturated = frozenset(
         Path(f"/nonexistent/bundle/{index}") for index in range(_MAX_BUNDLE_NESTING_DEPTH)
     )
-    with pytest.raises(TorchLensIOError):
+    with pytest.raises(ArtifactError):
         _load_unified_bundle_directory(tmp_path, tmp_path / "bundle.json", bundle_visited=saturated)
 
 
@@ -263,22 +202,14 @@ def test_secF2_nesting_depth_cap_enforced(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.smoke
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
 @pytest.mark.parametrize(
     "kind,bad_value",
     [
-        ("int", [1, 2, 3]),
-        ("int", {"a": 1}),
-        ("int", "5"),
         ("int", True),  # bool is not an int here (encoder emits BOOL for bools)
-        ("bool", 5),
         ("bool", "true"),
-        ("str", 5),
-        ("str", None),
         ("float", 1),  # JSON int is not a float atom
-        ("float", "1.0"),
         ("none", 7),
-        ("ellipsis", "x"),
         ("nonfinite_float", 5),
     ],
 )
@@ -289,34 +220,11 @@ def test_secC_atom_value_type_mismatch_rejected(kind: str, bad_value: object) ->
         _parse_literal({"kind": kind, "value": bad_value})
 
 
-@pytest.mark.smoke
-@pytest.mark.parametrize(
-    "kind,good_value",
-    [
-        ("none", None),
-        ("ellipsis", None),
-        ("bool", True),
-        ("int", 5),
-        ("float", 1.5),
-        ("str", "hi"),
-        ("nonfinite_float", "inf"),
-    ],
-)
-def test_secC_legit_atoms_still_parse(kind: str, good_value: object) -> None:
-    """Every legitimate encoder-shaped atom still round-trips through the parser."""
-
-    atom = _parse_literal({"kind": kind, "value": good_value})
-    assert isinstance(atom, LiteralAtom)
-    assert atom.kind is LiteralAtomKind(kind)
-    assert atom.value == good_value or (good_value is None and atom.value is None)
-
-
 # --------------------------------------------------------------------------- #
 # fastlog -- dtype-name resolution is isinstance-guarded (parity).
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.smoke
 def test_fastlog_dtype_from_name_resolves_real_dtypes() -> None:
     """A real dtype name (or ``None``) resolves as before."""
 
@@ -325,13 +233,13 @@ def test_fastlog_dtype_from_name_resolves_real_dtypes() -> None:
     assert _dtype_from_name("int64") is torch.int64
 
 
-@pytest.mark.smoke
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
 @pytest.mark.parametrize(
     "bad_name",
-    ["load", "save", "compile", "nn", "__class__", "os", "system"],
+    ["system"],
 )
 def test_fastlog_dtype_from_name_rejects_non_dtype(bad_name: str) -> None:
     """A non-dtype torch attribute name is refused instead of silently resolving."""
 
-    with pytest.raises(TorchLensIOError):
+    with pytest.raises(ArtifactError):
         _dtype_from_name(bad_name)

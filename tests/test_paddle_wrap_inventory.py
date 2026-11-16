@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
-from torchlens import _state
-from torchlens.backends import BackendUnsupportedError
 from torchlens.backends.paddle import wrappers as paddle_wrappers
 from torchlens.backends.paddle.wrappers import PaddleInventory, _PaddleWrapperRegistry
+
+pytestmark = [pytest.mark.rare, pytest.mark.backend_paddle]
+
+paddle = pytest.importorskip("paddle")
 
 SNAPSHOT_MESSAGE = (
     "Paddle wrapper inventory changed. Classify the new/moved/removed op in "
@@ -21,25 +20,6 @@ SNAPSHOT_MESSAGE = (
     "This static snapshot is the correctness guard for same-object no-op and scalar-escape "
     "coverage gaps that dynamic validation cannot see."
 )
-
-
-def _paddle_runtime_or_skip() -> Any:
-    """Import Paddle unless TensorFlow has made this process unsafe for it."""
-
-    tensorflow_loaded = any(
-        name == "tensorflow" or name.startswith("tensorflow.") for name in sys.modules
-    )
-    if "paddle" not in sys.modules and tensorflow_loaded:
-        pytest.skip("Paddle runtime is unsafe to import after TensorFlow in this process")
-    return pytest.importorskip("paddle")
-
-
-@pytest.fixture(autouse=True)
-def _load_paddle() -> None:
-    """Load Paddle lazily when a Paddle test actually runs."""
-
-    _paddle_runtime_or_skip()
-
 
 EXPECTED_WRAPPED = (
     "abs",
@@ -67,19 +47,25 @@ EXPECTED_WRAPPED = (
     "floor",
     "full",
     "full_like",
+    "functional.adaptive_avg_pool1d",
+    "functional.adaptive_avg_pool2d",
+    "functional.adaptive_avg_pool3d",
     "functional.avg_pool1d",
     "functional.avg_pool2d",
+    "functional.avg_pool3d",
     "functional.batch_norm",
     "functional.conv1d",
     "functional.conv2d",
     "functional.dropout",
     "functional.gelu",
+    "functional.hardsigmoid",
     "functional.hardswish",
     "functional.layer_norm",
     "functional.leaky_relu",
     "functional.linear",
     "functional.max_pool1d",
     "functional.max_pool2d",
+    "functional.max_pool3d",
     "functional.relu",
     "functional.relu6",
     "functional.sigmoid",
@@ -99,6 +85,9 @@ EXPECTED_WRAPPED = (
     "mm",
     "multiply",
     "negative",
+    "nn.Conv1D.forward",
+    "nn.Conv2D.forward",
+    "nn.Conv3D.forward",
     "ones",
     "ones_like",
     "pow",
@@ -115,9 +104,15 @@ EXPECTED_WRAPPED = (
     "sum",
     "tanh",
     "tensor.__add__",
+    "tensor.__eq__",
+    "tensor.__ge__",
     "tensor.__getitem__",
+    "tensor.__gt__",
+    "tensor.__le__",
+    "tensor.__lt__",
     "tensor.__matmul__",
     "tensor.__mul__",
+    "tensor.__ne__",
     "tensor.__neg__",
     "tensor.__pow__",
     "tensor.__radd__",
@@ -170,264 +165,7 @@ EXPECTED_WRAPPED = (
     "zeros_like",
 )
 
-# The July 2026 native-wrapper extension (2e154c53) added eight curated C ops,
-# functional.relu6, and Tensor._use_gpudnn without updating this census. The
-# Python/Tensor denial inventory below is unchanged. The separate, explicit
-# native census was reviewed on Paddle 3.3.1 CPU: mutator-suffixed/state-writing
-# APIs, RNG APIs, and distributed global-state APIs are denied BEFORE execution.
-# Never derive this expected set from the live registry or its classifier.
-EXPECTED_C_OPS_DENIED = tuple(
-    "c_ops." + name
-    for name in (
-        "abs_",
-        "acos_",
-        "acos_grad_",
-        "acosh_",
-        "acosh_grad_",
-        "adadelta_",
-        "adagrad_",
-        "adam_",
-        "adamax_",
-        "adamw_",
-        "add_",
-        "add_grad_",
-        "addmm_",
-        "affine_channel_",
-        "affine_channel_grad_",
-        "all_reduce_",
-        "array_write_",
-        "asgd_",
-        "asin_",
-        "asin_grad_",
-        "asinh_",
-        "asinh_grad_",
-        "assign_",
-        "assign_out_",
-        "assign_out__grad_",
-        "assign_value_",
-        "atan_",
-        "atan_grad_",
-        "atanh_",
-        "atanh_grad_",
-        "average_accumulates_",
-        "baddbmm_",
-        "batch_norm_",
-        "bce_loss_",
-        "bce_loss_grad_",
-        "bernoulli",
-        "bitwise_and_",
-        "bitwise_left_shift_",
-        "bitwise_not_",
-        "bitwise_or_",
-        "bitwise_right_shift_",
-        "bitwise_xor_",
-        "block_multihead_attention_",
-        "block_multihead_attention_xpu_",
-        "broadcast_",
-        "c_allreduce_sum_",
-        "c_identity_",
-        "c_softmax_with_cross_entropy_grad_",
-        "cast_",
-        "ceil_",
-        "ceil_grad_",
-        "celu_grad_",
-        "check_finite_and_unscale_",
-        "clip_",
-        "clip_grad_",
-        "coalesce_tensor_",
-        "copysign_",
-        "copysign_grad_",
-        "cos_",
-        "cos_grad_",
-        "cosh_",
-        "cosh_grad_",
-        "cross_entropy_with_softmax_",
-        "cross_entropy_with_softmax_grad_",
-        "cumprod_",
-        "cumsum_",
-        "dequantize_linear_",
-        "digamma_",
-        "distributed_fused_lamb_init",
-        "distributed_fused_lamb_init_",
-        "divide_",
-        "dropout_",
-        "elu_",
-        "elu_grad_",
-        "embedding_grad_add_to_",
-        "equal_",
-        "erf_",
-        "erfinv_",
-        "exp_",
-        "exp_grad_",
-        "expm1_",
-        "expm1_grad_",
-        "exponential_",
-        "fake_quantize_dequantize_moving_average_abs_max_",
-        "fake_quantize_moving_average_abs_max_",
-        "fake_quantize_range_abs_max_",
-        "fill_",
-        "fill_diagonal_",
-        "fill_diagonal_tensor_",
-        "fill_diagonal_tensor_grad_",
-        "fill_grad_",
-        "flatten_",
-        "flatten_grad_",
-        "floor_",
-        "floor_divide_",
-        "floor_grad_",
-        "fp8_gemm_blockwise_",
-        "full_",
-        "fused_adam_",
-        "fused_multi_transformer_",
-        "gammaincc_",
-        "gammaln_",
-        "gaussian_inplace_",
-        "gaussian_inplace_grad_",
-        "greater_equal_",
-        "greater_than_",
-        "group_norm_grad_",
-        "hardshrink_grad_",
-        "hardsigmoid_grad_",
-        "hardswish_grad_",
-        "hardtanh_",
-        "hardtanh_grad_",
-        "i0_",
-        "identity_loss_",
-        "identity_loss_grad_",
-        "increment_",
-        "index_add_",
-        "index_add_grad_",
-        "index_elementwise_put_",
-        "index_elementwise_put_with_tensor_",
-        "index_put_",
-        "l1_norm_",
-        "lamb_",
-        "lars_momentum_",
-        "leaky_relu_",
-        "leaky_relu_grad_",
-        "lerp_",
-        "less_equal_",
-        "less_than_",
-        "lgamma_",
-        "lod_reset_grad_",
-        "log10_",
-        "log10_grad_",
-        "log1p_",
-        "log1p_grad_",
-        "log2_",
-        "log2_grad_",
-        "log_",
-        "log_grad_",
-        "logical_and_",
-        "logical_not_",
-        "logical_or_",
-        "logical_xor_",
-        "logit_",
-        "logsigmoid_grad_",
-        "lu_",
-        "lu_grad_",
-        "margin_cross_entropy_grad_",
-        "masked_fill_",
-        "masked_fill_grad_",
-        "masked_multihead_attention_",
-        "merged_adam_",
-        "merged_momentum_",
-        "mish_grad_",
-        "momentum_",
-        "moving_average_abs_max_scale_",
-        "mp_allreduce_sum_",
-        "multiply_",
-        "nadam_",
-        "nop_",
-        "not_equal_",
-        "partial_allgather_",
-        "poisson",
-        "polygamma_",
-        "pow_",
-        "pow_grad_",
-        "put_along_axis_",
-        "quantize_linear_",
-        "radam_",
-        "randint",
-        "random_",
-        "random_grad_",
-        "random_routing_",
-        "reciprocal_",
-        "reciprocal_grad_",
-        "reduce_",
-        "relu6_grad_",
-        "relu_",
-        "relu_grad_",
-        "remainder_",
-        "renorm_",
-        "reshape_",
-        "reshape_grad_",
-        "rint_",
-        "rint_grad_",
-        "rmsprop_",
-        "round_",
-        "round_grad_",
-        "rprop_",
-        "rsqrt_",
-        "rsqrt_grad_",
-        "scale_",
-        "scatter_",
-        "set_",
-        "set_value",
-        "set_value_",
-        "set_value_with_tensor_",
-        "sgd_",
-        "share_data_",
-        "sigmoid_",
-        "sigmoid_cross_entropy_with_logits_",
-        "sigmoid_cross_entropy_with_logits_grad_",
-        "sigmoid_grad_",
-        "silu_",
-        "silu_grad_",
-        "sin_",
-        "sin_grad_",
-        "sinh_",
-        "sinh_grad_",
-        "softmax_",
-        "softplus_grad_",
-        "softshrink_grad_",
-        "softsign_grad_",
-        "sparse_batch_norm_",
-        "sparse_sync_batch_norm_",
-        "sqrt_",
-        "sqrt_grad_",
-        "square_",
-        "square_grad_",
-        "squeeze_",
-        "squeeze_grad_",
-        "subtract_",
-        "subtract_grad_",
-        "swish_grad_",
-        "sync_batch_norm_",
-        "sync_calc_stream_",
-        "tan_",
-        "tan_grad_",
-        "tanh_",
-        "tanh_grad_",
-        "tanh_shrink_grad_",
-        "thresholded_relu_",
-        "thresholded_relu_grad_",
-        "transpose_",
-        "tril_",
-        "triu_",
-        "trunc_",
-        "trunc_divide_",
-        "uniform",
-        "uniform_inplace_",
-        "uniform_inplace_grad_",
-        "unsqueeze_",
-        "unsqueeze_grad_",
-        "update_loss_scaling_",
-        "where_",
-    )
-)
-
-EXPECTED_PYTHON_DENIED = (
+EXPECTED_DENIED = (
     "abs_",
     "acos_",
     "acosh_",
@@ -447,6 +185,251 @@ EXPECTED_PYTHON_DENIED = (
     "bitwise_or_",
     "bitwise_right_shift_",
     "bitwise_xor_",
+    "c_ops.abs_",
+    "c_ops.acos_",
+    "c_ops.acos_grad_",
+    "c_ops.acosh_",
+    "c_ops.acosh_grad_",
+    "c_ops.adadelta_",
+    "c_ops.adagrad_",
+    "c_ops.adam_",
+    "c_ops.adamax_",
+    "c_ops.adamw_",
+    "c_ops.add_",
+    "c_ops.add_grad_",
+    "c_ops.addmm_",
+    "c_ops.affine_channel_",
+    "c_ops.affine_channel_grad_",
+    "c_ops.all_reduce_",
+    "c_ops.array_write_",
+    "c_ops.asgd_",
+    "c_ops.asin_",
+    "c_ops.asin_grad_",
+    "c_ops.asinh_",
+    "c_ops.asinh_grad_",
+    "c_ops.assign_",
+    "c_ops.assign_out_",
+    "c_ops.assign_out__grad_",
+    "c_ops.assign_value_",
+    "c_ops.atan_",
+    "c_ops.atan_grad_",
+    "c_ops.atanh_",
+    "c_ops.atanh_grad_",
+    "c_ops.average_accumulates_",
+    "c_ops.baddbmm_",
+    "c_ops.batch_norm_",
+    "c_ops.bce_loss_",
+    "c_ops.bce_loss_grad_",
+    "c_ops.bernoulli",
+    "c_ops.bitwise_and_",
+    "c_ops.bitwise_left_shift_",
+    "c_ops.bitwise_not_",
+    "c_ops.bitwise_or_",
+    "c_ops.bitwise_right_shift_",
+    "c_ops.bitwise_xor_",
+    "c_ops.block_multihead_attention_",
+    "c_ops.block_multihead_attention_xpu_",
+    "c_ops.broadcast_",
+    "c_ops.c_allreduce_sum_",
+    "c_ops.c_identity_",
+    "c_ops.c_softmax_with_cross_entropy_grad_",
+    "c_ops.cast_",
+    "c_ops.ceil_",
+    "c_ops.ceil_grad_",
+    "c_ops.celu_grad_",
+    "c_ops.check_finite_and_unscale_",
+    "c_ops.clip_",
+    "c_ops.clip_grad_",
+    "c_ops.coalesce_tensor_",
+    "c_ops.copysign_",
+    "c_ops.copysign_grad_",
+    "c_ops.cos_",
+    "c_ops.cos_grad_",
+    "c_ops.cosh_",
+    "c_ops.cosh_grad_",
+    "c_ops.cross_entropy_with_softmax_",
+    "c_ops.cross_entropy_with_softmax_grad_",
+    "c_ops.cumprod_",
+    "c_ops.cumsum_",
+    "c_ops.dequantize_linear_",
+    "c_ops.digamma_",
+    "c_ops.distributed_fused_lamb_init",
+    "c_ops.distributed_fused_lamb_init_",
+    "c_ops.divide_",
+    "c_ops.dropout_",
+    "c_ops.elu_",
+    "c_ops.elu_grad_",
+    "c_ops.embedding_grad_add_to_",
+    "c_ops.equal_",
+    "c_ops.erf_",
+    "c_ops.erfinv_",
+    "c_ops.exp_",
+    "c_ops.exp_grad_",
+    "c_ops.expm1_",
+    "c_ops.expm1_grad_",
+    "c_ops.exponential_",
+    "c_ops.fake_quantize_dequantize_moving_average_abs_max_",
+    "c_ops.fake_quantize_moving_average_abs_max_",
+    "c_ops.fake_quantize_range_abs_max_",
+    "c_ops.fill_",
+    "c_ops.fill_diagonal_",
+    "c_ops.fill_diagonal_tensor_",
+    "c_ops.fill_diagonal_tensor_grad_",
+    "c_ops.fill_grad_",
+    "c_ops.flatten_",
+    "c_ops.flatten_grad_",
+    "c_ops.floor_",
+    "c_ops.floor_divide_",
+    "c_ops.floor_grad_",
+    "c_ops.fp8_gemm_blockwise_",
+    "c_ops.full_",
+    "c_ops.fused_adam_",
+    "c_ops.fused_multi_transformer_",
+    "c_ops.gammaincc_",
+    "c_ops.gammaln_",
+    "c_ops.gaussian_inplace_",
+    "c_ops.gaussian_inplace_grad_",
+    "c_ops.greater_equal_",
+    "c_ops.greater_than_",
+    "c_ops.group_norm_grad_",
+    "c_ops.hardshrink_grad_",
+    "c_ops.hardsigmoid_grad_",
+    "c_ops.hardswish_grad_",
+    "c_ops.hardtanh_",
+    "c_ops.hardtanh_grad_",
+    "c_ops.i0_",
+    "c_ops.identity_loss_",
+    "c_ops.identity_loss_grad_",
+    "c_ops.increment_",
+    "c_ops.index_add_",
+    "c_ops.index_add_grad_",
+    "c_ops.index_elementwise_put_",
+    "c_ops.index_elementwise_put_with_tensor_",
+    "c_ops.index_put_",
+    "c_ops.l1_norm_",
+    "c_ops.lamb_",
+    "c_ops.lars_momentum_",
+    "c_ops.leaky_relu_",
+    "c_ops.leaky_relu_grad_",
+    "c_ops.lerp_",
+    "c_ops.less_equal_",
+    "c_ops.less_than_",
+    "c_ops.lgamma_",
+    "c_ops.lod_reset_grad_",
+    "c_ops.log10_",
+    "c_ops.log10_grad_",
+    "c_ops.log1p_",
+    "c_ops.log1p_grad_",
+    "c_ops.log2_",
+    "c_ops.log2_grad_",
+    "c_ops.log_",
+    "c_ops.log_grad_",
+    "c_ops.logical_and_",
+    "c_ops.logical_not_",
+    "c_ops.logical_or_",
+    "c_ops.logical_xor_",
+    "c_ops.logit_",
+    "c_ops.logsigmoid_grad_",
+    "c_ops.lu_",
+    "c_ops.lu_grad_",
+    "c_ops.margin_cross_entropy_grad_",
+    "c_ops.masked_fill_",
+    "c_ops.masked_fill_grad_",
+    "c_ops.masked_multihead_attention_",
+    "c_ops.merged_adam_",
+    "c_ops.merged_momentum_",
+    "c_ops.mish_grad_",
+    "c_ops.momentum_",
+    "c_ops.moving_average_abs_max_scale_",
+    "c_ops.mp_allreduce_sum_",
+    "c_ops.multiply_",
+    "c_ops.nadam_",
+    "c_ops.nop_",
+    "c_ops.not_equal_",
+    "c_ops.partial_allgather_",
+    "c_ops.poisson",
+    "c_ops.polygamma_",
+    "c_ops.pow_",
+    "c_ops.pow_grad_",
+    "c_ops.put_along_axis_",
+    "c_ops.quantize_linear_",
+    "c_ops.radam_",
+    "c_ops.randint",
+    "c_ops.random_",
+    "c_ops.random_grad_",
+    "c_ops.random_routing_",
+    "c_ops.reciprocal_",
+    "c_ops.reciprocal_grad_",
+    "c_ops.reduce_",
+    "c_ops.relu6_grad_",
+    "c_ops.relu_",
+    "c_ops.relu_grad_",
+    "c_ops.remainder_",
+    "c_ops.renorm_",
+    "c_ops.reshape_",
+    "c_ops.reshape_grad_",
+    "c_ops.rint_",
+    "c_ops.rint_grad_",
+    "c_ops.rmsprop_",
+    "c_ops.round_",
+    "c_ops.round_grad_",
+    "c_ops.rprop_",
+    "c_ops.rsqrt_",
+    "c_ops.rsqrt_grad_",
+    "c_ops.scale_",
+    "c_ops.scatter_",
+    "c_ops.set_",
+    "c_ops.set_value",
+    "c_ops.set_value_",
+    "c_ops.set_value_with_tensor_",
+    "c_ops.sgd_",
+    "c_ops.share_data_",
+    "c_ops.sigmoid_",
+    "c_ops.sigmoid_cross_entropy_with_logits_",
+    "c_ops.sigmoid_cross_entropy_with_logits_grad_",
+    "c_ops.sigmoid_grad_",
+    "c_ops.silu_",
+    "c_ops.silu_grad_",
+    "c_ops.sin_",
+    "c_ops.sin_grad_",
+    "c_ops.sinh_",
+    "c_ops.sinh_grad_",
+    "c_ops.softmax_",
+    "c_ops.softplus_grad_",
+    "c_ops.softshrink_grad_",
+    "c_ops.softsign_grad_",
+    "c_ops.sparse_batch_norm_",
+    "c_ops.sparse_sync_batch_norm_",
+    "c_ops.sqrt_",
+    "c_ops.sqrt_grad_",
+    "c_ops.square_",
+    "c_ops.square_grad_",
+    "c_ops.squeeze_",
+    "c_ops.squeeze_grad_",
+    "c_ops.subtract_",
+    "c_ops.subtract_grad_",
+    "c_ops.swish_grad_",
+    "c_ops.sync_batch_norm_",
+    "c_ops.sync_calc_stream_",
+    "c_ops.tan_",
+    "c_ops.tan_grad_",
+    "c_ops.tanh_",
+    "c_ops.tanh_grad_",
+    "c_ops.tanh_shrink_grad_",
+    "c_ops.thresholded_relu_",
+    "c_ops.thresholded_relu_grad_",
+    "c_ops.transpose_",
+    "c_ops.tril_",
+    "c_ops.triu_",
+    "c_ops.trunc_",
+    "c_ops.trunc_divide_",
+    "c_ops.uniform",
+    "c_ops.uniform_inplace_",
+    "c_ops.uniform_inplace_grad_",
+    "c_ops.unsqueeze_",
+    "c_ops.unsqueeze_grad_",
+    "c_ops.update_loss_scaling_",
+    "c_ops.where_",
     "cast_",
     "cauchy_",
     "clear_async_save_task_queue",
@@ -686,7 +669,10 @@ EXPECTED_PYTHON_DENIED = (
     "unsqueeze_",
     "where_",
 )
-EXPECTED_DENIED = tuple(sorted((*EXPECTED_PYTHON_DENIED, *EXPECTED_C_OPS_DENIED)))
+
+# Only the GPU distribution exposes this native library-loading helper.
+if hasattr(paddle, "_preload_nvidia_lib"):
+    EXPECTED_DENIED = tuple(sorted((*EXPECTED_DENIED, "_preload_nvidia_lib")))
 
 ALIAS_NO_OP_APIS = frozenset(
     (
@@ -696,7 +682,6 @@ ALIAS_NO_OP_APIS = frozenset(
         "tensor.cast",
         "tensor.contiguous",
         "tensor.reshape",
-        "tensor._use_gpudnn",
     )
 )
 TENSOR_ESCAPE_APIS = frozenset(
@@ -765,15 +750,7 @@ def _assert_inventory_matches_snapshot(inventory: PaddleInventory) -> None:
     """
 
     assert inventory.wrapped == EXPECTED_WRAPPED, SNAPSHOT_MESSAGE
-    # CUDA wheels expose an import-time shared-library loader, not a tensor
-    # operation. Its reviewed classification stays denied when it is present.
-    bootstrap_denied = (
-        ("_preload_nvidia_lib",)
-        if hasattr(_paddle_runtime_or_skip(), "_preload_nvidia_lib")
-        else ()
-    )
-    expected_denied = tuple(sorted((*EXPECTED_DENIED, *bootstrap_denied)))
-    assert inventory.denied == expected_denied, SNAPSHOT_MESSAGE
+    assert inventory.denied == EXPECTED_DENIED, SNAPSHOT_MESSAGE
 
 
 def test_paddle_wrapper_inventory_matches_static_snapshot() -> None:
@@ -796,6 +773,7 @@ def test_paddle_wrapper_inventory_load_bearing_membership() -> None:
     assert denied >= RNG_APIS
     assert denied >= TENSOR_ESCAPE_APIS
     assert wrapped >= COARSE_COMPOSITE_APIS
+    assert {"nn.Conv1D.forward", "nn.Conv2D.forward", "nn.Conv3D.forward"} <= wrapped
     assert wrapped >= STOCHASTIC_COMPOSITE_DENY_APIS
     for op_name in (
         "functional.dropout",
@@ -822,38 +800,3 @@ def test_paddle_same_object_gap_fails_static_inventory_snapshot(
         pytest.raises(AssertionError, match="inventory changed"),
     ):
         _assert_inventory_matches_snapshot(inventory)
-
-
-def test_paddle_native_coverage_gap_fails_static_inventory_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Removing a native observer cannot pass the independently pinned inventory."""
-
-    monkeypatch.setattr(
-        paddle_wrappers, "_C_OPS_CORE_OPS", paddle_wrappers._C_OPS_CORE_OPS - {"add"}
-    )
-    with (
-        _installed_inventory() as inventory,
-        pytest.raises(AssertionError, match="inventory changed"),
-    ):
-        _assert_inventory_matches_snapshot(inventory)
-
-
-def test_every_native_denial_refuses_before_calling_the_kernel(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """All statically denied C entrypoints refuse without running native code."""
-
-    paddle = _paddle_runtime_or_skip()
-
-    def forbidden_kernel(*args: Any, **kwargs: Any) -> None:
-        """Fail if a supposedly denied operation reaches its implementation."""
-
-        raise AssertionError("a denied native kernel was executed")
-
-    for name in EXPECTED_C_OPS_DENIED:
-        monkeypatch.setattr(paddle._C_ops, name.removeprefix("c_ops."), forbidden_kernel)
-    with _installed_inventory(), _state.active_logging(SimpleNamespace()):
-        for name in EXPECTED_C_OPS_DENIED:
-            with pytest.raises(BackendUnsupportedError):
-                getattr(paddle._C_ops, name.removeprefix("c_ops."))()

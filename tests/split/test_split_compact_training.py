@@ -307,6 +307,7 @@ def test_compact_training_replays_cpu_autocast_gradients() -> None:
     )
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_compact_training_cpu_cuda_gradient_handoff_and_update() -> None:
     """A CPU prefix and CUDA suffix preserve input gradients and independent state updates."""

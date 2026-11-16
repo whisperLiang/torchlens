@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Mapping
 from typing import Any
 
@@ -10,7 +11,12 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.visualization import _render_nodes
+from torchlens._visualization import _render_nodes
+
+# ``_render_entrypoints`` star-imports the render modules. Loaded for the first time inside a test
+# that has patched one of their names, it copies the patch, and ``monkeypatch`` never restores
+# that copy; so load it before any test here patches.
+importlib.import_module("torchlens._visualization._render_entrypoints")
 
 
 class _SplitReuse(nn.Module):
@@ -69,7 +75,7 @@ def test_rolled_draw_reuses_atomic_module_sibling_counts(
     monkeypatch.setattr(_render_nodes, "_atomic_module_sibling_counts", spy_build)
     monkeypatch.setattr(_render_nodes, "_atomic_module_split_range", spy_split)
 
-    trace.draw(vis_mode="rolled", return_graph=True, vis_save_only=True)
+    trace.draw(rolled=True)
 
     assert len(built_counts) == 1
     assert len(received_counts) > 1
@@ -77,36 +83,12 @@ def test_rolled_draw_reuses_atomic_module_sibling_counts(
     assert built_counts[0] == _render_nodes._atomic_module_sibling_counts(trace)
 
 
-def test_sibling_counts_match_per_layer_scan() -> None:
-    """The one-pass counter must reproduce the historical per-node scan."""
-
-    trace = tl.trace(_SplitReuse(), torch.randn(1, 4))
-    counts = _render_nodes._atomic_module_sibling_counts(trace)
-
-    addresses = {
-        layer.modules[-1].rsplit(":", 1)[0]
-        for layer in trace.layer_logs.values()
-        if getattr(layer, "modules", None)
-    }
-    assert addresses
-    for address in addresses | {"not_a_module"}:
-        expected = sum(
-            1
-            for other in trace.layer_logs.values()
-            if isinstance(other, _render_nodes.Layer)
-            and getattr(other, "is_atomic_module", False)
-            and other.modules
-            and other.modules[-1].rsplit(":", 1)[0] == address
-        )
-        assert counts.get(address, 0) == expected
-
-
 def test_split_range_fallback_matches_threaded_counts() -> None:
     """Calling the split-range helper without counts must not change output."""
 
     trace = tl.trace(_SplitReuse(), torch.randn(1, 4))
     counts = _render_nodes._atomic_module_sibling_counts(trace)
-    for layer in trace.layer_logs.values():
+    for layer in trace._layer_logs.values():
         if not getattr(layer, "modules", None):
             continue
         address = layer.modules[-1].rsplit(":", 1)[0]

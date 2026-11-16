@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._utils._record_group_table import record_member
 from torchlens.options import CaptureOptions
 
 
@@ -34,8 +35,7 @@ def _armed_trace(save_mode: str = "copy") -> tl.Trace:
     return tl.trace(
         model,
         x,
-        capture=CaptureOptions(backward_ready=True, save_grads="all"),
-        save_mode=save_mode,
+        capture=CaptureOptions(backward_ready=True, save_grads="all", save_mode=save_mode),
     )
 
 
@@ -45,7 +45,6 @@ def _loss(trace: tl.Trace) -> torch.Tensor:
     return trace[trace.output_layers[0]].out.sum()
 
 
-@pytest.mark.smoke
 @pytest.mark.parametrize("save_mode", ["reference", "view"])
 def test_second_backward_does_not_rewrite_recorded_grads(save_mode: str) -> None:
     """Recorded pass-1 grad payloads stay frozen when a second backward runs.
@@ -59,19 +58,19 @@ def test_second_backward_does_not_rewrite_recorded_grads(save_mode: str) -> None
 
     trace = _armed_trace(save_mode=save_mode)
     loss = _loss(trace)
-    trace.log_backward(loss, retain_graph=True)
+    trace.backward(loss, retain_graph=True)
 
-    param_payloads = [record.grad for param in trace.param_logs.values() for record in param.grads]
+    param_payloads = [record.grad for param in trace._param_logs.values() for record in param.grads]
     op_payloads = [
         record.out if hasattr(record, "out") else record.grad
-        for layer in trace.layer_list
-        for record in layer.grads
+        for layer in trace._layer_list
+        for record in layer.autograd.grads
     ]
     payloads = [p for p in param_payloads + op_payloads if isinstance(p, torch.Tensor)]
     assert payloads, "expected recorded pass-1 gradient payloads"
     snapshots = [p.clone() for p in payloads]
 
-    trace.log_backward(loss)
+    trace.backward(loss)
 
     for payload, snapshot in zip(payloads, snapshots):
         assert torch.equal(payload, snapshot), (
@@ -80,7 +79,6 @@ def test_second_backward_does_not_rewrite_recorded_grads(save_mode: str) -> None
         )
 
 
-@pytest.mark.smoke
 def test_reentered_recording_backward_restores_tensor_backward() -> None:
     """Re-entering one RecordingBackward context leaves no persistent wrapper.
 
@@ -92,7 +90,7 @@ def test_reentered_recording_backward_restores_tensor_backward() -> None:
 
     trace = _armed_trace()
     original_backward = torch.Tensor.backward
-    context = trace.recording_backward()
+    context = trace.capture_backward()
     try:
         with context:
             with context:
@@ -102,10 +100,9 @@ def test_reentered_recording_backward_restores_tensor_backward() -> None:
             torch.Tensor.backward = original_backward  # type: ignore[method-assign]
             pytest.fail("re-entered recording_backward() leaked a wrapper on torch.Tensor.backward")
     # The backward inside the nested block is still recorded exactly once.
-    assert trace.num_backward_passes == 1
+    assert len(trace.autograd.backward_passes) == 1
 
 
-@pytest.mark.smoke
 def test_op_grad_payloads_charge_the_save_budget() -> None:
     """Retained op-gradient payloads charge the save-budget accountant.
 
@@ -129,12 +126,12 @@ def test_op_grad_payloads_charge_the_save_budget() -> None:
     assert budget is not None
     committed_before = sum(ledger.committed_bytes for ledger in budget.ledgers.values())
 
-    trace.log_backward(_loss(trace))
+    trace.backward(_loss(trace))
 
     grad_bytes = sum(
         int(record.grad.nelement() * record.grad.element_size())
-        for layer in trace.layer_list
-        for record in layer.grads
+        for layer in trace._layer_list
+        for record in layer.autograd.grads
         if isinstance(record.grad, torch.Tensor)
     )
     assert grad_bytes > 0, "expected retained op gradient payloads"
@@ -145,7 +142,6 @@ def test_op_grad_payloads_charge_the_save_budget() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_selective_save_grads_consults_predicate_for_params() -> None:
     """Callable save_grads policies see parameter gradients, not a silent drop.
 
@@ -165,9 +161,9 @@ def test_selective_save_grads_consults_predicate_for_params() -> None:
         return kind == "param_grad"
 
     trace = _armed_trace()
-    trace.log_backward(_loss(trace), save_grads=keep_param_grads)
+    trace.backward(_loss(trace), save_grads=keep_param_grads)
 
-    param_payloads = [record.grad for param in trace.param_logs.values() for record in param.grads]
+    param_payloads = [record.grad for param in trace._param_logs.values() for record in param.grads]
     assert param_payloads, "expected parameter gradient records"
     assert "param_grad" in seen_kinds, "predicate never saw a parameter context"
     assert all(isinstance(p, torch.Tensor) for p in param_payloads), (
@@ -176,24 +172,23 @@ def test_selective_save_grads_consults_predicate_for_params() -> None:
     # The same predicate rejected op gradients, so none retain payloads.
     op_payloads = [
         record.out if hasattr(record, "out") else record.grad
-        for layer in trace.layer_list
-        for record in layer.grads
+        for layer in trace._layer_list
+        for record in layer.autograd.grads
     ]
     assert all(not isinstance(p, torch.Tensor) for p in op_payloads)
 
 
-@pytest.mark.smoke
 def test_backward_finalize_drains_pending_cpu_async_copies() -> None:
     """The backward finalize seam fences pending cpu_async D2H copies.
 
     The R36-1 drain only ran at the FORWARD finalize seam, so a cpu_async
-    grad payload recorded during log_backward stayed on the pending-event
+    grad payload recorded during backward stayed on the pending-event
     list and a host read could observe partial bytes from the unfinished
     non_blocking copy. A planted fence object stands in for an in-flight
     CUDA copy event (CPU-only hosts record no real events).
     """
 
-    from torchlens.utils import tensor_utils
+    from torchlens._utils import tensor_utils
 
     class _FenceSpy:
         """Pending-copy stand-in recording whether it was synchronized."""
@@ -210,9 +205,9 @@ def test_backward_finalize_drains_pending_cpu_async_copies() -> None:
     fence = _FenceSpy()
     tensor_utils._CPU_ASYNC_PENDING_EVENTS.append(fence)
     try:
-        trace.log_backward(_loss(trace))
+        trace.backward(_loss(trace))
         assert fence.synchronized, (
-            "log_backward finished without draining pending cpu_async copy fences"
+            "backward finished without draining pending cpu_async copy fences"
         )
         assert fence not in tensor_utils._CPU_ASYNC_PENDING_EVENTS
     finally:
@@ -220,7 +215,6 @@ def test_backward_finalize_drains_pending_cpu_async_copies() -> None:
             tensor_utils._CPU_ASYNC_PENDING_EVENTS.remove(fence)
 
 
-@pytest.mark.smoke
 def test_backward_graph_task_id_routes_through_torch_compat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -231,8 +225,8 @@ def test_backward_graph_task_id_routes_through_torch_compat(
     ``getattr(torch._C, "_current_graph_task_id", None)`` probe bypassed it.
     """
 
+    from torchlens._utils import _torch_compat
     from torchlens.backends.torch import tensor_tracking
-    from torchlens.utils import _torch_compat
 
     assert hasattr(_torch_compat, "HAS_CURRENT_GRAPH_TASK_ID")
     assert "HAS_CURRENT_GRAPH_TASK_ID" in _torch_compat._CAPABILITY_ATTRS
@@ -245,10 +239,9 @@ def test_backward_graph_task_id_routes_through_torch_compat(
     assert tensor_tracking._current_backward_graph_task_id() is None
 
 
-@pytest.mark.smoke
 @pytest.mark.parametrize("save_mode", ["reference", "view"])
 def test_legacy_grad_slot_stores_snapshot_not_alias(save_mode: str) -> None:
-    """``Op.log_tensor_grad`` snapshots the observed gradient under all modes.
+    """``Op._log_tensor_grad`` snapshots the observed gradient under all modes.
 
     The legacy backward-hook write went through ``safe_copy(save_mode=...)``,
     which returns a storage ALIAS under ``reference``/``view``. Output-layer
@@ -260,7 +253,7 @@ def test_legacy_grad_slot_stores_snapshot_not_alias(save_mode: str) -> None:
     trace = _armed_trace(save_mode=save_mode)
     out_op = trace[trace.output_layers[0]]
     seed = torch.full_like(out_op.out, 2.0)
-    trace.log_backward(out_op.out, gradient=seed)
+    trace.backward(out_op.out, gradient=seed)
 
     seed_ptr = seed.untyped_storage().data_ptr()
     recorded: dict[str, torch.Tensor] = {}
@@ -284,9 +277,8 @@ def test_legacy_grad_slot_stores_snapshot_not_alias(save_mode: str) -> None:
     assert rewritten == [], f"seed mutation rewrote recorded grads: {rewritten}"
 
 
-@pytest.mark.smoke
 def test_per_call_save_grads_false_gates_legacy_layer_slot() -> None:
-    """``log_backward(..., save_grads=False)`` disables legacy slot retention.
+    """``backward(..., save_grads=False)`` disables legacy slot retention.
 
     The legacy layer-slot write was gated on the deprecated ``save_grads``
     trace attribute instead of the active per-call policy, so a capture armed
@@ -295,7 +287,7 @@ def test_per_call_save_grads_false_gates_legacy_layer_slot() -> None:
     """
 
     trace = _armed_trace()
-    trace.log_backward(_loss(trace), save_grads=False)
+    trace.backward(_loss(trace), save_grads=False)
     retained = [
         label
         for label in trace.layer_labels
@@ -304,7 +296,6 @@ def test_per_call_save_grads_false_gates_legacy_layer_slot() -> None:
     assert retained == [], f"save_grads=False call retained legacy grad payloads: {retained}"
 
 
-@pytest.mark.smoke
 def test_saved_grad_hook_clones_once_and_transforms_once() -> None:
     """grind-r6 b5 R34-N1/R35-N1 (fable+opus, probe-corroborated).
 
@@ -329,12 +320,13 @@ def test_saved_grad_hook_clones_once_and_transforms_once() -> None:
     trace = tl.trace(
         model,
         x,
-        capture=CaptureOptions(backward_ready=True, save_grads="all"),
-        grad_transform=counting_transform,
+        capture=CaptureOptions(
+            backward_ready=True, save_grads="all", grad_transform=counting_transform
+        ),
     )
-    trace.log_backward(_loss(trace))
+    trace.backward(_loss(trace))
 
-    from torchlens.ir.events import OpGradObserved
+    from torchlens._ir.events import OpGradObserved
 
     grad_events = [e for e in trace.backward_events if isinstance(e, OpGradObserved)]
     fired = [
@@ -351,10 +343,10 @@ def test_saved_grad_hook_clones_once_and_transforms_once() -> None:
     events_by_label = {e.op_label: e for e in fired}
     reused = 0
     for label, event in events_by_label.items():
-        layer = trace.layer_dict_all_keys.get(label)
+        layer = trace._layer_dict_all_keys.get(label)
         if layer is None or not getattr(layer, "has_grad", False):
             continue
-        transformed_slot = getattr(layer, "transformed_grad", None)
+        transformed_slot = record_member(layer, "transformed_grad", None)
         if transformed_slot is not None:
             assert transformed_slot is event.transformed_payload_ref, (
                 f"{label}: layer transformed_grad is a second clone, not the charged event payload"

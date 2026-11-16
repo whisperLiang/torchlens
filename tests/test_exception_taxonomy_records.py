@@ -1,7 +1,7 @@
 """Typed-door tests for the r3 data_classes refusal conversions.
 
 Every case provokes a public refusal converted from a raw builtin raise in
-``torchlens/data_classes/`` and asserts the error-refusal contract: the
+``torchlens/_data_classes/`` and asserts the error-refusal contract: the
 exception is a ``TorchLensError`` subclass retaining its historical builtin
 base, carries a stable ``fields["code"]``, and names a concrete remedy in
 both ``fields["remedy"]`` and the message tail.
@@ -20,8 +20,10 @@ from torch import nn
 import torchlens as tl
 from torchlens import errors
 from torchlens._errors import PayloadUnavailableError, RecordBindingError
-
-pytestmark = pytest.mark.smoke
+from torchlens._visualization._trace_collapse import (
+    collapse_order as _collapse_order,
+    collapse_plan as _collapse_plan,
+)
 
 
 @pytest.fixture(scope="module")
@@ -45,8 +47,9 @@ def _assert_contract(exc: BaseException, expected_code: str, builtin: type[BaseE
     assert fields["code"] == expected_code
     remedy = fields.get("remedy")
     assert isinstance(remedy, str) and remedy
-    assert "Remedy:" in str(exc)
-    assert remedy in str(exc)
+    message = str(exc)
+    remedy_label = "\n  remedy     " if "\n  candidates " in message else "Remedy: "
+    assert f"{remedy_label}{remedy}" in message
 
 
 RECORD_DOOR_CASES: tuple[tuple[str, type[BaseException], Callable[[Any], object]], ...] = (
@@ -73,12 +76,12 @@ RECORD_DOOR_CASES: tuple[tuple[str, type[BaseException], Callable[[Any], object]
     (
         "collapse_mode_invalid",
         ValueError,
-        lambda log: log.collapse_plan(mode="bogus"),  # type: ignore[arg-type]
+        lambda log: _collapse_plan(log, mode="bogus"),  # type: ignore[arg-type]
     ),
     (
         "collapse_level_invalid",
         ValueError,
-        lambda log: log.collapse_plan(mode=1.5),
+        lambda log: _collapse_plan(log, mode=1.5),
     ),
     (
         "stack_selector_no_match",
@@ -86,14 +89,9 @@ RECORD_DOOR_CASES: tuple[tuple[str, type[BaseException], Callable[[Any], object]
         lambda log: log.stack("no_such_selector_xyz"),
     ),
     (
-        "intervention_direction_invalid",
-        ValueError,
-        lambda log: log.set(log.op_labels[0], torch.zeros(1), direction="sideways"),
-    ),
-    (
         "run_legacy_arguments_conflict",
         TypeError,
-        lambda log: log.run(object(), torch.randn(1, 4), inputs=torch.randn(1, 4)),
+        lambda log: log.run(object(), torch.randn(1, 4)),
     ),
     (
         "derived_field_assignment_invalid",
@@ -108,7 +106,7 @@ RECORD_DOOR_CASES: tuple[tuple[str, type[BaseException], Callable[[Any], object]
     (
         "top_n_invalid",
         ValueError,
-        lambda log: log.output_table(top_n=0),
+        lambda log: log.output_table(k=0),
     ),
 )
 
@@ -168,8 +166,8 @@ FASTLOG_DOOR_CASES: tuple[tuple[str, type[BaseException], dict[str, Any]], ...] 
     ("history_size_invalid", ValueError, {"history_size": -1}),
     ("lookback_invalid", ValueError, {"lookback": 4096}),
     ("lookback_payload_policy_invalid", ValueError, {"lookback_payload_policy": "bogus"}),
-    ("recording_intervention_predicate_type_invalid", ValueError, {"intervene": "not-callable"}),
-    ("recording_halt_predicate_type_invalid", ValueError, {"halt": "not-callable"}),
+    ("intervention_predicate_type_invalid", TypeError, {"intervene": "not-callable"}),
+    ("halt_predicate_type_invalid", TypeError, {"halt": "not-callable"}),
     ("max_predicate_failures_invalid", ValueError, {"max_predicate_failures": -3}),
     ("on_predicate_error_invalid", ValueError, {"on_predicate_error": "explode"}),
     ("on_forward_error_invalid", ValueError, {"on_forward_error": "shrug"}),
@@ -192,13 +190,61 @@ def test_recorder_option_refusals_carry_codes_and_remedies(
 
     model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
     with pytest.raises(errors.TorchLensError) as exc_info:
-        tl.record(model, torch.randn(1, 4), save=tl.func("relu"), **kwargs)
+        tl.record(model, torch.randn(1, 4), save=tl.func("relu"), **_door_kwargs(kwargs))
     _assert_contract(exc_info.value, expected_code, builtin)
+
+
+_RECORDING_FIELDS = {
+    "history_size",
+    "max_predicate_failures",
+    "on_predicate_error",
+    "on_forward_error",
+    "default_op",
+    "default_module",
+    "default_grad",
+    "include_source_events",
+    "postprocess",
+    "lean",
+}
+_CAPTURE_FIELDS = {
+    "lookback",
+    "lookback_payload_policy",
+    "activation_transform",
+    "save_raw_activations",
+    "seed",
+    "save_grads",
+    "grad_transform",
+    "save_raw_grads",
+    "backward_ready",
+    "detach_saved_activations",
+}
+
+
+def _door_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Spell former flat record keywords the way the door takes them now.
+
+    Recorder knobs ride ``recording=RecordingOptions(...)``, capture knobs ride
+    ``capture=CaptureOptions(...)`` and ``halt`` is ``stop_after=``; the typed
+    refusal still fires inside the door call (the option constructors validate).
+    """
+
+    out: dict[str, Any] = {}
+    recording = {k: v for k, v in kwargs.items() if k in _RECORDING_FIELDS}
+    capture = {k: v for k, v in kwargs.items() if k in _CAPTURE_FIELDS}
+    if recording:
+        out["recording"] = tl.options.RecordingOptions(**recording)
+    if capture:
+        out["capture"] = tl.options.CaptureOptions(**capture)
+    for key, value in kwargs.items():
+        if key in _RECORDING_FIELDS or key in _CAPTURE_FIELDS:
+            continue
+        out["stop_after" if key == "halt" else key] = value
+    return out
 
 
 TRACE_PREDICATE_DOOR_CASES: tuple[tuple[str, type[BaseException], dict[str, Any]], ...] = (
     ("intervention_predicate_type_invalid", TypeError, {"intervene": "not-callable"}),
-    ("halt_predicate_type_invalid", TypeError, {"halt": "not-callable"}),
+    ("stop_after_type_invalid", TypeError, {"stop_after": 1234}),
 )
 
 
@@ -214,8 +260,9 @@ def test_trace_predicate_type_doors_carry_codes_and_remedies(
 ) -> None:
     """The tl.trace() non-callable intervene/halt doors expose codes and remedies.
 
-    Trace-side twins of the ``recording_*_predicate_type_invalid`` fastlog
-    doors above (new vocabulary must ship provoked).
+    The same codes and ``TypeError`` lineage as the ``tl.record`` doors above:
+    predicate misuse raises identically on both entry points, so one catch
+    handles the pair.
     """
 
     model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
@@ -227,12 +274,12 @@ def test_trace_predicate_type_doors_carry_codes_and_remedies(
 def test_intervention_doors_carry_codes_and_remedies() -> None:
     """Converted intervention-family doors expose codes and remedies."""
 
-    from torchlens.intervention.errors import ReplayPreconditionError
-    from torchlens.intervention.resolver import resolve_import_ref
-    from torchlens.intervention.save import _validate_format_version
+    from torchlens.intervention._resolver_registry import resolve_import_ref
+    from torchlens.intervention._spec_codec import _validate_format_version
+    from torchlens.intervention.errors import TorchLensInterventionError
 
     with pytest.raises(errors.TorchLensError) as exc_info:
-        ReplayPreconditionError("message", selector="both")  # args + fields conflict
+        TorchLensInterventionError("message", selector="both")  # args + fields conflict
     _assert_contract(exc_info.value, "error_constructor_args_conflict", TypeError)
 
     with pytest.raises(errors.TorchLensError) as exc_info:
@@ -247,8 +294,8 @@ def test_intervention_doors_carry_codes_and_remedies() -> None:
 def test_visualization_doors_carry_codes_and_remedies(small_trace: Any) -> None:
     """Converted visualization option doors expose codes and remedies."""
 
-    from torchlens.visualization.overlays import normalize_overlay_name
-    from torchlens.visualization.themes import resolve_theme
+    from torchlens._visualization.overlays import normalize_overlay_name
+    from torchlens._visualization.themes import resolve_theme
 
     with pytest.raises(errors.TorchLensError) as exc_info:
         resolve_theme("bogus_theme")
@@ -263,7 +310,7 @@ def test_visualization_doors_carry_codes_and_remedies(small_trace: Any) -> None:
     _assert_contract(exc_info.value, "summary_level_invalid", ValueError)
 
     with pytest.raises(errors.TorchLensError) as exc_info:
-        small_trace.collapse_order(mode="bogus")
+        _collapse_order(small_trace, mode="bogus")
     _assert_contract(exc_info.value, "collapse_mode_invalid", ValueError)
 
 

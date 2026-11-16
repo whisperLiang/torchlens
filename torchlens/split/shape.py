@@ -32,49 +32,6 @@ class SymbolicShape:
         return self.dims
 
 
-def infer_traced_batch_size(trace: Any) -> int | None:
-    """Infer the leading traced batch dimension from trace input layers.
-
-    Parameters
-    ----------
-    trace:
-        Current-main TorchLens ``Trace``.
-
-    Returns
-    -------
-    int | None
-        Leading batch size, or ``None`` when no tensor input shape is available.
-    """
-
-    layer_dict = getattr(trace, "layer_dict_all_keys", {}) or {}
-    output_leading_dims: set[int] = set()
-    for label in getattr(trace, "output_layers", ()) or ():
-        op = layer_dict.get(label)
-        shape = getattr(op, "shape", None)
-        if shape:
-            output_leading_dims.add(int(shape[0]))
-    input_leading_dims: list[int] = []
-    for label in getattr(trace, "input_layers", ()) or ():
-        op = layer_dict.get(label)
-        shape = getattr(op, "shape", None)
-        if shape:
-            leading_dim = int(shape[0])
-            input_leading_dims.append(leading_dim)
-            if leading_dim in output_leading_dims:
-                return leading_dim
-    for op in getattr(trace, "layer_list", ()) or ():
-        if getattr(op, "is_input", False):
-            shape = getattr(op, "shape", None)
-            if shape:
-                leading_dim = int(shape[0])
-                input_leading_dims.append(leading_dim)
-                if leading_dim in output_leading_dims:
-                    return leading_dim
-    if input_leading_dims:
-        return input_leading_dims[0]
-    return None
-
-
 def symbolic_shape_from_tensor_ref(tensor_ref: Any) -> SymbolicShape | None:
     """Build a concrete shape record from an op, tensor ref, tensor, or shape.
 
@@ -158,8 +115,9 @@ def validate_tensor_against_symbolic_shape(
                 traced_shape=expected,
                 runtime_shape=runtime_shape,
             ),
+            code=SplitBoundaryError.code,
         )
-    for index, (runtime_dim, expected_dim) in enumerate(zip(runtime_shape, expected)):
+    for index, (runtime_dim, expected_dim) in enumerate(zip(runtime_shape, expected, strict=True)):
         if not isinstance(expected_dim, int):
             if int(runtime_dim) < 1:
                 raise SplitBoundaryError(
@@ -175,6 +133,7 @@ def validate_tensor_against_symbolic_shape(
                         traced_shape=expected,
                         runtime_shape=runtime_shape,
                     ),
+                    code=SplitBoundaryError.code,
                 )
             continue
         if runtime_dim != expected_dim:
@@ -191,6 +150,7 @@ def validate_tensor_against_symbolic_shape(
                     traced_shape=expected,
                     runtime_shape=runtime_shape,
                 ),
+                code=SplitBoundaryError.code,
             )
 
 
@@ -245,11 +205,10 @@ def is_batch_shape_sensitive_op(*names: str | None) -> bool:
     return False
 
 
-__all__ = [
+__all__ = (
     "SymbolicDim",
     "SymbolicShape",
-    "infer_traced_batch_size",
     "is_batch_shape_sensitive_op",
     "symbolic_shape_from_tensor_ref",
     "validate_tensor_against_symbolic_shape",
-]
+)

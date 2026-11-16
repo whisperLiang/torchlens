@@ -7,15 +7,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..data_classes.trace import Trace
-    from .invariants import (
-        MetadataInvariantError,
-        _check_backward_event_flow_invariants,
-        _check_backward_pass_domain_invariants,
-        _check_journal_seq_invariants,
-        _layer_feeds_recorded_backward_roots,
-        _layer_postdates_all_backward_triggers,
-    )
+    from .._data_classes.trace import Trace
 
 __all__ = (
     "_check_backward_graph_invariants",
@@ -24,7 +16,7 @@ __all__ = (
     "_check_backward_layer_backpointers",
     "_check_backward_saved_grad_records",
     "_check_backward_pass_record_consistency",
-    "_check_backward_pass_index_density",
+    "_check_backward_pass_number_density",
     "_check_grad_fn_topology_invariants",
     "_check_grad_fn_relation_list",
 )
@@ -43,11 +35,14 @@ def _check_backward_graph_invariants(trace: Trace) -> None:
     forward layers did not exist when backward graph walking ran, while still
     failing pre-trigger layers whose backpointer was accidentally severed.
     A pre-trigger layer is also exempt when it provably sat OUTSIDE the
-    backward walk (b7-opus R24-X): its recorded handle id was never projected
+    backward walk: its recorded handle id was never projected
     into ``grad_fn_logs`` AND no autograd-visited op is reachable from it
     through grad-carrying edges — the dead-branch case (``_ = h.mean()``) and
     grad-severed subgraphs, where autograd never constructs a backpointer to
-    retain.
+    retain. An in-place write through a view (its recorded node is a view
+    backward class) is never exempted while the walk visited a ``CopySlices``
+    that no op owns: its gradient runs through that node, and its forward
+    children do not show the written base's readers in every capture mode.
 
     Parameters
     ----------
@@ -66,7 +61,7 @@ def _check_backward_graph_invariants(trace: Trace) -> None:
         sync_projection()
     _check_journal_seq_invariants(trace, name)
     _check_backward_event_flow_invariants(trace, name)
-    if not trace.grad_fn_logs:
+    if not trace._grad_fn_logs:
         _refuse_backward_evidence_without_registry(trace, name)
         return
 
@@ -74,7 +69,7 @@ def _check_backward_graph_invariants(trace: Trace) -> None:
     _check_backward_grad_fn_handle_records(trace, name, valid_pass_indices)
     _check_backward_layer_backpointers(trace, name)
     _check_backward_saved_grad_records(trace, name)
-    _check_backward_pass_index_density(trace, name)
+    _check_backward_pass_number_density(trace, name)
     _check_grad_fn_topology_invariants(trace, name)
     _check_backward_pass_domain_invariants(trace, name, valid_pass_indices)
     _check_backward_pass_record_consistency(trace, name, valid_pass_indices)
@@ -86,7 +81,7 @@ def _refuse_backward_evidence_without_registry(trace: Trace, name: str) -> None:
     The rest of the backward invariant family is gated on ``grad_fn_logs``
     being non-empty, and the capture-event journal is a run-scoped live fact
     that never survives pickle restore, fork, or bundle load -- so on a
-    detached trace a WIPED registry used to silently skip every registry,
+    detached trace a WIPED registry would silently skip every registry,
     backpointer, saved-grad, density, topology, and domain check. Backward
     projection can never legitimately leave ``backward_pass_logs``,
     ``num_backward_passes``, ``grad_fn_order``, or
@@ -112,22 +107,22 @@ def _refuse_backward_evidence_without_registry(trace: Trace, name: str) -> None:
     """
 
     evidence: list[str] = []
-    backward_pass_logs = getattr(trace, "backward_pass_logs", None) or {}
+    backward_pass_logs = trace._backward_pass_logs or {}
     ok_pass_count = sum(
         1 for record in backward_pass_logs.values() if getattr(record, "status", "ok") == "ok"
     )
     if ok_pass_count:
         evidence.append(f"backward_pass_logs holds {ok_pass_count} ok-status pass record(s)")
-    num_backward_passes = getattr(trace, "num_backward_passes", 0) or 0
+    num_backward_passes = trace._num_backward_passes or 0
     if isinstance(num_backward_passes, int) and num_backward_passes > len(backward_pass_logs):
         evidence.append(
             f"num_backward_passes={num_backward_passes} exceeds the "
             f"{len(backward_pass_logs)} recorded pass record(s)"
         )
-    grad_fn_order = getattr(trace, "grad_fn_order", None) or ()
+    grad_fn_order = trace._autograd_grad_fn_order or ()
     if grad_fn_order:
         evidence.append(f"grad_fn_order holds {len(grad_fn_order)} id(s)")
-    root_ids = getattr(trace, "backward_root_grad_fn_object_ids", None) or ()
+    root_ids = trace._autograd_backward_root_grad_fn_object_ids or ()
     if root_ids:
         evidence.append(f"backward_root_grad_fn_object_ids holds {len(root_ids)} id(s)")
     if evidence:
@@ -161,26 +156,26 @@ def _check_backward_grad_fn_registry(trace: Trace, name: str) -> set[int]:
         If registry or root references are inconsistent.
     """
 
-    grad_fn_ids = set(trace.grad_fn_logs)
-    order_ids = set(trace.grad_fn_order)
+    grad_fn_ids = set(trace._grad_fn_logs)
+    order_ids = set(trace._autograd_grad_fn_order)
     if not order_ids <= grad_fn_ids:
         missing = sorted(order_ids - grad_fn_ids)
         raise MetadataInvariantError(name, f"grad_fn_order contains unknown ids {missing!r}")
 
-    root_ids = trace.backward_root_grad_fn_object_ids
+    root_ids = trace._autograd_backward_root_grad_fn_object_ids
     if not isinstance(root_ids, list):
         raise MetadataInvariantError(
             name,
             f"backward_root_grad_fn_object_ids must be a list, got {type(root_ids).__name__}",
         )
-    missing_root_ids = [root_id for root_id in root_ids if root_id not in trace.grad_fn_logs]
+    missing_root_ids = [root_id for root_id in root_ids if root_id not in trace._grad_fn_logs]
     if missing_root_ids:
         raise MetadataInvariantError(
             name,
             f"backward_root_grad_fn_object_ids {missing_root_ids!r} are not present in grad_fn_logs",
         )
 
-    return set(getattr(trace, "backward_pass_logs", {}).keys())
+    return set(trace._backward_pass_logs.keys())
 
 
 def _check_backward_grad_fn_handle_records(
@@ -206,7 +201,7 @@ def _check_backward_grad_fn_handle_records(
     """
 
     layer_labels = set(trace.layer_labels)
-    for grad_fn_object_id, grad_fn_handle in trace.grad_fn_logs.items():
+    for grad_fn_object_id, grad_fn_handle in trace._grad_fn_logs.items():
         if not re.fullmatch(r"[a-z0-9_]+_back_[1-9]\d*_[1-9]\d*", grad_fn_handle.label):
             raise MetadataInvariantError(
                 name,
@@ -248,7 +243,7 @@ def _check_backward_grad_fn_handle_records(
             )
         # Domain check for EVERY handle, not only higher-order ones. This used to
         # live under ``creator_object_id is not None``, which is populated only by
-        # ``create_graph=True`` autograd, so an ordinary ``log_backward`` never
+        # ``create_graph=True`` autograd, so an ordinary ``backward`` never
         # reached it. ``origin_backward_pass`` is declared ``int | None`` and is
         # legitimately None on handles built outside a backward pass, so None is
         # explicitly allowed here; the stricter creator-branch form below is
@@ -261,7 +256,7 @@ def _check_backward_grad_fn_handle_records(
             )
         creator_object_id = getattr(grad_fn_handle, "creator_object_id", None)
         if creator_object_id is not None:
-            creator = trace.grad_fn_logs.get(creator_object_id)
+            creator = trace._grad_fn_logs.get(creator_object_id)
             if creator is None:
                 raise MetadataInvariantError(
                     name,
@@ -293,10 +288,10 @@ def _check_backward_grad_fn_handle_records(
                     name,
                     f"{grad_fn_handle.label}:{ordinal} has inconsistent local ordinal fields",
                 )
-            if call.backward_pass_index is None:
+            if call.backward_pass_number is None:
                 raise MetadataInvariantError(
                     name,
-                    f"{grad_fn_handle.label}:{ordinal} is missing backward_pass_index",
+                    f"{grad_fn_handle.label}:{ordinal} is missing backward_pass_number",
                 )
 
 
@@ -316,14 +311,14 @@ def _check_backward_layer_backpointers(trace: Trace, name: str) -> None:
         If a layer points to a missing or severed GradFn handle.
     """
 
-    for layer in trace.layer_list:
-        grad_fn_object_id = layer.grad_fn_object_id
+    for layer in trace._layer_list:
+        grad_fn_object_id = layer._grad_fn_object_id
         if grad_fn_object_id is None:
             continue
-        if layer.grad_fn is None:
+        if layer.autograd.grad_fn is None:
             if _layer_postdates_all_backward_triggers(trace, layer):
                 continue
-            # Dead-branch carve-out (b7-opus R24-X): autograd visits a grad_fn
+            # Dead-branch carve-out: autograd visits a grad_fn
             # only when its output feeds a backward root along grad-carrying
             # edges, so a provably non-contributing layer (unconsumed output,
             # or a path severed by a grad-less op) never receives a
@@ -333,16 +328,22 @@ def _check_backward_layer_backpointers(trace: Trace, name: str) -> None:
             # a dropped backpointer on it still raises) AND the grad-carrying
             # reachability walk — which fails closed on every resolution
             # gap — cannot reach any visited op downstream.
-            if grad_fn_object_id not in getattr(
-                trace, "grad_fn_logs", {}
-            ) and not _layer_feeds_recorded_backward_roots(trace, layer):
+            # A write through a view whose gradient may run through an
+            # unowned ``CopySlices`` is never excused by the forward walk: in a
+            # capture without base-label propagation its readers are not its
+            # forward children.
+            if (
+                grad_fn_object_id not in trace._grad_fn_logs
+                and not _layer_feeds_recorded_backward_roots(trace, layer)
+                and not _view_write_gradient_runs_through_copy_slices(trace, layer)
+            ):
                 continue
             raise MetadataInvariantError(
                 name,
                 f"Layer {layer.layer_label} with grad_fn_handle id {grad_fn_object_id!r} "
                 "is missing its GradFn backpointer",
             )
-        if grad_fn_object_id not in trace.grad_fn_logs:
+        if grad_fn_object_id not in trace._grad_fn_logs:
             raise MetadataInvariantError(
                 name,
                 f"Layer {layer.layer_label} points to missing grad_fn_handle id "
@@ -366,7 +367,7 @@ def _check_backward_saved_grad_records(trace: Trace, name: str) -> None:
         If saved-grad op labels and layer ``has_grad`` flags disagree.
     """
 
-    expected_saved_grad_labels = {layer.label for layer in trace.layer_list if layer.has_grad}
+    expected_saved_grad_labels = {layer.label for layer in trace._layer_list if layer.has_grad}
     saved_grad_labels = {op.label for op in trace.saved_grad_ops}
     if saved_grad_labels != expected_saved_grad_labels:
         raise MetadataInvariantError(
@@ -397,30 +398,29 @@ def _check_backward_pass_record_consistency(
         If backward pass logs are not dense or calls reference missing passes.
     """
 
-    for pass_index, backward_pass in getattr(trace, "backward_pass_logs", {}).items():
-        if backward_pass.pass_index != pass_index:
+    for pass_index, backward_pass in trace._backward_pass_logs.items():
+        if backward_pass.pass_number != pass_index:
             raise MetadataInvariantError(
                 name,
-                f"BackwardPass stored index {backward_pass.pass_index!r} under {pass_index!r}",
+                f"BackwardPass stored index {backward_pass.pass_number!r} under {pass_index!r}",
             )
         for call in backward_pass.grad_fn_calls:
-            if call.backward_pass_index != pass_index:
+            if call.backward_pass_number != pass_index:
                 raise MetadataInvariantError(
                     name,
-                    f"{call.call_label} is attached to pass {pass_index} but records "
-                    f"pass {call.backward_pass_index}",
+                    f"{call.label} is attached to pass {pass_index} but records "
+                    f"pass {call.backward_pass_number}",
                 )
-    for grad_fn_handle in trace.grad_fn_logs.values():
+    for grad_fn_handle in trace._grad_fn_logs.values():
         for call in grad_fn_handle.calls.values():
-            if call.backward_pass_index not in valid_pass_indices:
+            if call.backward_pass_number not in valid_pass_indices:
                 raise MetadataInvariantError(
                     name,
-                    f"{call.call_label} references missing backward pass "
-                    f"{call.backward_pass_index}",
+                    f"{call.grad_fn_label} references missing backward pass {call.backward_pass_number}",
                 )
 
 
-def _check_backward_pass_index_density(trace: Trace, name: str) -> None:
+def _check_backward_pass_number_density(trace: Trace, name: str) -> None:
     """Check backward pass log keys are dense.
 
     Parameters
@@ -436,13 +436,13 @@ def _check_backward_pass_index_density(trace: Trace, name: str) -> None:
         If backward pass log keys are not exactly ``1..num_backward_passes``.
     """
 
-    expected_pass_indices = list(range(1, trace.num_backward_passes + 1))
-    actual_pass_indices = sorted(getattr(trace, "backward_pass_logs", {}).keys())
+    expected_pass_indices = list(range(1, trace._num_backward_passes + 1))
+    actual_pass_indices = sorted(trace._backward_pass_logs.keys())
     if actual_pass_indices != expected_pass_indices:
         raise MetadataInvariantError(
             name,
             f"backward_pass_logs keys {actual_pass_indices!r} are not dense "
-            f"1..{trace.num_backward_passes}",
+            f"1..{trace._num_backward_passes}",
         )
 
 
@@ -450,7 +450,7 @@ def _check_grad_fn_topology_invariants(trace: Trace, name: str) -> None:
     """Check backward GradFn relation lists for reciprocal, resolvable links.
 
     The precondition contract is backward-capture only: callers invoke this
-    helper after proving ``trace.grad_fn_logs`` is populated. Forward-only
+    helper after proving ``trace._grad_fn_logs`` is populated. Forward-only
     traces legitimately have no GradFn topology and are skipped by
     ``_check_backward_graph_invariants`` before this helper is reached.
 
@@ -469,10 +469,10 @@ def _check_grad_fn_topology_invariants(trace: Trace, name: str) -> None:
     """
 
     grad_fns_by_label = {
-        grad_fn_handle.label: grad_fn_handle for grad_fn_handle in trace.grad_fn_logs.values()
+        grad_fn_handle.label: grad_fn_handle for grad_fn_handle in trace._grad_fn_logs.values()
     }
-    grad_fn_ids = set(trace.grad_fn_logs)
-    for grad_fn_handle in trace.grad_fn_logs.values():
+    grad_fn_ids = set(trace._grad_fn_logs)
+    for grad_fn_handle in trace._grad_fn_logs.values():
         missing_next_ids = [
             next_id for next_id in grad_fn_handle.next_grad_fn_ids if next_id not in grad_fn_ids
         ]
@@ -574,3 +574,20 @@ def _check_grad_fn_relation_list(
                 f"{source_label} {relation_name} references {related_label!r}, but "
                 f"{related_label!r} does not list {source_label!r} in {reciprocal_name}",
             )
+
+
+# Late imports: the split modules of this package import one another (cycles), so each
+# imports its siblings once every definition above exists.
+from ._invariants import (  # noqa: E402
+    MetadataInvariantError,
+)
+from ._invariants_backward_domain import (  # noqa: E402
+    _check_backward_pass_domain_invariants,
+    _check_journal_seq_invariants,
+    _layer_feeds_recorded_backward_roots,
+    _layer_postdates_all_backward_triggers,
+    _view_write_gradient_runs_through_copy_slices,
+)
+from ._invariants_backward_flow import (  # noqa: E402
+    _check_backward_event_flow_invariants,
+)

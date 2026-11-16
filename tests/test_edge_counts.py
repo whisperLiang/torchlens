@@ -27,22 +27,27 @@ def _trace(model: nn.Module, inputs: torch.Tensor, **kwargs: object) -> tl.Trace
         Captured trace.
     """
 
-    return tl.trace(model, inputs, save_raw_activations=False, **kwargs)
+    kwargs.setdefault("capture", tl.options.CaptureOptions(save_raw_activations=False))
+    return tl.trace(model, inputs, **kwargs)
 
 
 def _canonical_child_edges(trace: tl.Trace) -> set[tuple[str, str]]:
-    """Return distinct graph edges by walking Op children."""
+    """Return distinct graph edges by walking every row's children (input/output rows too)."""
 
     return {
-        (op.label, trace.ops[child_label].label) for op in trace.ops for child_label in op.children
+        (op.label, trace.ops[child_label].label)
+        for op in trace._layer_list
+        for child_label in op.children
     }
 
 
 def _canonical_parent_edges(trace: tl.Trace) -> set[tuple[str, str]]:
-    """Return distinct graph edges by walking Op parents."""
+    """Return distinct graph edges by walking every row's parents (input/output rows too)."""
 
     return {
-        (trace.ops[parent_label].label, op.label) for op in trace.ops for parent_label in op.parents
+        (trace.ops[parent_label].label, op.label)
+        for op in trace._layer_list
+        for parent_label in op.parents
     }
 
 
@@ -52,12 +57,12 @@ def _assert_edge_invariants(trace: tl.Trace) -> None:
     child_edges = _canonical_child_edges(trace)
     parent_edges = _canonical_parent_edges(trace)
     assert child_edges == parent_edges
-    assert sum(len({trace.ops[child].label for child in op.children}) for op in trace.ops) == len(
-        child_edges
-    )
-    assert sum(len({trace.ops[parent].label for parent in op.parents}) for op in trace.ops) == len(
-        parent_edges
-    )
+    assert sum(
+        len({trace.ops[child].label for child in op.children}) for op in trace._layer_list
+    ) == len(child_edges)
+    assert sum(
+        len({trace.ops[parent].label for parent in op.parents}) for op in trace._layer_list
+    ) == len(parent_edges)
     assert len(child_edges) == trace.num_edges
 
 
@@ -211,12 +216,12 @@ def test_linear_chain_edge_counts() -> None:
     trace = _trace(Chain(num_pairs=2).eval(), torch.randn(1, 4))
 
     assert trace.num_edges == 5
-    assert trace.num_compute_edges == 3
+    assert trace.graph.num_compute_edges == 3
     # mean children per compute op: 4 compute ops each feed exactly one child -> 1.0
-    assert trace.branching_factor == pytest.approx(1.0)
-    assert trace.max_in_degree == 1
-    assert trace.max_out_degree == 1
-    assert trace.num_layer_edges == 5
+    assert trace.graph.branching_factor == pytest.approx(1.0)
+    assert trace.graph.max_in_degree == 1
+    assert trace.graph.max_out_degree == 1
+    assert trace.graph.num_layer_edges == 5
     _assert_edge_invariants(trace)
 
 
@@ -226,9 +231,9 @@ def test_residual_reuse_counts_skip_edge() -> None:
     trace = _trace(ComputeReuse().eval(), torch.randn(1, 4))
 
     assert trace.num_edges == 7
-    assert trace.num_compute_edges == 5
-    assert trace.max_in_degree == 2
-    assert trace.max_out_degree == 2
+    assert trace.graph.num_compute_edges == 5
+    assert trace.graph.max_in_degree == 2
+    assert trace.graph.max_out_degree == 2
     assert ("relu_1_2:1", "mul_1_3:1") in _canonical_child_edges(trace)
     assert ("relu_1_2:1", "add_1_4:1") in _canonical_child_edges(trace)
     _assert_edge_invariants(trace)
@@ -240,73 +245,7 @@ def test_n_way_combine_max_in_degree() -> None:
     trace = _trace(NWayCombine(num_branches=3).eval(), torch.randn(1, 4))
 
     assert trace.num_edges == 8
-    assert trace.num_compute_edges == 4
-    assert trace.max_in_degree == 3
-    assert trace.max_out_degree == 1
-    _assert_edge_invariants(trace)
-
-
-def test_recurrent_reassignment_layer_edges_collapse_pass_edges() -> None:
-    """Rolling recurrent layers has fewer layer edges than per-pass Op edges."""
-
-    trace = _trace(RecurrentCell().eval(), torch.randn(1, 4))
-
-    assert trace.num_edges == 7
-    assert trace.num_layer_edges == 4
-    assert trace.num_layer_edges < trace.num_edges
-    _assert_edge_invariants(trace)
-
-
-def test_module_and_module_call_edge_footprints() -> None:
-    """Nested Module and ModuleCall edge footprints are exact."""
-
-    trace = _trace(NestedModel().eval(), torch.randn(1, 4))
-
-    block_call = trace.module_calls["block:1"]
-    assert block_call.num_internal_edges == 2
-    assert block_call.num_input_edges == 1
-    assert block_call.num_output_edges == 1
-    assert block_call.num_edges == 4
-
-    block = trace.modules["block"]
-    assert block.num_internal_edges == 2
-    assert block.num_input_edges == 1
-    assert block.num_output_edges == 1
-    assert block.num_edges == 4
-
-    pre_call = trace.module_calls["pre:1"]
-    assert pre_call.num_internal_edges == 0
-    assert pre_call.num_input_edges == 1
-    assert pre_call.num_output_edges == 1
-    assert pre_call.num_edges == 2
-    _assert_edge_invariants(trace)
-
-
-def test_buffer_edges_are_counted() -> None:
-    """BatchNorm train-mode buffer reads and writes contribute buffer edges."""
-
-    trace = _trace(BufferModel().train(), torch.randn(3, 4))
-
-    assert trace.num_buffer_edges == 6
-    assert trace.num_buffer_edges > 0
-    _assert_edge_invariants(trace)
-
-
-def test_backward_edges_gate_on_backward_capture() -> None:
-    """Backward edge count is None until backward data has been logged."""
-
-    no_backward = _trace(BackwardModel(), torch.randn(2, 4, requires_grad=True))
-    assert no_backward.num_backward_edges is None
-
-    trace = _trace(
-        BackwardModel(),
-        torch.randn(2, 4, requires_grad=True),
-        backward_ready=True,
-        save_grads=True,
-    )
-    assert trace.num_backward_edges is None
-    loss = trace[trace.output_layers[0]].out
-    trace.backward(loss, retain_graph=True)
-    assert trace.num_backward_edges is not None
-    assert trace.num_backward_edges > 0
+    assert trace.graph.num_compute_edges == 4
+    assert trace.graph.max_in_degree == 3
+    assert trace.graph.max_out_degree == 1
     _assert_edge_invariants(trace)

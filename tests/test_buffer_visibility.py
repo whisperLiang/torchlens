@@ -10,8 +10,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.data_classes.trace import Trace
-from torchlens.options import CaptureOptions
+from torchlens._data_classes.trace import Trace
+from torchlens._utils._record_group_table import record_member
 
 
 class _BatchNormOnly(nn.Module):
@@ -131,7 +131,7 @@ def _log_model(model: nn.Module) -> Trace:
     return tl.trace(
         model,
         torch.randn(2, 4),
-        capture=CaptureOptions(layers_to_save="none"),
+        save="none",
     )
 
 
@@ -154,12 +154,11 @@ def _render_dot(log: Trace, tmp_path: Path, show_buffer_layers: str | bool) -> s
     """
 
     return log.draw(
-        vis_save_only=True,
-        vis_fileformat="svg",
-        vis_outpath=str(tmp_path / f"buffer_visibility_{show_buffer_layers}"),
-        show_buffer_layers=show_buffer_layers,
-        vis_node_placement="dot",
-    )
+        file_format="svg",
+        path=str(tmp_path / f"buffer_visibility_{show_buffer_layers}"),
+        show_buffers=show_buffer_layers,
+        layout="dot",
+    ).dot
 
 
 def _render_collapsed_module(
@@ -185,12 +184,11 @@ def _render_collapsed_module(
     """
 
     return log.draw(
-        vis_save_only=True,
-        vis_fileformat="svg",
-        vis_outpath=str(tmp_path / f"collapsed_{node_placement}"),
+        file_format="svg",
+        path=str(tmp_path / f"collapsed_{node_placement}"),
         collapse_fn=_collapse_batchnorm,
-        vis_node_placement=node_placement,
-    )
+        layout=node_placement,
+    ).dot
 
 
 def _collapse_batchnorm(module: object) -> bool:
@@ -207,7 +205,7 @@ def _collapse_batchnorm(module: object) -> bool:
         Whether the module is the BatchNorm child.
     """
 
-    return getattr(module, "address", None) == "bn"
+    return record_member(module, "address", None) == "bn"
 
 
 def _collapse_module_at_address(module: object, address: str) -> bool:
@@ -227,7 +225,7 @@ def _collapse_module_at_address(module: object, address: str) -> bool:
         Whether the module has the requested address.
     """
 
-    return getattr(module, "address", None) == address
+    return record_member(module, "address", None) == address
 
 
 def _node_line(dot_source: str, graph_node_label: str) -> str:
@@ -291,13 +289,12 @@ def _child_ops_for_buffer(log: Trace, address: str) -> list[str]:
         Child layer labels for the matching buffer.
     """
 
-    for node in log.layer_dict_main_keys.values():
-        if node.is_buffer and node.address == address:
+    for node in log._layer_dict_main_keys.values():
+        if node.graph.is_buffer and node.buffer_address == address:
             return [child.replace(":", "pass") for child in node.children]
     raise AssertionError(f"Buffer {address!r} was not found in the log.")
 
 
-@pytest.mark.smoke
 def test_never_hides_all_and_marks_parents(tmp_path: Path) -> None:
     """Mode ``never`` hides all buffers and marks ops with hidden buffer sources."""
 
@@ -312,7 +309,6 @@ def test_never_hides_all_and_marks_parents(tmp_path: Path) -> None:
     assert 'tooltip="Hidden buffers:' in _node_line(dot_source, "batchnorm_1_1")
 
 
-@pytest.mark.smoke
 def test_meaningful_hides_noise_only(tmp_path: Path) -> None:
     """Mode ``meaningful`` hides noisy buffers but keeps architectural buffers."""
 
@@ -333,7 +329,6 @@ def test_meaningful_hides_noise_only(tmp_path: Path) -> None:
         assert "peripheries=2" not in _node_line(dot_source, child_name)
 
 
-@pytest.mark.smoke
 def test_always_shows_all_no_marker(tmp_path: Path) -> None:
     """Mode ``always`` shows all buffers and omits hidden-buffer markers."""
 
@@ -350,7 +345,6 @@ def test_always_shows_all_no_marker(tmp_path: Path) -> None:
     assert "Hidden buffers:" not in dot_source
 
 
-@pytest.mark.smoke
 def test_visible_buffer_uses_cylinder_shape(tmp_path: Path) -> None:
     """Visible buffers render as white cylinders instead of gray boxes."""
 
@@ -368,38 +362,27 @@ def test_visible_buffer_uses_cylinder_shape(tmp_path: Path) -> None:
     assert "#888888" not in causal_mask_lines[0]
 
 
-@pytest.mark.smoke
-def test_legacy_true_matches_always(tmp_path: Path) -> None:
-    """Legacy ``True`` buffer visibility maps to ``always``."""
+@pytest.mark.parametrize(
+    "legacy_value",
+    [True, False],
+    ids=["legacy_true_refuses_typed", "legacy_false_refuses_typed"],
+)
+def test_legacy_bool_refuses_typed(tmp_path: Path, legacy_value: bool) -> None:
+    """The removed legacy ``True`` and ``False`` buffer-visibility values refuse typed."""
 
     log = _log_model(_BatchNormWithArchitecturalBuffer())
     try:
-        legacy_dot = _render_dot(log, tmp_path, True)
-        tri_state_dot = _render_dot(log, tmp_path, "always")
+        with pytest.raises(tl.errors.InvalidArgumentError) as exc_info:
+            _render_dot(log, tmp_path, legacy_value)
     finally:
         log.cleanup()
 
-    assert legacy_dot == tri_state_dot
+    assert exc_info.value.fields["code"] == "buffer_visibility_invalid"
 
 
-@pytest.mark.smoke
-def test_legacy_false_matches_never(tmp_path: Path) -> None:
-    """Legacy ``False`` buffer visibility maps to ``never``."""
-
-    log = _log_model(_BatchNormWithArchitecturalBuffer())
-    try:
-        legacy_dot = _render_dot(log, tmp_path, False)
-        tri_state_dot = _render_dot(log, tmp_path, "never")
-    finally:
-        log.cleanup()
-
-    assert legacy_dot == tri_state_dot
-
-
-@pytest.mark.smoke
 @pytest.mark.parametrize(
     ("training", "expected"),
-    [(False, "1 op + 4 buffers"), (True, "2 ops + 6 buffers")],
+    [(False, "1 op + 2 buffers"), (True, "2 ops + 6 buffers")],
 )
 def test_collapsed_batchnorm_labels_ops_and_buffers(
     tmp_path: Path,
@@ -410,7 +393,7 @@ def test_collapsed_batchnorm_labels_ops_and_buffers(
 
     model = _BatchNormOnly()
     model.train(training)
-    log = tl.trace(model, torch.randn(2, 4), capture=CaptureOptions(layers_to_save="none"))
+    log = tl.trace(model, torch.randn(2, 4), save="none")
     try:
         dot_source = _render_collapsed_module(log, tmp_path)
     finally:
@@ -420,19 +403,17 @@ def test_collapsed_batchnorm_labels_ops_and_buffers(
     assert "layers total" not in dot_source
 
 
-@pytest.mark.smoke
 def test_collapsed_pure_op_module_omits_buffer_clause(tmp_path: Path) -> None:
     """Collapsed modules without buffers render only their operation count."""
 
-    log = tl.trace(_PureOpModel(), torch.randn(2, 4), capture=CaptureOptions(layers_to_save="none"))
+    log = tl.trace(_PureOpModel(), torch.randn(2, 4), save="none")
     try:
         dot_source = log.draw(
-            vis_save_only=True,
-            vis_fileformat="svg",
-            vis_outpath=str(tmp_path / "pure_ops"),
+            file_format="svg",
+            path=str(tmp_path / "pure_ops"),
             collapse_fn=partial(_collapse_module_at_address, address="block"),
-            vis_node_placement="dot",
-        )
+            layout="dot",
+        ).dot
     finally:
         log.cleanup()
 

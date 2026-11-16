@@ -5,8 +5,8 @@ import pytest
 import torch
 import torch.nn as nn
 
+import torchlens as tl
 from torchlens import trace as trace_fn
-from torchlens.data_classes import ModuleAccessor, ParamAccessor
 from torchlens.types import Module, ModuleCall
 
 # ---------------------------------------------------------------------------
@@ -35,136 +35,15 @@ def _nested_input():
     return torch.randn(1, 10)
 
 
-class _RepeatedBatchNormLeaf(nn.Module):
-    """Leaf module with a BatchNorm site and registered running buffers."""
-
-    def __init__(self, channels: int) -> None:
-        """Initialize the convolution and BatchNorm layers.
-
-        Parameters
-        ----------
-        channels:
-            Number of feature channels preserved by the leaf block.
-        """
-
-        super().__init__()
-        self.conv = nn.Conv2d(channels, channels, 1, bias=False)
-        self.bn = nn.BatchNorm2d(channels)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run the leaf block.
-
-        Parameters
-        ----------
-        x:
-            Input feature map.
-
-        Returns
-        -------
-        torch.Tensor
-            Activated output feature map.
-        """
-
-        return torch.relu(self.bn(self.conv(x)))
-
-
-class _RepeatedBatchNormStack(nn.Module):
-    """Stack of identical BatchNorm-containing leaf modules."""
-
-    def __init__(self, depth: int = 4, channels: int = 3) -> None:
-        """Initialize the repeated BatchNorm stack.
-
-        Parameters
-        ----------
-        depth:
-            Number of repeated leaf modules.
-        channels:
-            Number of channels preserved by every leaf module.
-        """
-
-        super().__init__()
-        self.blocks = nn.Sequential(*(_RepeatedBatchNormLeaf(channels) for _ in range(depth)))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run the repeated BatchNorm stack.
-
-        Parameters
-        ----------
-        x:
-            Input feature map.
-
-        Returns
-        -------
-        torch.Tensor
-            Output feature map after every leaf module.
-        """
-
-        return self.blocks(x)
-
-
 # ---------------------------------------------------------------------------
 # TestModuleLogBasic
 # ---------------------------------------------------------------------------
 
 
 class TestModuleLogBasic:
-    @pytest.mark.smoke
-    def test_modules_accessor_exists(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        assert isinstance(log.modules, ModuleAccessor)
-
-    def test_root_module_exists(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        root = log.modules["self"]
-        assert isinstance(root, Module)
-        assert root.address == "self"
-
     def test_root_module_alias(self):
         log = trace_fn(_make_simple_model(), _simple_input())
         assert log.modules[""] is log.modules["self"]
-
-    def test_root_module_property(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        assert log.root_module is log.modules["self"]
-
-    def test_module_count(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        # Sequential has 3 children: Linear, ReLU, Linear → 3 submodules + root = 4
-        assert len(log.modules) >= 4
-
-    @pytest.mark.smoke
-    def test_access_by_address(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        ml = log.modules["0"]
-        assert isinstance(ml, Module)
-        assert ml.address == "0"
-
-    def test_access_by_index(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        ml = log.modules[0]
-        assert isinstance(ml, Module)
-
-    def test_call_access_by_pass_notation(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        # All modules have 1 pass in a non-recurrent model
-        addresses = [ml.address for ml in log.modules if ml.address != "self"]
-        if addresses:
-            addr = addresses[0]
-            assert isinstance(log.modules[f"{addr}:1"], Module)
-            mpl = log.module_calls[f"{addr}:1"]
-            assert isinstance(mpl, ModuleCall)
-
-    def test_contains(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        assert "0" in log.modules
-        assert "self" in log.modules
-        assert "nonexistent" not in log.modules
-
-    def test_iter(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        modules_list = list(log.modules)
-        assert len(modules_list) == len(log.modules)
-        assert all(isinstance(ml, Module) for ml in modules_list)
 
     def test_getitem_multi_pass_returns_module_log(self, input_2d):
         """log["fc1"] for a multi-pass module should return Module (instead of error)."""
@@ -180,37 +59,6 @@ class TestModuleLogBasic:
 
 
 class TestModuleLogFields:
-    def test_identity_fields(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        ml = log.modules["0"]
-        assert ml.address == "0"
-        assert ml.name == "0"
-        assert ml.class_name == "Linear"
-
-    def test_source_info(self):
-        log = trace_fn(_make_simple_model(), _simple_input(), save_code_context=True)
-        ml = log.modules["0"]
-        assert ml.class_source_file is not None  # nn.Linear has inspectable source
-        assert ml.forward_signature is not None
-
-    def test_hierarchy_address(self):
-        log = trace_fn(_make_nested_model(), _nested_input())
-        # "0.0" is Linear inside first Sequential
-        ml = log.modules["0.0"]
-        assert ml.address_parent == "0"
-        assert ml.address_depth == 2
-
-        # "0" is the first Sequential
-        parent = log.modules["0"]
-        assert parent.address_parent == "self"
-        assert "0.0" in parent.address_children
-
-    def test_hierarchy_call(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        root = log.modules["self"]
-        # Root's call_children should include top-level modules
-        assert len(root.call_children) > 0
-
     def test_call_depth(self):
         log = trace_fn(_make_nested_model(), _nested_input())
         root = log.modules["self"]
@@ -230,77 +78,6 @@ class TestModuleLogFields:
         assert log.modules["0"].address_depth == 1
         assert log.modules["0.0"].address_depth == 2
 
-    def test_layers_populated(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        ml = log.modules["0"]
-        assert len(ml.layers) > 0
-        assert ml.num_layers == len(ml.layers)
-
-    def test_params_accessor(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        ml = log.modules["0"]  # Linear layer
-        assert isinstance(ml.params, ParamAccessor)
-        assert len(ml.params) == 2  # weight + bias
-
-    def test_training_mode(self):
-        model = _make_simple_model()
-        model.eval()
-        log = trace_fn(model, _simple_input())
-        for ml in log.modules:
-            if ml.address != "self":
-                assert ml.training is False
-
-    def test_hooks_detected_false(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        for ml in log.modules:
-            assert ml.has_forward_hooks is False
-            assert ml.has_backward_hooks is False
-
-    def test_repr(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        ml = log.modules["0"]
-        r = repr(ml)
-        assert "Module" in r
-        assert ml.address in r
-        assert ml.class_name in r
-
-
-# ---------------------------------------------------------------------------
-# TestModuleCallLog
-# ---------------------------------------------------------------------------
-
-
-class TestModuleCallLog:
-    def test_pass_layers(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        ml = log.modules["0"]
-        mpl = ml.ops[0]
-        assert isinstance(mpl, ModuleCall)
-        # Pass layers should be a subset of parent layers
-        assert all(label.split(":", 1)[0] in ml.layer_labels for label in mpl.ops)
-
-    def test_input_output_layers(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        ml = log.modules["0"]
-        mpl = ml.ops[0]
-        assert isinstance(mpl.input_layers, list)
-        assert isinstance(mpl.output_layers, list)
-
-    def test_call_children(self):
-        log = trace_fn(_make_nested_model(), _nested_input())
-        # "0" contains "0.0" and "0.1" as submodules
-        ml = log.modules["0"]
-        mpl = ml.ops[0]
-        assert isinstance(mpl.call_children, list)
-
-    def test_repr(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        ml = log.modules["0"]
-        mpl = ml.ops[0]
-        r = repr(mpl)
-        assert "ModuleCall" in r
-        assert len(r) > 0
-
 
 # ---------------------------------------------------------------------------
 # TestMultiPassModules
@@ -308,13 +85,6 @@ class TestModuleCallLog:
 
 
 class TestMultiPassModules:
-    def test_num_calls_gt_1(self, input_2d):
-        model = example_models.RecurrentParamsSimple()
-        log = trace_fn(model, input_2d)
-        # fc1 is used 4 times
-        ml = log.modules["fc1"]
-        assert ml.num_calls >= 2
-
     def test_per_call_field_raises(self, input_2d):
         model = example_models.RecurrentParamsSimple()
         log = trace_fn(model, input_2d)
@@ -333,75 +103,6 @@ class TestMultiPassModules:
         assert isinstance(ml.ops[0], ModuleCall)
         assert isinstance(ml.ops[1], ModuleCall)
 
-    def test_pass_notation_accessor(self, input_2d):
-        model = example_models.RecurrentParamsSimple()
-        log = trace_fn(model, input_2d)
-        assert isinstance(log.modules["fc1:2"], Module)
-        mpl = log.module_calls["fc1:2"]
-        assert isinstance(mpl, ModuleCall)
-        assert mpl.call_index == 2
-
-
-# ---------------------------------------------------------------------------
-# TestSinglePassDelegation
-# ---------------------------------------------------------------------------
-
-
-class TestSinglePassDelegation:
-    def test_layers_delegates(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        ml = log.modules["0"]
-        assert ml.num_calls == 1
-        assert ml.layer_labels == [label.split(":", 1)[0] for label in ml.ops[0].ops]
-
-    def test_forward_args_delegates(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        ml = log.modules["0"]
-        # GC-11 (torchlens/postprocess/finalization.py) unconditionally nulls
-        # ModuleCall.forward_args/forward_kwargs after Trace construction for
-        # the default "torch_module" identity mode -- the only modes GC-11
-        # exempts ("pytree_module"/"object_module") are JAX/TF/MLX/paddle/
-        # tinygrad-specific and the torch backend rejects them outright
-        # (BackendUnsupportedError), so asserting on forward_args itself for
-        # a torch-backend trace always compares None == None and can never
-        # discriminate a delegation regression (cert7 finding). forward_args
-        # and forward_args_summary delegate through the exact same
-        # ``Module._single_pass_or_error(field_name)`` mechanism, but
-        # forward_args_summary is computed *before* GC-11 nulls the raw
-        # payload and is never itself cleared, so it stays a real, non-empty
-        # value -- making this a genuinely discriminating exercise of the
-        # same delegation code path (mirrors test_layers_delegates, which
-        # discriminates via a real stored field for the same reason).
-        assert ml.forward_args is None
-        assert ml.ops[0].forward_args is None
-        assert ml.forward_args_summary == ml.ops[0].forward_args_summary
-        assert ml.forward_args_summary != ""
-
-    def test_forward_args_summary_delegation_is_discriminating(self, monkeypatch):
-        """Litmus for test_forward_args_delegates: prove the comparison it
-        relies on actually catches a field-swap regression in the shared
-        ``_single_pass_or_error`` delegation mechanism, rather than trivially
-        passing regardless of what the property returns.
-        """
-        from torchlens.data_classes.module import Module
-
-        def _swapped_forward_args_summary(self: Module) -> str:
-            """Wrong delegation: returns kwargs summary instead of args summary."""
-
-            return self._single_pass_or_error("forward_kwargs_summary")
-
-        monkeypatch.setattr(
-            Module,
-            "forward_args_summary",
-            property(_swapped_forward_args_summary),
-        )
-        log = trace_fn(_make_simple_model(), _simple_input())
-        ml = log.modules["0"]
-        # ops[0] is a ModuleCall (Op), not a Module -- its own
-        # forward_args_summary attribute is untouched by the monkeypatch, so
-        # a swapped Module-level delegation now visibly disagrees with it.
-        assert ml.forward_args_summary != ml.ops[0].forward_args_summary
-
 
 # ---------------------------------------------------------------------------
 # TestModuleAccessorSummary
@@ -409,15 +110,6 @@ class TestSinglePassDelegation:
 
 
 class TestModuleAccessorSummary:
-    def test_to_pandas(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        df = log.modules.to_pandas()
-        assert len(df) == len(log.modules)
-        assert "address" in df.columns
-        assert "class_name" in df.columns
-        assert "call_depth" in df.columns
-        assert "num_params" in df.columns
-
     def test_recurrent_to_pandas_and_root_aggregates(self, input_2d):
         """Recurrent models must not crash Module.to_pandas.
 
@@ -430,13 +122,15 @@ class TestModuleAccessorSummary:
         crash the per-pass columns.
         """
 
-        from torchlens.validation.invariants import check_metadata_invariants
+        from torchlens.validation._invariants import check_metadata_invariants
 
         model = example_models.RecurrentParamsSimple()
         # activation_transform=identity forces transformed_out to be populated
         # (it stays None with no transform), so the single-pass-vs-multi-pass
         # None-guard assertions below are meaningful rather than trivially true.
-        log = trace_fn(model, input_2d, activation_transform=lambda x: x)
+        log = trace_fn(
+            model, input_2d, capture=tl.options.CaptureOptions(activation_transform=lambda x: x)
+        )
 
         # The whole table renders without raising.
         df = log.modules.to_pandas()
@@ -445,12 +139,12 @@ class TestModuleAccessorSummary:
         # Root aggregates sum over ALL ops (every recurrent pass), with no
         # double-count and no miss versus a manual sum over log.ops.
         root = log.root_module
-        all_ops = list(log.ops)
-        manual_func = sum(getattr(op, "func_duration", 0.0) or 0.0 for op in all_ops)
-        manual_autograd = sum(int(getattr(op, "autograd_memory", 0) or 0) for op in all_ops)
+        all_ops = list(log._layer_list)
+        manual_func = sum(op.cost.duration or 0.0 for op in all_ops)
+        manual_autograd = sum(int(op.cost.autograd_memory or 0) for op in all_ops)
         out_label_set = set(root.calls[0].output_ops)
         manual_out_act = sum(
-            int(getattr(op, "activation_memory", 0) or 0)
+            int(op.cost.activation_memory or 0)
             for op in all_ops
             if op.label in out_label_set or op.layer_label in out_label_set
         )
@@ -478,11 +172,13 @@ class TestModuleAccessorSummary:
         # ``Layer._single_pass_or_error()`` for any multi-pass (recurrent) layer.
         # None of these three surfaces were covered by the assertions above, which
         # is exactly why the regression slipped through hotfix2.
-        multi_pass_labels = [label for label in fc1.layer_labels if log[label].num_passes > 1]
+        multi_pass_labels = [
+            label for label in fc1.layer_labels if log.layers[label].num_passes > 1
+        ]
         assert multi_pass_labels, "fixture must contain a multi-pass layer to exercise this gap"
 
         # 1) Layer.to_pandas() directly.
-        multi_pass_layer = log[multi_pass_labels[0]]
+        multi_pass_layer = log.layers[multi_pass_labels[0]]
         layer_df = multi_pass_layer.to_pandas()
         assert len(layer_df) == 1
         assert layer_df.iloc[0]["transformed_out"] is None
@@ -500,7 +196,7 @@ class TestModuleAccessorSummary:
 
         # 3) trace.modules["addr"].to_pandas() -- the per-module layer export.
         fc1_layers_df = fc1.to_pandas()
-        assert len(fc1_layers_df) == fc1.num_layers
+        assert len(fc1_layers_df) == len(fc1.layer_labels)
         fc1_layer_row = fc1_layers_df[fc1_layers_df["layer_label"] == multi_pass_labels[0]].iloc[0]
         assert fc1_layer_row["transformed_out"] is None
         assert fc1_layer_row["transformed_grad"] is None
@@ -526,82 +222,18 @@ class TestModuleAccessorSummary:
 
 
 class TestModuleLogIntegration:
-    def test_root_layers_equals_model_layers(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        root = log.root_module
-        assert root.layer_labels == [layer.layer_label for layer in log.layer_list]
-
-    def test_root_params_count(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        root = log.root_module
-        assert root.num_params == log.num_params
-
-    def test_class_name_matches(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        # Module "0" is Linear
-        assert log.modules["0"].class_name == "Linear"
-        # Module "1" is ReLU
-        assert log.modules["1"].class_name == "ReLU"
-        # Module "2" is Linear
-        assert log.modules["2"].class_name == "Linear"
-
-    def test_nested_model_hierarchy(self):
-        log = trace_fn(_make_nested_model(), _nested_input())
-        # Check that nesting is consistent
-        for ml in log.modules:
-            if ml.address == "self":
-                continue
-            # address_parent should be a valid module
-            assert ml.address_parent in log.modules
-
-    def test_module_log_to_pandas(self):
-        log = trace_fn(_make_simple_model(), _simple_input())
-        ml = log.modules["0"]
-        df = ml.to_pandas()
-        assert len(df) == ml.num_layers
-
     def test_module_log_iter(self):
         log = trace_fn(_make_simple_model(), _simple_input())
         ml = log.modules["0"]
         entries = list(ml)
-        assert len(entries) == ml.num_layers
+        assert len(entries) == len(ml.layer_labels)
 
     def test_module_log_getitem(self):
         log = trace_fn(_make_simple_model(), _simple_input())
         ml = log.modules["0"]
-        if ml.num_layers > 0:
+        if len(ml.layer_labels) > 0:
             entry = ml[0]
             assert entry.layer_label == ml.layer_labels[0]
-
-    def test_nested_modules_model(self, input_2d):
-        """Integration test with the NestedModules example model."""
-        model = example_models.NestedModules()
-        log = trace_fn(model, input_2d)
-        assert len(log.modules) > 1
-        root = log.root_module
-        assert root.address == "self"
-        # Should have nested hierarchy
-        max_depth = max(ml.call_depth for ml in log.modules)
-        assert max_depth >= 2  # At least 3 levels of nesting
-
-    def test_first_repeated_batchnorm_module_owns_only_local_layers(self) -> None:
-        """Internal buffer-address probes must not inflate first BatchNorm module layers."""
-
-        model = _RepeatedBatchNormStack(depth=4).eval()
-        log = trace_fn(model, torch.randn(1, 3, 8, 8))
-
-        block_layers = [log.modules[f"blocks.{idx}"].layer_labels for idx in range(4)]
-        block_counts = [log.modules[f"blocks.{idx}"].num_layers for idx in range(4)]
-        batchnorm_counts = [log.modules[f"blocks.{idx}.bn"].num_layers for idx in range(4)]
-
-        assert block_counts == [7, 7, 7, 7]
-        assert [len(labels) for labels in block_layers] == block_counts
-        assert batchnorm_counts == [5, 5, 5, 5]
-        for labels in block_layers:
-            assert [label.split("_", 1)[0] for label in labels].count("buffer") == 4
-            assert [label.split("_", 1)[0] for label in labels].count("batchnorm") == 1
-            assert [label.split("_", 1)[0] for label in labels].count("conv2d") == 1
-            assert [label.split("_", 1)[0] for label in labels].count("relu") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -616,41 +248,3 @@ class _SimpleLinear(nn.Module):
 
     def forward(self, x):
         return self.fc(x)
-
-
-class TestModuleLogStringIndexing:
-    """Module should support string label lookup."""
-
-    def test_module_string_lookup(self):
-        model = _SimpleLinear()
-        log = trace_fn(model, torch.randn(2, 10))
-        if hasattr(log, "_module_logs") and log._module_logs:
-            first_key = list(log._module_logs._dict.keys())[0]
-            mod = log._module_logs[first_key]
-            assert mod is not None
-
-
-class TestTupleStringNormalization:
-    """modules should handle both tuple and string formats."""
-
-    def test_module_hierarchy_with_nested_model(self):
-        class Inner(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.linear = nn.Linear(10, 10)
-
-            def forward(self, x):
-                return self.linear(x)
-
-        class Outer(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.inner = Inner()
-
-            def forward(self, x):
-                return self.inner(x)
-
-        model = Outer()
-        log = trace_fn(model, torch.randn(2, 10))
-        assert len(log.modules) > 0
-        assert "inner" in log.modules

@@ -7,15 +7,15 @@ from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
-from ._accessor_base import SuperAccessor
+from ._accessor_base import SharedNamesMixin, SuperAccessor, member_lookup
 from ._base import _TENSOR_FIELD_LITERAL, Super, _TensorBearing
 
 if TYPE_CHECKING:
-    from ...data_classes.buffer import Buffer
-    from ...data_classes.grad_fn import GradFn
-    from ...data_classes.grad_fn_call import GradFnCall
-    from ...data_classes.module import Module, ModuleCall
-    from ...data_classes.param import Param
+    from ..._data_classes.buffer import Buffer
+    from ..._data_classes.grad_fn import GradFn
+    from ..._data_classes.grad_fn_call import GradFnCall
+    from ..._data_classes.module import Module, ModuleCall
+    from ..._data_classes.param import Param
 
 
 class SuperModule(Super["Module"]):
@@ -80,11 +80,25 @@ class SuperBuffer(Super["Buffer"], _TensorBearing):
 
 
 class SuperParam(Super["Param"], _TensorBearing):
-    """Aligned view of a parameter address across bundle members."""
+    """Aligned view of a parameter address across bundle members.
+
+    Parameter members carry live handles, never capture-time bytes, so every
+    cross-member tensor read on this view (two or more members) refuses with
+    the stable code ``checkpoint_series_live_params`` unless every member has
+    immutable capture-time parameter evidence (not yet available). The guard lives at the one ``_tensor_dict``
+    funnel; single-member views keep the documented live-handle read,
+    disclosed by ``Param.value_basis``.
+    """
+
+    _cross_member_param_claim = True
 
     @property
     def weight_norm_diff(self) -> dict[str, float]:
         """Return L2 norm of parameter differences from the first member.
+
+        Refuses ``checkpoint_series_live_params`` on cross-member views
+        without immutable parameter evidence: live handles would report a
+        false zero for every member of a checkpoint series.
 
         Returns
         -------
@@ -162,8 +176,10 @@ class SuperGradFnCall(Super["GradFnCall"]):
     """Aligned view of a grad_fn_handle call label across bundle members."""
 
 
-class SuperModuleAccessor(SuperAccessor["Module", SuperModule]):
+class SuperModuleAccessor(SharedNamesMixin, SuperAccessor["Module", SuperModule]):
     """Dict-like Bundle accessor returning SuperModule objects."""
+
+    _names_kind = "modules"
 
     def __init__(self, bundle: Any) -> None:
         """Initialize a module accessor for ``bundle``.
@@ -192,10 +208,7 @@ class SuperModuleAccessor(SuperAccessor["Module", SuperModule]):
             Matching Module, or ``None`` when unresolved.
         """
 
-        try:
-            resolved = trace.modules[label]
-        except (KeyError, ValueError):
-            return None
+        resolved = member_lookup(trace.modules, label)
         return cast("Module", resolved) if type(resolved).__name__ == "Module" else None
 
     def _labels_in_member(self, trace: Any) -> list[str]:
@@ -215,8 +228,10 @@ class SuperModuleAccessor(SuperAccessor["Module", SuperModule]):
         return [str(label) for label in trace.modules.keys()]
 
 
-class SuperBufferAccessor(SuperAccessor["Buffer", SuperBuffer]):
+class SuperBufferAccessor(SharedNamesMixin, SuperAccessor["Buffer", SuperBuffer]):
     """Dict-like Bundle accessor returning SuperBuffer objects."""
+
+    _names_kind = "buffers"
 
     def __init__(self, bundle: Any) -> None:
         """Initialize a buffer accessor for ``bundle``.
@@ -245,10 +260,7 @@ class SuperBufferAccessor(SuperAccessor["Buffer", SuperBuffer]):
             Matching Buffer, or ``None`` when unresolved.
         """
 
-        try:
-            return cast("Buffer", trace.buffers[label])
-        except (KeyError, ValueError):
-            return None
+        return cast("Buffer", member_lookup(trace.buffers, label))
 
     def _labels_in_member(self, trace: Any) -> list[str]:
         """Return buffer labels from one member trace.
@@ -267,8 +279,10 @@ class SuperBufferAccessor(SuperAccessor["Buffer", SuperBuffer]):
         return [str(label) for label in trace.buffers.keys()]
 
 
-class SuperParamAccessor(SuperAccessor["Param", SuperParam]):
+class SuperParamAccessor(SharedNamesMixin, SuperAccessor["Param", SuperParam]):
     """Dict-like Bundle accessor returning SuperParam objects."""
+
+    _names_kind = "params"
 
     def __init__(self, bundle: Any) -> None:
         """Initialize a parameter accessor for ``bundle``.
@@ -297,10 +311,7 @@ class SuperParamAccessor(SuperAccessor["Param", SuperParam]):
             Matching Param, or ``None`` when unresolved.
         """
 
-        try:
-            return cast("Param", trace.params[label])
-        except (KeyError, ValueError):
-            return None
+        return cast("Param", member_lookup(trace.params, label))
 
     def _labels_in_member(self, trace: Any) -> list[str]:
         """Return parameter labels from one member trace.
@@ -319,8 +330,10 @@ class SuperParamAccessor(SuperAccessor["Param", SuperParam]):
         return [str(label) for label in trace.params.keys()]
 
 
-class SuperGradFnAccessor(SuperAccessor["GradFn", SuperGradFn]):
+class SuperGradFnAccessor(SharedNamesMixin, SuperAccessor["GradFn", SuperGradFn]):
     """Dict-like Bundle accessor returning SuperGradFn objects."""
+
+    _names_kind = "grad_fns"
 
     def __init__(self, bundle: Any) -> None:
         """Initialize a grad_fn_handle accessor for ``bundle``.
@@ -349,10 +362,7 @@ class SuperGradFnAccessor(SuperAccessor["GradFn", SuperGradFn]):
             Matching GradFn, or ``None`` when unresolved.
         """
 
-        try:
-            resolved = trace.grad_fns[label]
-        except (KeyError, ValueError):
-            return None
+        resolved = member_lookup(trace.autograd.grad_fns, label)
         return cast("GradFn", resolved) if type(resolved).__name__ == "GradFn" else None
 
     def _labels_in_member(self, trace: Any) -> list[str]:
@@ -369,7 +379,7 @@ class SuperGradFnAccessor(SuperAccessor["GradFn", SuperGradFn]):
             Grad-fn labels.
         """
 
-        return [str(label) for label in trace.grad_fns.keys()]
+        return [str(label) for label in trace.autograd.grad_fns.keys()]
 
 
 class SuperModuleCallAccessor(SuperAccessor["ModuleCall", SuperModuleCall]):
@@ -402,10 +412,7 @@ class SuperModuleCallAccessor(SuperAccessor["ModuleCall", SuperModuleCall]):
             Matching ModuleCall, or ``None`` when unresolved.
         """
 
-        try:
-            resolved = trace.module_calls[label]
-        except (KeyError, ValueError):
-            return None
+        resolved = member_lookup(trace.module_calls, label)
         return cast("ModuleCall", resolved) if type(resolved).__name__ == "ModuleCall" else None
 
     def _labels_in_member(self, trace: Any) -> list[str]:
@@ -459,10 +466,7 @@ class SuperGradFnCallAccessor(SuperAccessor["GradFnCall", SuperGradFnCall]):
             Matching GradFnCall, or ``None`` when unresolved.
         """
 
-        try:
-            resolved = trace.grad_fn_calls[label]
-        except (KeyError, ValueError):
-            return None
+        resolved = member_lookup(trace.autograd.grad_fn_calls, label)
         return cast("GradFnCall", resolved) if type(resolved).__name__ == "GradFnCall" else None
 
     def _labels_in_member(self, trace: Any) -> list[str]:
@@ -481,7 +485,7 @@ class SuperGradFnCallAccessor(SuperAccessor["GradFnCall", SuperGradFnCall]):
 
         return [
             str(call_label)
-            for grad_fn_handle in trace.grad_fns
+            for grad_fn_handle in trace.autograd.grad_fns
             for call_label in getattr(grad_fn_handle, "call_labels", [])
         ]
 

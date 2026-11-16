@@ -9,11 +9,11 @@ Exposed as `tl.viz` through the lazy attribute map in `torchlens/__init__.py`
 - `visualization/` owns Graphviz graph rendering (rank layout, NodeSpec, themes,
   overlays, bundle diff).
 - Cross imports today: `viz/__init__.py` re-exports `bundle_diff` from
-  `..visualization.bundle_diff`; `viz/feature_maps.py` imports `NodeSpec` /
+  `..visualization.bundle_diff`; `viz/_feature_maps.py` imports `NodeSpec` /
   `NodeSpecFn` from `..visualization.node_spec`; and
-  `visualization/_render_nodes.py` imports `..viz.batch_summary`
-  (`batch_summary.text_table` at its string-summary node path and
-  `batch_summary.montage` at its image-grid node path).
+  `_visualization/_render_nodes.py` imports the private `..viz._batch_summary`
+  (`text_table` at its string-summary node path and `montage` at its image-grid
+  node path).
 
 ## __init__.py
 - Visualizer factories returning `tensor -> PIL.Image | None` callables:
@@ -36,18 +36,18 @@ Exposed as `tl.viz` through the lazy attribute map in `torchlens/__init__.py`
 
 ## batch_summary.py
 - `montage()` (image grid with cap disclosure) and `text_table()` (truncated
-  text summary); reused by `visualization/_render_nodes.py` (both call sites
+  text summary); reused by `_visualization/_render_nodes.py` (both call sites
   live there, not in `_render_common.py`).
 
 ## feature_maps.py
-- `feature_map_evolution()` renders per-layer activation feature-map grids;
+- `feature_maps()` renders per-layer activation feature-map grids;
   `feature_map_node_spec()` returns a node-spec function for `Trace.draw()`.
 - Channel selection/aggregation helpers: `_select_maps()`,
   `_aggregate_channels()`, `_top_channel_indices()`.
 
 ## node_plots.py
-- PIL-only render primitives: `render_heatmap()`, `render_lineplot()`,
-  `render_image_scatter()`.
+- PIL-only render primitives: `heatmap()`, `lineplot()`,
+  `image_scatter()`.
 - Consumed outside the package by `repgeom/__init__.py` and
   `receptive_field/_viz.py`; treat their signatures as shared surface.
 

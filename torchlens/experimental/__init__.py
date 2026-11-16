@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import os
 import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -12,9 +11,18 @@ from typing import Any, cast
 
 from torch import nn
 
+import torchlens
+
+from .._entry_refusals import (
+    refuse_attribute_walk_segment,
+    refuse_auto_environment,
+    refuse_if_nonpositive_every,
+)
+from .._utils.env_flags import closed_bool_env
+
 _ATTRIBUTE_PART_RE = re.compile(r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<indexes>(?:\[[0-9]+\])*)")
 _STOP_AFTER_SITE: Any | None = None
-_LAZY_SUBMODULE_EXPORTS = {"dagua", "node_styles"}
+_LAZY_SUBMODULE_EXPORTS = {"node_styles"}
 
 
 def __getattr__(name: str) -> Any:
@@ -66,6 +74,13 @@ def attribute_walk(model: nn.Module, address: str) -> Any:
         If any index component is invalid.
     ValueError
         If the address syntax is malformed.
+
+    Examples
+    --------
+    >>> net = nn.Sequential()
+    >>> net.add_module("block", nn.Sequential(nn.Linear(4, 4), nn.ReLU()))
+    >>> type(attribute_walk(net, "block[1]")).__name__
+    'ReLU'
     """
 
     current: Any = model
@@ -74,7 +89,7 @@ def attribute_walk(model: nn.Module, address: str) -> Any:
     for part in address.split("."):
         match = _ATTRIBUTE_PART_RE.fullmatch(part)
         if match is None:
-            raise ValueError(f"Malformed attribute-walk segment: {part!r}")
+            refuse_attribute_walk_segment(part)
         name = match.group("name")
         if not hasattr(current, name):
             raise AttributeError(f"{type(current).__name__!s} has no attribute {name!r}")
@@ -87,17 +102,34 @@ def attribute_walk(model: nn.Module, address: str) -> Any:
 
 @contextmanager
 def stop_after(site: Any) -> Iterator[None]:
-    """Set the experimental stop-after site for ``torchlens.peek``.
+    """Set an ambient stop-after site for torch captures in this block.
+
+    Torch ``tl.trace`` calls inside the block (including the capture behind
+    ``torchlens.pluck``) compile the site into the halt engine exactly like
+    ``CaptureOptions(stop_after=...)``, halting inclusively after the site is
+    captured. Ambient provenance is exploratory: an explicit ``halt=`` on a
+    trace wins over the ambient site, a chunked capture refuses the
+    combination typed, and a site that never fires WARNS (never refuses,
+    unlike an explicit selector-shaped ``stop_after=``).
 
     Parameters
     ----------
     site:
-        Site where peek may stop early.
+        Module-address or function-name string, live selector
+        (``tl.func``/``tl.module``), or callable halt predicate.
 
     Yields
     ------
     None
         Context body.
+
+    Examples
+    --------
+    >>> full = tl.trace(model, x)
+    >>> with stop_after("1"):
+    ...     early = tl.trace(model, x)
+    >>> len(early.ops) < len(full.ops)
+    True
     """
 
     global _STOP_AFTER_SITE
@@ -128,18 +160,26 @@ class Session:
     ----------
     model:
         Model to invoke repeatedly.
+
+    Examples
+    --------
+    >>> session = Session(model)
+    >>> first = session.invoke(x)
+    >>> second = session.invoke(x + 1)
+    >>> len(session.traces), len(session.to_bundle())
+    (2, 2)
     """
 
     model: nn.Module
-    logs: list[Any] = field(default_factory=list)
+    traces: list[Any] = field(default_factory=list)
     invocations: list[dict[str, Any]] = field(default_factory=list)
 
-    def invoke(self, input_args: Any, input_kwargs: dict[str, Any] | None = None) -> Any:
+    def invoke(self, inputs: Any, input_kwargs: dict[str, Any] | None = None) -> Any:
         """Capture one model invocation and add it to this session.
 
         Parameters
         ----------
-        input_args:
+        inputs:
             Positional model input.
         input_kwargs:
             Keyword model input.
@@ -150,27 +190,24 @@ class Session:
             Captured ``Trace`` for this invocation.
         """
 
-        import torchlens
-
-        index = len(self.logs)
+        index = len(self.traces)
         trace_fn = cast(Callable[..., Any], torchlens.trace)
         log = trace_fn(
             self.model,
-            input_args,
+            inputs,
             input_kwargs=input_kwargs,
-            intervention_ready=True,
-            name=f"session_{index}",
+            capture=torchlens.options.CaptureOptions(name=f"session_{index}"),
         )
-        metadata = {"index": index, "name": log.trace_label}
+        metadata = {"index": index, "name": log.name}
         setattr(log, "session_invocation", metadata)
-        self.logs.append(log)
+        self.traces.append(log)
         self.invocations.append(metadata)
-        for stored_log in self.logs:
+        for stored_log in self.traces:
             setattr(stored_log, "session_invocations", self.invocations)
-            setattr(stored_log, "session_logs", self.logs)
+            setattr(stored_log, "session_logs", self.traces)
         return log
 
-    def bundle(self) -> Any:
+    def to_bundle(self) -> Any:
         """Return a bundle containing all captured invocation logs.
 
         Returns
@@ -179,11 +216,11 @@ class Session:
             ``torchlens.Bundle`` keyed by invocation name.
         """
 
-        import torchlens
+        # deferred: startup cost (a plain tl.trace reaches this package and must not load bundle)
+        from ..bundle import Bundle
 
-        bundle_fn = torchlens.bundle
-        return bundle_fn(
-            {str(metadata["name"]): log for metadata, log in zip(self.invocations, self.logs)}
+        return Bundle(
+            {str(metadata["name"]): log for metadata, log in zip(self.invocations, self.traces)}
         )
 
 
@@ -217,6 +254,15 @@ def freeze_module(layer: nn.Module) -> Iterator[nn.Module]:
     ------
     nn.Module
         The frozen module.
+
+    Examples
+    --------
+    >>> layer = nn.Linear(4, 2)
+    >>> with freeze_module(layer) as frozen:
+    ...     print(frozen.weight.requires_grad)
+    False
+    >>> layer.weight.requires_grad
+    True
     """
 
     parameters = list(layer.parameters(recurse=True))
@@ -258,14 +304,19 @@ def auto_capture(model: nn.Module, every: int = 100) -> Iterator[AutoCaptureSess
     ------
     RuntimeError
         If ``TORCHLENS_AUTO=1`` is set.
+
+    Examples
+    --------
+    >>> net = nn.Sequential(nn.Linear(4, 2))
+    >>> with auto_capture(net, every=2) as session:
+    ...     outputs = [net(torch.randn(1, 4)) for _ in range(4)]
+    >>> session.calls, len(session.logs)
+    (4, 2)
     """
 
-    if os.environ.get("TORCHLENS_AUTO") == "1":
-        raise RuntimeError("TORCHLENS_AUTO=1 is intentionally unsupported; use auto_capture().")
-    if every <= 0:
-        raise ValueError("every must be positive.")
-
-    import torchlens
+    if closed_bool_env("TORCHLENS_AUTO"):
+        refuse_auto_environment()
+    refuse_if_nonpositive_every(every)
 
     session = AutoCaptureSession(model=model, every=every)
     original_forward = model.forward
@@ -279,7 +330,7 @@ def auto_capture(model: nn.Module, every: int = 100) -> Iterator[AutoCaptureSess
             try:
                 capture_input = list(args)
                 trace_fn = cast(Callable[..., Any], torchlens.trace)
-                log = trace_fn(model, capture_input, kwargs or None)
+                log = trace_fn(model, capture_input, input_kwargs=kwargs or None)
                 session.logs.append(log)
             finally:
                 model.forward = wrapped_forward
@@ -305,13 +356,10 @@ def _active_stop_after_site() -> Any | None:
 
 
 __all__ = [
-    "AutoCaptureSession",
     "Session",
     "attribute_walk",
     "auto_capture",
-    "dagua",
     "freeze_module",
     "node_styles",
-    "session",
     "stop_after",
 ]

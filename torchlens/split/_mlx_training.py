@@ -39,7 +39,10 @@ def _default_loss(output: Any, targets: Any) -> Any:
     import mlx.nn as nn
 
     if not isinstance(output, mx.array) or not isinstance(targets, mx.array):
-        raise SplitUnsupportedError("Non-array MLX outputs require an explicit loss_fn.")
+        raise SplitUnsupportedError(
+            "Non-array MLX outputs require an explicit loss_fn.",
+            code=SplitUnsupportedError.code,
+        )
     if (
         mx.issubdtype(targets.dtype, mx.integer)
         and output.ndim >= 2
@@ -92,6 +95,7 @@ def _checked_prefix(runtime: Any, boundary: ReplayBoundary) -> Any:
         raise SplitUnsupportedError(
             "backward_prefix requires a boundary from run_training_prefix().",
             context=_context(runtime, "boundary is not graph-connected"),
+            code=SplitUnsupportedError.code,
         )
     if (
         boundary.metadata.get("mlx_prefix_owner") is not prefix._backward_token
@@ -100,6 +104,7 @@ def _checked_prefix(runtime: Any, boundary: ReplayBoundary) -> Any:
         raise SplitBoundaryError(
             "MLX prefix boundary belongs to a different or updated training prefix.",
             context=_context(runtime, "stale MLX training boundary"),
+            code=SplitBoundaryError.code,
         )
     saved_state = boundary.metadata.get("mlx_prefix_state_values", {})
     for entry in prefix._state.entries():
@@ -112,6 +117,7 @@ def _checked_prefix(runtime: Any, boundary: ReplayBoundary) -> Any:
             raise SplitBoundaryError(
                 "MLX prefix state changed after run_training_prefix().",
                 context=_context(runtime, "stale MLX training boundary"),
+                code=SplitBoundaryError.code,
             )
     return prefix
 
@@ -125,7 +131,10 @@ def _prefix_cotangents(
 
     unknown = boundary_grads.keys() - boundary.tensors.keys()
     if unknown:
-        raise SplitBoundaryError(f"Unknown MLX boundary gradient keys: {sorted(unknown)!r}.")
+        raise SplitBoundaryError(
+            f"Unknown MLX boundary gradient keys: {sorted(unknown)!r}.",
+            code=SplitBoundaryError.code,
+        )
     keys = [key for key, value in boundary.tensors.items() if _is_differentiable(value)]
     cotangents: list[Any] = []
     for key in keys:
@@ -136,12 +145,16 @@ def _prefix_cotangents(
         elif (
             not isinstance(grad, mx.array) or grad.shape != value.shape or grad.dtype != value.dtype
         ):
-            raise SplitBoundaryError(f"MLX boundary gradient {key!r} has the wrong shape or dtype.")
+            raise SplitBoundaryError(
+                f"MLX boundary gradient {key!r} has the wrong shape or dtype.",
+                code=SplitBoundaryError.code,
+            )
         cotangents.append(runtime.adapter.to_device(grad, runtime.placement.prefix.device))
     nondiff = boundary_grads.keys() - set(keys)
     if nondiff:
         raise SplitBoundaryError(
-            f"MLX boundary gradients target non-floating arrays: {sorted(nondiff)!r}."
+            f"MLX boundary gradients target non-floating arrays: {sorted(nondiff)!r}.",
+            code=SplitBoundaryError.code,
         )
     return keys, cotangents
 
@@ -213,6 +226,7 @@ class MlxTrainingEngine:
                 raise SplitUnsupportedError(
                     "MLX split loss_fn must return a scalar MLX array.",
                     context=_context(runtime, "invalid MLX scalar loss"),
+                    code=SplitUnsupportedError.code,
                 )
             return result
 
@@ -281,7 +295,8 @@ class MlxTrainingEngine:
                 for key, output in zip(keys, outputs, strict=True):
                     if not runtime.adapter.allclose(output, boundary.tensors[key], atol=0, rtol=0):
                         raise SplitBoundaryError(
-                            "MLX prefix inputs or state changed after run_training_prefix()."
+                            "MLX prefix inputs or state changed after run_training_prefix().",
+                            code=SplitBoundaryError.code,
                         )
             else:
                 grads = [mx.zeros_like(value) for value in primals]
@@ -304,4 +319,4 @@ class MlxTrainingEngine:
         }
 
 
-__all__ = ["MlxTrainingEngine"]
+__all__ = ("MlxTrainingEngine",)

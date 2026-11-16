@@ -12,7 +12,7 @@ paddle = pytest.importorskip("paddle")
 import torchlens as tl  # noqa: E402
 from torchlens.backends.paddle import GradOptions, PaddleBackend  # noqa: E402
 
-pytestmark = [pytest.mark.backend_paddle, pytest.mark.smoke]
+pytestmark = [pytest.mark.backend_paddle, pytest.mark.rare]
 
 
 def _weights() -> tuple[Any, Any]:
@@ -86,17 +86,17 @@ def test_paddle_repeated_block_groups_into_passes() -> None:
     """A repeated functional block becomes multi-pass layers that validate."""
 
     trace = _repeated_trace()
-    linear_ops = [op for op in trace.layer_list if op.func_name == "functional.linear"]
-    relu_ops = [op for op in trace.layer_list if op.func_name == "functional.relu"]
+    linear_ops = [op for op in trace._layer_list if op.func_name == "functional.linear"]
+    relu_ops = [op for op in trace._layer_list if op.func_name == "functional.relu"]
 
-    assert trace.recurrence_detection is True
-    assert [op.pass_index for op in linear_ops] == [1, 2]
-    assert [op.pass_index for op in relu_ops] == [1, 2]
+    assert trace.options.recurrence_detection is True
+    assert [op.pass_number for op in linear_ops] == [1, 2]
+    assert [op.pass_number for op in relu_ops] == [1, 2]
     assert {op.layer_label for op in linear_ops} == {linear_ops[0].layer_label}
     assert {op.layer_label for op in relu_ops} == {relu_ops[0].layer_label}
     assert all(op.num_passes == 2 for op in (*linear_ops, *relu_ops))
-    assert list(linear_ops[0].recurrent_ops) == [op.label for op in linear_ops]
-    assert trace.layer_num_calls[linear_ops[0].layer_label] == 2
+    assert list(linear_ops[0].graph.recurrent_ops) == [op.label for op in linear_ops]
+    assert trace._layer_num_calls[linear_ops[0].layer_label] == 2
     assert PaddleBackend().validate_trace(trace) is True
 
 
@@ -104,8 +104,8 @@ def test_paddle_grouping_relabel_keeps_lookups_and_edges_coherent() -> None:
     """Raw labels stay resolvable and edges follow grouped ops to final labels."""
 
     trace = _repeated_trace()
-    linear_ops = [op for op in trace.layer_list if op.func_name == "functional.linear"]
-    relu_ops = [op for op in trace.layer_list if op.func_name == "functional.relu"]
+    linear_ops = [op for op in trace._layer_list if op.func_name == "functional.linear"]
+    relu_ops = [op for op in trace._layer_list if op.func_name == "functional.relu"]
     pass2_linear = linear_ops[1]
 
     # The pre-grouping raw label still resolves to the exact op.
@@ -124,9 +124,9 @@ def test_paddle_module_reuse_groups_module_anchored_passes() -> None:
     """A reused sublayer groups as one multi-pass layer per op site."""
 
     trace = tl.trace(_ReusedCell(), paddle.ones([2, 4], dtype="float32"), backend="paddle")
-    linear_ops = [op for op in trace.layer_list if op.func_name == "functional.linear"]
+    linear_ops = [op for op in trace._layer_list if op.func_name == "functional.linear"]
 
-    assert [op.pass_index for op in linear_ops] == [1, 2, 3]
+    assert [op.pass_number for op in linear_ops] == [1, 2, 3]
     assert {op.num_passes for op in linear_ops} == {3}
     assert len({op.layer_label for op in linear_ops}) == 1
 
@@ -135,7 +135,7 @@ def test_paddle_distinct_module_sites_do_not_group() -> None:
     """Two distinct sublayers with identical shapes stay separate layers."""
 
     trace = tl.trace(_TwoCells(), paddle.ones([2, 4], dtype="float32"), backend="paddle")
-    linear_ops = [op for op in trace.layer_list if op.func_name == "functional.linear"]
+    linear_ops = [op for op in trace._layer_list if op.func_name == "functional.linear"]
 
     assert len(linear_ops) == 2
     assert all(op.num_passes == 1 for op in linear_ops)
@@ -150,11 +150,11 @@ def test_paddle_recurrence_detection_off_preserves_single_pass_layout() -> None:
         _repeated_fn,
         (paddle.ones([2, 4], dtype="float32"), weight, bias),
         backend="paddle",
-        recurrence_detection=False,
+        capture=tl.options.CaptureOptions(recurrence_detection=False),
     )
 
-    assert trace.recurrence_detection is False
-    assert all(op.num_passes == 1 for op in trace.layer_list)
+    assert trace.options.recurrence_detection is False
+    assert all(op.num_passes == 1 for op in trace._layer_list)
     assert PaddleBackend().validate_trace(trace) is True
 
 
@@ -164,12 +164,10 @@ def test_paddle_tamper_dangling_sidecar_label_fails_validation() -> None:
     trace = _repeated_trace()
     captures = trace._paddle_op_captures
     target_index = next(
-        index
-        for index, capture in enumerate(captures)
-        if capture.label_raw.startswith("functional.linear")
+        index for index, capture in enumerate(captures) if capture.label_raw.startswith("linear_")
     )
     captures[target_index] = dataclasses.replace(
-        captures[target_index], label_raw="functional.linear_9_99_raw"
+        captures[target_index], label_raw="linear_9_99_raw"
     )
 
     assert PaddleBackend().validate_trace(trace) is False
@@ -188,9 +186,7 @@ def test_paddle_tamper_swapped_sidecar_labels_fail_validation() -> None:
     trace = _repeated_trace()
     captures = trace._paddle_op_captures
     linear_indices = [
-        index
-        for index, capture in enumerate(captures)
-        if capture.label_raw.startswith("functional.linear")
+        index for index, capture in enumerate(captures) if capture.label_raw.startswith("linear_")
     ]
     assert len(linear_indices) == 2
     first, second = linear_indices
@@ -208,14 +204,12 @@ def test_paddle_tamper_stale_producer_label_fails_validation() -> None:
     trace = _repeated_trace()
     captures = trace._paddle_op_captures
     relu_indices = [
-        index
-        for index, capture in enumerate(captures)
-        if capture.label_raw.startswith("functional.relu")
+        index for index, capture in enumerate(captures) if capture.label_raw.startswith("relu_")
     ]
     pass2_index = relu_indices[1]
     tampered = dataclasses.replace(
         captures[pass2_index],
-        producer_labels=frozenset({"functional.linear_9_99_raw"}),
+        producer_labels=frozenset({"linear_9_99_raw"}),
     )
     captures[pass2_index] = tampered
 
@@ -230,15 +224,17 @@ def test_paddle_intermediate_derived_grads_survive_grouping() -> None:
         _repeated_fn,
         (paddle.ones([2, 4], dtype="float32"), weight, bias),
         backend="paddle",
-        grad_options=GradOptions(
-            loss_fn=lambda output: paddle.sum(output),
-            intermediate_grads=True,
-            max_intermediate_grads=16,
+        capture=tl.options.CaptureOptions(
+            grad_options=GradOptions(
+                loss_fn=lambda output: paddle.sum(output),
+                intermediate_grads=True,
+                max_intermediate_grads=16,
+            )
         ),
     )
-    relu_ops = [op for op in trace.layer_list if op.func_name == "functional.relu"]
+    relu_ops = [op for op in trace._layer_list if op.func_name == "functional.relu"]
 
     assert {op.num_passes for op in relu_ops} == {2}
-    records = trace.intermediate_derived_grads
+    records = trace.autograd.intermediate_derived_grads
     for op in relu_ops:
         assert op.label in records, f"derived grad silently dropped for {op.label}"

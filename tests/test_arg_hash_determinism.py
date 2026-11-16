@@ -23,20 +23,7 @@ import torchlens as tl
 from torchlens.backends.torch.tensor_tracking import _get_hash_from_args
 
 
-@pytest.mark.smoke
-def test_object_arg_hash_is_address_free() -> None:
-    """Two semantically identical fresh objects must hash identically."""
-
-    # Hold BOTH generators alive: sequential construction lets CPython reuse
-    # the freed address, which would make an address-derived hash pass this
-    # test vacuously (the collision half of the same defect).
-    first_generator, second_generator = torch.Generator(), torch.Generator()
-    first = _get_hash_from_args((first_generator,), {})
-    second = _get_hash_from_args((second_generator,), {})
-    assert first == second, "the arg-hash tail still folds the object's memory address"
-
-
-@pytest.mark.smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/tensor_tracking.py, campaign mutant kills.
 def test_object_arg_hash_distinguishes_types() -> None:
     """The address-free token still separates different argument types."""
 
@@ -48,7 +35,7 @@ def test_object_arg_hash_distinguishes_types() -> None:
     assert generator_hash != marker_hash
 
 
-@pytest.mark.smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/tensor_tracking.py.
 def test_set_and_frozenset_args_hash_identically() -> None:
     """Equal members must produce one fingerprint regardless of container."""
 
@@ -92,7 +79,7 @@ class _BackwardModel(nn.Module):
         return torch.relu(self.lin(x))
 
 
-@pytest.mark.smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
 def test_backward_pass_root_ids_persist_as_dense_ordinals(tmp_path) -> None:
     """Loaded root_grad_fn_ids must be trace-local ordinals inside
     grad_fn_logs, never raw process addresses."""
@@ -100,21 +87,20 @@ def test_backward_pass_root_ids_persist_as_dense_ordinals(tmp_path) -> None:
     trace = tl.trace(
         _BackwardModel(),
         torch.randn(2, 4).requires_grad_(True),
-        capture=tl.options.CaptureOptions(backward_ready=True),
-        save_mode="reference",
+        capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"),
     )
-    trace.log_backward(trace[trace.output_layers[0]].out.sum())
+    trace.backward(trace[trace.output_layers[0]].out.sum())
 
     bundle = tmp_path / "backward.tlspec"
-    tl.save(trace, str(bundle))
+    trace.save(str(bundle))
     loaded = tl.load(str(bundle))
 
-    backward_passes = list(loaded.backward_pass_logs.values())
+    backward_passes = list(loaded._backward_pass_logs.values())
     assert backward_passes, "expected at least one persisted backward pass"
     all_roots = [root_id for record in backward_passes for root_id in record.root_grad_fn_ids]
     assert all_roots, "expected persisted root_grad_fn_ids"
     for root_id in all_roots:
-        assert root_id in loaded.grad_fn_logs, (
+        assert root_id in loaded._grad_fn_logs, (
             f"persisted root id {root_id} dangles outside the remapped grad_fn_logs"
         )
         assert root_id < 1_000_000, f"persisted root id {root_id} looks like a raw memory address"

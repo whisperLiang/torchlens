@@ -17,14 +17,20 @@ before any wrapped call writes its storage. These tests pin the contract:
 """
 
 import contextlib
+import warnings
 
 import pytest
 import torch
 import torch.nn as nn
+from _forward_stash import stashed
 
 import torchlens as tl
 import torchlens.backends.torch.wrappers as _wrappers
-from torchlens.utils import tensor_utils as _tu
+from torchlens._utils import tensor_utils as _tu
+from torchlens.errors import TraceCaptureError
+
+# These tests assert that payloads defer, which no capture does once Dynamo is loaded.
+pytestmark = pytest.mark.usefixtures("dynamo_free_process")
 
 
 @contextlib.contextmanager
@@ -82,10 +88,10 @@ def _zoo_trace(defer: bool, seed: int = 7, grad: bool = False, grad_defer: bool 
         torch.manual_seed(seed)
         x = torch.randn(2, 8)
         if grad:
-            log = tl.trace(model, x, random_seed=99)
+            log = tl.trace(model, x, capture=tl.options.CaptureOptions(seed=99))
         else:
             with torch.no_grad():
-                log = tl.trace(model, x, random_seed=99)
+                log = tl.trace(model, x, capture=tl.options.CaptureOptions(seed=99))
     return model, log
 
 
@@ -117,14 +123,12 @@ def _assert_payloads_identical(log_eager, log_defer):
             assert ac.numpy().tobytes() == bc.numpy().tobytes(), k
 
 
-@pytest.mark.smoke
 def test_deferred_payloads_byte_identical_no_grad():
     _, log_eager = _zoo_trace(defer=False)
     _, log_defer = _zoo_trace(defer=True)
     _assert_payloads_identical(log_eager, log_defer)
 
 
-@pytest.mark.smoke
 def test_deferred_payloads_byte_identical_grad_mode():
     # Grad-enabled captures defer only no-autograd payloads; the public
     # surface (values AND grad_fn presence) must be unchanged either way.
@@ -133,7 +137,50 @@ def test_deferred_payloads_byte_identical_grad_mode():
     _assert_payloads_identical(log_eager, log_defer)
 
 
-@pytest.mark.smoke
+def _explicit_inference_only_zoo_trace(defer: bool, seed: int = 7):
+    """Trace the zoo with explicit ``inference_only=True`` under grad-ENABLED ambient.
+
+    This is brainpipe's default posture (D-13), made clone-on-write eligible by
+    AGT-2132: ``inference_only`` only wraps the forward in ``no_grad``.
+    """
+    with _payload_clone_mode(defer):
+        torch.manual_seed(seed)
+        model = _InplaceZoo().train()
+        torch.manual_seed(seed)
+        x = torch.randn(2, 8)
+        assert torch.is_grad_enabled()
+        log = tl.trace(
+            model,
+            x,
+            capture=tl.options.CaptureOptions(seed=99, inference_only=True),
+        )
+    return model, log
+
+
+def _live_pending_aliases() -> int:
+    return sum(1 for entries in _tu._DEFER_PENDING.values() for e in entries if e.ref() is not None)
+
+
+def test_explicit_inference_only_grad_enabled_payloads_byte_identical():
+    _, log_eager = _explicit_inference_only_zoo_trace(defer=False)
+    _, log_defer = _explicit_inference_only_zoo_trace(defer=True)
+    assert log_eager.options.inference_only is True
+    assert log_defer.options.inference_only is True
+    _assert_payloads_identical(log_eager, log_defer)
+
+
+def test_explicit_inference_only_grad_enabled_defers_and_kill_switch_holds():
+    import gc
+
+    gc.collect()  # earlier tests' (cyclic) traces may still pin live aliases
+    baseline_live = _live_pending_aliases()
+    _, log_eager = _explicit_inference_only_zoo_trace(defer=False)
+    assert _live_pending_aliases() == baseline_live, "kill switch left a deferred alias"
+    _, log_defer = _explicit_inference_only_zoo_trace(defer=True)
+    assert _live_pending_aliases() > baseline_live, "no payload was deferred"
+    assert log_eager.options.inference_only is True and log_defer.options.inference_only is True
+
+
 def test_post_hoc_inplace_edit_isolation():
     _, log = _zoo_trace(defer=True)
     labels = _tensor_payload_labels(log)
@@ -146,29 +193,26 @@ def test_post_hoc_inplace_edit_isolation():
         assert torch.equal(snapshot[k], log[k].out), k
 
 
-@pytest.mark.smoke
 def test_retained_live_activation_mutation_does_not_corrupt_saved():
     model, log = _zoo_trace(defer=True)
     labels = _tensor_payload_labels(log)
     saved = {k: log[k].out.clone() for k in labels}
     # The model kept a live handle to a mid-forward activation; a post-capture
     # in-place write through it must be intercepted before the bytes move.
-    model.stash.add_(999.0)
+    stashed(log, "stash").add_(999.0)
     for k in labels:
         assert torch.equal(saved[k], log[k].out), k
 
 
-@pytest.mark.smoke
 def test_validation_tripwire_green_on_deferred_capture():
     with _payload_clone_mode(True):
         torch.manual_seed(7)
         model = _InplaceZoo().train()
         torch.manual_seed(7)
         x = torch.randn(2, 8)
-        assert tl.validate(model, x, scope="forward", random_seed=99) is True
+        assert tl.validate(model, x, scope="forward", seed=99) is True
 
 
-@pytest.mark.smoke
 def test_version_belt_refuses_unintercepted_mutation():
     x = torch.randn(4)
     _tu.arm_deferred_payload_window(frozenset())
@@ -206,7 +250,6 @@ def _grad_zoo_payloads(defer: bool, grad_defer: bool):
     return log, _tensor_payload_labels(log)
 
 
-@pytest.mark.smoke
 def test_grad_connected_deferral_is_off_by_default():
     # Residual H3 (autograd's saved-tensor machinery is a second holder that
     # interception cannot rebind) keeps this opt-in; pin the shipped default so
@@ -214,7 +257,6 @@ def test_grad_connected_deferral_is_off_by_default():
     assert _tu._DEFER_GRAD_ENABLED is False
 
 
-@pytest.mark.smoke
 def test_grad_connected_deferral_actually_defers():
     # Guard against the whole feature silently degrading to eager clones: at
     # least one graph-connected payload must genuinely share its source
@@ -235,14 +277,12 @@ def test_grad_connected_deferral_actually_defers():
         assert out._is_view() is False, k
 
 
-@pytest.mark.smoke
 def test_grad_connected_payloads_byte_identical_to_eager_clones():
     _, log_eager = _zoo_trace(defer=False, grad=True)
     _, log_defer = _zoo_trace(defer=True, grad=True, grad_defer=True)
     _assert_payloads_identical(log_eager, log_defer)
 
 
-@pytest.mark.smoke
 def test_grad_connected_payload_gradients_match_eager_clones():
     """Backward through every saved payload must match the eager clone exactly.
 
@@ -279,7 +319,6 @@ def test_grad_connected_payload_gradients_match_eager_clones():
                 assert torch.equal(ge, gd), k
 
 
-@pytest.mark.smoke
 def test_grad_connected_alias_materialization_preserves_backward():
     """H2 regression: ``set_`` has no derivative and would poison the graph.
 
@@ -301,7 +340,6 @@ def test_grad_connected_alias_materialization_preserves_backward():
     assert torch.equal(grad, expected)
 
 
-@pytest.mark.smoke
 def test_grad_connected_alias_survives_source_mutation_without_rebasing():
     """H1 regression: an autograd view would re-route the gradient.
 
@@ -323,7 +361,6 @@ def test_grad_connected_alias_survives_source_mutation_without_rebasing():
     assert torch.equal(grad, torch.full_like(x, 2.0))  # identity through mul, not relu
 
 
-@pytest.mark.smoke
 def test_grad_connected_alias_keeps_sharing_the_source_version_counter():
     """Residual H3 stays LOUD rather than silently wrong.
 
@@ -342,7 +379,121 @@ def test_grad_connected_alias_keeps_sharing_the_source_version_counter():
     assert int(alias._version) != version
 
 
-@pytest.mark.smoke
+def test_detached_alias_rebind_leaves_the_shared_version_counter_alone():
+    """Materializing a detached alias must not bump its live source's version.
+
+    Every pending alias shares its source's autograd version counter, and the
+    wrapper materializes the aliases of EVERY tensor argument of a mutating
+    call, read-only sources included. A ``set_`` rebind bumped that shared
+    counter, so an unmodified source looked modified in place.
+    """
+    src = torch.randn(4, 4)
+    _tu.arm_deferred_payload_window(frozenset())
+    try:
+        alias = _tu.safe_copy(src, detach_tensor=True, save_mode="copy")
+    finally:
+        _tu.disarm_deferred_payload_window()
+    assert alias.data_ptr() == src.data_ptr()  # deferred: still a zero-copy alias
+    before = src._version
+    _tu.materialize_deferred_for_call([src])
+    assert alias.data_ptr() != src.data_ptr()  # exclusive storage now
+    assert torch.equal(alias, src)
+    assert src._version == before
+
+
+class _CustomViewFn(torch.autograd.Function):
+    """A custom Function whose output is a view of its input."""
+
+    @staticmethod
+    def forward(ctx, x):
+        return x.view(-1)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad
+
+
+class _CustomViewIntoSetitem(nn.Module):
+    """A custom-Function view used as the SOURCE of in-place writes."""
+
+    def __init__(self, use_tensor_resize: bool):
+        super().__init__()
+        self.lin = nn.Linear(4, 6)
+        self.use_tensor_resize = use_tensor_resize
+        self.register_buffer("idx", torch.arange(3))
+
+    def forward(self, x):
+        h = torch.tanh(self.lin(x))
+        if self.use_tensor_resize:
+            # Deprecated ``Tensor.resize`` is ``autograd._functions.Resize``, a
+            # custom Function returning a view (Sylvester normalizing flows).
+            v = h.resize(x.shape[0], 3, 2)
+        else:
+            v = _CustomViewFn.apply(h).view(x.shape[0], 3, 2)
+        out = torch.zeros(x.shape[0], 3, 3, 2)
+        out[:, self.idx, self.idx, :] = v
+        return out + v.sum()
+
+
+@pytest.mark.smoke_cells("test_custom_function_view_as_inplace_source_captures[True]")
+@pytest.mark.parametrize("use_tensor_resize", [False, True])
+def test_custom_function_view_as_inplace_source_captures(use_tensor_resize):
+    """A deferred alias rebind must not poison a custom-Function view.
+
+    Ops inside a custom Function's forward run without grad, so their outputs
+    get deferred detached aliases. When such an output escapes as the
+    Function's view and later feeds an in-place write, materialization used to
+    bump the shared version counter and autograd refused the view ("created
+    inside a custom Function ... modified inplace") although eager runs it.
+    """
+    with _payload_clone_mode(True), warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="non-inplace resize is deprecated")
+        torch.manual_seed(0)
+        model = _CustomViewIntoSetitem(use_tensor_resize)
+        x = torch.randn(2, 4)
+        expected = model(x)
+        log = tl.trace(model, x)
+        assert torch.equal(log[log.layer_labels[-1]].out.detach(), expected.detach())
+        assert tl.validate(model, x, scope="forward", seed=0) is True
+
+
+class _CustomViewModifiedInplace(nn.Module):
+    """A custom-Function view that IS modified in place (autograd must refuse)."""
+
+    def __init__(self, use_tensor_resize: bool):
+        super().__init__()
+        self.lin = nn.Linear(4, 6)
+        self.use_tensor_resize = use_tensor_resize
+
+    def forward(self, x):
+        h = torch.tanh(self.lin(x))
+        if self.use_tensor_resize:
+            v = h.resize(x.shape[0], 3, 2)
+        else:
+            v = _CustomViewFn.apply(h)
+        v.add_(1.0)
+        return v
+
+
+@pytest.mark.parametrize("use_tensor_resize", [False, True])
+def test_custom_function_view_genuinely_modified_inplace_still_raises(use_tensor_resize):
+    """The unbumped rebind must not hide autograd's guard on a REAL in-place write.
+
+    Negative control for the case above: when the custom-Function view itself is
+    written in place, eager refuses, and the capture must refuse the same way.
+    """
+    with _payload_clone_mode(True), warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="non-inplace resize is deprecated")
+        torch.manual_seed(0)
+        model = _CustomViewModifiedInplace(use_tensor_resize)
+        x = torch.randn(2, 4)
+        with pytest.raises(RuntimeError, match="modified inplace"):
+            model(x)
+        with pytest.raises(TraceCaptureError, match="modified inplace") as _tce_info2:
+            tl.trace(model, x)
+        assert isinstance(_tce_info2.value.__cause__, RuntimeError)
+
+
 def test_kill_switch_restores_eager_clones():
     import gc
 
@@ -401,11 +552,10 @@ def _positional_inplace_trace(defer: bool, seed: int = 3):
         torch.manual_seed(seed)
         x = torch.randn(2, 8)
         with torch.no_grad():
-            log = tl.trace(model, x, random_seed=99)
+            log = tl.trace(model, x, capture=tl.options.CaptureOptions(seed=99))
     return log
 
 
-@pytest.mark.smoke
 def test_positional_inplace_index_located_at_decoration_time():
     import torch.nn.functional as F
 
@@ -417,13 +567,11 @@ def test_positional_inplace_index_located_at_decoration_time():
     assert _wrappers._positional_inplace_index(torch.add) is None
 
 
-@pytest.mark.smoke
 def test_positional_inplace_capture_does_not_trip_belt():
     log = _positional_inplace_trace(defer=True)
     assert isinstance(log[log.layer_labels[-1]].out, torch.Tensor)
 
 
-@pytest.mark.smoke
 def test_positional_inplace_payloads_byte_identical_to_eager():
     log_eager = _positional_inplace_trace(defer=False)
     log_defer = _positional_inplace_trace(defer=True)

@@ -1,0 +1,289 @@
+# Trackers: feeding TensorBoard and wandb honestly
+
+> Every name on this page is experimental and may change in any
+> release. Access is `import torchlens.trackers` for now.
+
+TorchLens never builds dashboards. It computes more and better statistics
+than the trackers' built-in watchers and feeds their dashboards: one
+collection engine (the private observability package's per-step records), one
+conversion layer, and first-party sinks.
+
+```python
+import torch
+import torchlens.trackers as trk
+
+model, opt = build_model_and_optimizer()
+sink = trk.TensorBoardSink("runs/exp1")   # or an existing SummaryWriter
+with trk.watch(model, to=sink, signals=("gradients", "updates"),
+               optimizer=opt, every=50, hist_every=200) as watch:
+    for global_step, batch in enumerate(loader, start=start_step):
+        with watch.step(global_step, scaler=scaler):
+            opt.zero_grad(set_to_none=True)
+            loss = model(**batch).loss
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+print(watch.close().format())
+```
+
+## The three cost tiers, disclosed
+
+| Tier | Signals | Mechanism | Cost class | Status |
+|---|---|---|---|---|
+| P (default) | parameters, gradients, updates | optimizer-boundary hooks; NO forward is wrapped or run | cheap (whole-step numbers publish only after the quiet-GPU gate) | shipped |
+| M | module-output activations | ordinary forward hooks; one real discovery forward at attach (`inputs=`), run in the model's CURRENT mode | ~1.1x class (forward-only ratio) | shipped |
+| O | op-grain (and facet) activations | the root `forward` is WRAPPED: sampled steps run inside one sparse-recording capture, other steps run plain | calibrated at attach and disclosed; op capture is WRAP-dominated | shipped behind consent |
+
+Tier O needs explicit consent because it is the one tier that wraps your
+model's forward:
+
+```python
+session = watch(
+    model, to=sink, signals=("activations",), grain="op",
+    select=tl.func("softmax"),          # or module path prefixes
+    inputs=x, allow_forward_wrap=True,
+    facets={"softmax_3_12": split_heads(12, dim=1)},  # optional per-head series
+)
+print(session.plan_report())            # names the wrap and the calibrated cost
+```
+
+Without `allow_forward_wrap=True` the call refuses
+`watch_forward_wrap_consent_required`. With it, attach runs one
+metadata-only discovery pass and a short interleaved A/B calibration (the
+plain forward against the wrapped pass on `inputs`, under `no_grad`;
+the RNG state and every buffer are restored), then discloses the measured
+ratio in `plan_report()`, in the `torchlens/meta/op_grain_calibration` text
+row and the `torchlens/run/op_grain_overhead_median_x` scalar, and in one
+`watch_op_grain_cost_disclosed` warning. The calibration is a disclosure
+from a few pairs on your machine, not a published number. Narrowing
+`select=` moves only part of the bill (op wrapping dominates); `every=` is
+the time lever, because unsampled steps run the plain forward. Only the first
+forward of a sampled step is observed (a second forward in the same step is a
+named skip), the root module's own hooks fire twice on observed steps, op
+grain watches activations only (parameter streams go in a second session
+with a distinct `name=`), and facet series land under `<op label>/<facet>`.
+`close()` removes the wrap.
+
+## AMP truth: observed, derived, or unknown -- never asserted
+
+Pass the scaler into the step scope (`watch.step(n, scaler=scaler)`) and
+the engine reads TWO facts at the optimizer boundary: the scale
+(`torchlens/run/amp_scale`) and whether the gradients it reduced were
+already unscaled. `scaler.step(optimizer)` unscales in place before the
+boundary, so the record says `unscaled="yes"` and the numbers are
+observed. A plain `optimizer.step()` after `scaler.scale(loss).backward()`
+never unscales: the record says `unscaled="no"`, the emitted gradient
+statistics are corrected in closed form (bit-exact for the scaler's
+power-of-two scales) and the derivation is disclosed on the run-health
+series `torchlens/run/amp_unscale_derived`. A scaler whose stage cannot be
+read (a duck-typed object without the per-optimizer stage record) stamps
+`unknown` and ships the numbers as measured -- unknown never masquerades
+as a factor of one.
+
+## The step law
+
+Every record carries the CALLER's `global_step`. There is no hidden
+counter: a checkpoint resume with an internal counter restarting at 0
+silently misaligns every panel (and the wandb relay ships this exact
+failure -- see the table below). Sources: `with watch.step(n):`
+(authoritative; also the home of AMP scale stamping and skip truth),
+`step=callable` at attach for unchanged loops, or the framework callbacks
+(`HFTrainerWatchCallback`, `LightningWatchCallback`). Duplicate or
+decreasing steps refuse unless `new_segment=True` declares a resume.
+
+Under `step=callable` the engine schedules tier-M activation observation
+at forward entry (one root forward pre-hook, installed only when both
+`step=` and `activations` are requested) and carries the forward's
+observations across the implicit block open at the optimizer boundary, so
+the two step spellings observe the same activation statistics. The HF
+callback lands rows on the Trainer's own log axis: `state.global_step` is
+incremented AFTER `optimizer.step()`, so the callback reads it `+ 1`.
+
+The manifest and the `torchlens/run/attached` heartbeat ride the FIRST
+step the session sees (and the last seen step, or 0, at close when no
+step ran): a resumed wandb run drops every `log(step=0)` call, and those
+were exactly the rows that vanished.
+
+## Attach-time refusals (nothing latches silently after step 0)
+
+- Two sinks of one class get two ledger rows (`JSONLSink`, `JSONLSink#2`):
+  rows are keyed by sink OBJECT, so one failing file never starves its
+  sibling. The same sink object listed twice refuses
+  (`tracker_sink_duplicate`).
+- A second `watch()` on a model that already has an open session under the
+  same `name=`/`namespace=` refuses (`tracker_namespace_collision`); a
+  distinct `name=` keeps both series distinguishable.
+- Tag safety is checked for every catalogued site at attach
+  (`tracker_tag_unsafe`), never first inside a step's `finally`; a typed
+  drain refusal while the loop's own exception unwinds is recorded as a
+  named skip and never masks that exception.
+- Gradient watching over `sparse=True` modules refuses at attach
+  (`watch_sparse_grad_unsupported`) instead of crashing inside
+  `optimizer.step()`.
+- Sinks may implement `preflight_histograms(descriptor)`; `WandbSink`
+  (512-bucket cap) and `TensorBoardSink` (relay detected) refuse a
+  `hist_every=` request at attach rather than latching on the first
+  sampled step.
+- Sinks may also offer `default_histogram_descriptor()`. When the caller
+  passes neither `descriptor=` nor `settings=`, `watch` uses the first
+  offering sink's grid for every sink of the session: `WandbSink` offers
+  `WANDB_SAFE_DESCRIPTOR` (497 buckets), so
+  `watch(model, to=WandbSink(run), hist_every=...)` attaches on the default
+  path. Any caller grid, including the default carried by a bare
+  `WatchSettings()`, is kept and each sink's preflight judges it, so an
+  over-cap grid still refuses (`tracker_histogram_bucket_cap`).
+- `watch_close_empty` counts DATA points only: heartbeat, manifest, and
+  check rows never make an empty run look populated. A run whose every
+  step is explained by a named skip (AMP-skipped, demoted missing phase)
+  is not empty.
+- `JSONLSink` writes each row unbuffered and truncates a torn row on
+  failure, so rows already on disk are always whole JSONL; `flush()` and
+  `close()` are separate attempts at teardown.
+
+## What each route costs you (the measured fidelity table)
+
+Current versions: wandb 0.30.0 (pinned by the `trackers-relay-test`
+extra), clearml 2.1.12, TB 2.21.0, offline. The trackers panel first
+measured the table on real distilgpt2 tensors at wandb 0.28.2, with
+ClearML measured independently twice; the wandb relay's step rewrite,
+summary-field destruction and re-binning above 512 buckets were
+re-measured at 0.30.0 and are unchanged, and the relay delivers every
+event:
+
+| | TB native | wandb native sink | wandb relay | ClearML relay |
+|---|---|---|---|---|
+| Scalars | faithful | faithful | faithful | faithful |
+| Caller step on scalars | preserved | preserved | REWRITTEN 0,1,2 | preserved |
+| Histogram counts | exact | exact | exact (uniform bins only) | INTERPOLATED, ~75% of mass |
+| Histogram edges | exact | exact | exact only for uniform bins | 2-decimal strings |
+| Summary fields (min/max/num/sum/sumsq) | preserved | dropped by wandb.Histogram | DESTROYED | DESTROYED |
+| Caller step on histograms | preserved | preserved | rewritten | LOST (iter=0) |
+| Bucket cap | none | 512 | >512 silently re-binned | resampled to ~48 regardless |
+| Graph | renders | n/a | ignored | not captured |
+
+Consequences, wired into the code:
+
+- **Anything you alert on or compare across runs must be a scalar.** Every
+  histogram ships its scalar summary series (mean/std/norm/min/max/count/
+  zero fraction, plus nonfinite counts) as first-class tags.
+- **Relay ordering matters:** call `wandb.init(sync_tensorboard=True)`
+  BEFORE constructing the TB writer, or nothing appears in wandb at all.
+  `TensorBoardSink` detects both relays and reports `relay_configured` in
+  the close report -- runtime reports never claim downstream presence
+  beyond their evidence tier.
+- **Histograms over a detected relay refuse typed**
+  (`tracker_relay_histogram_unsupported`): the signed-log2 edges are
+  non-uniform and both relays reconstruct them wrong. Use the native sink.
+
+## Coming from `wandb.watch`
+
+Organized as their open issues with our answers:
+
+| wandb issue class | Stock `wandb.watch` | `torchlens.trackers.watch` |
+|---|---|---|
+| activation watching (#5218) | absent | module or op grain, by explicit selector |
+| exact site/parameter selection (#6945) | absent | `select=` prefixes + hard budgets |
+| update magnitudes (#5218) | absent | measured accepted optimizer deltas, never `lr*grad` |
+| silent empty panels (#1639/#3701/#2625) | known class | typed refusals + close report + heartbeat |
+| silent FSDP no-op (#9866) | silent | typed teaching refusal (deferred distributed emission) |
+| relay step rewrite | measured above | caller axis preserved in both first-party sinks |
+| multi-model naming (#5135/#2284) | weak | `name=` namespace component |
+| unexplained slowdown | log_freq folklore | plan table printed at attach; preflight budget FACTS |
+
+Bytes per logged step (arithmetic, not measurement): a full-tensor watcher
+moves ~655 MB per step on real distilgpt2 shapes; counts+edges move
+~84.5 KB -- and the transfer is independent of tensor numel (the
+bounded-transfer law, tested).
+
+## The TB graph
+
+`build_graph_ir(trace)` turns the executed TorchLens DAG into a graph IR
+(never `torch.jit.trace` -- dict inputs and data-dependent branches are
+fine because the DAG is what actually ran);
+`graph_ir_to_tensorboard(ir, logdir)` serializes GraphDef + per-node
+StepStats through torch's own writer path (151/151 real resnet18 stats rows
+bound in TB 2.21, measured). Truthful fields only: CPU host-bracket timing
+with its evidence label; no CUDA timing and no allocator-memory coloring
+until real sources exist -- missing evidence omits a field, never writes
+zero.
+
+## MLflow and Comet sinks
+
+`MLflowSink(client=None, *, run_id=None)` and `CometSink(experiment)` are native
+receivers over a run or experiment you already created; neither starts or ends it.
+
+- `MLflowSink` takes the fluent `mlflow` module (active run, or `run_id=`), an
+  `mlflow.MlflowClient` with `run_id=`, or nothing (imports mlflow, active run). Scalars go to
+  `log_metric(run_id, tag, value, step=<your step>)`, so MLflow's own counter never replaces
+  your step. Text points and raw histograms are artifacts at `<tag>/step_<NNNNNNNNNN>.txt` and
+  `.json`; the histogram JSON holds the exact `counts`, `edges` and `summary`. Keep
+  `hist_every` sparse: one file per point. A tag MLflow cannot carry (it allows letters,
+  digits, `_ - . : /` and space) refuses typed (`tracker_tag_unsafe`) and latches the sink.
+- `CometSink` takes a `comet_ml.Experiment` or `OfflineExperiment`. Scalars go to
+  `log_metric(tag, value, step=<your step>)`, text to `log_text(..., step=...,
+  metadata={"tag": tag})`. It does not advertise `raw_histogram`: Comet re-bins raw values on
+  its own fixed grid, so exact counts on explicit edges cannot survive. Asking for histograms
+  refuses by name at attach; the summary statistics still arrive as scalar series.
+
+## Framework callbacks
+
+`HFTrainerWatchCallback(to=...)` and `LightningWatchCallback(to=...)` are
+explicit wrappers over the same engine: the framework's global step is the
+step source and its logging cadence derives the watch cadence. No
+environment variable ever activates instrumentation; the off-only kill
+switch `TORCHLENS_WATCH_DISABLE=1` disables collection and still writes a
+`torchlens/run/disabled` row saying so.
+
+Once constructed, a callback may take its configuration from the
+environment: `TORCHLENS_WATCH_SIGNALS` (comma list), `TORCHLENS_WATCH_SELECT`
+(comma list of prefixes), `TORCHLENS_WATCH_EVERY` and
+`TORCHLENS_WATCH_HIST_EVERY` (positive integers; `none` turns histograms
+off). A constructor argument wins over the environment, the environment over
+the framework-derived cadence, and that over the package default. At attach
+the callback prints one line per setting with its source (`[argument]`,
+`[env TORCHLENS_WATCH_EVERY]`, `[derived: logging_steps=50]`, `[default]`)
+through `print_fn=` (default `print`); the resolved values stay on
+`callback.settings`. A set but malformed variable refuses
+`watch_env_config_invalid`, naming it.
+
+**Migration note:** the shipped
+`torchlens.callbacks.lightning.LayerProfilerCallback` is a different tool
+(a per-epoch structure profiler). It re-traces under `eval()`/`no_grad()`
+-- the wrong mode for dropout/BatchNorm statistics -- cannot see training
+gradients, and pays an extra forward per profile. For training-time
+watching, use `LightningWatchCallback`; keep `LayerProfilerCallback` only
+for structure snapshots. Each of its JSONL records carries `run_id` (fresh
+at every Lightning `setup`, or fixed with `run_id=`) and a `disclosure` line
+naming the extra eval-mode, `no_grad` forward; a batch the forward cannot
+take skips that batch with a `lightning_profile_skipped` warning and
+training continues.
+
+`torchlens.callbacks.lightning.SummaryCallback()` prints the `tl.summary`
+table once at the start of each fit, where Lightning prints its own
+ModelSummary. It summarizes the module's `example_input_array` when one is
+set, otherwise the first training batch, and costs one extra forward in eval
+mode under `no_grad` with every module's mode and the RNG state restored. Pass
+`input_getter=` when the batch is not `(x, ...)`, `{"x": ...}` or a mapping of
+forward keyword arguments; a batch the forward rejects skips the summary with
+a `lightning_summary_skipped` warning and training continues.
+
+```python
+import lightning.pytorch as pl
+from torchlens.callbacks import lightning as tl_lightning
+
+trainer = pl.Trainer(
+    callbacks=[tl_lightning.SummaryCallback(depth=2)], enable_model_summary=False
+)
+```
+
+## Writing your own sink
+
+The sink protocol is documented and closed over capability words
+(`scalar`, `raw_histogram`, `text_manifest`, `image`, `graph`,
+`run_metadata`, `structured_event`, `embedding_module`): implement
+`capabilities()`, the `emit_*` methods for what you advertise, `flush`,
+and `close`. A requested capability you do not advertise refuses by name
+before any partial emission; a raise in your sink latches it failed in the
+close report and can never corrupt collection. `JSONLSink` is the
+reference implementation (one JSON object per line, header row first, a
+`closed` footer marking complete files).

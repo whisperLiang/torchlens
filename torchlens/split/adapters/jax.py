@@ -5,13 +5,17 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from torchlens.split.errors import SplitRequestError
+
+from ..._ir.container import rebuild_container_from_spec
+from ..._utils.collections import _path_component_key
 from ...backends.jax.jaxpr import (
     JaxEquationCapture,
     JaxRegionCapture,
     _evaluate_closed_jaxpr_no_capture,
     replay_equation,
 )
-from ...ir.container import TupleIndex, rebuild_container_from_spec, reorder_container_leaves
+from .._capture_projection import reorder_container_leaves
 from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
@@ -56,8 +60,7 @@ def _slice_output_by_path(output: Any, path: tuple[Any, ...]) -> Any:
 def _jax_tree_key(component: Any) -> Any:
     """Convert a JAX tree path entry to a native container key."""
 
-    if isinstance(component, TupleIndex):
-        return component.index
+    component = _path_component_key(component)
     if hasattr(component, "key"):
         return component.key
     if hasattr(component, "idx"):
@@ -157,6 +160,7 @@ class _JaxGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} source value is unavailable.",
                 context=self._context(node, "missing source value"),
+                code=SplitUnsupportedError.code,
             )
         return value
 
@@ -173,6 +177,7 @@ class _JaxGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} references unavailable JAX parent {parent_label!r}.",
                 context=self._context(node, "missing parent value"),
+                code=SplitUnsupportedError.code,
             )
         return overlay[parent_id]
 
@@ -209,6 +214,7 @@ class _JaxGeneratedSegmentBase:
                 raise SplitUnsupportedError(
                     f"{node.label!r} has invalid JAX parent arg position {position!r}.",
                     context=self._context(node, "invalid parent position"),
+                    code=SplitUnsupportedError.code,
                 )
             inputs[position] = self._resolve_parent_value(str(parent_label), node, overlay)
         return tuple(inputs)
@@ -231,6 +237,7 @@ class _JaxGeneratedSegmentBase:
                     raise SplitUnsupportedError(
                         f"{node.label!r} has invalid JAX region parent position {position!r}.",
                         context=self._context(node, "invalid region parent position"),
+                        code=SplitUnsupportedError.code,
                     )
                 inputs[position] = self._resolve_parent_value(str(parent_label), node, overlay)
             try:
@@ -245,23 +252,26 @@ class _JaxGeneratedSegmentBase:
                 raise SplitUnsupportedError(
                     f"JAX region replay failed for {node.label!r}: {exc}",
                     context=self._context(node, "JAX region replay failed"),
+                    code=SplitUnsupportedError.code,
                 ) from exc
             return outputs[0] if len(outputs) == 1 else tuple(outputs)
         if not isinstance(capture, JaxEquationCapture):
             raise SplitUnsupportedError(
                 f"{node.label!r} has no JAX equation capture.",
                 context=self._context(node, "missing JAX equation capture"),
+                code=SplitUnsupportedError.code,
             )
         try:
+            params = self._params_override(capture, node, overlay)
             outputs = replay_equation(
-                capture,
+                capture if params is None else replace(capture, params=params),
                 self._equation_inputs(capture, node, overlay),
-                params_override=self._params_override(capture, node, overlay),
             )
         except Exception as exc:
             raise SplitUnsupportedError(
                 f"JAX split replay failed for {node.label!r}: {exc}",
                 context=self._context(node, "JAX primitive replay failed"),
+                code=SplitUnsupportedError.code,
             ) from exc
         return outputs[0] if len(outputs) == 1 else tuple(outputs)
 
@@ -312,6 +322,7 @@ class JaxGeneratedPrefix(_JaxGeneratedSegmentBase):
                     split_point=self.spec.boundary,
                     reason="input count mismatch",
                 ),
+                code=SplitUnsupportedError.code,
             )
         overlay = dict(zip(self.graph.input_node_ids, input_leaves))
         if self.graph.shape_program is not None:
@@ -395,6 +406,7 @@ class JaxGeneratedSuffix(_JaxGeneratedSegmentBase):
         raise SplitUnsupportedError(
             f"Final output {node.canonical_id!r} has no available replay value.",
             context=self._context(node, "missing output replay value"),
+            code=SplitUnsupportedError.code,
         )
 
     def _reconstruct_output(self, overlay: dict[str, Any]) -> Any:
@@ -409,6 +421,7 @@ class JaxGeneratedSuffix(_JaxGeneratedSegmentBase):
                     split_point=self.spec.boundary,
                     reason="missing output records",
                 ),
+                code=SplitUnsupportedError.code,
             )
         leaves = [
             (node.output_container_path, self._output_leaf(node, overlay)) for node in output_nodes
@@ -427,12 +440,14 @@ class JaxGeneratedSuffix(_JaxGeneratedSegmentBase):
                 raise SplitUnsupportedError(
                     "JAX output records do not match the recorded container specification.",
                     context=self._context(output_nodes[0], "invalid output container records"),
+                    code=SplitUnsupportedError.code,
                 ) from exc
         if len(leaves) == 1 and not leaves[0][0]:
             return leaves[0][1]
         raise SplitUnsupportedError(
             "JAX container outputs require an explicitly recorded container specification.",
             context=self._context(output_nodes[0], "missing output container specification"),
+            code=SplitUnsupportedError.code,
         )
 
 
@@ -487,7 +502,10 @@ class JaxSplitAdapter(SplitPolicyMixin):
             return value
         current = int(value.shape[axis])
         if current <= 0:
-            raise ValueError("Cannot resize an empty batch axis.")
+            raise SplitRequestError(
+                "Cannot resize an empty batch axis.",
+                code=SplitRequestError.code,
+            )
         with _jax().default_device(value.device):
             indexes = _jnp().arange(batch_size) % current
             return _jnp().take(value, indexes, axis=axis)
@@ -550,4 +568,4 @@ class JaxSplitAdapter(SplitPolicyMixin):
         return SegmentBundle(prefix=prefix, training_prefix=training_prefix, suffix=suffix)
 
 
-__all__ = ["JaxGeneratedPrefix", "JaxGeneratedSuffix", "JaxSplitAdapter"]
+__all__ = ("JaxGeneratedPrefix", "JaxGeneratedSuffix", "JaxSplitAdapter")

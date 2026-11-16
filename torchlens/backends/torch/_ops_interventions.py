@@ -8,141 +8,108 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from ... import _state as _st
-from ..._state import pause_logging
-from ...capture.arg_positions import (
+from ..._capture.arg_positions import (
     _normalize_func_name,
 )
-from ...capture.predicates import (
+from ..._capture.predicates import (
     _evaluate_intervene_op,
     build_op_record_context,
 )
-from ...capture.projections import (
+from ..._capture.projections import (
     get_active_recording_state,
 )
-from ...data_classes.internal_types import FuncExecutionContext
-from ...errors._base import CompatibilityError
-from ...fastlog.types import (
-    RecordContext,
-)
-from ...intervention.hooks import make_live_site_proxy, normalize_hook_plan
-from ...intervention.runtime import active_intervention_context
-from ...intervention.selectors import (
-    label as make_label_selector,
-)
-from ...intervention.types import (
-    InterventionDecision,
-    TargetSpec,
-)
-from ...ir.container import (
+from ..._data_classes.internal_types import FuncExecutionContext
+from ..._ir.container import (
     ContainerSpec,
     OutputPathComponent,
     TupleIndex,
 )
-from ...ir.intervention import FireResult
-from ._tl import (
-    get_label_list,
+from ..._ir.intervention import FireResult
+from ..._selection.selectors import (
+    label as make_label_selector,
+)
+from ..._state import pause_logging
+from ..._utils._tensor_label import get_label_list
+from ...errors._base import CompatibilityError
+from ...intervention._runtime import active_intervention_context
+from ...intervention._types import (
+    InterventionDecision,
+    TargetSpec,
+)
+from ...intervention.hooks import make_live_site_proxy, normalize_hook_plan
+from ...recording._types import (
+    RecordContext,
 )
 
 if TYPE_CHECKING:
-    from ...data_classes.trace import Trace
-
-if TYPE_CHECKING:
-    from .ops import (
-        _LIVE_FIRE_RESULTS_ATTR,
-        TRANSFORM_FUNC_NAMES,
-        _build_shared_fields_dict,
-        _build_trace_predicate_context,
-        _cache_trace_predicate_context,
-        _extract_arg_tensors_and_params,
-        _output_should_be_logged,
-        _replace_output_value,
-        _walk_output_tensors_with_paths,
-    )
+    from ..._data_classes.trace import Trace
 
 
-_LIVE_FIRE_RESULTS_STORAGE_ATTR = "_tl_live_fire_results_by_tensor_id"
+_OUT_OF_BAND_FIRE_RESULTS: dict[
+    int, tuple[weakref.ReferenceType[torch.Tensor], tuple[FireResult, ...]]
+] = {}
+"""Fire results of tensors that reject dynamic attributes, keyed by ``id(tensor)``.
+
+Each entry holds a weak reference to its tensor whose callback drops the entry, so
+the table never outlives a tensor, and readers check the referent's identity so a
+recycled id is never served. The table is keyed on the tensor, never on its
+storage: torch 2.1 returns a fresh storage wrapper from every ``untyped_storage()``
+call (an attribute set on one is lost) and a weak reference to a storage crashes
+the interpreter there.
+"""
 
 # Stable constant-spelled refusal kinds (surfaced on ``fields["kind"]``),
 # enrolled in the lockstep gate's constant-spelled table so a rename or
-# string drift trips governance like any inline ``code=`` literal (r25,
-# b6-fable carried MED: both shipped outside every governance surface).
+# string drift trips governance like any inline ``code=`` literal.
 INTERVENTION_FIRE_RESULTS_UNRECORDABLE = "intervention_fire_results_unrecordable"
 INTERVENTION_FIRE_RESULTS_CLEANUP_FAILED = "intervention_fire_results_cleanup_failed"
 
 
 def _clear_out_of_band_fire_results(
     tensor_id: int,
-    storage_reference: weakref.ReferenceType[Any],
     reference: weakref.ReferenceType[torch.Tensor],
 ) -> None:
-    """Drop a storage-owned fire record when its tensor is reclaimed."""
+    """Drop an out-of-band fire record when its tensor is reclaimed."""
 
-    storage = storage_reference()
-    if storage is None:
-        return
-    records = getattr(storage, _LIVE_FIRE_RESULTS_STORAGE_ATTR, None)
-    if not isinstance(records, dict):
-        return
-    current = records.get(tensor_id)
+    current = _OUT_OF_BAND_FIRE_RESULTS.get(tensor_id)
     if current is not None and current[0] is reference:
-        records.pop(tensor_id, None)
-    if not records:
-        try:
-            delattr(storage, _LIVE_FIRE_RESULTS_STORAGE_ATTR)
-        except (AttributeError, RuntimeError):
-            return
+        _OUT_OF_BAND_FIRE_RESULTS.pop(tensor_id, None)
 
 
 def _store_out_of_band_fire_results(
     tensor: torch.Tensor,
     fire_results: tuple[FireResult, ...],
 ) -> None:
-    """Store fire results on the tensor's storage with weak tensor ownership."""
+    """Record fire results for ``tensor`` in the weakly owned module table."""
 
     tensor_id = id(tensor)
     try:
-        with pause_logging():
-            storage = tensor.untyped_storage()
-        records = getattr(storage, _LIVE_FIRE_RESULTS_STORAGE_ATTR, None)
-        if records is None:
-            records = {}
-            setattr(storage, _LIVE_FIRE_RESULTS_STORAGE_ATTR, records)
-        if not isinstance(records, dict):
-            raise TypeError("storage fire-result side table has an invalid type")
-        storage_reference = weakref.ref(storage)
-        reference = weakref.ref(
-            tensor,
-            partial(_clear_out_of_band_fire_results, tensor_id, storage_reference),
-        )
-    except (AttributeError, RuntimeError, TypeError) as side_table_error:
+        reference = weakref.ref(tensor, partial(_clear_out_of_band_fire_results, tensor_id))
+    except TypeError as side_table_error:
         raise CompatibilityError(
             "An intervention changed execution, but its tensor accepts neither "
-            "transient metadata nor storage-backed evidence.",
+            "transient metadata nor a weakly referenced out-of-band record.",
             kind=INTERVENTION_FIRE_RESULTS_UNRECORDABLE,
         ) from side_table_error
-    records[tensor_id] = (reference, fire_results)
+    _OUT_OF_BAND_FIRE_RESULTS[tensor_id] = (reference, fire_results)
+
+
+def _peek_out_of_band_fire_results(tensor: torch.Tensor) -> tuple[FireResult, ...]:
+    """Return, without consuming, the out-of-band fire results for ``tensor``."""
+
+    entry = _OUT_OF_BAND_FIRE_RESULTS.get(id(tensor))
+    if entry is not None and entry[0]() is tensor:
+        return entry[1]
+    return ()
 
 
 def _take_out_of_band_fire_results(tensor: torch.Tensor) -> tuple[FireResult, ...]:
-    """Take fire results for ``tensor`` from its storage-owned side table."""
+    """Take the out-of-band fire results for ``tensor`` from the module table."""
 
-    try:
-        with pause_logging():
-            storage = tensor.untyped_storage()
-        records = getattr(storage, _LIVE_FIRE_RESULTS_STORAGE_ATTR, None)
-    except (AttributeError, RuntimeError, TypeError):
-        return ()
-    if not isinstance(records, dict):
-        return ()
-    fallback = records.pop(id(tensor), None)
-    if not records:
-        try:
-            delattr(storage, _LIVE_FIRE_RESULTS_STORAGE_ATTR)
-        except (AttributeError, RuntimeError):
-            pass
-    if fallback is not None and fallback[0]() is tensor:
-        return fallback[1]
-    return ()
+    fire_results = _peek_out_of_band_fire_results(tensor)
+    if fire_results:
+        _OUT_OF_BAND_FIRE_RESULTS.pop(id(tensor), None)
+    return fire_results
 
 
 __all__ = (
@@ -178,11 +145,11 @@ def _apply_live_hooks_to_outputs_legacy(
     if (
         not _st._active_hook_plan
         and not predicate_intervene_active
-        or self.capture_mode not in {"exhaustive", "predicate"}
+        or self._options_mode not in {"exhaustive", "predicate"}
     ):
         return out_orig
     if (
-        self.capture_mode == "predicate"
+        self._options_mode == "predicate"
         and predicate_intervene_active
         and not _st._active_hook_plan
     ):
@@ -198,7 +165,7 @@ def _apply_live_hooks_to_outputs_legacy(
             record_is_inplace=record_is_inplace,
         )
 
-    from ...intervention.runtime import _apply_live_hooks
+    from ...intervention._runtime import _apply_live_hooks
 
     shared_fields, _parent_layer_entries, _arg_tensors, _parent_param_ops = (
         _build_shared_fields_dict(
@@ -220,7 +187,7 @@ def _apply_live_hooks_to_outputs_legacy(
         site_fields["type_index"] = reserved.type_index
         site_fields["_label_raw"] = raw_label
         site_fields["_layer_label_raw"] = raw_label
-        site_fields["pass_index"] = 1
+        site_fields["pass_number"] = 1
         site_fields["step_index"] = None
         site_fields["container_path"] = container_path
         site_fields["is_inplace"] = record_is_inplace
@@ -323,12 +290,12 @@ def _apply_predicate_mode_interventions_to_outputs(
             pass_index=state.pass_index,
             event_index=state.event_index + output_ordinal,
             step_index=state.step_index + output_ordinal,
-            capture_start_time=trace.capture_start_time,
+            capture_start_time=trace._provenance_start_time,
             include_source_events=state.options.include_source_events,
             sample_id=state.sample_id,
             address=module_frame.address if module_frame else None,
             module_type=module_frame.module_type if module_frame else None,
-            module_pass_index=module_frame.pass_index if module_frame else None,
+            module_pass_number=module_frame.pass_number if module_frame else None,
             is_transform=func_name in TRANSFORM_FUNC_NAMES,
             transform_kind=func_name if func_name in TRANSFORM_FUNC_NAMES else None,
         )
@@ -355,15 +322,14 @@ def _apply_predicate_mode_interventions_to_outputs(
         hook_entries = normalize_hook_plan(
             decision.hook,
             default_site_target=make_label_selector(ctx.raw_label or ctx.label),
-            direction=decision.direction,
         )
-        from ...intervention.runtime import _apply_live_hooks
+        from ...intervention import _runtime as runtime, _zero_fire
 
         with active_intervention_context(
             intervention_spec=getattr(trace, "_intervention_spec", None),
             hook_plan=hook_entries,
         ):
-            hooked, fire_results = _apply_live_hooks(
+            hooked, fire_results = runtime._apply_live_hooks(
                 out,
                 site=site,
                 container_path=container_path,
@@ -372,9 +338,7 @@ def _apply_predicate_mode_interventions_to_outputs(
                 call_input_snapshots=call_input_snapshots,
             )
         if fire_results:
-            trace._tl_intervene_selector_fire_count = int(
-                getattr(trace, "_tl_intervene_selector_fire_count", 0)
-            ) + len(fire_results)
+            _zero_fire.note_capture_fire(trace, len(fire_results), decision.rule_id)
             _set_tensor_live_fire_results(hooked, fire_results)
         if hooked is not out:
             replacements[container_path] = hooked
@@ -388,10 +352,162 @@ def _apply_predicate_mode_interventions_to_outputs(
 def _trace_intervene_options(trace: "Trace") -> Any | None:
     """Return trace predicate options when ``intervene`` is configured."""
 
-    options = getattr(trace, "_predicate_save_options", None)
+    options = trace.__dict__.get("_predicate_save_options")
     if options is None or options.intervene is None:
         return None
     return options
+
+
+# Identity-guarded memo for ``_intervene_reaches_op_door``: the intervene operand is fixed for a
+# whole capture, so the selector walk runs once per operand instead of once per op output. It
+# holds weak references, so the memo never keeps a finished capture's spec (or the tensors its
+# helpers close over) alive.
+_OP_DOOR_MEMO: dict[int, tuple["weakref.ref[Any]", bool]] = {}
+_OP_DOOR_MEMO_LIMIT = 64
+
+
+def _is_module_exit_only(selector: Any) -> bool:
+    """Return whether ``selector`` can only match at a module-exit boundary.
+
+    True only for a pure ``tl.module(...)`` selector or an ``|`` / ``&`` composite whose leaves are
+    all pure ``tl.module(...)`` selectors. On the torch backend an op-time context never carries
+    ``output_of_module_calls`` (that field is joined at module exit), so such a selector evaluates
+    False at every op door and only the module-boundary door can fire it. Any other node kind
+    (negation, callables, value producers, subclasses) is treated as op-capable.
+
+    Parameters
+    ----------
+    selector:
+        WHERE term of one intervention rule.
+
+    Returns
+    -------
+    bool
+        Whether the selector can never match an op-time context.
+    """
+
+    # Deferred (layer lint): the backend must not eagerly import intervention vocabulary.
+    # Both modules are loaded by then, so this costs a sys.modules lookup and no Python call.
+    from ..._selection.selectors import CompositeSelector, ModuleSelector
+
+    if type(selector) is ModuleSelector:
+        return True
+    if type(selector) is CompositeSelector and selector.operator in ("and", "or"):
+        return bool(selector.selectors) and all(
+            _is_module_exit_only(child) for child in selector.selectors
+        )
+    return False
+
+
+def _intervene_reaches_op_door(options: Any) -> bool:
+    """Return whether the ``intervene=`` operand can fire at a per-op output door.
+
+    Conservative: only an ``InterventionSpec`` whose every rule's WHERE term is module-exit-only
+    (see ``_is_module_exit_only``) returns False; every other operand returns True so the per-op
+    check keeps running exactly as before.
+
+    Parameters
+    ----------
+    options:
+        Trace predicate options carrying the ``intervene`` operand.
+
+    Returns
+    -------
+    bool
+        Whether the per-op intervention check can ever match.
+    """
+
+    intervene = options.intervene
+    memo = _OP_DOOR_MEMO.get(id(intervene))
+    if memo is not None and memo[0]() is intervene:
+        return memo[1]
+    from ...intervention._spec import Recipe
+
+    reaches = not (
+        isinstance(intervene, Recipe)
+        and bool(intervene.rules)
+        and all(_is_module_exit_only(rule.target) for rule in intervene.rules)
+    )
+    try:
+        intervene_ref = weakref.ref(intervene)
+    except TypeError:
+        # Not weak-referenceable (an InterventionSpec always is): answer without memoizing.
+        return reaches
+    if len(_OP_DOOR_MEMO) >= _OP_DOOR_MEMO_LIMIT:
+        _OP_DOOR_MEMO.clear()
+    _OP_DOOR_MEMO[id(intervene)] = (intervene_ref, reaches)
+    return reaches
+
+
+def _hook_entry_reaches_op_door(entry: Any) -> bool:
+    """Return whether one active hook-plan entry can fire at a per-op output door.
+
+    Mirrors the skip rules of ``intervention.runtime._apply_live_hooks``: entries that are not
+    forward post-hooks never fire there, a plain ``tl.module(...)`` input splice is skipped
+    there, and a module-exit-only WHERE term never matches an op-time site (it fires at the
+    module-boundary door). Anything else, including an entry whose op-door visit would raise,
+    is treated as reaching the op door.
+
+    Parameters
+    ----------
+    entry:
+        Hook-plan entry from ``_state._active_hook_plan``.
+
+    Returns
+    -------
+    bool
+        Whether the op-door hook loop could fire or raise for this entry.
+    """
+
+    # Not memoized: entries are slotted (no weak references), a strong-reference memo would keep a
+    # finished capture's hook callables alive, and this walk costs a few calls per op.
+    from ...intervention._runtime import _input_splice_module_scope, _is_plain_module_selector
+    from ...intervention.hooks import NormalizedHookEntry
+
+    if type(entry) is not NormalizedHookEntry:
+        return True
+    if entry.signal != "forward" or entry.metadata.get("timing", "post") != "post":
+        return False
+    if _input_splice_module_scope(entry.site_target, entry) is not None:
+        return not _is_plain_module_selector(entry.site_target)
+    return not _is_module_exit_only(entry.site_target)
+
+
+def _hook_plan_reaches_op_door(hook_plan: Any) -> bool:
+    """Return whether any active hook-plan entry can fire at a per-op output door.
+
+    Parameters
+    ----------
+    hook_plan:
+        The active hook plan (``_state._active_hook_plan``).
+
+    Returns
+    -------
+    bool
+        Whether the op-door hook loop has any entry that could fire or raise.
+    """
+
+    return any(_hook_entry_reaches_op_door(entry) for entry in hook_plan)
+
+
+def _predicate_hook_metadata(entry: Any, decision: InterventionDecision) -> dict[str, Any]:
+    """Build one predicate-door hook's persisted metadata dict.
+
+    Leverage B7: a spec-rule decision carries its rule's provenance, so the
+    persisted hook records the USER'S EXPRESSION beside the lowered label
+    target. The rider is provenance only: the save still stamps
+    spec_derived=True for every predicate-door hook (the ADDRESSING is
+    derived labels; the disclosure keys the door, never this rider).
+    """
+
+    metadata = {
+        **dict(entry.metadata),
+        "created_by": "intervene_predicate",
+    }
+    if decision.where_repr is not None:
+        metadata["spec_where_repr"] = decision.where_repr
+        metadata["spec_rule_id"] = decision.rule_id
+    return metadata
 
 
 def _record_predicate_intervention_spec(
@@ -413,7 +529,7 @@ def _record_predicate_intervention_spec(
     Returns
     -------
     None
-        Mutates ``trace._intervention_spec`` once per matched target/helper/direction.
+        Mutates ``trace._intervention_spec`` once per matched target/helper.
     """
 
     if decision.hook is None:
@@ -422,8 +538,8 @@ def _record_predicate_intervention_spec(
     if not target_label:
         return
     seen = trace.__dict__.setdefault("_tl_predicate_intervention_spec_keys", set())
-    # ``decision.hook`` may be a HelperSpec carrying live torch.Tensor args
-    # (tl.steer/mean_ablate/resample_ablate/project_onto/project_off/swap_with).
+    # ``decision.hook`` may be a Edit carrying live torch.Tensor args
+    # (tl.steer/mean_ablate/scramble_elements/project_onto/project_off/swap_with).
     # repr()'ing it invokes TorchLens's own intercepted tensor __repr__, which
     # calls .detach() -- an untraced raw op that, outside pause_logging, still
     # consumes a live raw-op-counter slot and becomes a graph orphan, staling
@@ -432,7 +548,7 @@ def _record_predicate_intervention_spec(
     # repr never perturbs the capture in progress.
     with pause_logging():
         hook_repr = repr(decision.hook)
-    key = (target_label, hook_repr, decision.direction)
+    key = (target_label, hook_repr)
     if key in seen:
         return
     seen.add(key)
@@ -440,7 +556,6 @@ def _record_predicate_intervention_spec(
     entries = normalize_hook_plan(
         target,
         decision.hook,
-        direction=decision.direction,
     )
     spec = trace._ensure_intervention_spec()
     # The target dedup was a freeze-and-compare scan over all of spec.targets
@@ -471,18 +586,13 @@ def _record_predicate_intervention_spec(
             target_keys[2].add(frozen_target)
             target_keys[1] = len(spec.targets)
     for entry in entries:
-        metadata = {
-            **dict(entry.metadata),
-            "created_by": "intervene_predicate",
-            "direction": entry.metadata.get("direction", decision.direction),
-        }
         spec.add_hook(
             target,
             entry.helper_spec if entry.helper_spec is not None else entry.normalized_callable,
             helper=entry.helper_spec,
-            metadata=metadata,
+            metadata=_predicate_hook_metadata(entry, decision),
         )
-    trace.__dict__.pop("intervention_spec", None)
+    trace.__dict__.pop("recipe", None)
     trace.__dict__.pop("_frozen_intervention_spec", None)
     trace.__dict__.pop("_cached_frozen_intervention_spec", None)
 
@@ -532,19 +642,36 @@ def _apply_predicate_intervention(
     decision = _evaluate_intervene_op(ctx, options)
     if decision is None:
         return out, ()
+    from ...intervention._injection import peek_injection_state
+
+    injection_state = peek_injection_state(trace)
+    if injection_state is not None and injection_state.get("armed", False):
+        # Injections: anchor this firing's injected ops to the PERSISTED
+        # rule id when the intervene= operand is the public immutable spec
+        # (consolidated session-transient state, read by _execute_hook's
+        # recorder).
+        from ...intervention._spec import Recipe as _PublicSpec
+
+        predicate = getattr(options, "intervene", None)
+        if isinstance(predicate, _PublicSpec):
+            matched_rule = predicate.match(ctx)
+            injection_state["current_rule"] = (
+                matched_rule.rule_id if matched_rule is not None else None
+            )
+        else:
+            injection_state["current_rule"] = None
     _record_predicate_intervention_spec(trace, ctx, decision)
     hook_entries = normalize_hook_plan(
         decision.hook,
         default_site_target=make_label_selector(ctx.raw_label or ctx.label),
-        direction=decision.direction,
     )
-    from ...intervention.runtime import _apply_live_hooks
+    from ...intervention import _runtime as runtime, _zero_fire
 
     with active_intervention_context(
         intervention_spec=getattr(trace, "_intervention_spec", None),
         hook_plan=hook_entries,
     ):
-        hooked, fire_results = _apply_live_hooks(
+        hooked, fire_results = runtime._apply_live_hooks(
             out,
             site=site,
             container_path=container_path,
@@ -553,9 +680,7 @@ def _apply_predicate_intervention(
             call_input_snapshots=call_input_snapshots,
         )
     if fire_results:
-        trace._tl_intervene_selector_fire_count = int(
-            getattr(trace, "_tl_intervene_selector_fire_count", 0)
-        ) + len(fire_results)
+        _zero_fire.note_capture_fire(trace, len(fire_results), decision.rule_id)
     return hooked, fire_results
 
 
@@ -581,30 +706,6 @@ def _iter_loggable_live_outputs(
     for out, container_path, container_spec in _walk_output_tensors_with_paths(out_orig):
         if _output_should_be_logged(out, is_bottom_level_func):
             yield out, container_path, container_spec
-
-
-def _replace_output_tensors_by_path(
-    out_orig: Any,
-    replacements: dict[tuple[OutputPathComponent, ...], torch.Tensor],
-) -> Any:
-    """Return an output object with selected tensor paths replaced.
-
-    Parameters
-    ----------
-    out_orig
-        Original output container.
-    replacements
-        Replacement tensors keyed by output path.
-
-    Returns
-    -------
-    Any
-        Rebuilt output object when supported, otherwise the original object.
-    """
-
-    if () in replacements:
-        return replacements[()]
-    return _replace_output_value(out_orig, (), replacements)
 
 
 def _set_tensor_live_fire_results(
@@ -674,3 +775,32 @@ def _pop_tensor_live_fire_results(tensor: torch.Tensor) -> tuple[FireResult, ...
                 kind=INTERVENTION_FIRE_RESULTS_CLEANUP_FAILED,
             ) from exc
     return tuple(fire_results)
+
+
+# Late imports: the split modules of this package import one another (cycles), so each
+# imports its siblings once every definition above exists.
+from ._ops_containers import (  # noqa: E402
+    _walk_output_tensors_with_paths,
+)
+from ._ops_exhaustive import (  # noqa: E402
+    _output_should_be_logged,
+)
+from ._ops_finalize import (  # noqa: E402
+    _cache_trace_predicate_context,
+)
+from ._ops_predicate_events import (  # noqa: E402
+    _extract_arg_tensors_and_params,
+)
+from ._ops_predicates import (  # noqa: E402
+    _replace_output_tensors_by_path,
+)
+from ._ops_retention import (  # noqa: E402
+    _build_trace_predicate_context,
+)
+from ._ops_shared_fields import (  # noqa: E402
+    _build_shared_fields_dict,
+)
+from .ops import (  # noqa: E402
+    _LIVE_FIRE_RESULTS_ATTR,
+    TRANSFORM_FUNC_NAMES,
+)

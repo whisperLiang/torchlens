@@ -8,6 +8,54 @@ from _paddle_subprocess import run_paddle_subprocess
 pytestmark = [pytest.mark.backend_paddle, pytest.mark.heavy]
 
 
+def test_registered_buffer_sources_require_intact_unwritten_evidence() -> None:
+    """Buffer operands replay exactly; stripped or written source evidence fails."""
+
+    run_paddle_subprocess(
+        """
+        from dataclasses import replace
+        import paddle
+        import torchlens as tl
+        from torchlens.backends.paddle import PaddleBackend
+
+        paddle.set_device('cpu')
+
+        class ReadBuffer(paddle.nn.Layer):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer('offset', paddle.arange(3, dtype='float32'))
+
+            def forward(self, x):
+                return (x + self.offset) * 2
+
+        backend = PaddleBackend()
+        trace = tl.trace(ReadBuffer(), paddle.ones([2, 3]), backend='paddle')
+        assert backend.validate_trace(trace) is True
+        assert any(call.buffer_inputs for call in trace._paddle_op_captures)
+        trace._paddle_op_captures = [
+            replace(call, buffer_inputs={}) if call.buffer_inputs else call
+            for call in trace._paddle_op_captures
+        ]
+        assert backend.validate_trace(trace) is False
+
+        class WriteBuffer(paddle.nn.Layer):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer('mean', paddle.zeros([3]))
+                self.register_buffer('variance', paddle.ones([3]))
+
+            def forward(self, x):
+                return paddle._C_ops.batch_norm(
+                    x, self.mean, self.variance, None, None,
+                    False, 0.9, 1e-5, 'NCHW', False, False,
+                )[0] * 2
+
+        trace = tl.trace(WriteBuffer(), paddle.arange(6, dtype='float32').reshape([2, 3]), backend='paddle')
+        assert backend.validate_trace(trace) is False
+        """
+    )
+
+
 @pytest.mark.parametrize("call_style", ["module", "operator", "positional", "keyword"])
 def test_parameter_binding_matches_native_training_across_batches(call_style: str) -> None:
     """Bind actual operands despite unused state, equal shapes, and unentered child layers."""
@@ -61,7 +109,7 @@ def test_parameter_binding_matches_native_training_across_batches(call_style: st
             dag = graph.compute_dag()
             partition = dag.to_partition(close_call_ids(dag, call_ids(graph, modules=frozenset({'relu'}), ops=frozenset({'functional.relu'}))))
             runtime = graph.materialize(graph.analyze(partition))
-            assert runtime.trace_graph.shape_program.batch_probe.status == 'passed'
+            assert runtime.trace_graph.shape_program.batch_probe.status == 'passed', runtime.batch_validation
             for segment, expected in (
                 (runtime.plan.prefix_node_ids, {'first.weight', 'first.bias'}),
                 (runtime.plan.suffix_node_ids, {'second.weight', 'second.bias'}),
@@ -137,7 +185,7 @@ def test_repeated_and_reversed_operands_keep_exact_live_state() -> None:
             dag = graph.compute_dag()
             partition = dag.to_partition(close_call_ids(dag, call_ids(graph, modules=frozenset({'relu'}), ops=frozenset({'functional.relu'}))))
             runtime = graph.materialize(graph.analyze(partition))
-            assert runtime.trace_graph.shape_program.batch_probe.status == 'passed'
+            assert runtime.trace_graph.shape_program.batch_probe.status == 'passed', runtime.batch_validation
             for shift in (0.0, 0.2):
                 model.set_state_dict({name: value + shift for name, value in model.state_dict().items()})
                 for updated in (runtime, runtime.repartition(runtime.compute_dag().to_partition(close_call_ids(runtime.compute_dag(), frozenset(source for source, target, _ in runtime.compute_dag().data_edges if target in call_ids(runtime, ops=frozenset({'functional.relu'}))))))):

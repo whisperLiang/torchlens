@@ -2,7 +2,7 @@
 
 The MLX wrapper sees each concrete lazy output before the caller, and the
 derived-grad tap observer already proved mid-forward output substitution, so
-static-label ``trace(intervene=tl.when(...))`` and ``trace(halt=...)`` sites
+static-label ``trace(intervene=tl.when(...))`` and ``trace(stop_after=...)`` sites
 apply at the wrapper boundary. Value-dependent predicates stay refused typed:
 predicate-time values would need per-op ``mx.eval``, which would poison lazy
 evaluation.
@@ -20,12 +20,23 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
+from ... import _state
+from ..._ir.op_record import amend_module_exit_intervention
+from ..._ir.selector_eval import (
+    first_selector_kind_outside,
+    module_address_matches,
+    module_union_addresses,
+    selector_contains_kind,
+)
+from ..._postprocess._selective_save import _STATIC_INTERVENTION_SELECTOR_KINDS
+from ..._selection.selectors import BaseSelector
+from ...intervention._types import Edit, InterventionDecision
 from ...intervention.hooks import make_hook_context, normalize_hook
-from ...intervention.selectors import BaseSelector
-from ...intervention.types import HelperSpec, InterventionDecision
-from ...ir.selector_eval import first_selector_kind_outside, selector_contains_kind
-from .._selective_save import _STATIC_INTERVENTION_SELECTOR_KINDS
 from ..registry import BackendUnsupportedError
+from ._tap_observers import _replace_mlx_array_leaves
+
+#: Refusal code for gradient-universe sites (registered in `_protocols.mlx`).
+_MLX_REFUSAL_BACKWARD = "backward_capture_unsupported"
 
 MLX_STATIC_INTERVENTION_SELECTOR_KINDS = _STATIC_INTERVENTION_SELECTOR_KINDS
 """Selector kinds resolvable from static capture-time labels on MLX.
@@ -102,6 +113,8 @@ def selector_matches_capture_context(selector: BaseSelector, ctx: Any) -> bool:
         ``{layer_type}_{type_index}`` alias retry for label-universe kinds.
     """
 
+    if module_union_addresses(selector) is not None:
+        return False
     if bool(selector(ctx)):
         return True
     if ctx.layer_type is None or ctx.type_index is None:
@@ -124,7 +137,7 @@ def resolve_mlx_intervention_plan(
     intervene:
         Public ``trace(intervene=...)`` value.
     halt:
-        Public ``trace(halt=...)`` value.
+        Public ``trace(stop_after=...)`` value.
     mx:
         Imported ``mlx.core`` module used by the resolved appliers.
 
@@ -153,7 +166,9 @@ def resolve_mlx_intervention_plan(
                 "tl.when(tl.func(...) | tl.label(...) | tl.in_module(...), action) "
                 "or the PyTorch backend."
             )
+        _reject_gradient_site(selector)
         _reject_non_static_selector(selector, surface="intervene")
+        _validate_module_selector(selector)
         plan = MLXInterventionPlan(
             selector=selector,
             applier=_resolve_decision_applier(decision, mx),
@@ -161,14 +176,28 @@ def resolve_mlx_intervention_plan(
     if halt is not None:
         if not isinstance(halt, BaseSelector):
             raise BackendUnsupportedError(
-                "MLX backend supports trace(halt=...) only for static-label "
-                "selectors (tl.func, tl.label, tl.contains, tl.in_module and "
+                "MLX backend supports trace(stop_after=...) only for static-label "
+                "selectors (tl.func, tl.label, tl.label_contains, tl.in_module and "
                 "boolean composites). Value-dependent halt predicates need "
                 "concrete values at predicate time; use the PyTorch backend."
             )
         _reject_non_static_selector(halt, surface="halt")
         halt_selector = halt
     return plan, halt_selector
+
+
+def _reject_gradient_site(selector: BaseSelector) -> None:
+    """Refuse a site outside the activation universe: MLX has no backward capture."""
+
+    from ...intervention.hooks import split_site_branches
+
+    if any(universe != "activation" for universe, _branch in split_site_branches(selector)):
+        raise BackendUnsupportedError(
+            "MLX backend supports forward interventions only; the site "
+            f"{selector!r} addresses a gradient, which needs backward capture "
+            "that MLX does not declare. Use the PyTorch backend for gradient edits.",
+            code=_MLX_REFUSAL_BACKWARD,
+        )
 
 
 def _reject_non_static_selector(selector: BaseSelector, *, surface: str) -> None:
@@ -189,7 +218,7 @@ def _reject_non_static_selector(selector: BaseSelector, *, surface: str) -> None
         return
     raise BackendUnsupportedError(
         f"MLX backend supports trace({surface}=...) only for static-label "
-        "selectors tl.func, tl.label, tl.contains, tl.module, tl.in_module and "
+        "selectors tl.func, tl.label, tl.label_contains, tl.module, tl.in_module and "
         f"boolean composites (&, |, ~) of those; unsupported selector kind "
         f"{unsupported!r}. Value-dependent predicates need concrete activation "
         "values at predicate time, which MLX lazy evaluation does not expose "
@@ -215,15 +244,11 @@ def _resolve_decision_applier(decision: InterventionDecision, mx: Any) -> MLXHoo
     Raises
     ------
     BackendUnsupportedError
-        For directions, actions, flags, or helpers outside the MLX contract.
+        For actions, flags, or helpers outside the MLX contract.
     """
 
-    if decision.direction != "forward":
-        raise BackendUnsupportedError(
-            "MLX backend supports forward interventions only; direction "
-            f"{decision.direction!r} requires backward capture, which MLX does "
-            "not support (functional AD has no per-op backward nodes)."
-        )
+    # Gradient sites (tl.grad(...)) are outside the static selector kinds the
+    # caller admits, so every decision reaching here edits an activation.
     if decision.keep_grad or decision.isolate:
         raise BackendUnsupportedError(
             "MLX backend interventions do not support keep_grad or isolate; "
@@ -240,12 +265,12 @@ def _resolve_decision_applier(decision: InterventionDecision, mx: Any) -> MLXHoo
             "MLX backend interventions require an action; tl.when(selector, None) "
             "declares no replacement to apply."
         )
-    if isinstance(hook, HelperSpec):
+    if isinstance(hook, Edit):
         return _resolve_helper_applier(hook, mx)
     return _resolve_callable_applier(hook)
 
 
-def _resolve_helper_applier(spec: HelperSpec, mx: Any) -> MLXHookApplier:
+def _resolve_helper_applier(spec: Edit, mx: Any) -> MLXHookApplier:
     """Resolve a built-in helper spec to its MLX-native applier.
 
     Parameters
@@ -261,7 +286,7 @@ def _resolve_helper_applier(spec: HelperSpec, mx: Any) -> MLXHookApplier:
         Curated MLX application of the helper.
     """
 
-    name = spec.helper_name
+    name = spec.name
     kwargs = dict(spec.kwargs)
     identity = f"helper:{name}"
     if name == "zero_ablate":
@@ -279,15 +304,16 @@ def _resolve_helper_applier(spec: HelperSpec, mx: Any) -> MLXHookApplier:
             )
         return MLXHookApplier(identity, lambda out: out + delta)
     if name == "clamp":
-        low = kwargs.get("min")
-        high = kwargs.get("max")
+        low = kwargs.get("low")
+        high = kwargs.get("high")
         return MLXHookApplier(identity, lambda out: mx.clip(out, low, high))
     if name == "mean_ablate":
         source = spec.args[0] if spec.args else None
-        if source is not None or kwargs.get("over", "self") != "self":
+        if source is not None or kwargs.get("dim") is not None or "population_identity" in kwargs:
             raise BackendUnsupportedError(
                 "MLX backend tl.mean_ablate(...) interventions support the "
-                "over='self' form only; tensor sources are torch-side semantics."
+                "self form with dim=None only; tensor and population sources and "
+                "axis-aware means are torch-side semantics."
             )
         return MLXHookApplier(identity, lambda out: mx.zeros_like(out) + mx.mean(out))
     if name == "replace_with":
@@ -315,7 +341,7 @@ def _resolve_callable_applier(hook: Callable[..., Any]) -> MLXHookApplier:
     Parameters
     ----------
     hook:
-        User callable with the standard ``fn(out, *, hook)`` hook signature.
+        User callable with the standard ``fn(out, *, ctx)`` hook signature.
 
     Returns
     -------
@@ -323,7 +349,7 @@ def _resolve_callable_applier(hook: Callable[..., Any]) -> MLXHookApplier:
         Applier invoking the callable with a minimal hook context.
     """
 
-    normalized = normalize_hook(hook, direction="forward")
+    normalized = normalize_hook(hook)
     identity = f"callable:{getattr(hook, '__qualname__', type(hook).__name__)}"
 
     def _apply(out: Any) -> Any:
@@ -332,9 +358,9 @@ def _resolve_callable_applier(hook: Callable[..., Any]) -> MLXHookApplier:
         context = make_hook_context(
             name=identity,
             timing="post",
-            direction="forward",
+            signal="forward",
         )
-        return normalized(out, hook=context)
+        return normalized(out, ctx=context)
 
     return MLXHookApplier(identity, _apply)
 
@@ -346,3 +372,112 @@ __all__ = [
     "resolve_mlx_intervention_plan",
     "selector_matches_capture_context",
 ]
+
+
+def _validate_module_selector(selector: Any) -> None:
+    """Refuse module trees whose meaning needs both dispatch doors."""
+
+    if selector_contains_kind(selector, "module") and module_union_addresses(selector) is None:
+        raise BackendUnsupportedError(
+            "MLX backend module interventions require tl.module(...) or a union "
+            "of module selectors; mixed or negated module selectors are unsupported.",
+            code="interventions_unsupported",
+        )
+
+
+def _apply_module_exit(trace: Any, backend: Any, frame: Any, output: Any) -> Any:
+    """Replace each distinct output leaf once at a selected module exit."""
+
+    plan = trace._mlx_intervention_plan
+    if frame is None or plan is None:
+        return output
+    addresses = module_union_addresses(plan.selector)
+    if not addresses or not any(
+        module_address_matches((frame.address, frame.call_index), address) for address in addresses
+    ):
+        return output
+    replacements = {}
+    for tensor in backend._iter_arrays(output):
+        if id(tensor) not in replacements:
+            replacements[id(tensor)] = _emit_module_leaf(trace, backend, plan, tensor)
+    return _replace_mlx_array_leaves(backend, output, replacements)
+
+
+def _module_capture_op(trace: Any, frame: Any, op_name: str | None) -> str | None:
+    """Expose selected descendants instead of capturing their parent as one opaque op."""
+
+    plan = trace._mlx_intervention_plan
+    if frame is None or plan is None:
+        return op_name
+    addresses = module_union_addresses(plan.selector) or ()
+    prefix = frame.address + "." if frame.address not in ("", "self") else ""
+    if any(
+        address.rsplit(":", 1)[0].startswith(prefix) and address.rsplit(":", 1)[0] != frame.address
+        for address in addresses
+    ):
+        return None
+    return op_name
+
+
+def _copy_leaf(tensor: Any) -> Any:
+    """Produce a distinct identity value so aliasing keeps the raw producer intact."""
+
+    return tensor.astype(tensor.dtype)
+
+
+def _emit_module_leaf(trace: Any, backend: Any, plan: Any, tensor: Any) -> Any:
+    """Use the existing op intervention/replay path for the boundary replacement."""
+
+    from ..._selection.selectors import FuncSelector  # deferred: L4 vocabulary
+
+    label = backend.tensor_store.get_label(tensor)
+    # A separate identity boundary preserves the original producer's replay
+    # payload, including consumers that ran before this module returned it.
+    trace._mlx_intervention_plan = replace(plan, selector=FuncSelector("interventionreplacement"))
+    trace._mlx_capture_depth += 1
+    try:
+        with _state.pause_logging():
+            raw = _copy_leaf(tensor)
+            replacement = backend.emit_mlx_operation(
+                trace,
+                "interventionreplacement",
+                _copy_leaf,
+                (tensor,),
+                {},
+                raw,
+                module_stack=tuple(trace._mlx_module_stack),
+            )
+    finally:
+        trace._mlx_capture_depth -= 1
+        trace._mlx_intervention_plan = plan
+    events = trace.capture_events
+    boundary = events.op_event_by_label_raw[backend.tensor_store.get_label(replacement)]
+    event = events.op_event_by_label_raw.get(label)
+    if event is not None:
+        events.append_amendment(
+            amend_module_exit_intervention(
+                event.seq,
+                label,
+                intervention_fired=True,
+                is_edited=True,
+                fire_results=(
+                    *event.fire_results,
+                    *(
+                        replace(
+                            fire,
+                            site_label=label,
+                            fire_record={
+                                "backend": "mlx",
+                                "plan_id": fire.plan_id,
+                                "site_label": label,
+                                "level": "module",
+                                "selector": repr(plan.selector),
+                                "replaced": fire.replaced,
+                            },
+                        )
+                        for fire in boundary.fire_results
+                    ),
+                ),
+            )
+        )
+    return replacement

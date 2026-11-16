@@ -1,13 +1,15 @@
 # Containers
 
-TorchLens records input and output container structure for supported Python containers and exposes it as a lightweight runtime view. The public names in this guide are provisional for review: `Container`, `input_at`, `output_at`, `register_container`, and `capture_container_structure`.
+TorchLens can record the structure of supported input and output containers (tuples, lists, dicts, namedtuples, dataclasses and Hugging Face `ModelOutput` objects) and expose it through `op.container`. The public names in this guide are stable: `torchlens.types.Container`, `op.container`, the `input_at` and `output_at` selectors, `torchlens.types.register_container`, `Container.reconstruct`, `Trace.reconstruct_output`, `show_containers` (including `"nodes"`) and the `capture_container_structure` option.
+
+The snippets below assume `import torchlens as tl` and a `model` whose forward returns a dict with a `logits` tensor and a legacy `past_key_values` tuple of `(key, value)` pairs per layer.
 
 ## Runtime View
 
-Each output leaf `Op` with container metadata exposes `op.container`. The value is a computed `Container` view backed by the captured `ContainerSpec` plus sibling leaf ops; it is not stored as another trace record.
+Each output leaf `Op` with container metadata exposes `op.container`, a `Container` view built from the recorded structure.
 
 ```python
-trace = tl.trace(model, x, capture_container_structure=True)
+trace = tl.trace(model, x, capture=tl.options.CaptureOptions(capture_container_structure=True))
 container = trace.ops[trace.output_layers[0]].container
 
 container.kind
@@ -20,7 +22,7 @@ Index the view with the same shape as the original output:
 
 ```python
 logits_op = container["logits"]
-key_op = container["past_key_values"][0][1]
+key_op = container["past_key_values"][0][0]   # layer 0's key in a legacy (key, value) tuple cache
 ```
 
 Indexing returns a leaf `Op` or another nested `Container`.
@@ -39,21 +41,22 @@ For model returns, use the trace convenience:
 output = trace.reconstruct_output()
 ```
 
-Final model-output and input-container reconstruction require container structure to be captured. Use `capture_container_structure=True` when you need nested inputs or the top-level return object reconstructed after capture or after `.tlspec` load without enabling intervention replay metadata. `intervention_ready=True` also captures final-output structure as part of its broader replay-template metadata. `capture_output_structure=True` remains as a deprecated alias for existing callers.
+The model output's structure is recorded on every capture, so `trace.reconstruct_output()` and a live `trace.run()` rebuild the tuple, dict, namedtuple, dataclass or `ModelOutput` the model returned, even on a default capture. Per-op container records need the opt-in below (without it the output op records carry `container_spec=None`). A container holding an unsupported tensor-bearing object (for example a Hugging Face `DynamicCache`) is recorded as `opaque`: `reconstruct_output()` raises a typed error instead of returning a partial object, and saving a runnable artifact rejects that output during preflight.
 
-## Nested Output Selection
-
-`tl.output_at(path)` selects an output leaf by nested path:
-
-```python
-site = trace.resolve_sites(tl.output_at(("past_key_values", 0, 1))).first()
-```
-
-The selector matches TorchLens typed paths for dict keys, HuggingFace `ModelOutput` keys, namedtuple/dataclass fields, and tuple/list indices.
+Input-container reconstruction and module-boundary container records need `capture_container_structure=True`, which records nested inputs and per-op container specs (available after capture and after a `.tlspec` load) without enabling intervention replay metadata. `replayable=True` also captures that structure as part of the runnable apparatus.
 
 ## Visualization
 
-Container visualization is opt-in so default graph output remains unchanged.
+Container drawing is off by default. `show_containers` takes one of four settings; each one adds to the one before it.
+
+| Setting | What is drawn |
+| --- | --- |
+| `False` (default) | The plain graph. Container paths already sit on the node labels (`@output.hidden.1`, `@input.inputs.mask`). |
+| `"labels"` | The key or index of each container leaf as a small label on the edge into that leaf (`logits`, `0`, `1`). |
+| `"collapsed"` | `"labels"`, plus: in the unrolled view, a container with more than `container_max_inline` leaves (default 12) of identical shape folds into one dashed summary box (`tuple x16`). |
+| `"nodes"` | `"collapsed"`, plus one dashed record node per container, grey source and sink edges carrying the keys, dashed member-of ties for mid-graph containers, and a dotted box around an op-returned tuple whose leaves share one module. |
+
+Any string setting forces the Graphviz `dot` engine. `container_max_inline` matters only under `"collapsed"` and `"nodes"`.
 
 ```python
 trace.draw(show_containers="nodes")
@@ -61,18 +64,23 @@ trace.draw(show_containers="nodes")
 
 `show_containers="nodes"` renders one collapsed container node labeled with the container type and role, such as `dict[3] (model input)` or `CausalLMOutputWithPast (model output)`. Model-input containers fan out from that node to their input leaves; model-output leaves fan into a sink node. Field, key, or index labels appear on the relevant edges.
 
-For mid-graph containers, TorchLens does not route tensor dataflow through the container node. The key label stays on the real producer-to-consumer edge, and a light dashed arrowless member-of tie associates producer ops with the collapsed container node. Single-owner module clusters and large homogeneous-container collapse still apply as visual enhancers.
+Mid-graph containers keep the key label on the real producer-to-consumer edge and get a light dashed member-of tie to the container node; tensor dataflow is never routed through the container node.
 
-Existing modes are unchanged: `False`, `"labels"`, `"cluster"`, `"collapsed"`, and `"auto"` keep their prior rendering behavior.
+A container that is the model's input or output is drawn as that boundary container even when a submodule built it: its node carries the model-input or model-output role and its leaves connect only through the keyed source or sink edges. When the homogeneous-container collapse already summarizes every leaf of a container, the summary node is the container node (for example `tuple x16 (model output)`) and no second node is drawn.
 
-Container membership is a per-pass fact. On a rolled graph, a multi-pass (recurrent) layer aggregates passes that generally differ in container membership — typically only the final pass feeds the output container — so the rolled aggregate node carries no container decoration rather than projecting one pass's membership onto all of them. Unrolled per-pass nodes keep their exact labels.
+Container membership is per pass. A rolled node that aggregates several passes of a recurrent layer omits container decoration (typically only the final pass feeds the output container); unrolled nodes keep their per-pass labels.
 
 ## Custom Containers
 
-Register proprietary containers with `tl.register_container(type, flatten, unflatten)`.
+Register your own containers with `tl.types.register_container(type, flatten, unflatten)`:
 
 ```python
-tl.register_container(
+class PairBox:
+    def __init__(self, left, right):
+        self.left, self.right = left, right
+
+
+tl.types.register_container(
     PairBox,
     lambda value: ([value.left, value.right], None),
     lambda aux, children: PairBox(children[0], children[1]),
@@ -83,11 +91,9 @@ tl.register_container(
 
 Built-in handling already covers tuples, lists, dicts, namedtuples, dataclasses, and HuggingFace-style `ModelOutput` objects.
 
-## Capability Degradation
-
 ## Backend Capability
 
-Backends declare honest `input_container_structure` and `output_container_structure` capabilities:
+Backends declare `input_container_structure` and `output_container_structure` capabilities:
 
 - `torch`: `full_spec` for input and output
 - `jax`: `paths_only` for input and output builtin pytrees; custom pytrees are not reconstructable

@@ -6,9 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from torchlens.utils import rng
-
-pytestmark = pytest.mark.smoke
+from torchlens._utils.rng import call_sites as rng
 
 
 @pytest.mark.parametrize("call_op", ["CALL_FUNCTION", "CALL_METHOD", "CALL", "PRECALL_CALL"])
@@ -31,7 +29,7 @@ def test_time_proof_across_call_layouts(
     )
     frame = SimpleNamespace(f_lasti=6, f_code=None, f_locals={"timestamp": value}, f_globals={})
     monkeypatch.setattr(rng._dis_module, "get_instructions", lambda _code: iter(rows))
-    assert rng._call_site_argcount(frame) == count
+    assert rng.channels.call_site_argcount(frame) == count
     assert rng._call_site_time_arg_proof(frame, count, time_index) == expected
 
 

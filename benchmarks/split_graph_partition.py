@@ -420,9 +420,9 @@ def training_step(
     import torch
     from torch.overrides import TorchFunctionMode
 
+    from torchlens._utils.display import identity
     from torchlens.split.adapters.torch import _slice_output_by_path
     from torchlens.split.graph import ReplayCall
-    from torchlens.utils.display import identity
 
     actual_opt.zero_grad(set_to_none=True)
     expected_opt.zero_grad(set_to_none=True)
@@ -507,7 +507,7 @@ def training_step(
             if index >= len(calls):
                 raise AssertionError(f"native reference call count changed: {func}")
             leader, call = calls[index]
-            from torchlens.utils.rng import execute_with_restored_rng_autocast
+            from torchlens._utils.rng import execute_with_restored_rng_autocast
 
             op = leader.op
             result = execute_with_restored_rng_autocast(

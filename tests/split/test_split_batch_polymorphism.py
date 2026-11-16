@@ -249,6 +249,7 @@ def test_boundary_schema_is_batch_neutral() -> None:
         assert set(boundary.spec) == set(runtime.boundary_spec)
 
 
+@pytest.mark.cuda
 def test_cpu_prefix_cuda_suffix_replay_and_training() -> None:
     """PlacementPlan moves prefix and suffix independently when CUDA is present."""
 

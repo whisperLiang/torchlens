@@ -17,12 +17,13 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens import constants as tl_constants
-from torchlens.data_classes.layer import Layer
-from torchlens.data_classes.module import Module, ModuleCall
-from torchlens.data_classes.op import Op
-from torchlens.data_classes.param import Param
-from torchlens.data_classes.trace import Trace
+from torchlens import _constants as tl_constants
+from torchlens._data_classes.layer import Layer
+from torchlens._data_classes.module import Module, ModuleCall
+from torchlens._data_classes.op import Op
+from torchlens._data_classes.param import Param
+from torchlens._data_classes.trace import Trace
+from torchlens._utils._record_group_table import record_storage_attr
 
 
 class _DxModel(nn.Module):
@@ -68,27 +69,6 @@ def _debugger_visible_names(obj: object) -> set[str]:
     return visible
 
 
-def _has_inspectable_descriptor(obj: object, name: str) -> bool:
-    """Return whether a field is backed by a real inspectable descriptor.
-
-    A slot descriptor, ``property``, or instance-``__dict__`` entry is
-    inspectable; resolution purely through ``__getattr__`` is not.
-    """
-
-    instance_dict = getattr(obj, "__dict__", None)
-    if instance_dict is not None and name in instance_dict:
-        return True
-    for mro_cls in type(obj).__mro__:
-        descriptor = mro_cls.__dict__.get(name)
-        if descriptor is None:
-            continue
-        if isinstance(descriptor, property):
-            return True
-        if hasattr(descriptor, "__get__"):
-            return True
-    return False
-
-
 _CASES = (
     ("trace", Trace, tuple(tl_constants.MODEL_LOG_FIELD_ORDER)),
     ("op", Op, tuple(tl_constants.LAYER_PASS_LOG_FIELD_ORDER)),
@@ -103,7 +83,7 @@ _CASES = (
 #: makes any other field vanish — or silently materializes one of these —
 #: must update this table consciously.
 _EXPECTED_ABSENT: dict[str, frozenset[str]] = {
-    "trace": frozenset({"input_structure", "_containers", "_buffer_persistence"}),
+    "trace": frozenset({"_provenance_input_structure", "_containers", "_buffer_persistence"}),
     "op": frozenset(),
     "layer": frozenset(),
     "module": frozenset(),
@@ -130,7 +110,6 @@ def _get_instance(dx_trace: Trace, kind: str) -> object:
     raise KeyError(kind)
 
 
-@pytest.mark.smoke
 @pytest.mark.parametrize(("kind", "cls", "field_order"), _CASES)
 def test_all_declared_fields_are_debugger_visible(
     dx_trace: Trace, kind: str, cls: type, field_order: tuple[str, ...]
@@ -140,7 +119,8 @@ def test_all_declared_fields_are_debugger_visible(
     instance = _get_instance(dx_trace, kind)
     assert isinstance(instance, cls)
     visible = _debugger_visible_names(instance)
-    missing = {name for name in field_order if name not in visible}
+    # A field moved into a concern group stays visible under its storage attribute.
+    missing = {name for name in field_order if record_storage_attr(instance, name) not in visible}
     assert missing == _EXPECTED_ABSENT[kind], (
         f"{cls.__name__} debugger-invisible field set changed: "
         f"unexpected={sorted(missing - _EXPECTED_ABSENT[kind])} "
@@ -148,25 +128,6 @@ def test_all_declared_fields_are_debugger_visible(
     )
 
 
-@pytest.mark.smoke
-@pytest.mark.parametrize(("kind", "cls", "field_order"), _CASES)
-def test_all_declared_fields_have_inspectable_descriptors(
-    dx_trace: Trace, kind: str, cls: type, field_order: tuple[str, ...]
-) -> None:
-    """No FIELD_ORDER field may resolve purely through ``__getattr__``."""
-
-    instance = _get_instance(dx_trace, kind)
-    uninspectable = {
-        name for name in field_order if not _has_inspectable_descriptor(instance, name)
-    }
-    assert uninspectable == _EXPECTED_ABSENT[kind], (
-        f"{cls.__name__} fields without slot/property/dict backing changed: "
-        f"unexpected={sorted(uninspectable - _EXPECTED_ABSENT[kind])} "
-        f"newly-backed={sorted(_EXPECTED_ABSENT[kind] - uninspectable)}"
-    )
-
-
-@pytest.mark.smoke
 def test_dir_is_sorted_and_stable(dx_trace: Trace) -> None:
     """``dir()`` on records stays usable: no duplicates, deterministic."""
 

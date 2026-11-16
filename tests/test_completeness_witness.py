@@ -16,18 +16,26 @@ import torch.nn.functional as F
 from torch import nn
 
 import torchlens as tl
+import torchlens.backends.torch._completeness_cross_thread
+import torchlens.backends.torch._completeness_dispatch
+import torchlens.backends.torch._completeness_finalize
+import torchlens.backends.torch._completeness_patches
 from torchlens import _state
-from torchlens._errors import TorchLensCaptureGapWarning
-from torchlens.backends.torch import completeness_witness as cw
+from torchlens._errors import CaptureGapWarning
+from torchlens._utils._torch_compat import (
+    HAS_FUNCTORCH_INTERPRETER_STACK_API,
+    HAS_FUNCTORCH_LEVEL_API,
+    get_tensorbase_class,
+)
+from torchlens._utils.introspection import INPUT_SEARCH_DEPTH_LIMIT
+from torchlens.backends.torch import completeness_witness as cw, rescue
+from torchlens.backends.torch._completeness_types import _DispatchEvent
 from torchlens.backends.torch.completeness_witness import (
     AUDITED_COMPLETENESS_BOUNDARIES,
     MAX_AUDITED_COMPLETENESS_BOUNDARIES,
 )
+from torchlens.backends.torch.escape_detection import ExpectedOriginalToken
 from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
-from torchlens.utils.introspection import INPUT_SEARCH_DEPTH_LIMIT
-
-# (major, minor) of the running torch, dependency-free (e.g. "2.8.0+cpu" -> (2, 8)).
-_TORCH_XY = tuple(int(p) for p in torch.__version__.split("+")[0].split(".")[:2])
 
 
 def _observer_patch_ast() -> ast.FunctionDef:
@@ -39,7 +47,11 @@ def _observer_patch_ast() -> ast.FunctionDef:
         Parsed function definition for the observer-install context manager.
     """
 
-    source = textwrap.dedent(inspect.getsource(cw._observe_invisible_host_escapes))
+    source = textwrap.dedent(
+        inspect.getsource(
+            torchlens.backends.torch._completeness_patches._observe_invisible_host_escapes
+        )
+    )
     function = ast.parse(source).body[0]
     assert isinstance(function, ast.FunctionDef)
     return function
@@ -229,7 +241,7 @@ class _DirectAtenGapModel(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Bypass the Python wrapper namespace for the relu call."""
 
-        escaped = torch.ops.aten.relu.default(x)
+        escaped = torch._C._VariableFunctions.relu(x)
         return torch.sigmoid(escaped)
 
 
@@ -250,7 +262,7 @@ class _DirectAtenChild(nn.Module):
             Direct aten result.
         """
 
-        return torch.ops.aten.relu.default(x)
+        return torch._C._VariableFunctions.relu(x)
 
 
 class _DirectAtenSubmoduleGapModel(nn.Module):
@@ -285,7 +297,7 @@ class _DirectAtenIntermediateChild(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Return a traced sigmoid of an unwrapped relu intermediate."""
 
-        escaped = torch.ops.aten.relu.default(x)
+        escaped = torch._C._VariableFunctions.relu(x)
         return torch.sigmoid(escaped)
 
 
@@ -304,6 +316,29 @@ class _DirectAtenIntermediateSubmoduleGapModel(nn.Module):
         return self.child(x).add(1)
 
 
+def _c_tensor_base() -> type:
+    """Return torch's C tensor base class through the compat accessor.
+
+    torch 2.1 spells it ``torch._C._TensorBase`` and later torches ``TensorBase``;
+    calling its ``mul_`` is the unwrapped in-place route these models need.
+
+    Returns
+    -------
+    type
+        The C tensor base class.
+
+    Raises
+    ------
+    RuntimeError
+        When this torch exposes neither spelling.
+    """
+
+    base = get_tensorbase_class()
+    if base is None:
+        raise RuntimeError("this torch exposes no C tensor base class")
+    return base
+
+
 class _MutatingDirectAtenOutputChild(nn.Module):
     """Mutate a traced value before returning a separate untraceable raw output."""
 
@@ -311,8 +346,8 @@ class _MutatingDirectAtenOutputChild(nn.Module):
         """Return raw relu output after an observable unwrapped in-place mutation."""
 
         y = x + 1
-        torch.ops.aten.mul_.Tensor(y, 2)
-        return torch.ops.aten.relu.default(y)
+        _c_tensor_base().mul_(y, 2)
+        return torch._C._VariableFunctions.relu(y)
 
 
 class _MutatingDirectAtenOutputSubmoduleModel(nn.Module):
@@ -366,7 +401,7 @@ class _RegisteredParameterMutationModel(nn.Module):
     """Mutate prepared model state during the captured forward."""
 
     def __init__(self) -> None:
-        """Create the registered parameter that must remain a witnessed gap."""
+        """Create the registered parameter whose in-place write is captured."""
 
         super().__init__()
         self.weight = nn.Parameter(torch.ones(4, 4))
@@ -456,7 +491,10 @@ class _ScalarExtractionModel(nn.Module):
     """Use intentional scalar extraction for data-dependent control flow."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Extract one item and branch on another scalar tensor.
+        """Extract scalars, index with a tensor, and branch on another scalar tensor.
+
+        ``count`` reaches Python through ``Tensor.__index__`` twice: as a tuple index
+        and as a slice bound (the Menagerie rung-4 f-bedlam-cliff and f-tm2t shapes).
 
         Parameters
         ----------
@@ -470,6 +508,8 @@ class _ScalarExtractionModel(nn.Module):
         """
 
         shift = x.sum().item() + float(x.sum()) + int(x.sum())
+        count = x.sum().long()
+        shift += (0.5, 1.0, 1.5, 2.0, 2.5)[count] + float(x[:count].sum())
         if x.sum() > 0:
             return x + shift
         return x - shift
@@ -507,83 +547,23 @@ class _PreWrapVmapModel(nn.Module):
         return self.vectorized(x)
 
 
-@pytest.mark.smoke
+# Kept: sole branch coverage of _data_classes/_trace_groups_capture.py.
 def test_wrapped_ops_have_zero_unaccounted_dispatches() -> None:
     """Every ordinarily wrapped operation is owned by a captured leaf token."""
 
     wrap_torch(completeness_witness=True)
     trace = tl.trace(_WrappedOpsModel(), torch.randn(4))
 
-    assert trace.completeness_witness_mode == "shadow"
-    assert trace.completeness_witness_verified is True
-    assert trace.completeness_witness_event_count >= 3
-    assert trace.completeness_witness_unaccounted_count == 0
+    assert trace.health.completeness_mode == "shadow"
+    assert trace.health.completeness_verified is True
+    assert trace.health.num_witness_events >= 3
+    assert trace.health.num_unaccounted_witness_events == 0
     assert trace.completeness_diagnostics == []
-    assert trace.capture_verified is True
-    assert trace.capture_verification_reason == "dispatch_witness_verified"
+    assert trace.provenance.verified is True
+    assert trace.provenance.verification_reason == "dispatch_witness_verified"
 
 
-@pytest.mark.smoke
-def test_input_copy_preserves_alias_mutation_semantics_and_validation() -> None:
-    """Caller protection preserves repeated tensor identity across model sites."""
-
-    wrap_torch(completeness_witness=True)
-    plain_input = torch.tensor([1.0])
-    plain_output = _AliasedInputMutationModel()(plain_input, plain_input)
-    capture_input = torch.tensor([1.0])
-    trace = tl.trace(_AliasedInputMutationModel(), [capture_input, capture_input])
-    captured_output = trace[trace.output_layers[0]].out
-
-    assert plain_output.tolist() == [13.0]
-    assert captured_output.tolist() == [13.0]
-    assert capture_input.tolist() == [1.0]
-    assert len(trace.input_layers) == 1
-    assert trace.capture_verified is True
-    assert trace.completeness_witness_verified is True
-    validation_input = torch.tensor([1.0])
-    assert (
-        tl.validate_forward_pass(
-            _AliasedInputMutationModel(),
-            [validation_input, validation_input],
-        )
-        is True
-    )
-
-
-@pytest.mark.smoke
-def test_input_copy_preserves_nonzero_storage_offset_semantics() -> None:
-    """A copied tensor view retains its physical storage offset."""
-
-    wrap_torch(completeness_witness=True)
-    plain_input = torch.arange(6.0)[2:5]
-    plain_output = _StorageOffsetBranchModel()(plain_input)
-    capture_input = torch.arange(6.0)[2:5]
-    trace = tl.trace(_StorageOffsetBranchModel(), capture_input)
-
-    assert plain_output.tolist() == [-98.0, -97.0, -96.0]
-    assert trace[trace.output_layers[0]].out.tolist() == [-98.0, -97.0, -96.0]
-    assert trace.capture_verified is True
-    assert trace.completeness_witness_verified is True
-
-
-@pytest.mark.smoke
-def test_deep_input_tensor_is_captured_and_witnessed() -> None:
-    """A seven-level tensor input remains a represented graph source."""
-
-    wrap_torch(completeness_witness=True)
-    nested: object = torch.tensor([5.0])
-    for _ in range(7):
-        nested = [nested]
-    trace = tl.trace(_DeepInputModel(7), nested)
-
-    assert len(trace.input_layers) == 1
-    assert not any(op.unattributed_tensor_args for op in trace.ops)
-    assert trace.capture_verified is True
-    assert trace.completeness_witness_verified is True
-    assert trace.capture_verification_reason == "dispatch_witness_verified"
-
-
-@pytest.mark.smoke
+# Kept: sole branch coverage of _data_classes/_summary.py.
 def test_mid_band_container_depth_is_captured_and_witnessed() -> None:
     """Container nesting in the once-dropped 65-200 band is fully captured.
 
@@ -600,12 +580,12 @@ def test_mid_band_container_depth_is_captured_and_witnessed() -> None:
     trace = tl.trace(_DeepInputModel(70), nested)
 
     assert len(trace.input_layers) == 1
-    assert trace.capture_verified is True
-    assert trace.completeness_witness_verified is True
-    assert trace.capture_verification_reason == "dispatch_witness_verified"
+    assert trace.provenance.verified is True
+    assert trace.health.completeness_verified is True
+    assert trace.provenance.verification_reason == "dispatch_witness_verified"
 
 
-@pytest.mark.smoke
+# Kept: sole branch coverage of _utils/introspection.py, backends/torch/_completeness_finalize.py, backends/torch/backend.py and more; a sole mutation kill.
 def test_input_depth_limit_fails_closed_with_unresolved_path() -> None:
     """The retained safety ceiling names its frontier and forbids verification.
 
@@ -621,13 +601,13 @@ def test_input_depth_limit_fails_closed_with_unresolved_path() -> None:
     nested: object = torch.tensor([5.0])
     for _ in range(depth):
         nested = _AttrWrap(nested)
-    with pytest.warns(TorchLensCaptureGapWarning, match="input_traversal_depth_exceeded"):
+    with pytest.warns(CaptureGapWarning, match="input_traversal_depth_exceeded"):
         trace = tl.trace(_DeepAttrInputModel(depth), nested)
 
     assert trace.input_layers == []
-    assert trace.capture_verified is False
-    assert trace.completeness_witness_verified is False
-    assert trace.capture_verification_reason == "input_boundary_unverifiable"
+    assert trace.provenance.verified is False
+    assert trace.health.completeness_verified is False
+    assert trace.provenance.verification_reason == "input_boundary_unverifiable"
     input_gap = next(
         report
         for report in trace.completeness_diagnostics
@@ -636,30 +616,7 @@ def test_input_depth_limit_fails_closed_with_unresolved_path() -> None:
     assert input_gap["input_path"].startswith("input.nested.inner.inner")
 
 
-@pytest.mark.smoke
-def test_direct_aten_call_trips_non_vacuous_witness() -> None:
-    """A direct aten call is loudly and machine-readably unaccounted."""
-
-    wrap_torch(completeness_witness=True)
-    with pytest.warns(TorchLensCaptureGapWarning, match="unaccounted aten dispatch"):
-        trace = tl.trace(_DirectAtenGapModel(), torch.randn(4))
-
-    assert trace.completeness_witness_verified is False
-    assert trace.completeness_witness_unaccounted_count == 1
-    assert trace.capture_verified is False
-    assert trace.capture_verification_reason == "dispatch_witness_unaccounted_ops"
-    assert len(trace.completeness_diagnostics) == 1
-    report = trace.completeness_diagnostics[0]
-    assert report["operator"] == "aten.relu.default"
-    assert report["reason"] == "unowned_dispatch"
-    assert report["function"] == "forward"
-    assert report["owner_wrapper"] is None
-    # A forward-body drop did NOT fire inside a replacement hook, so it is a real
-    # silent drop that the validation census must fail on (not excused).
-    assert report["in_replacement_hook"] is False
-
-
-@pytest.mark.smoke
+# Kept: a sole mutation kill.
 def test_genuine_replacement_hook_dispatch_is_tagged_in_replacement_hook() -> None:
     """A raw replacement hook's dispatches belong to its explicit boundary Op.
 
@@ -679,7 +636,7 @@ def test_genuine_replacement_hook_dispatch_is_tagged_in_replacement_hook() -> No
             return self.relu(self.fc1(x))
 
     def _replacement_hook(module, inputs, output):  # type: ignore[no-untyped-def]
-        return torch.ops.aten.mul.Tensor(output, torch.tensor(0.5))
+        return torch._C._VariableFunctions.mul(output, torch.tensor(0.5))
 
     wrap_torch(completeness_witness=True)
     model = _Mlp().eval()
@@ -688,83 +645,37 @@ def test_genuine_replacement_hook_dispatch_is_tagged_in_replacement_hook() -> No
         warnings.simplefilter("always")
         trace = tl.trace(model, torch.randn(3, 4))
 
-    assert not any(isinstance(item.message, TorchLensCaptureGapWarning) for item in caught)
-    assert trace.capture_verified is True
-    assert trace.completeness_witness_verified is True
-    assert trace.completeness_witness_unaccounted_count == 0
+    assert not any(isinstance(item.message, CaptureGapWarning) for item in caught)
+    assert trace.provenance.verified is True
+    assert trace.health.completeness_verified is True
+    assert trace.health.num_unaccounted_witness_events == 0
     assert trace.completeness_diagnostics == []
     hook_owners = [
         row
-        for row in trace.completeness_decompositions
+        for row in trace.health.completeness_decompositions
         if row["owner_wrapper"] == "module_forward_hook:user"
     ]
     assert len(hook_owners) == 1
     assert hook_owners[0]["capture_accounted"] is True
     assert hook_owners[0]["in_replacement_hook"] is True
     assert "aten.mul.Tensor" in hook_owners[0]["aten_ops"]
-    assert any(
-        op.func_name == "intervention_replacement" and op.intervention_replaced for op in trace.ops
-    )
+    assert any(op.func_name == "intervention_replacement" and op.is_edited for op in trace.ops)
 
 
-@pytest.mark.smoke
-def test_direct_aten_submodule_output_is_owned_by_internal_source() -> None:
-    """A child module's untraceable output is owned by its internal-source boundary."""
-
-    wrap_torch(completeness_witness=True)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        trace = tl.trace(_DirectAtenSubmoduleGapModel(), torch.randn(4))
-
-    assert not any(isinstance(item.message, TorchLensCaptureGapWarning) for item in caught)
-    assert trace.capture_verified is True
-    assert trace.completeness_witness_verified is True
-    assert trace.completeness_witness_unaccounted_count == 0
-    assert trace.completeness_diagnostics == []
-    module_owners = [
-        row
-        for row in trace.completeness_decompositions
-        if row["owner_wrapper"] == "module_forward:exhaustive"
-        and "aten.relu.default" in row["aten_ops"]
-    ]
-    assert len(module_owners) == 1
-    assert module_owners[0]["capture_accounted"] is True
-    assert len(module_owners[0]["capture_accounted_boundary_labels"]) == 1
-    assert any(op.func_name == "none" and op.is_internal_source for op in trace.ops)
-
-
-@pytest.mark.smoke
-def test_direct_aten_child_intermediate_still_trips_witness() -> None:
-    """A child raw dispatch not represented by its output boundary fails closed."""
-
-    wrap_torch(completeness_witness=True)
-    with pytest.warns(TorchLensCaptureGapWarning, match="unaccounted aten dispatch"):
-        trace = tl.trace(_DirectAtenIntermediateSubmoduleGapModel(), torch.randn(4))
-
-    assert trace.capture_verified is False
-    assert trace.completeness_witness_verified is False
-    assert trace.completeness_witness_unaccounted_count == 1
-    report = trace.completeness_diagnostics[0]
-    assert report["operator"] == "aten.relu.default"
-    assert report["reason"] == "owner_not_captured"
-    assert report["mutates"] is False
-    assert report["file"] == __file__
-    assert isinstance(report["line"], int)
-    assert report["line"] > 0
-    assert report["function"] == "forward"
-
-
-@pytest.mark.smoke
-def test_untraceable_child_output_does_not_mask_observable_mutation() -> None:
+# Kept: sole branch coverage of backends/torch/_completeness_dispatch.py; a sole mutation kill.
+def test_untraceable_child_output_does_not_mask_observable_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """ATTACK4 mutation remains unaccounted beside an owned output boundary."""
+    monkeypatch.setattr(rescue, "_escape_signal", lambda trace: None)  # keep primary capture
 
     wrap_torch(completeness_witness=True)
-    with pytest.warns(TorchLensCaptureGapWarning, match="unaccounted aten dispatch"):
+    with pytest.warns(CaptureGapWarning, match="unaccounted aten dispatch"):
         trace = tl.trace(_MutatingDirectAtenOutputSubmoduleModel(), torch.randn(4))
 
-    assert trace.capture_verified is False
-    assert trace.completeness_witness_verified is False
-    assert trace.completeness_witness_unaccounted_count == 1
+    assert trace.provenance.verified is False
+    assert trace.health.completeness_verified is False
+    assert trace.health.num_unaccounted_witness_events == 1
     mutating = [
         report
         for report in trace.completeness_diagnostics
@@ -776,7 +687,7 @@ def test_untraceable_child_output_does_not_mask_observable_mutation() -> None:
     assert mutating[0]["in_replacement_hook"] is False
     child_owners = [
         row
-        for row in trace.completeness_decompositions
+        for row in trace.health.completeness_decompositions
         if row["owner_wrapper"] == "module_forward:exhaustive"
         and "aten.mul_.Tensor" in row["aten_ops"]
         and "aten.relu.default" in row["aten_ops"]
@@ -784,10 +695,10 @@ def test_untraceable_child_output_does_not_mask_observable_mutation() -> None:
     assert len(child_owners) == 1
     assert child_owners[0]["capture_accounted"] is True
     assert len(child_owners[0]["capture_accounted_boundary_labels"]) == 1
-    assert any(op.func_name == "none" and op.is_internal_source for op in trace.ops)
+    assert any(op.func_name == "none" and op.graph.is_internal_source for op in trace.ops)
 
 
-@pytest.mark.smoke
+# Kept: sole branch coverage of backends/torch/_predicate_forward.py.
 def test_record_wrapped_ops_have_zero_unaccounted_dispatches() -> None:
     """Fastlog accounting uses capture emission rather than Trace-only events."""
 
@@ -802,15 +713,15 @@ def test_record_wrapped_ops_have_zero_unaccounted_dispatches() -> None:
     assert recording.completeness_witness_unaccounted_count == 0
     assert recording.completeness_diagnostics == []
     assert recording.capture_verified is True
-    assert not any(isinstance(item.message, TorchLensCaptureGapWarning) for item in caught)
+    assert not any(isinstance(item.message, CaptureGapWarning) for item in caught)
 
 
-@pytest.mark.smoke
+# Kept: sole branch coverage of backends/torch/_tl.py.
 def test_record_direct_aten_call_trips_non_vacuous_witness() -> None:
     """A direct aten gap remains loud on the fastlog capture path."""
 
     wrap_torch(completeness_witness=True)
-    with pytest.warns(TorchLensCaptureGapWarning, match="unaccounted aten dispatch"):
+    with pytest.warns(CaptureGapWarning, match="unaccounted aten dispatch"):
         recording = tl.record(
             _DirectAtenGapModel(),
             torch.randn(4),
@@ -825,87 +736,7 @@ def test_record_direct_aten_call_trips_non_vacuous_witness() -> None:
     assert report["reason"] == "unowned_dispatch"
 
 
-@pytest.mark.smoke
-@pytest.mark.parametrize(
-    ("owner_name", "pool"),
-    [
-        (
-            "adaptive_max_pool2d_with_indices",
-            lambda x: F.adaptive_max_pool2d(x, (2, 2)),
-        ),
-        ("max_pool2d", lambda x: F.max_pool2d(x, 2)),
-    ],
-)
-def test_logged_nested_wrapper_calls_are_accounted(
-    owner_name: str,
-    pool: Callable[[torch.Tensor], torch.Tensor],
-) -> None:
-    """A non-leaf wrapper is accounted when its func-call id emitted an op.
-
-    Parameters
-    ----------
-    owner_name:
-        Expected inner pooling wrapper name.
-    pool:
-        Nested functional pooling pair under test.
-    """
-
-    wrap_torch(completeness_witness=True)
-    trace = tl.trace(_NestedPoolModel(pool), torch.randn(1, 2, 4, 4))
-
-    assert trace.completeness_witness_unaccounted_count == 0
-    assert trace.completeness_diagnostics == []
-    row = next(
-        item for item in trace.completeness_decompositions if item["owner_func_name"] == owner_name
-    )
-    assert row["capture_accounted"] is True
-    assert any(op.func_call_id == row["owner_func_call_id"] for op in trace.ops)
-
-
-@pytest.mark.smoke
-def test_scalar_extraction_boundaries_are_narrowly_accounted() -> None:
-    """Python scalar conversions remain intentional scalar-output boundaries."""
-
-    wrap_torch(completeness_witness=True)
-    trace = tl.trace(_ScalarExtractionModel(), torch.ones(4))
-
-    assert trace.completeness_witness_unaccounted_count == 0
-    assert trace.completeness_diagnostics == []
-    scalar_rows = [
-        row
-        for row in trace.completeness_decompositions
-        if row["owner_func_name"] in {"item", "__bool__", "__float__", "__int__"}
-    ]
-    assert {row["owner_func_name"] for row in scalar_rows} == {
-        "item",
-        "__bool__",
-        "__float__",
-        "__int__",
-    }
-    assert all(row["scope"] == "expected_opaque" for row in scalar_rows)
-    assert all(row["aten_ops"] == ("aten._local_scalar_dense.default",) for row in scalar_rows)
-
-
-@pytest.mark.smoke
-def test_linear_decomposition_is_owned_by_one_captured_call() -> None:
-    """Multiple aten events owned by one linear call do not false-alarm."""
-
-    wrap_torch(completeness_witness=True)
-    trace = tl.trace(_LinearCompositeModel(), torch.randn(2, 4))
-
-    assert trace.completeness_diagnostics == []
-    assert trace.completeness_witness_verified is True
-    linear_rows = [
-        row for row in trace.completeness_decompositions if row["owner_func_name"] == "linear"
-    ]
-    assert len(linear_rows) == 1
-    linear_row = linear_rows[0]
-    assert linear_row["capture_accounted"] is True
-    assert linear_row["aten_ops"] == ("aten.t.default", "aten.addmm.default")
-    assert any(op.func_call_id == linear_row["owner_func_call_id"] for op in trace.ops)
-
-
-@pytest.mark.smoke
+# Kept: a sole mutation kill.
 def test_vmap_interior_is_expected_opaque() -> None:
     """Documented vmap interiors remain outside the active dispatch census."""
 
@@ -916,18 +747,20 @@ def test_vmap_interior_is_expected_opaque() -> None:
 
     assert any("captured a vmap transform as a boundary op" in str(item.message) for item in caught)
     assert trace.completeness_diagnostics == []
-    assert trace.completeness_witness_verified is True
-    assert trace.capture_verified is True
+    assert trace.health.completeness_verified is True
+    assert trace.provenance.verified is True
     assert "vmap" in {op.func_name for op in trace.ops}
 
 
-@pytest.mark.smoke
+# Kept: sole branch coverage of backends/torch/_completeness_finalize.py, backends/torch/_outputs.py, backends/torch/wrappers.py; a sole mutation kill.
 @pytest.mark.skipif(
-    _TORCH_XY < (2, 2),
+    not (HAS_FUNCTORCH_LEVEL_API or HAS_FUNCTORCH_INTERPRETER_STACK_API),
     reason=(
         "Graceful pre-wrap-vmap transform-escape handling (witness-only, "
-        "capture_verified=False) requires torch>=2.2; on the 2.1 best-effort floor the "
-        "escaped vmap output honestly raises an output-attribution error instead."
+        "capture_verified=False) needs a functorch transform probe (the level API, or the "
+        "interpreter stack on torch 2.1/2.2) to detect the escape "
+        "(_is_inside_functorch_transform); absent both, the escape goes undetected and "
+        "the unattributable output honestly raises an output-attribution error instead."
     ),
 )
 def test_pre_wrap_vmap_is_witness_only_not_capture_verified() -> None:
@@ -940,44 +773,30 @@ def test_pre_wrap_vmap_is_witness_only_not_capture_verified() -> None:
         trace = tl.trace(model, torch.randn(3, 4))
 
     assert trace._raw_transform_escape_detected is True
-    assert trace.completeness_witness_verified is True
-    assert trace.completeness_witness_unaccounted_count == 0
-    assert trace.capture_verified is False
-    assert trace.capture_verification_reason == "transform_call_route_unverified"
+    assert trace.health.completeness_verified is True
+    assert trace.health.num_unaccounted_witness_events == 0
+    assert trace.provenance.verified is False
+    assert trace.provenance.verification_reason == "transform_call_route_unverified"
     assert "vmap" not in {op.func_name for op in trace.ops}
 
 
-@pytest.mark.smoke
-def test_escape_detector_and_witness_compose_on_shared_tokens() -> None:
-    """Both diagnostics can run together and independently verify a clean call."""
-
-    wrap_torch(
-        escape_detector="shadow",
-        completeness_witness=True,
-    )
-    trace = tl.trace(_WrappedOpsModel(), torch.randn(4))
-
-    assert trace.escape_detector_verified is True
-    assert trace.escape_diagnostics == []
-    assert trace.completeness_witness_verified is True
-    assert trace.completeness_diagnostics == []
-    assert trace.capture_verified is True
-    assert trace.capture_verification_reason == "dispatch_witness_and_detector_verified"
-
-
+# Kept: its run phase reached no library code in the per-id coverage run, so it has no measurement (shrink rule 3).
 def test_expected_opaque_boundary_table_is_exact_and_budgeted() -> None:
     """Metadata-only exclusions remain a small reviewable exact-name table."""
 
     assert {row.wrapper_name for row in AUDITED_COMPLETENESS_BOUNDARIES} == {
-        "torch_func:numpy:not_logged",
-        "torch_func:__array__:not_logged",
         "torch_func:size:not_logged",
         "torch_func:dim:not_logged",
         "torch_func:item:logged",
         "torch_func:__bool__:logged",
         "torch_func:__float__:logged",
         "torch_func:__int__:logged",
+        "torch_func:__index__:logged",
         "autograd:grad",
+        "autograd_function:foreign",
+        "foreign_data:export",
+        "jit_script:boundary",
+        "lazy_module:materialize",
     }
     scalar_rows = [row for row in AUDITED_COMPLETENESS_BOUNDARIES if row.operator is not None]
     assert {row.wrapper_name for row in scalar_rows} == {
@@ -985,11 +804,13 @@ def test_expected_opaque_boundary_table_is_exact_and_budgeted() -> None:
         "torch_func:__bool__:logged",
         "torch_func:__float__:logged",
         "torch_func:__int__:logged",
+        "torch_func:__index__:logged",
     }
     assert {row.operator for row in scalar_rows} == {"aten._local_scalar_dense.default"}
     assert all(row.reason for row in AUDITED_COMPLETENESS_BOUNDARIES)
 
 
+# Kept: reads source statically or runs a subprocess, so per-id coverage cannot measure it (shrink rule 3).
 def test_observer_install_loops_fail_closed_before_each_continue() -> None:
     """Every required observer-install loop must flag failure before continuing.
 
@@ -1027,6 +848,7 @@ def test_observer_install_loops_fail_closed_before_each_continue() -> None:
                     )
 
 
+# Kept: reads source statically or runs a subprocess, so per-id coverage cannot measure it (shrink rule 3).
 def test_observer_restore_loops_fail_closed_on_restore_error() -> None:
     """Every targeted observer-restore loop must downgrade on restore failure.
 
@@ -1060,6 +882,7 @@ def test_observer_restore_loops_fail_closed_on_restore_error() -> None:
             )
 
 
+# Kept: reads source statically or runs a subprocess, so per-id coverage cannot measure it (shrink rule 3).
 def test_invisible_host_escape_property_lookup_uses_tensor_mro() -> None:
     """The property observer must resolve descriptors through ``torch.Tensor``'s MRO.
 
@@ -1086,6 +909,7 @@ def test_invisible_host_escape_property_lookup_uses_tensor_mro() -> None:
     assert ast.unparse(descriptor_call) == "inspect.getattr_static(torch.Tensor, name, None)"
 
 
+# Kept: reads source statically or runs a subprocess, so per-id coverage cannot measure it (shrink rule 3).
 def test_completeness_witness_functions_have_docstrings() -> None:
     """The verification module must keep docstrings on every function.
 
@@ -1111,6 +935,7 @@ def test_completeness_witness_functions_have_docstrings() -> None:
     assert not missing, f"missing docstrings: {missing}"
 
 
+# Kept: sole branch coverage of backends/torch/_completeness_dispatch.py; a sole mutation kill.
 def test_writeback_sampling_outer_failures_are_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1135,17 +960,24 @@ def test_writeback_sampling_outer_failures_are_fail_closed(
     state = cw._WitnessState(trace=trace, owner_thread_id=0, guard_pass_index=1)
     state.writeback_watch.append((torch.tensor([1.0]), None, torch.tensor([1], dtype=torch.uint8)))
     monkeypatch.setattr(
-        cw,
+        torchlens.backends.torch._completeness_dispatch,
         "_iter_dispatch_tensors",
         lambda args, kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
     )
-    monkeypatch.setattr(cw, "_has_state_toctou_watch", lambda _trace: False)
+    monkeypatch.setattr(
+        torchlens.backends.torch._completeness_dispatch,
+        "_has_state_toctou_watch",
+        lambda _trace: False,
+    )
 
     assert trace not in cw._HOST_ESCAPE_MUTABLE_WRITEBACK
-    cw._sample_writeback_at_consumption(state, (torch.tensor([2.0]),), None)
+    torchlens.backends.torch._completeness_dispatch._sample_writeback_at_consumption(
+        state, (torch.tensor([2.0]),), None
+    )
     assert trace in cw._HOST_ESCAPE_MUTABLE_WRITEBACK
 
 
+# Kept: a sole mutation kill.
 def test_finalize_census_keeps_dispatch_reason_across_later_guard_passes() -> None:
     """Later clean passes must not relabel earlier dispatch gaps as input-boundary gaps."""
 
@@ -1157,81 +989,99 @@ def test_finalize_census_keeps_dispatch_reason_across_later_guard_passes() -> No
                 "operator": "aten.relu.default",
             }
         ],
-        completeness_decompositions=[],
+        _health_completeness_decompositions=[],
+        _options_mode=None,
     )
     state = cw._WitnessState(trace=trace, owner_thread_id=0, guard_pass_index=2)
 
-    cw._finalize_census(state)
+    torchlens.backends.torch._completeness_finalize._finalize_census(state)
 
-    assert trace.capture_verified is False
-    assert trace.capture_verification_reason == "dispatch_witness_unaccounted_ops"
+    assert trace._provenance_verified is False
+    assert trace._provenance_verification_reason == "dispatch_witness_unaccounted_ops"
     assert len(trace.completeness_diagnostics) == 1
 
 
-@pytest.mark.smoke
-def test_dynamic_parameter_initializers_are_captured_without_hiding_state_mutations() -> None:
-    """Capture temporary Parameter initialization while registered-state writes fail closed."""
+# Kept: sole branch coverage of backends/torch/_opaque_call_advisory.py; a sole mutation kill.
+def test_index_boundary_excuses_only_the_scalar_read_under_its_token() -> None:
+    """The ``__index__`` audited row is exact on its operator.
+
+    The scalar read (``aten._local_scalar_dense``) under a ``Tensor.__index__``
+    token is the excused boundary; any other aten op dispatched under that same
+    token has no captured representation and must stay an ``owner_not_captured``
+    gap that ceilings the capture.
+    """
+
+    token = ExpectedOriginalToken(
+        raw_id=1,
+        original=torch.Tensor.__index__,
+        wrapper_name="torch_func:__index__:logged",
+        wrapper_frame_id=0,
+        owner_thread_id=0,
+        func_name="__index__",
+        func_call_id=1,
+    )
+    trace = SimpleNamespace(
+        completeness_diagnostics=[], _health_completeness_decompositions=[], _options_mode=None
+    )
+    state = cw._WitnessState(trace=trace, owner_thread_id=0, guard_pass_index=1)
+    state.events.extend(
+        [
+            _DispatchEvent(operator="aten._local_scalar_dense.default", owner=token, callsite=None),
+            _DispatchEvent(operator="aten.add.Tensor", owner=token, callsite=None),
+        ]
+    )
+
+    with pytest.warns(CaptureGapWarning, match="unaccounted aten dispatch"):
+        torchlens.backends.torch._completeness_finalize._finalize_census(state)
+
+    assert trace._provenance_verified is False
+    assert trace._provenance_verification_reason == "dispatch_witness_unaccounted_ops"
+    assert [
+        (report["operator"], report["reason"], report["owner_wrapper"])
+        for report in trace.completeness_diagnostics
+    ] == [("aten.add.Tensor", "owner_not_captured", "torch_func:__index__:logged")]
+
+
+# Kept: sole branch coverage of _data_classes/layer.py; a sole mutation kill.
+def test_dynamic_parameter_initializers_and_registered_state_writes_are_captured() -> None:
+    """Capture temporary Parameter initialization and in-place writes to prepared state.
+
+    A registered Parameter mutated in place inside ``forward`` used to stay a
+    witnessed ``owner_not_captured`` gap; it is now a captured op whose output the
+    later read consumes (JMT decision 2026-10-05, MIX-HIC ``self.temp.clamp_``).
+    """
 
     wrap_torch(completeness_witness=True)
     temporary_trace = tl.trace(_DynamicParameterInitializationModel(), torch.randn(2, 4))
 
     initializer_rows = [
         row
-        for row in temporary_trace.completeness_decompositions
+        for row in temporary_trace.health.completeness_decompositions
         if row["owner_func_name"] == "uniform_"
     ]
     assert len(initializer_rows) == 2
     assert all(row["capture_accounted"] is True for row in initializer_rows)
     assert temporary_trace.completeness_diagnostics == []
-    assert temporary_trace.capture_verified is True
+    assert temporary_trace.provenance.verified is True
 
-    with pytest.warns(TorchLensCaptureGapWarning, match="aten.uniform_"):
-        state_trace = tl.trace(_RegisteredParameterMutationModel(), torch.randn(2, 4))
+    state_trace = tl.trace(_RegisteredParameterMutationModel(), torch.randn(2, 4))
 
-    assert state_trace.capture_verified is False
-    assert [
-        (row["operator"], row["reason"], row["mutates"])
-        for row in state_trace.completeness_diagnostics
-    ] == [("aten.uniform_.default", "owner_not_captured", True)]
-
-
-@pytest.mark.smoke
-def test_mid_forward_autograd_grad_is_an_exact_backward_boundary() -> None:
-    """Exclude only engine dispatches represented by the captured backward pass."""
-
-    wrap_torch(completeness_witness=True)
-    with pytest.warns(UserWarning, match="no graph/source provenance"):
-        trace = tl.trace(_MidForwardAutogradGradModel(), torch.randn(2, 4))
-
-    boundary_rows = [
-        row for row in trace.completeness_decompositions if row["owner_wrapper"] == "autograd:grad"
-    ]
-    assert len(boundary_rows) == 1
-    assert boundary_rows[0]["scope"] == "expected_opaque"
-    assert boundary_rows[0]["aten_ops"]
-    assert trace.num_backward_passes == 1
-    assert trace.completeness_diagnostics == []
-    assert trace.capture_verified is True
+    assert state_trace.provenance.verified is True
+    assert state_trace.completeness_diagnostics == []
+    uniform_ops = [layer for layer in state_trace.layers if layer.type == "uniform"]
+    assert len(uniform_ops) == 1
+    assert [param.address for param in uniform_ops[0].params] == ["weight"]
+    matmul = [layer for layer in state_trace.layers if layer.type == "matmul"][0]
+    assert [state_trace[parent].label for parent in matmul.parents][-1] == uniform_ops[0].label
 
 
-@pytest.mark.smoke
-def test_tensor_data_getter_dispatch_is_captured() -> None:
-    """Represent the C-level data getter's detach dispatch as an ordinary op."""
-
-    wrap_torch(completeness_witness=True)
-    trace = tl.trace(_DataPropertyModel(), torch.randn(4))
-
-    detach_ops = [op for op in trace.ops if op.func_name == "detach"]
-    assert len(detach_ops) == 1
-    assert detach_ops[0].parents == ("input_1",)
-    assert trace.completeness_diagnostics == []
-    assert trace.capture_verified is True
-
-
+# Kept: sole branch coverage of backends/torch/_completeness_dispatch_names.py; a sole mutation kill.
 def test_is_mutating_operator_reads_schema_not_name() -> None:
     """Mutation detection uses the operator schema, covering out= overloads too."""
 
-    from torchlens.backends.torch.completeness_witness import _is_mutating_operator
+    from torchlens.backends.torch._completeness_dispatch_names import (
+        _is_mutating_operator,
+    )
 
     assert _is_mutating_operator(torch.ops.aten.mul_.Tensor) is True
     assert _is_mutating_operator(torch.ops.aten.add_.Tensor) is True
@@ -1255,33 +1105,8 @@ class _DirectMutatingAtenModel(nn.Module):
         """Mutate a tensor in place through a direct (unwrapped) aten call."""
 
         y = x + 1
-        torch.ops.aten.mul_.Tensor(y, 2)
+        _c_tensor_base().mul_(y, 2)
         return torch.sigmoid(y)
-
-
-@pytest.mark.smoke
-def test_observable_uncaptured_mutation_is_flagged_mutates() -> None:
-    """An observable uncaptured in-place aten op is tripped AND tagged mutates.
-
-    A direct ``aten.mul_`` call is unowned (a real silent drop) and, being an
-    in-place op, carries ``mutates=True``. This proves the witness observes and
-    tags value-affecting drops it can actually see, distinct from a pure read.
-    """
-
-    wrap_torch(completeness_witness=True)
-    with pytest.warns(TorchLensCaptureGapWarning, match="unaccounted aten dispatch"):
-        trace = tl.trace(_DirectMutatingAtenModel(), torch.randn(4))
-
-    assert trace.completeness_witness_verified is False
-    mutating = [d for d in trace.completeness_diagnostics if d["mutates"] is True]
-    assert mutating, "expected the in-place mul_ drop to be tagged mutates=True"
-    assert any(d["operator"].startswith("aten.mul_") for d in mutating)
-    # A pure-read op that also dispatched (e.g. add) is never tagged mutates.
-    assert all(
-        d["mutates"] is False
-        for d in trace.completeness_diagnostics
-        if d["operator"].startswith("aten.add.")
-    )
 
 
 class _SubclassHiddenMutationTensor(torch.Tensor):
@@ -1315,6 +1140,7 @@ class _SubclassHiddenMutationModel(nn.Module):
         return torch.sigmoid(base + 1)
 
 
+# Kept: sole branch coverage of backends/torch/_completeness_finalize.py.
 def test_subclass_disabled_dispatch_mutation_is_outside_observational_reach() -> None:
     """DOCUMENTED BOUNDARY: a mutation hidden under _DisableTorchDispatch is invisible.
 
@@ -1332,7 +1158,9 @@ def test_subclass_disabled_dispatch_mutation_is_outside_observational_reach() ->
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         trace = tl.trace(
-            _SubclassHiddenMutationModel(), torch.tensor([1.0, 2.0]), save_arg_values=True
+            _SubclassHiddenMutationModel(),
+            torch.tensor([1.0, 2.0]),
+            capture=tl.options.CaptureOptions(save_args=True),
         )
 
     operators = [d["operator"] for d in trace.completeness_diagnostics]
@@ -1349,6 +1177,7 @@ def test_subclass_disabled_dispatch_mutation_is_outside_observational_reach() ->
     assert len(AUDITED_COMPLETENESS_BOUNDARIES) <= MAX_AUDITED_COMPLETENESS_BOUNDARIES
 
 
+# Kept: sole branch coverage of _capture/outcome.py, backends/torch/_completeness_finalize.py, backends/torch/_completeness_patches.py; a sole mutation kill.
 def test_witness_arm_install_failure_strands_no_patches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1357,7 +1186,7 @@ def test_witness_arm_install_failure_strands_no_patches(
     R07 regression: ~240 lines of process-global ``setattr``s ran BEFORE the
     ``try`` owning the yield, and that try had no except arm -- Python never
     calls ``__exit__`` when ``__enter__`` raises, so one Ctrl-C during an
-    ``intervention_ready`` capture stranded ~124 torch surfaces (the
+    ``replayable`` capture stranded ~124 torch surfaces (the
     ``torch._ops.*.__call__`` dispatch, the storage accessor surface, the
     scalar/predicate belt) permanently and monotonically: the next armed
     capture read the leaked wrapper as its "original" and re-installed over
@@ -1387,8 +1216,12 @@ def test_witness_arm_install_failure_strands_no_patches(
     def _interrupted() -> object:
         raise KeyboardInterrupt
 
-    # The runtime observer is the cw-rebound copy, so patch cw's globals.
-    monkeypatch.setattr(cw, "_private_c_module_callables", _interrupted)
+    # The home module and every module that binds the name by import.
+    for module in (
+        torchlens.backends.torch._completeness_cross_thread,
+        torchlens.backends.torch._completeness_patches,
+    ):
+        monkeypatch.setattr(module, "_private_c_module_callables", _interrupted)
 
     class Model(nn.Module):
         def __init__(self) -> None:
@@ -1402,7 +1235,7 @@ def test_witness_arm_install_failure_strands_no_patches(
         tl.trace(
             Model(),
             torch.randn(2, 4),
-            capture=tl.options.CaptureOptions(intervention_ready=True, cache=False),
+            capture=tl.options.CaptureOptions(replayable=True, cache=False),
         )
 
     leaked = {name for name, obj in _surface_snapshot().items() if obj is not baseline[name]}
@@ -1414,38 +1247,56 @@ def test_witness_arm_install_failure_strands_no_patches(
     trace = tl.trace(
         Model(),
         torch.randn(2, 4),
-        capture=tl.options.CaptureOptions(intervention_ready=True, cache=False),
+        capture=tl.options.CaptureOptions(replayable=True, cache=False),
     )
     assert trace is not None
     leaked_after = {name for name, obj in _surface_snapshot().items() if obj is not baseline[name]}
     assert not leaked_after, f"stranded witness patches after clean capture: {sorted(leaked_after)}"
 
 
-def test_observer_restore_leaves_no_shadow_entries() -> None:
-    """Arm/disarm must leave ``torch.Tensor`` and storage class dicts unchanged.
+# Kept: its run phase reached no library code in the per-id coverage run, so it has no measurement (shrink rule 3).
+def test_descriptor_compat_property_construction_never_raises_without_a_docstring() -> None:
+    """``DescriptorCompatProperty`` must construct with an UNDOCUMENTED getter.
 
-    Most belt names (``tolist``/``numpy``/``data_ptr``/``stride``/
-    ``is_contiguous``/the bool-method belt/``UntypedStorage.data_ptr``) are C
-    slots on the BASE class and not in the patched class ``__dict__``; the
-    pre-fix plain-setattr restore left a permanent shadow entry behind after
-    every armed capture, so ``unwrap_torch``'s "torch is clean again" claim
-    was false at the class-dict level.
+    Regression for a real installation bug (not a dynamo/force-eager-stance
+    interaction as first suspected): CPython's ``property.__init__`` only
+    stores an implicit ``fget.__doc__`` directly on the C struct for the
+    EXACT ``property`` type. For any subclass -- ``DescriptorCompatProperty``
+    included -- it instead does ``self.__doc__ = fget.__doc__`` through the
+    normal attribute-set protocol, even when ``fget.__doc__`` is ``None``,
+    which raises ``AttributeError: '...' object attribute '__doc__' is
+    read-only`` against this slots-only subclass's missing ``__dict__``.
+    Every production call site now passes ``doc=`` explicitly (never
+    defaulted) to route around the C-struct fast path instead; this pins the
+    construction itself so a future call site that forgets ``doc=`` fails
+    this test rather than silently degrading a capture to
+    observer-install-failed via the shared ``except (TypeError,
+    AttributeError)`` guards every install loop uses.
+
+    (``instance.__doc__`` is NOT asserted here: ``DescriptorCompatProperty``'s
+    own class docstring shadows the per-instance ``doc=`` in MRO attribute
+    lookup on a ``__dict__``-less slotted instance, so reading it back would
+    pin a read-back artifact rather than the construction behavior this test
+    targets. ``__name__`` has no such class-level shadow and is asserted
+    directly.)
     """
 
-    class _Trace:
-        """Weakrefable trace stand-in."""
+    from torchlens._utils._tensor_label import DescriptorCompatProperty
 
-    trace = _Trace()
-    state = cw._WitnessState(trace=trace, owner_thread_id=0, guard_pass_index=1)
-    tensor_keys_before = set(vars(torch.Tensor))
-    storage_classes = (torch.UntypedStorage, torch.TypedStorage)
-    storage_keys_before = {cls: set(vars(cls)) for cls in storage_classes}
+    def getter(self: object) -> int:
+        return 0
 
-    with cw._observe_invisible_host_escapes(state):
-        # The belt is armed: the census-invisible conversions are shadowed in.
-        assert "tolist" in vars(torch.Tensor)
-        assert "stride" in vars(torch.Tensor)
+    def setter(self: object, value: int) -> None:
+        pass
 
-    assert set(vars(torch.Tensor)) == tensor_keys_before
-    for cls in storage_classes:
-        assert set(vars(cls)) == storage_keys_before[cls]
+    assert getter.__doc__ is None  # the exact undocumented-callable shape that broke
+
+    getter_only = DescriptorCompatProperty(getter, doc="getter_only")
+    getter_only.__objclass__ = object
+    getter_only.__name__ = "getter_only"
+    assert getter_only.__name__ == "getter_only"
+
+    getter_and_setter = DescriptorCompatProperty(getter, setter, doc="getter_and_setter")
+    getter_and_setter.__objclass__ = object
+    getter_and_setter.__name__ = "getter_and_setter"
+    assert getter_and_setter.__name__ == "getter_and_setter"

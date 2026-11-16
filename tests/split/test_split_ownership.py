@@ -226,6 +226,7 @@ def test_optimizer_bindings_remain_valid_after_repartition(kind: str) -> None:
             )
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_migration_reports_parameter_moves_and_prefix_buffer_ownership() -> None:
     """A new cut reports CUDA state moving to a CPU prefix and external Adam work."""

@@ -45,8 +45,8 @@ from pathlib import Path
 import pytest
 from _source_corpus import package_ast, package_files
 
-from torchlens.merged import MergedErrorCode
-from torchlens.runnable import RunnableErrorCode
+from torchlens._merged import MergedErrorCode
+from torchlens._runnable import RunnableErrorCode
 
 # Per-test smoke marks (the former module-level pytestmark was additive
 # with the census's heavy re-tier and tripped the marker-combination
@@ -65,10 +65,9 @@ _DOC_ROW_PATTERN = re.compile(r"^\| `([a-z0-9_]+)` \|")
 # moved to a provocation test, never silently kept.
 ENV_GATED_ALLOWLIST: dict[str, str] = {
     "tlspec_format_markers_incoherent": (
-        "TOCTOU defense-in-depth at the load dispatch (bundle.py): the r7 R73 root fix "
-        "moved the spec.json-existence check INTO detect_tlspec_format, so this raise "
-        "only fires if spec.json vanishes between detection and dispatch -- a race no "
-        "deterministic test can provoke without fs mocking; kept as a belt."
+        "The retired intervention loader retains its TOCTOU guard, but directory "
+        "dispatch refuses pre_3 artifacts before entering that loader; only an "
+        "internal caller racing spec.json removal can reach this site."
     ),
 }
 
@@ -78,12 +77,18 @@ ENV_GATED_ALLOWLIST: dict[str, str] = {
 # for a red gate.
 UNPROVOKED_BASELINE: frozenset[str] = frozenset(
     {
+        # F05 mechinterp rows needing a BROKEN substrate to provoke (each is a
+        # fail-closed guard on evidence no healthy capture can lack): a spine
+        # whose execution-order accumulation misses bitwise (mi_spine_open), an
+        # undecidable additive join (mi_spine_ambiguous), and a fused QKV weight
+        # with no split evidence (mi_qkv_slicing_unprovable).
+        "mi_qkv_slicing_unprovable",
+        "mi_spine_ambiguous",
+        "mi_spine_open",
         "annotation_backend_unsupported",
         "annotation_namespace_invalid",
         "annotation_tensor_not_portable",
-        "auto_environment_unsupported",
         "backend_capability_conformance",
-        "backend_error",
         "backward_capture_conflict",
         "backward_pass_filter_invalid",
         "batch_items_invalid",
@@ -97,15 +102,11 @@ UNPROVOKED_BASELINE: frozenset[str] = frozenset(
         "bundle_statistic_invalid",
         "code_panel_model_collected",
         "code_panel_side_invalid",
-        "compiled_callable_unsupported",
         "container_leaf_not_saved",
-        "container_not_reconstructable",
         "container_selector_requires_registry",
         "container_selector_unresolved",
         "container_value_source_invalid",
-        "dagua_renderer_not_opted_in",
         "decoded_output_not_classification",
-        "decoded_output_unavailable",
         "fsdp_capture_unsupported",
         "gradient_not_saved",
         "gradient_pass_ambiguous",
@@ -115,46 +116,48 @@ UNPROVOKED_BASELINE: frozenset[str] = frozenset(
         # The two fire-results kinds enter governance in the same change that
         # hoisted their constants (r25 b6-fable carried MED: they were outside
         # every governance surface); provoking them needs a tensor that
-        # accepts neither transient metadata nor a storage side table.
+        # accepts neither transient metadata nor a weak reference.
         "intervention_fire_results_cleanup_failed",
         "intervention_fire_results_unrecordable",
-        "intervention_helper_unknown",
         "intervention_tensor_unsupported",
-        "layer_pass_ambiguous",
+        # layer_pass_ambiguous: row DELETED (shrink-only lock-in) -- the indexing
+        # coherence tests provoke it through a multi-pass Layer's .out.
         "layers_not_logged",
         "link_format_invalid",
         "max_pairs_invalid",
         "metric_name_invalid",
-        "metric_shape_mismatch",
         "metric_tensor_type_invalid",
         "metric_type_invalid",
-        "model_type_unsupported",
-        "module_call_ambiguous",
         "module_focus_empty",
-        "op_lookup_pass_out_of_range",
         "op_lookup_pass_required",
-        "option_group_type_invalid",
+        # option_group_type_invalid: row DELETED (shrink-only lock-in) -- the
+        # record-options lane's test_record_recording_options.py now provokes it.
         "output_device_invalid",
-        "output_sink_conflict",
-        "recording_events_not_retained",
+        # output_sink_conflict: row DELETED (shrink-only lock-in) -- the REM1
+        # test_io_streaming migration to the typed ArgumentConflictError now
+        # provokes it.
+        # recording_events_not_retained: row DELETED (shrink-only lock-in) -- the
+        # public-entry refusal provocations (test_public_entry_refusal_codes) now
+        # provoke it.
         "recording_failed_not_convertible",
         "recording_halt_frontier_missing",
-        "recording_multipass_not_convertible",
-        "recording_option_duplicate",
-        "renderer_capability_unsupported",
-        # run_fast_divergence_policy_invalid, run_fast_requires_inputs,
-        # run_legacy_options_conflict, run_source_model_collected: rows
+        # recording_multipass_not_convertible: row DELETED (shrink-only lock-in);
+        # tests/test_record_to_trace_multipass.py asserts the halted multi-pass
+        # refusal by code.
+        # run_fast_divergence_policy_invalid, run_source_model_collected: rows
         # DELETED (shrink-only lock-in) -- the L4 S1-seam merge's compat pins
-        # now provoke them.
+        # now provoke them. run_fast_requires_inputs and
+        # run_legacy_options_conflict left the contract when Trace.run split
+        # from Trace.run_transaction (the keywords no longer reach one door).
         "run_input_missing",
         "selector_function_pattern_type_invalid",
-        "skip_fn_boundary_invalid",
+        # skip_fn_boundary_invalid: row DELETED (shrink-only lock-in) -- the
+        # F12 display-filter boundary test now provokes it.
         "stack_ordinals_duplicate",
         "stack_ordinals_unavailable",
         "stack_output_not_tensor",
-        "storage_argument_conflict",
-        "summary_fields_invalid",
-        "summary_option_conflict",
+        # summary_fields_invalid: row DELETED (shrink-only lock-in) -- the code
+        # left the vocabulary with the removed legacy summary renderer.
         "sweep_intervention_conflict",
         "sweep_names_length_mismatch",
         "sweep_site_missing",
@@ -162,7 +165,6 @@ UNPROVOKED_BASELINE: frozenset[str] = frozenset(
         "sweep_values_empty",
         "sweep_values_missing",
         "tensor_connection_labels_missing",
-        "trace_not_finished",
     }
 )
 
@@ -515,7 +517,6 @@ def _test_referenced_codes(universe: set[str]) -> set[str]:
     return referenced & universe
 
 
-@pytest.mark.smoke
 def test_universe_is_nonempty() -> None:
     """Anti-vacuity: the scanners find real vocabularies."""
 
@@ -526,14 +527,13 @@ def test_universe_is_nonempty() -> None:
     assert any(origin == "error_refusal_contract" for origin in universe.values())
 
 
-@pytest.mark.smoke
 def test_every_enum_member_is_reachable_in_source() -> None:
     """No frozen enum member is declaration-only (dead vocabulary)."""
 
     texts = _iter_python_texts(_PACKAGE_ROOT)
     dead: list[str] = []
     for enum_cls, declaring in (
-        (RunnableErrorCode, _PACKAGE_ROOT / "runnable.py"),
+        (RunnableErrorCode, _PACKAGE_ROOT / "_runnable/__init__.py"),
         (MergedErrorCode, _PACKAGE_ROOT / "merged" / "_enums.py"),
     ):
         for member in enum_cls:
@@ -552,7 +552,6 @@ def test_every_enum_member_is_reachable_in_source() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_every_code_is_provoked_or_consciously_ledgered() -> None:
     """The shrink-only provocation ratchet over the full vocabulary."""
 
@@ -581,7 +580,6 @@ def test_every_code_is_provoked_or_consciously_ledgered() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_provocation_scanner_is_red_capable() -> None:
     """A code absent from every test is actually reported (gate can fail)."""
 
@@ -590,7 +588,6 @@ def test_provocation_scanner_is_red_capable() -> None:
     assert referenced == set()
 
 
-@pytest.mark.smoke
 def test_prose_names_and_inert_tables_never_count_as_provocation() -> None:
     """Non-executed mention channels never count (r3+r4 b6 R25 lineage).
 
@@ -688,14 +685,14 @@ def test_prose_names_and_inert_tables_never_count_as_provocation() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# R65/F9: codeless TorchLensIOError ratchet (shrink-only)                      #
+# R65/F9: codeless ArtifactError ratchet (shrink-only)                      #
 # --------------------------------------------------------------------------- #
 
 # Historical debt (b8-opus F9: 236/243 raise sites code-less). The number may
 # only SHRINK: give a site fields["code"] (and ideally a remedy) and lower the
 # ceiling in the same change. Raising it is a conscious public decision.
 _MAX_CODELESS_IO_RAISES = 237
-_IO_FAMILY_PATTERN = re.compile(r"^(TorchLensIOError|Artifact\w*Error)$")
+_IO_FAMILY_PATTERN = re.compile(r"^(ArtifactError|Artifact\w*Error)$")
 
 
 def _codeless_io_raises() -> list[str]:
@@ -734,7 +731,7 @@ def test_codeless_io_raise_count_only_shrinks() -> None:
     assert offenders, "scanner found no IO-family raises at all (vacuous scan)"
     assert len(offenders) <= _MAX_CODELESS_IO_RAISES, (
         f"{len(offenders)} codeless IO-family raises exceed the ratchet of "
-        f"{_MAX_CODELESS_IO_RAISES}. New TorchLensIOError/Artifact*Error raises "
+        f"{_MAX_CODELESS_IO_RAISES}. New ArtifactError/Artifact*Error raises "
         "must carry fields['code'] (branch-on-fields doctrine); first offenders: "
         + ", ".join(offenders[:10])
     )

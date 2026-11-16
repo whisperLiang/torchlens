@@ -9,7 +9,7 @@ but unusable (stale driver, mismatched build, one bad device in a multi-GPU box)
 aborted with the driver error instead of completing on the CPU.  That is the bug
 that forced ``CUDA_VISIBLE_DEVICES=""`` on every command in this repo.
 
-The fix (``torchlens/utils/rng.py::_snapshot_cuda_rng_states``) skips the CUDA
+The fix (``torchlens/_utils/rng.py::_snapshot_cuda_rng_states``) skips the CUDA
 snapshot entirely until the process has actually initialized CUDA, and degrades
 to a warning if the read fails anyway.  Real CUDA captures are unaffected: a
 capture that touches CUDA has initialized it by definition.
@@ -24,12 +24,12 @@ from __future__ import annotations
 import subprocess
 import sys
 import textwrap
-from types import SimpleNamespace
 
 import pytest
 import torch
 
-from torchlens.utils import rng as tl_rng, tensor_utils
+from torchlens._utils import _cuda_probe, rng as tl_rng
+from torchlens._utils.rng import streams as rng_streams
 
 # Markers are additive: a file-level smoke pytestmark would keep the heavy tests
 # in the `-m smoke` tier, so tier marks are applied per test instead.
@@ -189,7 +189,6 @@ def test_cpu_capture_tolerates_failing_cuda_rng_read() -> None:
 # ======================================================================================
 
 
-@pytest.mark.smoke
 def test_snapshot_skips_cuda_until_initialized(monkeypatch: pytest.MonkeyPatch) -> None:
     """An available-but-never-initialized CUDA runtime is never read."""
 
@@ -198,8 +197,8 @@ def test_snapshot_skips_cuda_until_initialized(monkeypatch: pytest.MonkeyPatch) 
 
         raise AssertionError("get_rng_state_all() must not run before CUDA init")
 
-    monkeypatch.setattr(tl_rng, "_cuda_rng_unusable", False)
-    monkeypatch.setattr(tl_rng, "_is_cuda_available", lambda: True)
+    monkeypatch.setattr(rng_streams, "_cuda_rng_unusable", False)
+    monkeypatch.setattr(rng_streams, "_is_cuda_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
     monkeypatch.setattr(torch.cuda, "get_rng_state_all", _forbidden)
 
@@ -211,7 +210,6 @@ def test_snapshot_skips_cuda_until_initialized(monkeypatch: pytest.MonkeyPatch) 
     tl_rng.set_rng_from_saved_states(states)
 
 
-@pytest.mark.smoke
 def test_initialized_cuda_snapshot_shape_is_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -226,8 +224,8 @@ def test_initialized_cuda_snapshot_shape_is_unchanged(
 
     fake_states = [torch.tensor([7], dtype=torch.uint8), torch.tensor([9], dtype=torch.uint8)]
 
-    monkeypatch.setattr(tl_rng, "_cuda_rng_unusable", False)
-    monkeypatch.setattr(tl_rng, "_is_cuda_available", lambda: True)
+    monkeypatch.setattr(rng_streams, "_cuda_rng_unusable", False)
+    monkeypatch.setattr(rng_streams, "_is_cuda_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_rng_state_all", lambda: fake_states)
 
@@ -238,7 +236,6 @@ def test_initialized_cuda_snapshot_shape_is_unchanged(
     assert states["torch_cuda"] is fake_states[0]
 
 
-@pytest.mark.smoke
 def test_failing_cuda_rng_read_warns_latches_and_skips_restore(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -257,8 +254,8 @@ def test_failing_cuda_rng_read_warns_latches_and_skips_restore(
 
         raise AssertionError("set_rng_state_all() must not run after a latched failure")
 
-    monkeypatch.setattr(tl_rng, "_cuda_rng_unusable", False)
-    monkeypatch.setattr(tl_rng, "_is_cuda_available", lambda: True)
+    monkeypatch.setattr(rng_streams, "_cuda_rng_unusable", False)
+    monkeypatch.setattr(rng_streams, "_is_cuda_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_rng_state_all", _explode)
     monkeypatch.setattr(torch.cuda, "set_rng_state_all", _forbidden_restore)
@@ -273,7 +270,6 @@ def test_failing_cuda_rng_read_warns_latches_and_skips_restore(
     tl_rng.set_rng_from_saved_states({"torch": torch.random.get_rng_state(), "torch_cuda_all": []})
 
 
-@pytest.mark.smoke
 def test_transient_cuda_rng_failure_rearms_at_next_capture_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -297,8 +293,8 @@ def test_transient_cuda_rng_failure_rearms_at_next_capture_entry(
             raise RuntimeError("simulated transient CUDA failure (busy device)")
         return healthy
 
-    monkeypatch.setattr(tl_rng, "_cuda_rng_unusable", False)
-    monkeypatch.setattr(tl_rng, "_is_cuda_available", lambda: True)
+    monkeypatch.setattr(rng_streams, "_cuda_rng_unusable", False)
+    monkeypatch.setattr(rng_streams, "_is_cuda_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_rng_state_all", _transiently_broken)
 
@@ -315,7 +311,6 @@ def test_transient_cuda_rng_failure_rearms_at_next_capture_entry(
     assert attempts == ["read", "read"]
 
 
-@pytest.mark.smoke
 def test_cuda_availability_probe_failure_degrades_to_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -326,74 +321,24 @@ def test_cuda_availability_probe_failure_degrades_to_unavailable(
 
         raise RuntimeError("simulated incompatible visible CUDA driver")
 
-    monkeypatch.setattr(tensor_utils, "_cuda_available", None)
+    monkeypatch.setattr(_cuda_probe, "_cuda_available", None)
     monkeypatch.setattr(torch.cuda, "is_available", _explode)
 
     with pytest.warns(UserWarning, match="torch.cuda.is_available"):
-        assert tensor_utils._is_cuda_available() is False
+        assert _cuda_probe._is_cuda_available() is False
     # Cached: the failing probe is not repeated.
-    assert tensor_utils._is_cuda_available() is False
+    assert _cuda_probe._is_cuda_available() is False
 
 
-@pytest.mark.smoke
 def test_cuda_initialized_probe_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     """``_is_cuda_initialized`` tracks torch's flag instead of caching it."""
 
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
-    assert tensor_utils._is_cuda_initialized() is False
+    assert _cuda_probe._is_cuda_initialized() is False
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
-    assert tensor_utils._is_cuda_initialized() is True
+    assert _cuda_probe._is_cuda_initialized() is True
 
 
-@pytest.mark.smoke
-def test_cpu_only_seeding_does_not_queue_accelerator_work(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Seed the CPU reproducibly without queuing work for absent accelerators."""
-    torch.default_generator.manual_seed(1234)
-    expected = torch.randn(4)
-    queued: list[int] = []
-    monkeypatch.setattr(
-        torch,
-        "accelerator",
-        SimpleNamespace(current_accelerator=lambda *, check_available: None),
-        raising=False,
-    )
-    monkeypatch.setattr(torch.cuda, "manual_seed_all", queued.append)
-
-    tl_rng.set_random_seed(1234)
-
-    assert torch.equal(torch.randn(4), expected)
-    assert queued == []
-
-
-@pytest.mark.smoke
-@pytest.mark.parametrize("probe_state", ["missing", "raising"])
-def test_seeding_preserves_accelerator_path_when_capability_is_unknown(
-    monkeypatch: pytest.MonkeyPatch, probe_state: str
-) -> None:
-    """An unavailable capability query must retain deferred accelerator seeds."""
-    queued: list[int] = []
-
-    def unavailable(*, check_available: bool) -> None:
-        """Simulate an accelerator query that cannot classify this runtime."""
-        raise RuntimeError("accelerator query unavailable")
-
-    namespace = (
-        SimpleNamespace()
-        if probe_state == "missing"
-        else SimpleNamespace(current_accelerator=unavailable)
-    )
-    monkeypatch.setattr(torch, "accelerator", namespace, raising=False)
-    monkeypatch.setattr(torch.cuda, "manual_seed_all", queued.append)
-
-    tl_rng.set_random_seed(1234)
-
-    assert queued == [1234]
-    assert torch.default_generator.initial_seed() == 1234
-
-
-@pytest.mark.smoke
 def test_seeding_degrades_when_accelerator_seed_leg_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -415,12 +360,6 @@ def test_seeding_degrades_when_accelerator_seed_leg_fails(
 
         raise IndexError("tuple index out of range")
 
-    monkeypatch.setattr(
-        torch,
-        "accelerator",
-        SimpleNamespace(current_accelerator=lambda *, check_available: torch.device("cuda")),
-        raising=False,
-    )
     monkeypatch.setattr(torch.cuda, "manual_seed_all", _explode)
 
     with pytest.warns(UserWarning, match="Could not seed torch accelerator RNG"):

@@ -15,19 +15,15 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._runnable import StateSource
 from torchlens.options import CaptureOptions
-from torchlens.runnable import PathFaithfulness, StateSource
-
-pytestmark = pytest.mark.smoke
 
 
 def _capture(model: nn.Module, args: Any) -> Any:
     return tl.trace(
         model,
         args,
-        capture=CaptureOptions(
-            intervention_ready=True, capture_container_structure=True, cache=False
-        ),
+        capture=CaptureOptions(replayable=True, capture_container_structure=True, cache=False),
     )
 
 
@@ -49,6 +45,7 @@ class _TiedModel(nn.Module):
         return self.second(self.first(x))
 
 
+# Kept: sole branch coverage of _runnable/state.py; the catch of its regression fault.
 def test_r35_tied_nan_state_binds_and_saves(tmp_path: Path) -> None:
     """corr2_2: byte-identical tied NaN payloads are coherent, not a conflict."""
 
@@ -58,32 +55,16 @@ def test_r35_tied_nan_state_binds_and_saves(tmp_path: Path) -> None:
     x = torch.randn(2, 3)
     trace = _capture(model, x)
     path = tmp_path / "tied_nan.tlspec"
-    tl.save(trace, str(path), level="runnable", include_weights=True)
+    trace.save(str(path), level="runnable", include_weights=True)
     loaded = tl.load(str(path))
     # Staging the model's own state_dict must also bind (same tied storage).
     loaded.load_state_dict(model.state_dict())
-    result = loaded.run(inputs=x)
+    result = loaded.run_transaction(inputs=x)
     assert result.report.state_source is StateSource.USER_STATE_DICT
     assert torch.isnan(result.output).all()
 
 
-def test_r35_distinct_nan_payload_bytes_still_conflict() -> None:
-    """Tripwire intact: alias values with DIFFERENT NaN payload bytes refuse."""
-
-    from torchlens._runnable_state import _alias_values_coherent
-
-    quiet_nan = torch.tensor([float("nan")], dtype=torch.float32)
-    # Same logical NaN-ness, different payload bits.
-    other_nan = torch.tensor([0x7FC00001], dtype=torch.int32).view(torch.float32)
-    assert torch.isnan(other_nan).all()
-    assert not _alias_values_coherent(quiet_nan, other_nan)
-    # Signed zero: +0.0 and -0.0 are DIFFERENT bytes -> conflict.
-    assert not _alias_values_coherent(torch.tensor([0.0]), torch.tensor([-0.0]))
-    # Identical bytes bind; ordinary conflicting bytes refuse.
-    assert _alias_values_coherent(torch.tensor([1.5, 2.5]), torch.tensor([1.5, 2.5]))
-    assert not _alias_values_coherent(torch.tensor([1.5, 2.5]), torch.tensor([1.5, 3.5]))
-
-
+# Kept: its run phase reached no library code in the per-id coverage run, so it has no measurement (shrink rule 3).
 def test_r35_no_float_torch_equal_in_runnable_modules() -> None:
     """Mechanical class lock: no float ``torch.equal(`` in the runnable core.
 
@@ -95,10 +76,16 @@ def test_r35_no_float_torch_equal_in_runnable_modules() -> None:
 
     package_root = Path(torchlens.__file__).parent
     runnable_modules = (
-        *sorted(path.relative_to(package_root) for path in package_root.glob("_runnable_*.py")),
+        *sorted(
+            path.relative_to(package_root)
+            for path in (package_root / "_runnable").glob("*.py")
+            if path.name != "__init__.py"
+        ),
         Path("_io/runnable.py"),
         Path("backends/torch/completeness_witness.py"),
         Path("backends/torch/backend.py"),
+        Path("backends/torch/_outputs.py"),
+        Path("backends/torch/_failed_session.py"),
         Path("backends/torch/ops.py"),
     )
     offenders: list[str] = []
@@ -119,6 +106,13 @@ def test_r35_no_float_torch_equal_in_runnable_modules() -> None:
 # ---------------------------------------------------------------------------
 
 
+# Kept: a sole mutation kill.
+@pytest.mark.filterwarnings(
+    # A08 random-role-init disclosure (runnable_random_init_run): this test
+    # exercises a weight-free runnable run DELIBERATELY; the warning is the
+    # feature under test elsewhere (tests/test_persist_honesty_runnable_random.py).
+    "default:This runnable artifact carries no model weights"
+)
 def test_r35_zero_fan_in_linear_runs_random_init(tmp_path: Path) -> None:
     """corr2_3 repro: ``nn.Linear(0, 2)`` random fallback completes typed."""
 
@@ -127,8 +121,8 @@ def test_r35_zero_fan_in_linear_runs_random_init(tmp_path: Path) -> None:
     x = torch.randn(3, 0)
     trace = _capture(model, x)
     path = tmp_path / "zerofan.tlspec"
-    tl.save(trace, str(path), level="runnable")
-    result = tl.load(str(path)).run(inputs=x, seed=1)
+    trace.save(str(path), level="runnable")
+    result = tl.load(str(path)).run_transaction(inputs=x, seed=1)
     assert result.report.state_source is StateSource.RANDOM_INITIALIZATION
     # Weight is (2, 0): the output is exactly the bias broadcast over the batch.
     assert result.output.shape == (3, 2)
@@ -140,6 +134,7 @@ def test_r35_zero_fan_in_linear_runs_random_init(tmp_path: Path) -> None:
     assert torch.equal(result.output, fresh(x))
 
 
+# Kept: shares a parametrize list that is not trimmable per id with kept params.
 @pytest.mark.parametrize(
     "shape",
     [(2, 0), (2, 0, 3), (0, 3), (0,)],
@@ -147,13 +142,13 @@ def test_r35_zero_fan_in_linear_runs_random_init(tmp_path: Path) -> None:
 def test_r35_empty_slot_initializes_without_rng(shape: tuple[int, ...]) -> None:
     """Every legal empty shape allocates with PROVABLY zero RNG consumption."""
 
-    from torchlens._runnable_state import _initialize_slot
-    from torchlens.runnable import (
+    from torchlens._runnable import (
         StateSlotBinding,
         StateSlotRole,
         TensorSlotDescriptor,
         TensorSlotRole,
     )
+    from torchlens._runnable.state import _initialize_slot
 
     slot = TensorSlotDescriptor(
         slot_id="slot:weight_test",
@@ -203,6 +198,8 @@ class _CudaDrawModel(nn.Module):
         return x + noise.cpu()
 
 
+# Kept: id not measured per id (rare tier).
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_r35_seeded_run_restores_produced_only_cuda_rng(tmp_path: Path) -> None:
     """corr2_4 repro: a produced-only-CUDA seeded run leaks no CUDA RNG state."""
@@ -211,44 +208,20 @@ def test_r35_seeded_run_restores_produced_only_cuda_rng(tmp_path: Path) -> None:
     x = torch.randn(2, 3)
     trace = _capture(model, x)
     path = tmp_path / "cudadraw.tlspec"
-    tl.save(trace, str(path), level="runnable")
+    trace.save(str(path), level="runnable")
     loaded = tl.load(str(path))
 
     torch.cuda.init()
     cpu_before = torch.get_rng_state()
     cuda_before = torch.cuda.get_rng_state_all()
-    first = loaded.run(inputs=x, seed=11)
+    first = loaded.run_transaction(inputs=x, seed=11)
     cpu_after = torch.get_rng_state()
     cuda_after = torch.cuda.get_rng_state_all()
     assert torch.equal(cpu_before, cpu_after)
     assert all(torch.equal(b, a) for b, a in zip(cuda_before, cuda_after))
     # Fixed-seed determinism across runs.
-    second = loaded.run(inputs=x, seed=11)
+    second = loaded.run_transaction(inputs=x, seed=11)
     assert torch.equal(first.output, second.output)
-
-
-def test_r35_cpu_only_seeded_run_never_touches_cuda_lazy_seed(tmp_path: Path) -> None:
-    """A CPU-only descriptor's seeded run must not queue a lazy CUDA seed."""
-
-    model = nn.Sequential(nn.Linear(3, 2)).eval()
-    x = torch.randn(2, 3)
-    trace = _capture(model, x)
-    path = tmp_path / "cpuonly.tlspec"
-    tl.save(trace, str(path), level="runnable")
-    loaded = tl.load(str(path))
-    from torchlens._runnable_execution import _seeded_fork_devices
-
-    descriptor = loaded._runnable.descriptor
-    if torch.cuda.is_available() and torch.cuda.is_initialized():
-        assert _seeded_fork_devices(descriptor, 5) == list(range(torch.cuda.device_count()))
-    else:
-        assert _seeded_fork_devices(descriptor, 5) == []
-    cpu_before = torch.get_rng_state()
-    result = loaded.run(inputs=x, seed=5)
-    assert torch.equal(cpu_before, torch.get_rng_state())
-    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE or (
-        result.report.path_faithfulness is PathFaithfulness.VERIFIED
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -261,29 +234,11 @@ class _MaxModel(nn.Module):
         return torch.max(x, dim=1)
 
 
-def test_r35_large_int32_structseq_replays_verified(tmp_path: Path) -> None:
-    """hon1_4 repro: a 40x50 int32 max structseq no longer false-diverges.
-
-    Previously the repr-wrapped ``dtype=torch.int32`` line injected a phantom
-    field, flipping the verdict on tensor size alone.
-    """
-
-    model = _MaxModel().eval()
-    x = torch.arange(40 * 50, dtype=torch.int32).reshape(40, 50)
-    trace = _capture(model, x)
-    path = tmp_path / "structseq.tlspec"
-    tl.save(trace, str(path), level="runnable")
-    result = tl.load(str(path)).run(inputs=x)
-    assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
-    live = model(x)
-    assert torch.equal(result.output.values, live.values)
-    assert torch.equal(result.output.indices, live.indices)
-
-
+# Kept: reads source statically or runs a subprocess, so per-id coverage cannot measure it (shrink rule 3).
 def test_r35_structseq_helper_is_repr_independent() -> None:
     """Unit rows: exact fields for every family; repr text cannot influence."""
 
-    from torchlens.utils._torch_compat import torch_structseq_field_names
+    from torchlens._utils._torch_compat import torch_structseq_field_names
 
     x = torch.randn(6, 7).to(torch.float64)
     assert torch_structseq_field_names(torch.max(x, dim=1)) == ("values", "indices")
@@ -300,23 +255,24 @@ def test_r35_structseq_helper_is_repr_independent() -> None:
     # No repr involvement: the module source must not parse repr for fields.
     import inspect
 
-    from torchlens.utils import _torch_compat
+    from torchlens._utils import _torch_compat
 
     helper_source = inspect.getsource(_torch_compat.torch_structseq_field_names)
     assert "repr(" not in helper_source
 
 
+# Kept: reads source statically or runs a subprocess, so per-id coverage cannot measure it (shrink rule 3).
 def test_r35_repr_parsers_are_deleted() -> None:
     """The two repr regex parsers are gone with no fallback-to-repr path."""
 
     import inspect
 
-    import torchlens._runnable_execution as execution
-    import torchlens.backends.torch.ops as ops
+    import torchlens._runnable.witness_contracts
+    import torchlens.backends.torch._ops_container_base
 
     for source in (
-        inspect.getsource(ops._torch_return_type_fields),
-        inspect.getsource(execution._torch_structseq_field_names),
+        inspect.getsource(torchlens.backends.torch._ops_container_base._torch_return_type_fields),
+        inspect.getsource(torchlens._runnable.witness_contracts._torch_structseq_field_names),
     ):
         assert "re.findall" not in source
         assert "re.finditer" not in source

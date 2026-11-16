@@ -5,10 +5,27 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any, Generic, TypeVar
 
+from ..._errors import AmbiguousOpLookupError
+from ..._utils._display_errors import lookup_message
 from ._base import Super
 
 T = TypeVar("T")
 S = TypeVar("S", bound=Super[Any])
+
+
+def member_lookup(accessor: Any, label: str) -> Any:
+    """Resolve ``label`` through one member's typed door; ``None`` when absent.
+
+    An ambiguity refusal (``AmbiguousOpLookupError``) propagates: the bundle
+    answers with the member's remedy instead of a bare "not found".
+    """
+
+    try:
+        return accessor[label]
+    except AmbiguousOpLookupError:
+        raise
+    except (KeyError, ValueError):
+        return None
 
 
 class SuperAccessor(Generic[T, S]):
@@ -59,8 +76,13 @@ class SuperAccessor(Generic[T, S]):
 
         suggestions = self._suggest(label)
         if suggestions:
-            suggestion_str = ", ".join(repr(item) for item in suggestions)
-            raise KeyError(f"Label {label!r} not found. Did you mean {suggestion_str}?")
+            raise KeyError(
+                lookup_message(
+                    f"Label {label!r} not found.",
+                    suggestions,
+                    "pass a label from this accessor.",
+                )
+            )
         raise KeyError(f"Label {label!r} not found.")
 
     def __contains__(self, label: object) -> bool:
@@ -186,3 +208,23 @@ class SuperAccessor(Generic[T, S]):
         preview = keys[:5]
         suffix = "..." if len(keys) > 5 else ""
         return f"{type(self).__name__} with {len(keys)} labels: {preview}{suffix}"
+
+
+class SharedNamesMixin:
+    """Add ``shared`` and ``divergent`` name lists to a per-kind Bundle accessor."""
+
+    #: Bundle kind whose names this accessor lists (``ops``, ``layers``, ...).
+    _names_kind: str
+    _bundle: Any
+
+    @property
+    def shared(self) -> list[str]:
+        """Return the names present in every Bundle member, ordered by the first member."""
+
+        return list(self._bundle._kind_names(self._names_kind, shared=True))
+
+    @property
+    def divergent(self) -> list[str]:
+        """Return the names present in some but not all Bundle members."""
+
+        return list(self._bundle._kind_names(self._names_kind, shared=False))

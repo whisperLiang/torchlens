@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections import OrderedDict
 from collections.abc import Callable
@@ -12,23 +13,24 @@ from typing import Any, cast
 import pytest
 
 import torchlens as tl
-from torchlens.backends import BackendUnsupportedError
+from torchlens._data_classes._compaction import _COMPACTED_TRACES
+from torchlens._postprocess.graph_traversal import _remove_orphan_nodes
+from torchlens._record_type import record_type
+from torchlens._validation_status import (
+    REGION_REPLAY_CLASS,
+    REGION_REPLAY_CLASS_KEY,
+    REGION_REPLAY_IMPORTER_PROVENANCE,
+    REGION_REPLAY_PROVENANCE_KEY,
+    ValidationStatus,
+)
 from torchlens.backends.jax.backend import (
     _control_parent_labels,
     _data_parent_arg_positions,
     _data_parent_labels,
 )
-from torchlens.data_classes._compaction import _COMPACTED_TRACES
-from torchlens.intervention.types import EdgeUseRecord
-from torchlens.postprocess.graph_traversal import _remove_orphan_nodes
-from torchlens.validation.invariants import MetadataInvariantError
-from torchlens.validation.status import (
-    REGION_REPLAY_CLASS,
-    REGION_REPLAY_CLASS_KEY,
-    REGION_REPLAY_IMPORTER_PROVENANCE,
-    REGION_REPLAY_PROVENANCE_KEY,
-    ValidationReplayStatus,
-)
+from torchlens.errors import BackendUnsupportedError
+from torchlens.intervention._types import EdgeUseRecord
+from torchlens.validation._invariants import MetadataInvariantError
 
 jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
@@ -36,7 +38,7 @@ lax = pytest.importorskip("jax.lax")
 random = pytest.importorskip("jax.random")
 
 
-pytestmark = pytest.mark.backend_jax
+pytestmark = [pytest.mark.backend_jax, pytest.mark.rare]
 
 
 def _mlp(params: dict[str, Any], x: Any) -> Any:
@@ -467,10 +469,11 @@ def _path_token(component: object) -> tuple[str, object]:
         Component type name and stored key/index value.
     """
 
-    if hasattr(component, "key"):
-        return (type(component).__name__, getattr(component, "key"))
-    if hasattr(component, "index"):
-        return (type(component).__name__, getattr(component, "index"))
+    if dataclasses.is_dataclass(component) and not isinstance(component, type):
+        # Path components are single-field dataclasses (v11 keeps DictKey._key and
+        # NamedField._name private), so read the one stored field by its declared name.
+        (stored,) = dataclasses.fields(component)
+        return (type(component).__name__, getattr(component, stored.name))
     return (type(component).__name__, component)
 
 
@@ -491,6 +494,9 @@ def _path_tokens(path: tuple[object, ...]) -> tuple[tuple[str, object], ...]:
     return tuple(_path_token(component) for component in path)
 
 
+_CAPTURE_OPTIONS_FIELD_NAMES = frozenset(tl.options.CaptureOptions().as_dict())
+
+
 def _trace_jax(model: Callable[..., Any], args: tuple[Any, ...], **kwargs: Any) -> Any:
     """Trace a JAX callable through the public API.
 
@@ -501,7 +507,13 @@ def _trace_jax(model: Callable[..., Any], args: tuple[Any, ...], **kwargs: Any) 
     args
         Public positional input tuple.
     **kwargs
-        Additional public trace keyword arguments.
+        Additional public trace keyword arguments. Any name that is a
+        ``CaptureOptions`` field (``jax_control_flow``,
+        ``jax_max_control_flow_unroll``, ...) is routed through
+        ``capture=CaptureOptions(...)`` -- the sprint removed every such flat
+        kwarg from ``trace()``'s own signature, so passing one directly lands
+        in ``**forward_kwargs`` and raises an unrelated "keyword(s) it does
+        not route" error instead of exercising the backend option it names.
 
     Returns
     -------
@@ -509,6 +521,12 @@ def _trace_jax(model: Callable[..., Any], args: tuple[Any, ...], **kwargs: Any) 
         Captured JAX trace.
     """
 
+    capture_kwargs = {
+        name: kwargs.pop(name) for name in list(kwargs) if name in _CAPTURE_OPTIONS_FIELD_NAMES
+    }
+    if capture_kwargs:
+        assert "capture" not in kwargs, "combine capture= and flat capture kwargs by hand"
+        kwargs["capture"] = tl.options.CaptureOptions(**capture_kwargs)
     return tl.trace(cast(Any, model), args, backend="jax", **kwargs)
 
 
@@ -528,7 +546,7 @@ def _jax_equation_op(trace: Any, primitive: str) -> Any:
         Matching TorchLens op.
     """
 
-    for op in trace.layer_list:
+    for op in trace._layer_list:
         if op.func_name == primitive and "jax_source_path" in op.annotations:
             return op
     raise AssertionError(f"missing JAX primitive op: {primitive}")
@@ -552,7 +570,7 @@ def _jax_region_ops(trace: Any, primitive: str | None = None) -> list[Any]:
 
     return [
         op
-        for op in trace.layer_list
+        for op in trace._layer_list
         if op.annotations.get("jax_capture_kind") in {"region", "region_output"}
         and (primitive is None or op.annotations.get("jax_region_primitive") == primitive)
     ]
@@ -606,17 +624,17 @@ def test_jax_trace_captures_equation_ops_and_params() -> None:
 
     trace = _trace_jax(_mlp, (params, x))
 
-    assert trace.backend == "jax"
-    assert trace.module_identity_mode == "function_root"
-    assert trace.param_source == "pytree-derived"
+    assert trace.provenance.backend == "jax"
+    assert trace.options.module_identity_mode == "function_root"
+    assert trace.provenance.param_source == "pytree-derived"
     assert trace.modules["self"].address == "self"
     assert set(trace.params.keys()) == {"w1", "b1", "w2"}
     assert trace.params["w1"].backend_address == "pytree:w1"
     assert trace.params["w1"].resolver_status == "metadata_only"
-    primitive_names = [op.func_name for op in trace.layer_list]
+    primitive_names = [op.func_name for op in trace._layer_list]
     assert "dot_general" in primitive_names
     assert "tanh" in primitive_names
-    assert all(op.has_saved_activation for op in trace.layer_list)
+    assert all(op.has_saved_activation for op in trace._layer_list)
     assert trace in _COMPACTED_TRACES
     assert trace.validate_forward_pass([])
 
@@ -632,7 +650,7 @@ def test_jax_function_root_attributes_params_to_consuming_ops() -> None:
     that annotation, so ``uses_params``/``used_by_ops``/``used_by_layers``
     all pointed at the input-echo ``input`` op instead of the real
     ``dot_general``/``broadcast_in_dim`` consumer, and
-    ``trace.num_layers_with_params`` stayed 0 (confirmed by reverting the
+    ``trace._num_layers_with_params`` stayed 0 (confirmed by reverting the
     fix and re-running this exact scenario). Now params are attached to the
     op whose graph ``parents`` include the param's source label -- i.e. the
     op that actually took the param value as a computational operand.
@@ -643,12 +661,12 @@ def test_jax_function_root_attributes_params_to_consuming_ops() -> None:
 
     trace = _trace_jax(_mlp, (params, x))
 
-    assert trace.module_identity_mode == "function_root"
+    assert trace.options.module_identity_mode == "function_root"
     # 3 distinct layers genuinely use a param: the two matmuls (w1, w2) and
     # the bias broadcast (b1).
-    assert trace.num_layers_with_params == 3
+    assert trace._num_layers_with_params == 3
 
-    param_using_ops = {op.label: op for op in trace.layer_list if op.uses_params}
+    param_using_ops = {op.label: op for op in trace._layer_list if op.has_params}
     assert param_using_ops
     # No bare input-echo op should be reported as "using" a param -- params
     # are consumed downstream, not at the point they enter the trace.
@@ -680,7 +698,7 @@ def test_jax_trace_preserves_nested_param_paths() -> None:
 
     assert set(trace.params.keys()) == {"encoder.w", "encoder.b", "head.w"}
     assert trace.params["encoder.w"].backend_address == "pytree:encoder.w"
-    assert trace.param_source == "pytree-derived"
+    assert trace.provenance.param_source == "pytree-derived"
 
 
 def test_jax_trace_preserves_output_pytree_paths() -> None:
@@ -722,8 +740,8 @@ def test_jax_trace_accepts_declared_static_argnums() -> None:
         jax_static_argnums=2,
     )
 
-    assert trace.jax_static_argnums == (2,)
-    assert "mul" in {op.func_name for op in trace.layer_list}
+    assert trace.options.jax_static_argnums == (2,)
+    assert "mul" in {op.func_name for op in trace._layer_list}
     assert trace.validate_forward_pass([])
 
 
@@ -735,9 +753,9 @@ def test_jax_trace_inlines_allowlisted_pure_library_calls() -> None:
 
     trace = _trace_jax(_relu_block, (params, x))
 
-    assert "custom_jvp_call" in trace.jax_inlined_call_primitives
+    assert "custom_jvp_call" in trace.provenance.jax_inlined_call_primitives
     assert any(capture.inlined for capture in trace.jax_equation_captures)
-    assert "max" in {op.func_name for op in trace.layer_list}
+    assert "max" in {op.func_name for op in trace._layer_list}
     assert trace.validate_forward_pass([])
 
 
@@ -756,9 +774,9 @@ def test_jax_trace_inlines_non_allowlisted_jit_call() -> None:
         return user_dense(params, x) * 2.0
 
     trace = _trace_jax(model, (_params(), jnp.ones((2, 3), dtype=jnp.float32)))
-    inlined_ops = [op for op in trace.layer_list if op.annotations.get("jax_inlined") is True]
+    inlined_ops = [op for op in trace._layer_list if op.annotations.get("jax_inlined") is True]
 
-    assert "jit" in trace.jax_inlined_call_primitives
+    assert "jit" in trace.provenance.jax_inlined_call_primitives
     assert "dot_general" in {op.func_name for op in inlined_ops}
     assert "add" in {op.func_name for op in inlined_ops}
     assert trace.validate_forward_pass([]) is True
@@ -790,16 +808,16 @@ def test_jax_trace_inlines_jitted_scan_and_unrolls_body() -> None:
     )
     body_adds = [
         op
-        for op in trace.layer_list
+        for op in trace._layer_list
         if op.func_name == "add"
         and op.annotations.get("jax_inlined") is True
         and ":jit/" in op.annotations.get("jax_source_path", "")
         and "/body/" in op.annotations.get("jax_source_path", "")
     ]
 
-    assert "jit" in trace.jax_inlined_call_primitives
+    assert "jit" in trace.provenance.jax_inlined_call_primitives
     assert len(body_adds) == 4
-    assert any(op.annotations.get("jax_capture_kind") == "scan_stack" for op in trace.layer_list)
+    assert any(op.annotations.get("jax_capture_kind") == "scan_stack" for op in trace._layer_list)
     assert trace.validate_forward_pass([]) is True
 
 
@@ -818,18 +836,18 @@ def test_jax_repeated_op_block_groups_into_passes() -> None:
         repeated_block,
         (None, jnp.ones((2, 3), dtype=jnp.float32)),
     )
-    add_ops = [op for op in trace.layer_list if op.func_name == "add"]
-    mul_ops = [op for op in trace.layer_list if op.func_name == "mul"]
+    add_ops = [op for op in trace._layer_list if op.func_name == "add"]
+    mul_ops = [op for op in trace._layer_list if op.func_name == "mul"]
 
-    assert [op.pass_index for op in add_ops] == [1, 2]
-    assert [op.pass_index for op in mul_ops] == [1, 2]
+    assert [op.pass_number for op in add_ops] == [1, 2]
+    assert [op.pass_number for op in mul_ops] == [1, 2]
     assert {op.layer_label for op in add_ops} == {add_ops[0].layer_label}
     assert {op.layer_label for op in mul_ops} == {mul_ops[0].layer_label}
     assert all(op.num_passes == 2 for op in (*add_ops, *mul_ops))
-    assert add_ops[0].recurrent_ops == tuple(op.label for op in add_ops)
-    assert mul_ops[0].recurrent_ops == tuple(op.label for op in mul_ops)
-    assert trace.layer_num_calls[add_ops[0].layer_label] == 2
-    assert trace.layer_num_calls[mul_ops[0].layer_label] == 2
+    assert add_ops[0].graph.recurrent_ops == tuple(op.label for op in add_ops)
+    assert mul_ops[0].graph.recurrent_ops == tuple(op.label for op in mul_ops)
+    assert trace._layer_num_calls[add_ops[0].layer_label] == 2
+    assert trace._layer_num_calls[mul_ops[0].layer_label] == 2
     assert trace.validate_forward_pass([])
 
 
@@ -875,9 +893,9 @@ def test_jax_validation_fails_when_parent_edge_is_rewired_wrong() -> None:
         ),
     )
     add_op = _jax_equation_op(trace, "add")
-    wrong_parent = add_op.parent_arg_positions["args"][0]
+    wrong_parent = add_op.call.parent_arg_positions["args"][0]
 
-    add_op.parent_arg_positions["args"][1] = wrong_parent
+    add_op.call.parent_arg_positions["args"][1] = wrong_parent
     add_op.parents = [wrong_parent]
 
     assert trace.validate_forward_pass([], validate_metadata=False) is False
@@ -917,7 +935,7 @@ def test_jax_synthetic_control_parent_is_not_a_value_replay_parent() -> None:
     )
     add_op = _jax_equation_op(trace, "add")
     mul_op = _jax_equation_op(trace, "mul")
-    control_parent = next(op for op in trace.layer_list if op.is_input)
+    control_parent = next(op for op in trace._layer_list if op.is_input)
 
     mul_op.parents = tuple(mul_op.parents) + (control_parent._label_raw,)
     control_parent.children = tuple(control_parent.children) + (mul_op._label_raw,)
@@ -931,8 +949,8 @@ def test_jax_synthetic_control_parent_is_not_a_value_replay_parent() -> None:
                 arg_kind="positional",
                 arg_path=(),
                 view_or_copy="unknown",
-                parent_func_call_id=control_parent.func_call_id,
-                child_func_call_id=cast(int, mul_op.func_call_id),
+                parent_func_call_id=control_parent.call.call_id,
+                child_func_call_id=cast(int, mul_op.call.call_id),
                 edge_use="control",
             ),
         ],
@@ -940,7 +958,11 @@ def test_jax_synthetic_control_parent_is_not_a_value_replay_parent() -> None:
 
     assert control_parent._label_raw in _control_parent_labels(mul_op)
     assert control_parent._label_raw not in _data_parent_labels(mul_op)
-    assert _data_parent_arg_positions(mul_op) == {0: add_op.label, 1: add_op.label}
+    # Torch parity: parent_arg_positions resolves through the CONDITIONAL
+    # label map (bare layer_label for a single-pass referenced op, like this
+    # add; pass-qualified only for a multi-pass one), matching parents/
+    # children and `postprocess/labeling.py`'s own arg-location rename.
+    assert _data_parent_arg_positions(mul_op) == {0: add_op.layer_label, 1: add_op.layer_label}
     assert trace.validate_forward_pass([], validate_metadata=False)
 
 
@@ -959,7 +981,7 @@ def test_synthetic_control_parent_is_retained_by_orphan_pruning() -> None:
                 The raw graph fields are populated in place.
             """
 
-            from torchlens.ir.workspaces import (
+            from torchlens._ir.workspaces import (
                 ModuleCaptureWorkspace,
                 RawGraphWorkspace,
                 WrapperRuntimeWorkspace,
@@ -974,15 +996,16 @@ def test_synthetic_control_parent_is_retained_by_orphan_pruning() -> None:
             orphan = _fake_raw_node("orphan")
             decision.children.append("child")
             self._raw_graph_ws.raw_layer_labels_list = ["decision", "child", "output", "orphan"]
-            self.internal_sink_ops = []
-            self.internally_terminated_bool_ops = []
             self._raw_graph_ws.raw_layer_dict = OrderedDict(
                 (node._label_raw, node) for node in (decision, child, output, orphan)
             )
             self.input_layers: list[str] = []
             self.output_layers = ["output"]
             self.buffer_layers: list[str] = []
-            self.keep_orphans = False
+            self.internal_sink_ops: list[str] = []
+            self.internally_terminated_bool_ops: list[str] = []
+            self._options_keep_orphans = False
+            self.is_stopped = False
             self._orphan_labels: list[str] = []
 
         def _batch_remove_log_entries(
@@ -1031,18 +1054,18 @@ def test_jax_validation_reports_synthetic_importer_region_as_unverified() -> Non
 
     trace = _trace_jax(_mlp, (_params(), jnp.ones((2, 3))))
     region_op = SimpleNamespace(layer_label="synthetic_region", annotations={})
-    trace.layer_list.append(region_op)
+    trace._layer_list.append(region_op)
     trace.annotations[REGION_REPLAY_PROVENANCE_KEY] = REGION_REPLAY_IMPORTER_PROVENANCE
     region_op.annotations[REGION_REPLAY_CLASS_KEY] = REGION_REPLAY_CLASS
     region_op.annotations[REGION_REPLAY_PROVENANCE_KEY] = REGION_REPLAY_IMPORTER_PROVENANCE
 
     result = trace.validate_forward_pass([], validate_metadata=False)
 
-    assert isinstance(result, ValidationReplayStatus)
+    assert isinstance(result, ValidationStatus)
     assert result.state == "unverified"
-    assert result.available is True
-    assert result.replayed_node_count > 0
-    assert result.unverified_node_count == 1
+    assert result.is_available is True
+    assert result.num_replayed_ops > 0
+    assert result.num_unverified_ops == 1
     with pytest.raises(TypeError, match="not a boolean"):
         bool(result)
 
@@ -1072,7 +1095,7 @@ def test_jax_scan_over_cap_imports_unverified_region() -> None:
     assert boundary_ops[0].annotations[REGION_REPLAY_CLASS_KEY] == REGION_REPLAY_CLASS
     assert boundary_ops[0].annotations["jax_region_reason"] == "scan_length_exceeds_unroll_cap"
     assert trace.validate_forward_pass([]).state == "unverified"
-    assert trace.validation_replay_status.unverified_node_count == 1
+    assert trace.validation_replay_status.num_unverified_ops == 1
 
 
 def test_jax_dynamic_while_over_cap_imports_unverified_region() -> None:
@@ -1096,12 +1119,12 @@ def test_jax_dynamic_while_over_cap_imports_unverified_region() -> None:
     region_ops = _jax_region_ops(trace, "while")
     replay_kinds = {
         op.annotations.get("jax_capture_kind")
-        for op in trace.layer_list
+        for op in trace._layer_list
         if "jax_capture_kind" in op.annotations
     }
 
-    assert len([op for op in region_ops if op.layer_type == "jax_region"]) == 1
-    assert len([op for op in region_ops if op.layer_type == "jax_region_out"]) == 2
+    assert len([op for op in region_ops if record_type(op) == "jax_region"]) == 1
+    assert len([op for op in region_ops if record_type(op) == "jax_region_out"]) == 2
     assert "while_decision" not in replay_kinds
     assert trace.validate_forward_pass([]).state == "unverified"
 
@@ -1139,8 +1162,8 @@ def test_jax_custom_vjp_forward_imports_unverified_region() -> None:
     )
     region_ops = _jax_region_ops(trace, "custom_vjp_call")
 
-    assert len([op for op in region_ops if op.layer_type == "jax_region"]) == 1
-    assert len([op for op in region_ops if op.layer_type == "jax_region_out"]) == 1
+    assert len([op for op in region_ops if record_type(op) == "jax_region"]) == 1
+    assert len([op for op in region_ops if record_type(op) == "jax_region_out"]) == 1
     assert trace.validate_forward_pass([]).state == "unverified"
 
 
@@ -1158,7 +1181,7 @@ def test_jax_region_boundary_corruption_is_caught() -> None:
         ({}, jnp.ones((5,), dtype=jnp.float32)),
         jax_max_control_flow_unroll=2,
     )
-    boundary = next(op for op in _jax_region_ops(trace, "scan") if op.layer_type == "jax_region")
+    boundary = next(op for op in _jax_region_ops(trace, "scan") if op.type == "jax_region")
     corrupted = (boundary.out[0] + 10.0, *boundary.out[1:])
     boundary._internal_set("out", corrupted)
 
@@ -1239,73 +1262,73 @@ def test_jax_region_summary_pandas_and_draw_work(tmp_path: Path) -> None:
         jax_max_control_flow_unroll=2,
     )
 
-    assert "jax_region" in trace.summary(show_ops=True)
-    assert len(trace.to_pandas()) == len(trace.layer_list)
+    assert "jax_region" in trace.summary(level="op")
+    assert len(trace.to_pandas()) == len(trace._layer_list)
     dot = trace.draw(
-        vis_outpath=str(tmp_path / "jax_region_graph"),
-        vis_save_only=True,
-        vis_fileformat="dot",
-    )
+        path=str(tmp_path / "jax_region_graph"),
+        file_format="dot",
+    ).dot
     assert "jax_region" in dot
 
 
-# The 14 real capture/validation cells cost 13.4s combined on the CPU baseline.
+# Measured 8.0 s wall / 8.6 s CPU on the GitHub jax preview leg (2026-10-03).
 @pytest.mark.heavy
-@pytest.mark.parametrize(
-    ("name", "fn", "args_factory", "expected_primitives"),
-    [
+def test_jax_trace_accepts_s0j_extended_corpus_subset() -> None:
+    """Representative S0.J corpus cases should capture through public JAX tracing."""
+
+    cases: tuple[tuple[str, Callable[..., Any], tuple[Any, ...], set[str]], ...] = (
         (
             "attention",
             _attention_block,
-            lambda: (_attention_params(), jnp.ones((2, 3, 4), dtype=jnp.float32)),
+            (_attention_params(), jnp.ones((2, 3, 4), dtype=jnp.float32)),
             {"dot_general", "div"},
         ),
         (
             "operator_heavy",
             _operator_heavy,
-            lambda: (None, jnp.linspace(1.0, 3.0, 6, dtype=jnp.float32).reshape(2, 3)),
+            (None, jnp.linspace(1.0, 3.0, 6, dtype=jnp.float32).reshape(2, 3)),
             {"add", "mul", "div", "max"},
         ),
         (
             "method_spellings",
             _method_spellings,
-            lambda: (None, jnp.arange(6, dtype=jnp.float32)),
+            (None, jnp.arange(6, dtype=jnp.float32)),
             {"reshape", "transpose", "reduce_sum"},
         ),
         (
             "reductions",
             _reductions,
-            lambda: (None, jnp.arange(6, dtype=jnp.float32).reshape(2, 3)),
+            (None, jnp.arange(6, dtype=jnp.float32).reshape(2, 3)),
             {"reduce_sum", "div"},
         ),
         (
             "broadcasting",
             _broadcasting,
-            lambda: (None, jnp.ones((2, 3), dtype=jnp.float32)),
+            (None, jnp.ones((2, 3), dtype=jnp.float32)),
             {"add"},
         ),
         (
             "slicing",
             _slicing,
-            lambda: (None, jnp.arange(8, dtype=jnp.float32).reshape(2, 4)),
+            (None, jnp.arange(8, dtype=jnp.float32).reshape(2, 4)),
             {"slice", "mul"},
         ),
         (
             "einsum",
             _einsum,
-            lambda: (None, jnp.arange(6, dtype=jnp.float32).reshape(2, 3)),
+            (None, jnp.arange(6, dtype=jnp.float32).reshape(2, 3)),
             {"dot_general"},
         ),
         (
             "dtype_cast",
             _dtype_cast,
-            lambda: (None, jnp.arange(4, dtype=jnp.int32)),
+            (None, jnp.arange(4, dtype=jnp.int32)),
             {"convert_element_type", "add"},
         ),
         (
             "depthwise_conv",
             _depthwise_conv,
-            lambda: (
+            (
                 {"kernel": jnp.ones((3, 3, 1, 2), dtype=jnp.float32) / 9.0},
                 jnp.ones((1, 4, 4, 2), dtype=jnp.float32),
             ),
@@ -1314,7 +1337,7 @@ def test_jax_region_summary_pandas_and_draw_work(tmp_path: Path) -> None:
         (
             "pointwise_conv_relu",
             _pointwise_relu,
-            lambda: (
+            (
                 {"kernel": jnp.ones((1, 1, 2, 3), dtype=jnp.float32) / 2.0},
                 jnp.ones((1, 4, 4, 2), dtype=jnp.float32),
             ),
@@ -1323,13 +1346,13 @@ def test_jax_region_summary_pandas_and_draw_work(tmp_path: Path) -> None:
         (
             "dropout_like_explicit_key",
             _dropout_like,
-            lambda: (None, random.key(42), jnp.ones((2, 3), dtype=jnp.float32)),
+            (None, random.key(42), jnp.ones((2, 3), dtype=jnp.float32)),
             {"random_bits", "lt", "select_n"},
         ),
         (
             "randint_index_explicit_key",
             _randint_index,
-            lambda: (
+            (
                 None,
                 random.PRNGKey(7),
                 jnp.arange(12, dtype=jnp.float32).reshape(4, 3),
@@ -1339,7 +1362,7 @@ def test_jax_region_summary_pandas_and_draw_work(tmp_path: Path) -> None:
         (
             "layer_norm",
             _layer_norm,
-            lambda: (
+            (
                 {"scale": jnp.ones((4,), dtype=jnp.float32), "bias": jnp.zeros((4,))},
                 jnp.arange(8, dtype=jnp.float32).reshape(2, 4),
             ),
@@ -1348,34 +1371,24 @@ def test_jax_region_summary_pandas_and_draw_work(tmp_path: Path) -> None:
         (
             "one_hot_take",
             _one_hot_take,
-            lambda: (
-                {"indices": jnp.asarray([0, 2, 1], dtype=jnp.int32)},
-                jnp.eye(4, dtype=jnp.float32),
-            ),
+            ({"indices": jnp.asarray([0, 2, 1], dtype=jnp.int32)}, jnp.eye(4, dtype=jnp.float32)),
             {"broadcast_in_dim", "eq", "dot_general"},
         ),
-    ],
-)
-def test_jax_trace_accepts_s0j_extended_corpus_subset(
-    name: str,
-    fn: Callable[..., Any],
-    args_factory: Callable[[], tuple[Any, ...]],
-    expected_primitives: set[str],
-) -> None:
-    """Representative S0.J corpus cases should capture through public JAX tracing."""
+    )
 
-    trace = _trace_jax(fn, args_factory())
-    primitive_names = {op.func_name for op in trace.layer_list}
+    for name, fn, args, expected_primitives in cases:
+        trace = _trace_jax(fn, args)
+        primitive_names = {op.func_name for op in trace._layer_list}
 
-    assert expected_primitives <= primitive_names, name
-    assert trace.validate_forward_pass([]), name
+        assert expected_primitives <= primitive_names, name
+        assert trace.validate_forward_pass([]), name
 
 
 def test_jax_trace_rejects_save_shaping_kwargs() -> None:
     """JAX preview should reject selective-save shaping."""
 
     with pytest.raises(BackendUnsupportedError, match="full-save only"):
-        _trace_jax(_mlp, (_params(), jnp.ones((2, 3))), layers_to_save=["tanh"])
+        _trace_jax(_mlp, (_params(), jnp.ones((2, 3))), save=["tanh"])
 
 
 def test_jax_static_label_save_filters_public_payloads(tmp_path: Path) -> None:
@@ -1387,16 +1400,16 @@ def test_jax_static_label_save_filters_public_payloads(tmp_path: Path) -> None:
         save=tl.func("dot_general"),
     )
     saved_ops = list(trace.saved_ops)
-    unsaved_ops = [op for op in trace.layer_list if not op.has_saved_activation]
+    unsaved_ops = [op for op in trace._layer_list if not op.has_saved_activation]
 
     assert saved_ops
     assert {op.func_name for op in saved_ops} == {"dot_general"}
     assert unsaved_ops
-    assert all(op.out is None and op.out_ref is None for op in unsaved_ops)
+    assert all(op.out is None and op._out_ref is None for op in unsaved_ops)
     assert all(op.shape is not None and op.dtype_ref is not None for op in unsaved_ops)
-    assert trace.num_saved_ops == len(saved_ops)
-    assert int(trace.saved_activation_memory) == sum(
-        int(op.activation_memory or 0) for op in saved_ops
+    assert len(trace.saved_ops) == len(saved_ops)
+    assert int(trace.cost.saved_activation_memory) == sum(
+        int(op.cost.activation_memory or 0) for op in saved_ops
     )
     assert trace.validate_forward_pass([]) is True
 
@@ -1406,13 +1419,44 @@ def test_jax_static_label_save_filters_public_payloads(tmp_path: Path) -> None:
     out_entries = [entry for entry in manifest["body_index"] if entry.get("intended_use") == "out"]
     loaded = tl.load(path)
 
-    assert len(out_entries) == trace.num_saved_ops
-    assert loaded.backend == "jax"
-    assert len(list(loaded.saved_ops)) == trace.num_saved_ops
-    assert [op.has_saved_activation for op in loaded.layer_list] == [
-        op.has_saved_activation for op in trace.layer_list
+    assert len(out_entries) == len(trace.saved_ops)
+    assert loaded.provenance.backend == "jax"
+    assert len(list(loaded.saved_ops)) == len(trace.saved_ops)
+    assert [op.has_saved_activation for op in loaded._layer_list] == [
+        op.has_saved_activation for op in trace._layer_list
     ]
     assert loaded.validation_replay_status.reason == "loaded_trace_runtime_capture_stripped"
+
+
+def test_jax_nested_param_pytree_saves_and_loads(tmp_path: Path) -> None:
+    """Function-root params from a nested pytree save; the address derives from the name.
+
+    Menagerie m19008 (3.0.1): a ``{"head": {"dense": {"bias": ...}}}`` params tree gave
+    each param ``name`` = the last path segment under the root module, so the format3
+    writer refused the address ``head.dense.bias`` as not derived from ``bias``.
+    """
+
+    params = {
+        "body": {"w": jnp.ones((3, 4)), "b": jnp.zeros((4,))},
+        "head": {"dense": {"w": jnp.ones((4, 2)), "b": jnp.zeros((2,))}},
+    }
+
+    def nested(tree: dict[str, Any], x: Any) -> Any:
+        """Return a two-layer output from a nested params tree."""
+
+        hidden = jnp.tanh(x @ tree["body"]["w"] + tree["body"]["b"])
+        return hidden @ tree["head"]["dense"]["w"] + tree["head"]["dense"]["b"]
+
+    trace = _trace_jax(nested, (params, jnp.ones((2, 3))))
+    for param in trace.params:
+        assert param.name == param.address
+
+    path = tmp_path / "jax_nested_params.tlspec"
+    trace.save(path, level="portable")
+    loaded = tl.load(path)
+
+    assert sorted(p.address for p in loaded.params) == sorted(p.address for p in trace.params)
+    assert "head.dense.b" in {p.address for p in loaded.params}
 
 
 def test_jax_capture_index_map_survives_recurrent_relabeling() -> None:
@@ -1436,7 +1480,7 @@ def test_jax_capture_index_map_survives_recurrent_relabeling() -> None:
     )
     assert all(index in capture_to_label for index in outvar_to_capture.values())
     assert all(key.startswith(f"{index}:") for key, index in outvar_to_capture.items())
-    assert [trace[label].pass_index for label in body_add_labels] == [1, 2, 3]
+    assert [trace[label].pass_number for label in body_add_labels] == [1, 2, 3]
     assert len({trace[label].layer_label for label in body_add_labels}) == 1
 
 
@@ -1499,14 +1543,14 @@ def test_jax_trace_unrolls_scan_and_groups_body_iterations() -> None:
         ),
     )
     scan_reads = [
-        op for op in trace.layer_list if op.annotations.get("jax_capture_kind") == "scan_read"
+        op for op in trace._layer_list if op.annotations.get("jax_capture_kind") == "scan_read"
     ]
     scan_stacks = [
-        op for op in trace.layer_list if op.annotations.get("jax_capture_kind") == "scan_stack"
+        op for op in trace._layer_list if op.annotations.get("jax_capture_kind") == "scan_stack"
     ]
     body_muls = [
         op
-        for op in trace.layer_list
+        for op in trace._layer_list
         if op.func_name == "mul" and "/body/" in op.annotations.get("jax_source_path", "")
     ]
 
@@ -1514,13 +1558,12 @@ def test_jax_trace_unrolls_scan_and_groups_body_iterations() -> None:
     assert len(scan_stacks) == 1
     assert len(body_muls) == 4
     assert {op.layer_label for op in body_muls} == {body_muls[0].layer_label}
-    assert [op.pass_index for op in body_muls] == [1, 2, 3, 4]
+    assert [op.pass_number for op in body_muls] == [1, 2, 3, 4]
     assert {op.num_passes for op in body_muls} == {4}
     assert trace.validate_forward_pass([]) is True
 
 
-@pytest.mark.parametrize("x64", [False, True])
-def test_jax_trace_keeps_two_scan_groups_separate(x64: bool) -> None:
+def test_jax_trace_keeps_two_scan_groups_separate() -> None:
     """Two scan sites with the same body primitive should not overgroup."""
 
     def two_scans(params: dict[str, Any], xs: Any) -> Any:
@@ -1536,25 +1579,21 @@ def test_jax_trace_keeps_two_scan_groups_separate(x64: bool) -> None:
         _carry_b, ys_b = lax.scan(body, params["carry1"], xs)
         return ys_a + ys_b
 
-    with jax.enable_x64(x64):
-        trace = _trace_jax(
-            two_scans,
-            (
-                {
-                    "carry0": jnp.asarray(0.0, dtype=jnp.float32),
-                    "carry1": jnp.asarray(10.0, dtype=jnp.float32),
-                },
-                jnp.arange(3, dtype=jnp.float32),
-            ),
-        )
+    trace = _trace_jax(
+        two_scans,
+        (
+            {"carry0": jnp.asarray(0.0), "carry1": jnp.asarray(10.0)},
+            jnp.arange(3, dtype=jnp.float32),
+        ),
+    )
     first_scan_adds = [
         op
-        for op in trace.layer_list
+        for op in trace._layer_list
         if op.func_name == "add" and "root/0:scan/" in op.annotations.get("jax_source_path", "")
     ]
     second_scan_adds = [
         op
-        for op in trace.layer_list
+        for op in trace._layer_list
         if op.func_name == "add" and "root/1:scan/" in op.annotations.get("jax_source_path", "")
     ]
 
@@ -1592,12 +1631,12 @@ def test_jax_trace_keeps_scan_body_primitive_separate_from_outside() -> None:
     )
     body_adds = [
         op
-        for op in trace.layer_list
+        for op in trace._layer_list
         if op.func_name == "add" and "/body/" in op.annotations.get("jax_source_path", "")
     ]
     outside_adds = [
         op
-        for op in trace.layer_list
+        for op in trace._layer_list
         if op.func_name == "add" and "/body/" not in op.annotations.get("jax_source_path", "")
     ]
 
@@ -1653,25 +1692,30 @@ def test_jax_trace_unrolls_cond_executed_branch_with_control_edge() -> None:
 
     trace = _trace_jax(uses_cond, (_params(), jnp.ones((2, 3), dtype=jnp.float32)))
     decisions = [
-        op for op in trace.layer_list if op.annotations.get("jax_capture_kind") == "cond_decision"
+        op for op in trace._layer_list if op.annotations.get("jax_capture_kind") == "cond_decision"
     ]
     branch_ops = [
-        op for op in trace.layer_list if "/branch=1/" in op.annotations.get("jax_source_path", "")
+        op for op in trace._layer_list if "/branch=1/" in op.annotations.get("jax_source_path", "")
     ]
     other_branch_ops = [
-        op for op in trace.layer_list if "/branch=0/" in op.annotations.get("jax_source_path", "")
+        op for op in trace._layer_list if "/branch=0/" in op.annotations.get("jax_source_path", "")
     ]
 
     assert len(decisions) == 1
     assert decisions[0].out.item() == 1
     assert branch_ops
     assert not other_branch_ops
-    assert {decisions[0].label} <= set().union(*(_control_parent_labels(op) for op in branch_ops))
+    # Torch parity: a control-parent reference resolves through the
+    # CONDITIONAL label map (bare ``layer_label`` for a single-pass
+    # referenced op, like this decision node; pass-qualified ``label`` only
+    # for a multi-pass one -- see dbfd72d51's identical fix).
+    assert {decisions[0].layer_label} <= set().union(
+        *(_control_parent_labels(op) for op in branch_ops)
+    )
     assert trace.validate_forward_pass([]) is True
 
 
-@pytest.mark.parametrize("x64", [False, True])
-def test_jax_trace_unrolls_while_and_groups_iterations(x64: bool) -> None:
+def test_jax_trace_unrolls_while_and_groups_iterations() -> None:
     """``lax.while_loop`` should unroll cond/body frames and group repeated body ops."""
 
     def uses_while(params: dict[str, Any], x: Any) -> Any:
@@ -1691,29 +1735,25 @@ def test_jax_trace_unrolls_while_and_groups_iterations(x64: bool) -> None:
 
         return lax.while_loop(condition, body, (jnp.asarray(0, dtype=jnp.int32), x))[1]
 
-    with jax.enable_x64(x64):
-        trace = _trace_jax(
-            uses_while,
-            (
-                {
-                    "limit": jnp.asarray(3, dtype=jnp.int32),
-                    "step": jnp.ones((2, 3), dtype=jnp.float32),
-                },
-                jnp.zeros((2, 3), dtype=jnp.float32),
-            ),
-        )
+    trace = _trace_jax(
+        uses_while,
+        (
+            {"limit": jnp.asarray(3, dtype=jnp.int32), "step": jnp.ones((2, 3))},
+            jnp.zeros((2, 3), dtype=jnp.float32),
+        ),
+    )
     decisions = [
-        op for op in trace.layer_list if op.annotations.get("jax_capture_kind") == "while_decision"
+        op for op in trace._layer_list if op.annotations.get("jax_capture_kind") == "while_decision"
     ]
     cond_ops = [
         op
-        for op in trace.layer_list
+        for op in trace._layer_list
         if ":while/iter=" in op.annotations.get("jax_source_path", "")
         and "/cond/" in op.annotations.get("jax_source_path", "")
     ]
     body_adds = [
         op
-        for op in trace.layer_list
+        for op in trace._layer_list
         if op.func_name == "add" and "/body/" in op.annotations.get("jax_source_path", "")
     ]
 
@@ -1723,7 +1763,11 @@ def test_jax_trace_unrolls_while_and_groups_iterations(x64: bool) -> None:
     assert len(cond_ops) >= 4
     assert body_adds
     assert any(op.num_passes == 3 for op in body_adds)
-    assert all(decisions[0].label in _control_parent_labels(op) for op in (*cond_ops, *body_adds))
+    # Torch parity: see the identical fix for
+    # test_jax_trace_unrolls_cond_executed_branch_with_control_edge.
+    assert all(
+        decisions[0].layer_label in _control_parent_labels(op) for op in (*cond_ops, *body_adds)
+    )
     assert trace.validate_forward_pass([]) is True
 
 
@@ -1752,10 +1796,10 @@ def test_jax_trace_while_zero_iteration_uses_initial_carry() -> None:
         ({"limit": jnp.asarray(0, dtype=jnp.int32)}, jnp.ones((2, 3), dtype=jnp.float32)),
     )
     decisions = [
-        op for op in trace.layer_list if op.annotations.get("jax_capture_kind") == "while_decision"
+        op for op in trace._layer_list if op.annotations.get("jax_capture_kind") == "while_decision"
     ]
     body_ops = [
-        op for op in trace.layer_list if "/body/" in op.annotations.get("jax_source_path", "")
+        op for op in trace._layer_list if "/body/" in op.annotations.get("jax_source_path", "")
     ]
 
     assert len(decisions) == 1
@@ -1801,8 +1845,8 @@ def test_jax_trace_while_max_unroll_region_fallback() -> None:
     assert trace.validate_forward_pass([]).state == "unverified"
 
 
-def test_jax_trace_rejects_hidden_consts() -> None:
-    """Hidden closure constants should be rejected as undeclared leaves."""
+def test_jax_trace_records_hidden_consts_as_constant_ops() -> None:
+    """Closure constants are recorded ``constant`` source ops (shared constants rule)."""
 
     hidden = jnp.ones((3, 3))
 
@@ -1812,5 +1856,119 @@ def test_jax_trace_rejects_hidden_consts() -> None:
         del params
         return x @ hidden
 
-    with pytest.raises(ValueError, match="closed-jaxpr constants"):
-        _trace_jax(uses_hidden, ({}, jnp.ones((2, 3))))
+    trace = _trace_jax(uses_hidden, ({}, jnp.ones((2, 3))))
+    constants = [op for op in trace._layer_list if op.func_name == "constant"]
+    assert len(constants) == 1
+    assert constants[0].out is not None
+    assert tuple(constants[0].parents or ()) == ()
+    dot = next(op for op in trace._layer_list if op.func_name == "dot_general")
+    assert constants[0].layer_label in dot.parents or constants[0].label in dot.parents
+    assert trace.validate_forward_pass([]) is True
+
+
+def test_jax_capture_options_does_not_reject_the_whole_object() -> None:
+    """N5: ``capture=CaptureOptions(...)`` must not raise "does not support: capture".
+
+    ``JAXBackend.capture_trace`` had no ``capture`` parameter, so the grouped
+    object fell into its ``**kwargs`` catch-all and tripped the generic
+    extra-kwarg rejection naming the whole option, regardless of which (if
+    any) field was actually unsupported.
+    """
+
+    trace = tl.trace(
+        cast(Any, _mlp),
+        (_params(), jnp.ones((2, 3))),
+        backend="jax",
+        capture=tl.options.CaptureOptions(keep_orphans=True),
+    )
+
+    assert trace.provenance.backend == "jax"
+    assert trace._num_ops > 0
+
+
+def _failed_reasons(trace: Any) -> set[str]:
+    """Return the reasons of every failed decision on the trace's replay status.
+
+    Parameters
+    ----------
+    trace
+        Validated JAX trace.
+
+    Returns
+    -------
+    set[str]
+        Closed-list reasons recorded with ``decision == "failed"``.
+    """
+
+    status = trace.validation_replay_status
+    return {
+        str(record["reason"])
+        for record in status.decisions
+        if record["decision"] == "failed" and record.get("reason") is not None
+    }
+
+
+def test_jax_validation_fails_when_saved_output_dtype_drifts_with_equal_values() -> None:
+    """A saved payload whose dtype drifted is a replay mismatch even when values agree."""
+
+    def plus_one(_: None, x: Any) -> Any:
+        """Return ``x + 1`` so every value is exact in a narrower float dtype."""
+
+        return x + 1.0
+
+    trace = _trace_jax(plus_one, (None, jnp.ones((2, 3), dtype=jnp.float32)))
+    add_op = _jax_equation_op(trace, "add")
+    narrowed = add_op.out.astype(jnp.float16)
+    assert bool(jnp.all(narrowed.astype(jnp.float32) == add_op.out))
+
+    add_op._internal_set("out", narrowed)
+
+    assert trace.validate_forward_pass([], validate_metadata=False) is False
+    assert "replay_mismatch" in _failed_reasons(trace)
+
+
+def test_jax_validation_fails_when_output_ignores_its_parent() -> None:
+    """An equation whose output does not depend on its graph parent fails perturbation."""
+
+    def vanishing(_: None, x: Any) -> Any:
+        """Return an output that is zero for every input (``x * 0.0`` is a proved annihilator)."""
+
+        return x - x
+
+    trace = _trace_jax(vanishing, (None, jnp.ones((2, 3), dtype=jnp.float32)))
+
+    assert trace.validate_forward_pass([], validate_metadata=False) is False
+    assert "perturbation_insensitive" in _failed_reasons(trace)
+
+
+def test_jax_validation_reports_capture_count_drift_as_inconsistent() -> None:
+    """Dropping one equation capture is named ``capture_inconsistent``, not a crash."""
+
+    trace = _trace_jax(_mlp, (_params(), jnp.ones((2, 3))))
+    captures = tuple(trace.jax_equation_captures)
+    assert len(captures) > 1
+    trace.jax_equation_captures = captures[:-1]
+
+    assert trace.validate_forward_pass([], validate_metadata=False) is False
+    assert "capture_inconsistent" in _failed_reasons(trace)
+    assert "metadata_invariant_exception" not in _failed_reasons(trace)
+
+
+def test_jax_validation_runs_metadata_invariants_before_replay() -> None:
+    """The validation entry runs the backend-neutral invariants before any replay.
+
+    A one-sided child edge is invisible to equation replay (which reads
+    parents only), so only the invariant pass can refuse this trace.
+    """
+
+    trace = _trace_jax(_mlp, (_params(), jnp.ones((2, 3))))
+    tanh_op = _jax_equation_op(trace, "tanh")
+    input_op = next(op for op in trace._layer_list if op.is_input)
+    assert input_op.layer_label not in tanh_op.children
+    tanh_op.children = (*tanh_op.children, input_op.layer_label)
+
+    assert trace.validate_forward_pass([]) is False
+    status = trace.validation_replay_status
+    assert status.state == "failed"
+    assert "MetadataInvariantError" in status.message
+    assert "metadata_invariant_exception" in _failed_reasons(trace)

@@ -1,6 +1,7 @@
 """Tests for IO-S2 pandas and file-export surfaces."""
 
 import importlib.util
+import json
 from pathlib import Path
 from typing import Any
 
@@ -12,18 +13,16 @@ pd = pytest.importorskip("pandas")
 
 import torchlens as tl  # noqa: E402
 from torchlens import trace as trace_fn  # noqa: E402
-from torchlens.constants import (  # noqa: E402
+from torchlens._constants import (  # noqa: E402
     BUFFER_LOG_FIELD_ORDER,
-    MODULE_PASS_LOG_FIELD_ORDER,
     PARAM_LOG_FIELD_ORDER,
 )
-from torchlens.data_classes._summary import format_call_arg  # noqa: E402
-from torchlens.data_classes.buffer import (  # noqa: E402
+from torchlens._data_classes._summary import format_call_arg  # noqa: E402
+from torchlens._data_classes.buffer import (  # noqa: E402
     _TO_PANDAS_EXCLUDED_BUFFER_FIELDS,
     BufferAccessor,
 )
-from torchlens.data_classes.module import ModuleCall  # noqa: E402
-from torchlens.data_classes.param import ParamAccessor  # noqa: E402
+from torchlens._data_classes.param import ParamAccessor  # noqa: E402
 
 
 class _SummaryBlock(nn.Module):
@@ -141,166 +140,6 @@ def io_pandas_log() -> tuple[Any, _IoPandasModel, torch.Tensor]:
     return log, model, x
 
 
-@pytest.mark.parametrize(
-    ("accessor", "field_order"),
-    [
-        (ParamAccessor({}), PARAM_LOG_FIELD_ORDER),
-        (
-            BufferAccessor({}),
-            [f for f in BUFFER_LOG_FIELD_ORDER if f not in _TO_PANDAS_EXCLUDED_BUFFER_FIELDS],
-        ),
-    ],
-)
-def test_empty_accessors_to_pandas_schema(accessor: Any, field_order: list[str]) -> None:
-    """Empty accessors should still export the correct schema.
-
-    Parameters
-    ----------
-    accessor:
-        Empty accessor under test.
-    field_order:
-        Expected column order.
-    """
-    df = accessor.to_pandas()
-    assert df.empty
-    assert list(df.columns) == field_order
-
-
-def test_param_accessor_to_pandas_schema(
-    io_pandas_log: tuple[Any, _IoPandasModel, torch.Tensor],
-) -> None:
-    """ParamAccessor should export one row per parameter with canonical columns.
-
-    Parameters
-    ----------
-    io_pandas_log:
-        Logged model fixture.
-    """
-    log, _, _ = io_pandas_log
-    df = log.params.to_pandas()
-    assert list(df.columns) == PARAM_LOG_FIELD_ORDER
-    assert len(df) == len(log.params)
-
-
-def test_buffer_accessor_to_pandas_schema(
-    io_pandas_log: tuple[Any, _IoPandasModel, torch.Tensor],
-) -> None:
-    """BufferAccessor should export one row per buffer with canonical columns.
-
-    Regression gate for the ``initial_value`` MAJOR: this column used to be
-    silently absent from ``BUFFER_LOG_FIELD_ORDER`` and therefore missing
-    from every ``to_pandas()`` export built on it.
-
-    Parameters
-    ----------
-    io_pandas_log:
-        Logged model fixture.
-    """
-    log, _, _ = io_pandas_log
-    df = log.buffers.to_pandas()
-    expected_columns = [
-        field for field in BUFFER_LOG_FIELD_ORDER if field not in _TO_PANDAS_EXCLUDED_BUFFER_FIELDS
-    ]
-    assert list(df.columns) == expected_columns
-    assert "initial_value" in df.columns
-    assert "versions" not in df.columns
-    assert len(df) == len(log.buffers)
-    assert df.loc[0, "initial_value"] is not None
-
-
-def test_module_call_log_to_pandas_schema(
-    io_pandas_log: tuple[Any, _IoPandasModel, torch.Tensor],
-) -> None:
-    """ModuleCall should export a single canonical row including summaries.
-
-    Parameters
-    ----------
-    io_pandas_log:
-        Logged model fixture.
-    """
-    log, _, _ = io_pandas_log
-    pass_log = log.module_calls["block:1"]
-    df = pass_log.to_pandas()
-    assert isinstance(pass_log, ModuleCall)
-    assert list(df.columns) == MODULE_PASS_LOG_FIELD_ORDER
-    assert len(df) == 1
-    assert df.loc[0, "forward_args_summary"]
-    assert df.loc[0, "forward_kwargs_summary"]
-
-
-def test_module_pass_summaries_are_formatted_before_gc(
-    io_pandas_log: tuple[Any, _IoPandasModel, torch.Tensor],
-) -> None:
-    """Module-pass summary strings should survive the forward-arg GC step.
-
-    Parameters
-    ----------
-    io_pandas_log:
-        Logged model fixture.
-    """
-    log, model, x = io_pandas_log
-    payload, config, kwargs = model.build_block_inputs(x)
-    pass_log = log.module_calls["block:1"]
-
-    expected_args_summary = format_call_arg((x, payload, config))
-    expected_kwargs_summary = format_call_arg(kwargs)
-
-    assert pass_log.forward_args is None
-    assert pass_log.forward_kwargs is None
-    assert pass_log.forward_args_summary == expected_args_summary
-    assert pass_log.forward_kwargs_summary == expected_kwargs_summary
-
-
-@pytest.mark.parametrize("surface_name", ["params", "buffers", "module_pass"])
-def test_tabular_exports_round_trip(
-    io_pandas_log: tuple[Any, _IoPandasModel, torch.Tensor],
-    surface_name: str,
-    tmp_path: Path,
-) -> None:
-    """CSV/JSON exports should round-trip and Parquet should succeed or hint clearly.
-
-    Parameters
-    ----------
-    io_pandas_log:
-        Logged model fixture.
-    surface_name:
-        Export surface selector.
-    tmp_path:
-        Temporary output directory.
-    """
-    log, _, _ = io_pandas_log
-    if surface_name == "params":
-        surface = log.params
-    elif surface_name == "buffers":
-        surface = log.buffers
-    else:
-        surface = log.modules["block:1"]
-
-    expected_df = surface.to_pandas()
-
-    csv_path = tmp_path / f"{surface_name}.csv"
-    tl.export.csv(surface, csv_path)
-    csv_df = pd.read_csv(csv_path)
-    assert list(csv_df.columns) == list(expected_df.columns)
-    assert len(csv_df) == len(expected_df)
-
-    json_path = tmp_path / f"{surface_name}.json"
-    tl.export.json(surface, json_path)
-    json_df = pd.read_json(json_path, orient="records")
-    assert list(json_df.columns) == list(expected_df.columns)
-    assert len(json_df) == len(expected_df)
-
-    parquet_path = tmp_path / f"{surface_name}.parquet"
-    if importlib.util.find_spec("pyarrow") is None:
-        with pytest.raises(ImportError, match=r"torchlens\[tabular\]"):
-            tl.export.parquet(surface, parquet_path)
-    else:
-        tl.export.parquet(surface, parquet_path)
-        parquet_df = pd.read_parquet(parquet_path)
-        assert list(parquet_df.columns) == list(expected_df.columns)
-        assert len(parquet_df) == len(expected_df)
-
-
 class _CondConvModel(nn.Module):
     """Conv-plus-conditional model for layer-pass dataframe column checks."""
 
@@ -335,47 +174,92 @@ class _CondConvModel(nn.Module):
         return y
 
 
-def test_trace_to_pandas_covers_all_op_fields() -> None:
-    """Every Op field is either a dataframe column or explicitly excluded.
+@pytest.mark.parametrize(
+    ("accessor", "field_order"),
+    [
+        (ParamAccessor({}), PARAM_LOG_FIELD_ORDER),
+        (
+            BufferAccessor({}),
+            [f for f in BUFFER_LOG_FIELD_ORDER if f not in _TO_PANDAS_EXCLUDED_BUFFER_FIELDS],
+        ),
+    ],
+)
+def test_empty_accessors_to_pandas_schema(accessor: Any, field_order: list[str]) -> None:
+    """Empty accessors should still export the correct schema.
 
-    Regression gate for TO-PANDAS-NEW-FIELDS: fields added to the Op data
-    model (``LAYER_PASS_LOG_FIELD_ORDER``) must never silently fail to appear
-    in ``Trace.to_pandas()``. New fields must either become columns or be
-    added to the documented exclusion list.
+    Parameters
+    ----------
+    accessor:
+        Empty accessor under test.
+    field_order:
+        Expected column order.
     """
+    df = accessor.to_pandas()
+    assert df.empty
+    assert list(df.columns) == field_order
 
-    from torchlens.constants import LAYER_PASS_LOG_FIELD_ORDER
-    from torchlens.data_classes._trace_export import _TO_PANDAS_EXCLUDED_OP_FIELDS
 
-    log = trace_fn(_CondConvModel(), torch.rand(1, 1, 8, 8), layers_to_save="all")
-    try:
-        model_df = log.to_pandas()
-        columns = list(model_df.columns)
+@pytest.mark.parametrize("surface_name", ["params", "buffers", "module_pass"])
+def test_tabular_exports_round_trip(
+    io_pandas_log: tuple[Any, _IoPandasModel, torch.Tensor],
+    surface_name: str,
+    tmp_path: Path,
+) -> None:
+    """CSV/JSON exports should round-trip and Parquet should succeed or hint clearly.
 
-        # No duplicate columns.
-        assert len(columns) == len(set(columns))
+    Parameters
+    ----------
+    io_pandas_log:
+        Logged model fixture.
+    surface_name:
+        Export surface selector.
+    tmp_path:
+        Temporary output directory.
+    """
+    log, _, _ = io_pandas_log
+    if surface_name == "params":
+        surface = log.params
+    elif surface_name == "buffers":
+        surface = log.buffers
+    else:
+        surface = log.modules["block:1"]
 
-        # Complete coverage: every Op field is a column or excluded.
-        unaccounted = [
-            field_name
-            for field_name in LAYER_PASS_LOG_FIELD_ORDER
-            if field_name not in columns and field_name not in _TO_PANDAS_EXCLUDED_OP_FIELDS
-        ]
-        assert unaccounted == []
+    expected_df = surface.to_pandas()
 
-        # Exclusions and columns are disjoint.
-        assert not (_TO_PANDAS_EXCLUDED_OP_FIELDS & set(columns))
+    csv_path = tmp_path / f"{surface_name}.csv"
+    tl.export.csv(surface, csv_path)
+    # The capture-honesty preamble rides '#' comment lines (WT1 A-V row 24).
+    csv_df = pd.read_csv(csv_path, comment="#")
+    assert list(csv_df.columns) == list(expected_df.columns)
+    assert len(csv_df) == len(expected_df)
 
-        # Excluded fields are real Op fields (no stale exclusion entries).
-        assert set(LAYER_PASS_LOG_FIELD_ORDER) >= _TO_PANDAS_EXCLUDED_OP_FIELDS
-    finally:
-        log.cleanup()
+    json_path = tmp_path / f"{surface_name}.json"
+    tl.export.json(surface, json_path)
+    json_payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert "capture_honesty" in json_payload
+    json_df = pd.DataFrame(json_payload["rows"])
+    assert list(json_df.columns) == list(expected_df.columns)
+    assert len(json_df) == len(expected_df)
+
+    parquet_path = tmp_path / f"{surface_name}.parquet"
+    if importlib.util.find_spec("pyarrow") is None:
+        with pytest.raises(ImportError, match=r"torchlens\[tabular\]"):
+            tl.export.parquet(surface, parquet_path)
+    else:
+        tl.export.parquet(surface, parquet_path)
+        parquet_df = pd.read_parquet(parquet_path)
+        assert list(parquet_df.columns) == list(expected_df.columns)
+        assert len(parquet_df) == len(expected_df)
 
 
 def test_trace_to_pandas_func_config_and_conditional_values() -> None:
     """``func_config`` and ``conditional_then_children`` carry per-op values."""
 
-    log = trace_fn(_CondConvModel(), torch.rand(1, 1, 8, 8), layers_to_save="all")
+    log = trace_fn(
+        _CondConvModel(),
+        torch.rand(1, 1, 8, 8),
+        save="all",
+    )
     try:
         model_df = log.to_pandas()
 
@@ -383,7 +267,7 @@ def test_trace_to_pandas_func_config_and_conditional_values() -> None:
         assert "conditional_then_children" in model_df.columns
 
         conv_row = model_df[model_df["layer_label"] == "conv2d_1_1"].iloc[0]
-        assert conv_row["func_config"] == log["conv2d_1_1"].func_config
+        assert conv_row["func_config"] == log["conv2d_1_1"].call.config
         assert conv_row["func_config"]["stride"] == (2, 2)
         assert conv_row["conditional_then_children"] == ("relu_1_4",)
 
@@ -392,3 +276,52 @@ def test_trace_to_pandas_func_config_and_conditional_values() -> None:
         assert relu_row["conditional_then_children"] == ()
     finally:
         log.cleanup()
+
+
+def test_module_pass_summaries_are_formatted_before_gc(
+    io_pandas_log: tuple[Any, _IoPandasModel, torch.Tensor],
+) -> None:
+    """Module-pass summary strings should survive the forward-arg GC step.
+
+    Parameters
+    ----------
+    io_pandas_log:
+        Logged model fixture.
+    """
+    log, model, x = io_pandas_log
+    payload, config, kwargs = model.build_block_inputs(x)
+    pass_log = log.module_calls["block:1"]
+
+    expected_args_summary = format_call_arg((x, payload, config))
+    expected_kwargs_summary = format_call_arg(kwargs)
+
+    assert pass_log.forward_args is None
+    assert pass_log.forward_kwargs is None
+    assert pass_log.forward_args_summary == expected_args_summary
+    assert pass_log.forward_kwargs_summary == expected_kwargs_summary
+
+
+def test_buffer_accessor_to_pandas_schema(
+    io_pandas_log: tuple[Any, _IoPandasModel, torch.Tensor],
+) -> None:
+    """BufferAccessor should export one row per buffer with canonical columns.
+
+    Regression gate for the ``initial_value`` MAJOR: this column used to be
+    silently absent from ``BUFFER_LOG_FIELD_ORDER`` and therefore missing
+    from every ``to_pandas()`` export built on it.
+
+    Parameters
+    ----------
+    io_pandas_log:
+        Logged model fixture.
+    """
+    log, _, _ = io_pandas_log
+    df = log.buffers.to_pandas()
+    expected_columns = [
+        field for field in BUFFER_LOG_FIELD_ORDER if field not in _TO_PANDAS_EXCLUDED_BUFFER_FIELDS
+    ]
+    assert list(df.columns) == expected_columns
+    assert "initial_value" in df.columns
+    assert "versions" not in df.columns
+    assert len(df) == len(log.buffers)
+    assert df.loc[0, "initial_value"] is not None

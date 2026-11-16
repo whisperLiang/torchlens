@@ -1,14 +1,13 @@
-"""The torchlens 2.33 / tlspec_version 6 rehydration floor (drop-not-resurrect).
+"""Anything older than the current format refuses as a file saved by torchlens 2.x.
 
-Artifacts written by torchlens >= 2.33 (``tlspec_version >= 6``) load; anything
-older refuses with the typed ``ArtifactVersionBelowFloorError`` naming the
-floor, instead of being resurrected through legacy field-alias ladders.
+Artifacts written at the current ``tlspec_version`` load; any older stamp refuses with the
+typed ``ArtifactTooOldError`` that names the 2.x origin, instead of being resurrected through
+legacy field-alias ladders.
 """
 
 from __future__ import annotations
 
 import json
-import warnings
 from pathlib import Path
 
 import pytest
@@ -16,16 +15,32 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._data_classes.op import Op
 from torchlens._io import (
     MIN_TLSPEC_VERSION,
     TLSPEC_VERSION,
-    ArtifactSchemaAgeWarning,
-    TorchLensIOError,
+    ArtifactError,
 )
-from torchlens.data_classes.op import Op
-from torchlens.errors import ArtifactVersionBelowFloorError
+from torchlens.errors import ArtifactTooOldError
 
-FLOOR_MATCH = "torchlens 2.33"
+FLOOR_MATCH = "saved by torchlens 2.37 and earlier"
+
+
+def _stamp_between_floor(path: Path, version: int) -> None:
+    """Re-stamp the manifest of a current artifact for a floor refusal.
+
+    Parameters
+    ----------
+    path:
+        Saved 3.0 artifact directory.
+    version:
+        Below-floor record-contract stamp to test.
+    """
+
+    manifest_path = path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["tlspec_version"] = version
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
 
 def _build_trace() -> tl.Trace:
@@ -33,39 +48,54 @@ def _build_trace() -> tl.Trace:
 
     torch.manual_seed(0)
     model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
-    return tl.trace(model, torch.randn(2, 4), layers_to_save="all")
+    return tl.trace(model, torch.randn(2, 4), save="all")
 
 
-@pytest.mark.smoke
 def test_floor_error_is_typed_and_public() -> None:
-    """The floor error is a ``TorchLensIOError`` reachable via ``tl.errors``."""
+    """The floor error is a ``ArtifactError`` reachable via ``tl.errors``."""
 
-    assert issubclass(ArtifactVersionBelowFloorError, TorchLensIOError)
-    assert tl.errors.ArtifactVersionBelowFloorError is ArtifactVersionBelowFloorError
-    assert MIN_TLSPEC_VERSION == 6
+    assert issubclass(ArtifactTooOldError, ArtifactError)
+    assert tl.errors.ArtifactTooOldError is ArtifactTooOldError
+    assert MIN_TLSPEC_VERSION == TLSPEC_VERSION == 12
 
 
-@pytest.mark.smoke
 def test_current_artifacts_load_clean(tmp_path: Path) -> None:
-    """A 2.33+ save round-trips with no floor refusal and no version warning."""
+    """A current save round-trips with no floor refusal and no version warning."""
 
     trace = _build_trace()
     path = tmp_path / "current.tlspec"
-    tl.save(trace, path)
+    trace.save(path)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", ArtifactSchemaAgeWarning)
-        loaded = tl.load(path)
+    loaded = tl.load(path)
 
     assert isinstance(loaded, tl.Trace)
-    assert [layer.layer_label for layer in loaded.layer_list] == [
-        layer.layer_label for layer in trace.layer_list
+    assert [layer.layer_label for layer in loaded._layer_list] == [
+        layer.layer_label for layer in trace._layer_list
     ]
 
 
-@pytest.mark.smoke
+def test_no_between_floor_range_every_older_stamp_refuses(tmp_path: Path) -> None:
+    """The floor is the current format, so a coherently re-stamped older artifact refuses.
+
+    There is no stamp between the floor and the runtime: the stamp one below the current
+    format refuses at load with the one typed error naming the 2.x origin and the remedy.
+    """
+
+    assert MIN_TLSPEC_VERSION == TLSPEC_VERSION, "a between-floor range would need its own test"
+    trace = _build_trace()
+    version = TLSPEC_VERSION - 1
+    path = tmp_path / f"older_stamp_{version}.tlspec"
+    trace.save(path)
+    _stamp_between_floor(path, version)
+    with pytest.raises(ArtifactTooOldError, match=FLOOR_MATCH) as excinfo:
+        tl.load(path)
+    assert excinfo.value.fields["code"] == "artifact_version_below_floor"
+    assert excinfo.value.fields["observed"] == f"tlspec_version={version}"
+    trace.cleanup()
+
+
 @pytest.mark.parametrize("cls_and_state", ["trace", "op", "layer"])
-@pytest.mark.parametrize("version", [None, 0, 2, 5])
+@pytest.mark.parametrize("version", [None, 0, 2, 5, 9])
 def test_pre_floor_object_states_refuse_typed(cls_and_state: str, version: int | None) -> None:
     """Sub-floor and unversioned object states raise the typed floor error."""
 
@@ -73,7 +103,7 @@ def test_pre_floor_object_states_refuse_typed(cls_and_state: str, version: int |
     source = {
         "trace": trace,
         "op": trace.ops[0],
-        "layer": trace.layer_list[0],
+        "layer": trace._layer_list[0],
     }[cls_and_state]
     state = source.__getstate__()
     if version is None:
@@ -82,11 +112,10 @@ def test_pre_floor_object_states_refuse_typed(cls_and_state: str, version: int |
         state["tlspec_version"] = version
 
     restored = type(source).__new__(type(source))
-    with pytest.raises(ArtifactVersionBelowFloorError, match=FLOOR_MATCH):
+    with pytest.raises(ArtifactTooOldError, match=FLOOR_MATCH):
         restored.__setstate__(state)
 
 
-@pytest.mark.smoke
 def test_current_version_object_state_still_restores() -> None:
     """The same forged-state path succeeds at exactly the floor version."""
 
@@ -99,23 +128,68 @@ def test_current_version_object_state_still_restores() -> None:
     assert restored.layer_label == trace.ops[0].layer_label
 
 
-@pytest.mark.smoke
+def test_manifest_missing_kind_refuses_as_schema_invalid_not_as_2x(tmp_path: Path) -> None:
+    """A manifest with ``kind`` deleted is a schema error, never a file saved by 2.x.
+
+    ``kind`` is a required key of the 3.0 manifest, so losing it refuses with the typed
+    ``manifest_schema_invalid`` error that names the missing key. It must not misclassify
+    as a 2.x artifact (``ArtifactTooOldError``): the same fast-tier fuzz finding that once
+    made this shape raise a false "pre-tlspec ModelLog format" refusal
+    (``test_tlspec_parse_fuzz.py::test_every_toplevel_key_deletion_is_adjudicated``).
+    """
+
+    trace = _build_trace()
+    path = tmp_path / "no_kind.tlspec"
+    trace.save(path)
+    manifest_path = path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["kind"] == "trace"
+    del manifest["kind"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ArtifactError) as excinfo:
+        tl.load(path)
+    assert not isinstance(excinfo.value, ArtifactTooOldError)
+    assert excinfo.value.fields["code"] == "manifest_schema_invalid"
+    assert "missing required field 'kind'" in excinfo.value.fields["errors"]
+    trace.cleanup()
+
+
+def test_manifest_missing_kind_and_below_floor_still_refuses_typed(tmp_path: Path) -> None:
+    """Losing ``kind`` must not dodge the real numeric floor check either."""
+
+    trace = _build_trace()
+    path = tmp_path / "no_kind_below_floor.tlspec"
+    trace.save(path)
+    manifest_path = path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["kind"]
+    manifest["tlspec_version"] = MIN_TLSPEC_VERSION - 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ArtifactTooOldError) as excinfo:
+        tl.load(path)
+    # The REAL numeric floor refusal, never the unrelated legacy
+    # "pre-tlspec ModelLog format" message a misclassification would give.
+    assert excinfo.value.fields["observed"] == f"tlspec_version={MIN_TLSPEC_VERSION - 1}"
+    trace.cleanup()
+
+
 def test_pre_floor_bundle_manifest_refuses_typed(tmp_path: Path) -> None:
     """A bundle whose manifest claims a sub-floor tlspec_version refuses."""
 
     trace = _build_trace()
     path = tmp_path / "forged.tlspec"
-    tl.save(trace, path)
+    trace.save(path)
     manifest_path = path / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["tlspec_version"] = MIN_TLSPEC_VERSION - 1
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ArtifactVersionBelowFloorError, match=FLOOR_MATCH):
+    with pytest.raises(ArtifactTooOldError, match=FLOOR_MATCH):
         tl.load(path)
 
 
-@pytest.mark.smoke
 def test_below_floor_refusal_carries_structured_fields(tmp_path: Path) -> None:
     """The below-floor refusal must carry a branchable code, path, and remedy (R65).
 
@@ -125,13 +199,13 @@ def test_below_floor_refusal_carries_structured_fields(tmp_path: Path) -> None:
 
     trace = _build_trace()
     path = tmp_path / "forged.tlspec"
-    tl.save(trace, path)
+    trace.save(path)
     manifest_path = path / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["tlspec_version"] = MIN_TLSPEC_VERSION - 1
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ArtifactVersionBelowFloorError) as excinfo:
+    with pytest.raises(ArtifactTooOldError) as excinfo:
         tl.load(path)
     fields = excinfo.value.fields
     assert fields["code"] == "artifact_version_below_floor"
@@ -142,83 +216,16 @@ def test_below_floor_refusal_carries_structured_fields(tmp_path: Path) -> None:
     assert fields["path"] == str(path)
 
 
-@pytest.mark.smoke
-def test_between_floor_advisory_is_a_visible_user_warning(tmp_path: Path) -> None:
-    """The between-floor artifact-age advisory is visible, not a ``DeprecationWarning``.
+def test_legacy_intervention_specs_refuse_as_2x_at_the_format_stamp() -> None:
+    """A 2.16 intervention spec (``format_version`` 1) refuses with the one 2.x error.
 
-    R15-F1: the advisory deprecates no API -- it reports the AGE of one
-    artifact -- and Python's default filters hide ``DeprecationWarning`` from
-    end users, so the category made the advisory invisible exactly where it
-    matters. It is an ``ArtifactSchemaAgeWarning`` (``UserWarning`` subclass),
-    reachable through ``tl.errors``, and it must survive the default filters.
+    The Trace floor never sees it: the spec loader reads the format stamp first and
+    refuses before any stored edit keyword is decoded.
     """
 
-    assert issubclass(ArtifactSchemaAgeWarning, UserWarning)
-    assert not issubclass(ArtifactSchemaAgeWarning, DeprecationWarning)
-    assert issubclass(ArtifactSchemaAgeWarning, tl.errors.TorchLensWarning)
-    assert tl.errors.ArtifactSchemaAgeWarning is ArtifactSchemaAgeWarning
+    from _refuses_as_2x import assert_refuses_as_2x
 
-    trace = _build_trace()
-    path = tmp_path / "between_floor.tlspec"
-    tl.save(trace, path)
-    manifest_path = path / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert MIN_TLSPEC_VERSION < TLSPEC_VERSION, "no between-floor range to exercise"
-    manifest["tlspec_version"] = MIN_TLSPEC_VERSION
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-
-    # resetwarnings() drops pytest's own filters so this asserts against the
-    # DEFAULT interpreter filters -- the exact regime that hid the old category.
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.resetwarnings()
-        loaded = tl.load(path)
-
-    assert isinstance(loaded, tl.Trace)
-    advisories = [w for w in caught if issubclass(w.category, ArtifactSchemaAgeWarning)]
-    assert advisories, [str(w.category) for w in caught]
-    assert "older than runtime tlspec_version" in str(advisories[0].message)
-
-
-@pytest.mark.smoke
-def test_pre_floor_torchlens_version_refuses_typed(tmp_path: Path) -> None:
-    """A parseable pre-2.33 ``torchlens_version`` refuses even at tlspec 6."""
-
-    trace = _build_trace()
-    path = tmp_path / "forged_release.tlspec"
-    tl.save(trace, path)
-    manifest_path = path / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["tlspec_version"] == TLSPEC_VERSION
-    manifest["torchlens_version"] = "2.32.4"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-
-    with pytest.raises(ArtifactVersionBelowFloorError, match="torchlens_version=2.32.4"):
-        tl.load(path)
-
-
-@pytest.mark.smoke
-@pytest.mark.parametrize(
-    "fixture",
-    [
-        "golden/io_v3_sample.tlspec",
-        "fixtures/tlspec_v2_16/F2_modellog_tiny_cnn.tlspec",
-        "fixtures/tlspec_v2_16/F3_modellog_tiny_transformer.tlspec",
-    ],
-)
-def test_real_pre_floor_artifacts_refuse_typed(fixture: str) -> None:
-    """Checked-in real pre-2.33 artifacts refuse with the floor named."""
-
-    fixture_path = Path(__file__).parent / fixture
-    with pytest.raises(ArtifactVersionBelowFloorError, match=FLOOR_MATCH):
-        tl.load(fixture_path, trust_custom_callables=True)
-
-
-@pytest.mark.smoke
-def test_legacy_intervention_specs_stay_loadable() -> None:
-    """The floor covers Trace rehydration only; 2.16 intervention specs load."""
-
-    from torchlens.intervention.types import InterventionSpec
-
-    fixture_path = Path(__file__).parent / "fixtures" / "tlspec_v2_16"
-    loaded = tl.load(fixture_path / "F1_intervention_default.tlspec", trust_custom_callables=True)
-    assert isinstance(loaded, InterventionSpec)
+    fixture_path = Path(__file__).parent / "goldens" / "legacy" / "intervention_v2_16.tlspec"
+    error = assert_refuses_as_2x(fixture_path)
+    assert error.fields["observed"] == "intervention format_version=1"
+    assert error.fields["path"] == str(fixture_path)

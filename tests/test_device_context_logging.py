@@ -16,8 +16,8 @@ These tests assert traced behavior matches untraced behavior exactly.
 
 from __future__ import annotations
 
-import pytest
 import torch
+from _forward_stash import stashed
 from torch import nn
 
 import torchlens as tl
@@ -92,7 +92,6 @@ def _warm_torchlens_wrapping() -> None:
     tl.trace(_CpuFactoryModel(), torch.randn(2, 4))
 
 
-@pytest.mark.smoke
 def test_meta_device_context_untraced_baseline() -> None:
     """Sanity: without TorchLens, the context produces meta tensors."""
     model = _MetaFactoryConsumerModel()
@@ -100,7 +99,6 @@ def test_meta_device_context_untraced_baseline() -> None:
     assert model.seen_devices == ["meta", "meta"]
 
 
-@pytest.mark.smoke
 def test_meta_device_context_factory_under_active_logging() -> None:
     """Factory + consumption inside ``torch.device('meta')`` works under trace.
 
@@ -117,7 +115,7 @@ def test_meta_device_context_factory_under_active_logging() -> None:
 
     # Runtime behavior matches untraced: factory output and downstream op
     # both landed on the meta device.
-    assert model.seen_devices == ["meta", "meta"]
+    assert stashed(log, "seen_devices") == ["meta", "meta"]
 
     # The non-meta branch of the graph is captured intact.
     mul_layer = _layer_by_func(log, "mul")
@@ -125,14 +123,13 @@ def test_meta_device_context_factory_under_active_logging() -> None:
     assert torch.allclose(mul_layer.out, x * 2)
 
 
-@pytest.mark.smoke
 def test_meta_device_context_with_save_arg_values() -> None:
     """The arg-snapshot/variation-tracking path also tolerates meta tensors."""
     from torchlens.options import CaptureOptions
 
     model = _MetaFactoryConsumerModel()
-    tl.trace(model, torch.randn(2, 4), capture=CaptureOptions(save_arg_values=True))
-    assert model.seen_devices == ["meta", "meta"]
+    log = tl.trace(model, torch.randn(2, 4), capture=CaptureOptions(save_args=True))
+    assert stashed(log, "seen_devices") == ["meta", "meta"]
 
 
 def test_meta_factory_output_metadata_with_selective_save() -> None:
@@ -145,7 +142,7 @@ def test_meta_factory_output_metadata_with_selective_save() -> None:
     model = _MetaFactoryOutputModel()
     log = tl.trace(model, torch.randn(2, 4), save=tl.func("mul"))
 
-    assert model.seen_devices == ["meta"]
+    assert stashed(log, "seen_devices") == ["meta"]
     factory_layer = _output_parent(log, 1)
     # Shape/dtype come from the post-injection meta tensor: torch.zeros(3, 4)
     # under the meta context (a CPU tensor would have identical shape only if
@@ -165,14 +162,13 @@ def test_meta_factory_as_model_output_full_save() -> None:
     model = _MetaFactoryOutputModel()
     log = tl.trace(model, torch.randn(2, 4))
 
-    assert model.seen_devices == ["meta"]
+    assert stashed(log, "seen_devices") == ["meta"]
     factory_layer = _output_parent(log, 1)
     # Captured metadata records the post-injection device.
     assert factory_layer.out.device.type == "meta"
     assert factory_layer.shape == (3, 4)
 
 
-@pytest.mark.smoke
 def test_cpu_default_unaffected_under_active_logging() -> None:
     """Without a device context, factory functions stay on CPU under trace."""
     model = _CpuFactoryModel()
@@ -180,10 +176,27 @@ def test_cpu_default_unaffected_under_active_logging() -> None:
 
     log = tl.trace(model, x)
 
-    assert model.seen_devices == ["cpu"]
+    assert stashed(log, "seen_devices") == ["cpu"]
     factory_layer = _output_parent(log, 1)
     assert factory_layer.out.device.type == "cpu"
     assert torch.equal(factory_layer.out, torch.zeros(3, 4))
+
+
+def test_meta_tensor_has_no_retained_storage_identity() -> None:
+    """A meta tensor is billed zero bytes, never a spurious "meta" ledger charge.
+
+    ``torch.Tensor.untyped_storage()`` is not reliably zero-byte for a meta
+    tensor across the whole torch>=2.1 floor (it either raises on some
+    builds, routing into the logical-bytes fallback, or hands back a storage
+    whose reported size is not guaranteed zero), so the save-budget charging
+    path must short-circuit on ``is_meta`` before ever touching storage.
+    """
+    from torchlens._save_budget import _retained_storage_identities
+
+    with torch.device("meta"):
+        z = torch.zeros(3, 4)
+    assert z.is_meta
+    assert _retained_storage_identities(z) == []
 
 
 def test_meta_device_context_fast_path_with_torch_wrapped() -> None:

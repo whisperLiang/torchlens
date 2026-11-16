@@ -17,6 +17,7 @@ the raising code.
 from __future__ import annotations
 
 import gc
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -24,16 +25,15 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens._errors import RecordBindingError
-from torchlens.distributed._ledger import (
+from torchlens._distributed._ledger import (
     GroupLifecycleEvent,
     GroupLifecycleLedger,
     membership_digest_for_ranks,
 )
-from torchlens.merged import MergedErrorCode
-from torchlens.merged._errors import MergeConflictError
-
-pytestmark = pytest.mark.smoke
+from torchlens._errors import RecordBindingError
+from torchlens._merged import MergedErrorCode
+from torchlens._merged._errors import MergeConflictError
+from torchlens.backends.torch.prehook_provenance import PreHookProvenanceLedger
 
 
 class _TwoLayer(nn.Module):
@@ -59,6 +59,30 @@ def test_layer_read_after_trace_collection_refuses_trace_reference_collected() -
 
     with pytest.raises(RecordBindingError) as exc_info:
         _ = layer.source_trace
+
+    assert exc_info.value.fields["code"] == "trace_reference_collected"
+    assert exc_info.value.fields["remedy"]
+
+
+def test_prehook_ledger_read_after_trace_collection_refuses_trace_reference_collected() -> None:
+    """A pre-hook provenance ledger read after its Trace was collected refuses typed."""
+
+    model = _TwoLayer()
+    trace = tl.trace(model, torch.randn(2, 4))
+    ledger = PreHookProvenanceLedger(
+        trace_ref=weakref.ref(trace),
+        model=model,
+        modules=(),
+        prepared_ids=frozenset(),
+        local_registration_original=lambda *args, **kwargs: None,
+        global_registration_original=lambda *args, **kwargs: None,
+    )
+
+    del trace
+    gc.collect()
+
+    with pytest.raises(RecordBindingError) as exc_info:
+        _ = ledger.trace
 
     assert exc_info.value.fields["code"] == "trace_reference_collected"
     assert exc_info.value.fields["remedy"]
@@ -152,6 +176,7 @@ def _rank_trace(rank: int, *, kind: str, reduce_op: str | None) -> SimpleNamespa
     )
 
 
+@pytest.mark.smoke
 def test_structural_kind_conflict_raises_merge_conflict_code() -> None:
     """Contradicting collective kinds at one joined key refuse ``merge_conflict``.
 

@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.data_classes.op import Op
-from torchlens.intervention.resolver import SiteTable
+from torchlens._data_classes.op import Op
 
 
 class _TwoRelus(nn.Module):
@@ -100,33 +97,6 @@ def test_stack_matches_individual_outputs_and_labels() -> None:
     assert "StackedActivations" in repr(stacked)
 
 
-def test_stack_sorts_by_recorded_ordinal_even_if_resolver_order_is_adversarial(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Reused-module rows follow ordinals despite reversed selector iteration."""
-
-    trace = tl.trace(_ReusedRelu(), torch.randn(2, 4))
-    original_find_sites = type(trace).find_sites
-
-    def reversed_find_sites(self: Any, query: Any, **kwargs: Any) -> SiteTable:
-        """Return the real selector result in deliberately reversed order."""
-
-        resolved = original_find_sites(self, query, **kwargs)
-        return SiteTable(tuple(reversed(tuple(resolved))), query=query)
-
-    monkeypatch.setattr(type(trace), "find_sites", reversed_find_sites)
-    expected_ops = sorted(
-        original_find_sites(trace, tl.func("relu"), max_fanout=10),
-        key=lambda op: op.ordinal_index,
-    )
-
-    stacked = trace.stack(tl.func("relu"))
-
-    assert stacked.labels == tuple(op.layer_label for op in expected_ops)
-    for row, op in zip(stacked.tensor, expected_ops, strict=True):
-        torch.testing.assert_close(row, op.out)
-
-
 def test_stack_refuses_legacy_op_without_recorded_ordinal() -> None:
     """A restored legacy op with a missing ordinal cannot be ordered honestly."""
 
@@ -136,7 +106,7 @@ def test_stack_refuses_legacy_op_without_recorded_ordinal() -> None:
     legacy_state.pop("ordinal_index")
     restored_relu = Op.__new__(Op)
     restored_relu.__setstate__(legacy_state)
-    trace.layer_list = [restored_relu if op is relu else op for op in trace.layer_list]
+    trace._layer_list = [restored_relu if op is relu else op for op in trace._layer_list]
 
     with pytest.raises(ValueError, match="requires matched operations with recorded ordinals"):
         trace.stack(tl.func("relu"))

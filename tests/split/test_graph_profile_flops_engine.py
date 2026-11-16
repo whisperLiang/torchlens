@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch import nn
 
-from torchlens.capture import flops
+from torchlens._capture import flops
 from torchlens.split import GraphPartition, SplitFeatures, prepare_graph
 
 

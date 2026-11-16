@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from torchlens.errors import ArgumentTypeError
+
 from .._io import _json
 from .adapters import resolve_split_adapter
 from .adapters.base import SplitBackendAdapter
@@ -38,7 +40,7 @@ def _cache_secret() -> bytes:
     native backend tensor pickles cannot use the portable metadata allowlist.
     """
 
-    from ..user_funcs import _prepare_capture_cache_dir
+    from .._capture.prepare.cache import _prepare_capture_cache_dir
 
     _root, secret = _prepare_capture_cache_dir(None)
     return hmac.digest(secret, b"torchlens.split.boundary.v1", "sha256")
@@ -124,7 +126,7 @@ def save_boundary(
     authenticated cache writer enforces its 2-GiB serialized-payload limit.
     """
 
-    from ..user_funcs import _store_authenticated_capture_cache
+    from .._capture.prepare.cache import _store_authenticated_capture_cache
 
     resolved_adapter = adapter or resolve_split_adapter(boundary.backend)
     if not resolved_adapter.supports_boundary_cache:
@@ -135,6 +137,7 @@ def save_boundary(
                 split_point=str(boundary.metadata.get("split_id", "")),
                 reason="unsupported boundary cache",
             ),
+            code=SplitUnsupportedError.code,
         )
     cache_boundary = _cacheable_boundary(boundary, resolved_adapter)
     cache_dir = Path(path)
@@ -143,7 +146,10 @@ def save_boundary(
     if not _store_authenticated_capture_cache(
         cache_boundary, cache_dir / "payload.pkl", _cache_secret()
     ):
-        raise SplitBoundaryError("Boundary cache payload could not be written; see cache warning.")
+        raise SplitBoundaryError(
+            "Boundary cache payload could not be written; see cache warning.",
+            code=SplitBoundaryError.code,
+        )
     (cache_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
@@ -153,7 +159,7 @@ def load_boundary(
 ) -> ReplayBoundary:
     """Load a locally authenticated boundary, refusing unsigned or altered bytes."""
 
-    from ..user_funcs import _load_authenticated_capture_cache
+    from .._capture.prepare.cache import _load_authenticated_capture_cache
 
     cache_dir = Path(path)
     manifest_path = cache_dir / "manifest.json"
@@ -161,20 +167,29 @@ def load_boundary(
     manifest = _json.read_bounded(manifest_path)
     if not isinstance(manifest, dict) or manifest.get("payload_format") != _PAYLOAD_FORMAT:
         raise SplitBoundaryError(
-            "Boundary cache is not an authenticated cache; regenerate it with save_boundary()."
+            "Boundary cache is not an authenticated cache; regenerate it with save_boundary().",
+            code=SplitBoundaryError.code,
         )
     boundary = _load_authenticated_capture_cache(payload_path, _cache_secret())
     if boundary is None:
         raise SplitBoundaryError(
-            "Boundary cache authentication failed; regenerate it with save_boundary()."
+            "Boundary cache authentication failed; regenerate it with save_boundary().",
+            code=SplitBoundaryError.code,
         )
     if not isinstance(boundary, ReplayBoundary):
-        raise TypeError("Boundary cache payload did not contain a ReplayBoundary.")
+        raise ArgumentTypeError(
+            "Boundary cache payload did not contain a ReplayBoundary.",
+            code="split_argument_type",
+            remedy="regenerate the boundary cache with save_boundary",
+        )
     if manifest != _boundary_manifest(boundary):
-        raise SplitBoundaryError("Boundary cache manifest does not match authenticated payload.")
+        raise SplitBoundaryError(
+            "Boundary cache manifest does not match authenticated payload.",
+            code=SplitBoundaryError.code,
+        )
     resolved_adapter = adapter or resolve_split_adapter(boundary.backend)
     boundary.validate(split_id=manifest.get("split_id"), adapter=resolved_adapter)
     return boundary
 
 
-__all__ = ["load_boundary", "save_boundary"]
+__all__ = ("load_boundary", "save_boundary")

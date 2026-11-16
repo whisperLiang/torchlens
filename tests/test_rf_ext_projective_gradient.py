@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.backends.torch._tl import is_decorated_function
+from torchlens._utils._tensor_label import is_decorated_function
 from torchlens.backends.torch.wrappers import (
     DIRECT_TRANSFORM_SITES,
     TRANSFORM_BUILDER_SITES,
@@ -47,9 +47,13 @@ def _trace_model(
         save_grads="all" if save_grads else False,
         capture_tensor_grad_hooks=save_grads,
     )
-    trace = tl.trace(model, inputs, capture=capture, save_mode="reference")
-    source = next(op for op in trace.layer_list if op.is_input)
-    target = next(op for op in trace.layer_list if op.is_output)
+    trace = tl.trace(
+        model,
+        inputs,
+        capture=tl.options.merge_capture_options(capture=capture, save_mode="reference"),
+    )
+    source = next(op for op in trace._layer_list if op.is_input)
+    target = next(op for op in trace._layer_list if op.is_output)
     return trace, source, target
 
 
@@ -98,13 +102,13 @@ def _probe_snapshot(trace: object, model: nn.Module) -> tuple[object, ...]:
     """
 
     return (
-        trace.num_backward_passes,  # type: ignore[attr-defined]
-        trace.has_gradients,  # type: ignore[attr-defined]
+        len(trace.autograd.backward_passes),  # type: ignore[attr-defined]
+        trace.autograd.has_grads,  # type: ignore[attr-defined]
         tuple(trace.event_stream.backward_events),  # type: ignore[attr-defined]
-        tuple(tuple(op.grads) for op in trace.layer_list),  # type: ignore[attr-defined]
+        tuple(tuple(op.autograd.grads) for op in trace._layer_list),  # type: ignore[attr-defined]
         (
-            "_active_backward_pass_index" in trace.__dict__,
-            trace.__dict__.get("_active_backward_pass_index"),
+            "_active_backward_pass_number" in trace.__dict__,
+            trace.__dict__.get("_active_backward_pass_number"),
         ),
         trace.__dict__.get("_tl_backward_triggers_disarmed"),
         tuple(
@@ -177,14 +181,14 @@ def test_torch_func_jvp_wrapping_analysis() -> None:
 
     trace = tl.trace(nn.Identity(), torch.randn(2, 3))
     before = (
-        len(trace.layer_list),
-        trace.num_backward_passes,
+        len(trace._layer_list),
+        len(trace.autograd.backward_passes),
         len(trace.event_stream.backward_events),
     )
     torch.func.jvp(lambda value: value.square(), (torch.ones(3),), (torch.ones(3),))
     after = (
-        len(trace.layer_list),
-        trace.num_backward_passes,
+        len(trace._layer_list),
+        len(trace.autograd.backward_passes),
         len(trace.event_stream.backward_events),
     )
     assert after == before
@@ -207,7 +211,7 @@ def test_empirical_vjp_row_equals_double_vjp_column() -> None:
     row = gradient_for_unit(
         target,
         target_unit,
-        input=source,
+        input_op=source,
         retain_graph=True,
     )
     column = projective_gradient_for_unit(source, source_unit, target=target)
@@ -251,9 +255,9 @@ def test_projective_probe_does_not_pollute_trace_state() -> None:
             assert current is not None and torch.equal(current, previous)
     assert "_tl_rf_probe_active" not in trace.__dict__
 
-    trace.log_backward(target.out.sum())
-    assert trace.num_backward_passes == 1
-    assert trace.has_gradients
+    trace.backward(target.out.sum())
+    assert len(trace.autograd.backward_passes) == 1
+    assert trace.autograd.has_grads
     assert trace.event_stream.backward_events
 
 
@@ -298,6 +302,6 @@ def test_cotangent_linearization_failure_is_typed_and_restores_state(
 
     assert call_count == failure_call
     assert "_tl_rf_probe_active" not in trace.__dict__
-    assert trace.num_backward_passes == 0
-    assert not trace.has_gradients
+    assert len(trace.autograd.backward_passes) == 0
+    assert not trace.autograd.has_grads
     assert not trace.event_stream.backward_events

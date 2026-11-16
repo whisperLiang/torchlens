@@ -17,7 +17,7 @@ from torchlens.split.errors import SplitUnsupportedError
 
 @pytest.mark.filterwarnings(
     "ignore:TorchLens cannot verify the captured model-input semantics:"
-    "torchlens._errors.TorchLensCaptureGapWarning"
+    "torchlens._errors.CaptureGapWarning"
 )
 def test_same_geometry_aliases_preserve_the_captured_branch() -> None:
     """Aliased in-place reads retain their meaning at B=1, B=2 and extrapolated B."""

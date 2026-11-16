@@ -28,9 +28,9 @@ def nested_allclose(
             return False
         return all(
             nested_allclose(adapter, left_item, right_item, atol=atol, rtol=rtol)
-            for left_item, right_item in zip(left, right)
+            for left_item, right_item in zip(left, right, strict=True)
         )
     return left == right
 
 
-__all__ = ["nested_allclose"]
+__all__ = ("nested_allclose",)

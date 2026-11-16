@@ -10,7 +10,7 @@ import pytest
 
 import torchlens as tl
 from torchlens.backends.paddle import PaddleBackend
-from torchlens.validation.invariants import check_metadata_invariants
+from torchlens.validation._invariants import check_metadata_invariants
 
 pytestmark = [pytest.mark.backend_paddle, pytest.mark.optional]
 
@@ -98,10 +98,26 @@ def test_curated_native_calls_preserve_outputs_and_validate(name: str) -> None:
         assert str(captured.value) == str(error)
         return
 
+    native_paths = None
+    if name == "batch_norm":
+        native_outputs = paddle._C_ops.batch_norm(*args, True, 0.9, 1e-5, "NCHW", True, False)
+        native_paths = {
+            (index,)
+            for index, output in enumerate(native_outputs)
+            if isinstance(output, paddle.Tensor) and output._is_initialized()
+        }
     trace = tl.trace(model, args, backend="paddle")
     try:
+        if native_paths is not None:
+            captures = [
+                capture
+                for capture in trace._paddle_op_captures
+                if capture.op_name == "c_ops.batch_norm"
+            ]
+            assert len(captures) == 1
+            assert set(captures[0].output_leaf_paths) == native_paths
         expected_op = name if "." in name else f"c_ops.{name}"
-        assert any(op.func_name == expected_op for op in trace.layer_list)
+        assert any(op.func_name == expected_op for op in trace.ops)
         np.testing.assert_allclose(trace.output_ops[0].out.numpy(), expected.numpy())
         assert check_metadata_invariants(trace) is True
         assert PaddleBackend().validate_trace(trace) is True

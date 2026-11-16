@@ -1,7 +1,7 @@
 """Round-28/31 capture-attribution regression pins.
 
-Locks the fixes for the round-31 capture-reseal findings (Sol) and the
-validation false-negative hunt (Fable): H2 runtime tensor control-arg parents,
+Locks the fixes for the round-31 capture-reseal findings (review) and the
+validation false-negative hunt (review): H2 runtime tensor control-arg parents,
 H1/M3 foreach attribution, M4 element-overlap alias propagation, M5 in-place
 grad_fn metadata, M6 tensor property setters, and the identity-witness
 validation strengthening. Each test reproduces the original defect shape and
@@ -15,7 +15,8 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
-from torchlens.utils._torch_compat import ROLL_TENSOR_SHIFTS_SUPPORTED
+from torchlens._utils._torch_compat import ROLL_TENSOR_SHIFTS_SUPPORTED
+from torchlens.backends.torch._logged_arguments import logged_receiver_output
 
 
 def _ops_by_func(trace: object, func_name: str) -> list:
@@ -119,8 +120,8 @@ def test_h2_roll_tensor_shift_is_parent() -> None:
     sum_label = _ops_by_func(trace, "sum")[0].layer_label
 
     assert sum_label in roll_op.parents
-    assert roll_op.parent_arg_positions["args"].get(1) == sum_label
-    assert roll_op.unattributed_tensor_args == ()
+    assert roll_op.call.parent_arg_positions["args"].get(1) == sum_label
+    assert roll_op.call.unattributed_tensor_args == ()
     assert tl.validate(_RollTensorShift().eval(), x, scope="forward")
 
 
@@ -138,7 +139,7 @@ def test_h2_softmax_tensor_dim_is_parent_and_validates() -> None:
     sum_label = _ops_by_func(trace, "sum")[0].layer_label
 
     assert sum_label in softmax_op.parents
-    assert softmax_op.parent_arg_positions["args"].get(1) == sum_label
+    assert softmax_op.call.parent_arg_positions["args"].get(1) == sum_label
     assert tl.validate(_SoftmaxTensorDim().eval(), x, scope="forward")
 
 
@@ -151,9 +152,9 @@ def test_h2_arange_tensor_end_is_parent_not_internal_source() -> None:
     long_label = _ops_by_func(trace, "long")[0].layer_label
 
     assert arange_op.parents == (long_label,)
-    assert arange_op.parent_arg_positions["args"].get(0) == long_label
-    assert not arange_op.is_internal_source
-    assert arange_op.unattributed_tensor_args == ()
+    assert arange_op.call.parent_arg_positions["args"].get(0) == long_label
+    assert not arange_op.graph.is_internal_source
+    assert arange_op.call.unattributed_tensor_args == ()
     assert tl.validate(_ArangeTensorEnd().eval(), x, scope="forward")
 
 
@@ -181,7 +182,7 @@ def test_h2_literal_control_args_stay_clean() -> None:
     roll_op = _ops_by_func(trace, "roll")[0]
 
     assert roll_op.parents == ("input_1",)
-    assert roll_op.unattributed_tensor_args == ()
+    assert roll_op.call.unattributed_tensor_args == ()
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +265,67 @@ def test_h1_foreach_inplace_threads_mutation_to_consumers() -> None:
     assert tl.validate(_ForeachInplace().eval(), x, scope="forward")
 
 
+def test_h1_void_inplace_foreach_logs_its_receiver_members() -> None:
+    """An in-place foreach call that returns ``None`` logs its receiver members.
+
+    torch 2.1 binds ``torch._foreach_add_`` and family as returning nothing; later
+    torch returns the receiver list. Capture logs the same list either way, while
+    user code keeps the binding's own return value.
+    """
+
+    first, second = torch.ones(1), torch.ones(1)
+    logged = logged_receiver_output(None, ([first, second], 1.0), "_foreach_add_", False, False)
+    assert isinstance(logged, list)
+    assert logged[0] is first and logged[1] is second
+    returned = [first, second]
+    assert (
+        logged_receiver_output(returned, ([first, second], 1.0), "_foreach_add_", False, False)
+        is returned
+    )
+    assert (
+        logged_receiver_output(None, ([first, second], 1.0), "_foreach_add", False, False) is None
+    )
+    assert logged_receiver_output(None, (first, 1.0), "add_", False, False) is None
+
+
+_FOREACH_RETURN_TYPES: list[type] = []
+"""Types ``torch._foreach_add_`` returned inside ``_ForeachReturn.forward``, in call order."""
+
+
+class _ForeachReturn(nn.Module):
+    """Record the type of what ``torch._foreach_add_`` itself returns."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run one in-place foreach call and record its own return type.
+
+        Parameters
+        ----------
+        x:
+            1-D input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Sum of the two mutated members.
+        """
+
+        members = [x.relu().clone(), x.sigmoid().clone()]
+        _FOREACH_RETURN_TYPES.append(type(torch._foreach_add_(members, 1.0)))
+        return members[0] + members[1]
+
+
+def test_h1_inplace_foreach_return_value_is_untouched_by_capture() -> None:
+    """User code sees the binding's own return value from a captured foreach call."""
+
+    _FOREACH_RETURN_TYPES.clear()
+    model = _ForeachReturn().eval()
+    x = torch.tensor([1.0, 2.0])
+    model(x)
+    tl.trace(model, x)
+    assert len(_FOREACH_RETURN_TYPES) >= 2
+    assert set(_FOREACH_RETURN_TYPES) == {_FOREACH_RETURN_TYPES[0]}
+
+
 def test_m3_foreach_out_of_place_parents_are_zipped_without_duplicates() -> None:
     """Out-of-place foreach member ``i`` parents exactly ``(a[i], b[i])``."""
 
@@ -279,11 +341,11 @@ def test_m3_foreach_out_of_place_parents_are_zipped_without_duplicates() -> None
     assert len(foreach_ops) == 2
     assert foreach_ops[0].parents == ("input_3", "input_1")
     assert foreach_ops[1].parents == ("input_4", "input_2")
-    assert foreach_ops[0].parent_arg_positions["args"] == {
+    assert foreach_ops[0].call.parent_arg_positions["args"] == {
         (1, 0): "input_3",
         (0, 0): "input_1",
     }
-    assert foreach_ops[1].parent_arg_positions["args"] == {
+    assert foreach_ops[1].call.parent_arg_positions["args"] == {
         (1, 1): "input_4",
         (0, 1): "input_2",
     }
@@ -299,7 +361,7 @@ def test_m3_dropped_zipped_edge_still_fails_validation() -> None:
     so the narrow foreach exemption does not apply.
     """
 
-    from torchlens.validation.core import validate_saved_outs
+    from torchlens.validation._core import validate_saved_outs
 
     inputs = [
         torch.tensor([1.0]),
@@ -309,12 +371,16 @@ def test_m3_dropped_zipped_edge_still_fails_validation() -> None:
     ]
     model = _ForeachOutOfPlace().eval()
     ground_truth = model(*inputs)
-    trace = tl.trace(model, inputs, save_arg_values=True, save_rng_states=True)
+    trace = tl.trace(
+        model,
+        inputs,
+        capture=tl.options.CaptureOptions(save_args=True, save_rng=True),
+    )
     member0 = _ops_by_func(trace, "_foreach_add")[0]
     member0.parents = [p for p in member0.parents if p != "input_3"]
-    member0.parent_arg_positions["args"] = {
+    member0.call.parent_arg_positions["args"] = {
         key: label
-        for key, label in member0.parent_arg_positions["args"].items()
+        for key, label in member0.call.parent_arg_positions["args"].items()
         if label != "input_3"
     }
 
@@ -405,7 +471,7 @@ def test_m4_genuinely_overlapping_views_keep_mutation_edge() -> None:
 def test_m4_exact_overlap_helper_matrix() -> None:
     """Unit matrix for the element-exact overlap decision."""
 
-    from torchlens.backends.torch.wrappers import _strided_views_share_storage_elements
+    from torchlens.backends.torch._storage_overlap import _strided_views_share_storage_elements
 
     base = torch.arange(12, dtype=torch.float32)
     assert _strided_views_share_storage_elements(base[::2], base[1::2]) is False
@@ -455,13 +521,12 @@ def test_m5_inplace_grad_fn_metadata_is_user_op() -> None:
     trace = tl.trace(
         _InplaceGradModel().eval(),
         x,
-        capture=tl.options.CaptureOptions(backward_ready=True),
-        save_mode="reference",
+        capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"),
     )
     inplace_op = _ops_by_func(trace, "add_")[0]
 
-    assert inplace_op.grad_fn_class_name == "AddBackward0"
-    assert "CloneBackward" not in str(inplace_op.grad_fn_class_qualname)
+    assert inplace_op.autograd.grad_fn_class_name == "AddBackward0"
+    assert "CloneBackward" not in str(inplace_op.autograd.grad_fn_class_qualname)
     trace.cleanup()
 
 

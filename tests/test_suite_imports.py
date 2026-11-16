@@ -8,17 +8,35 @@ from types import ModuleType
 import pytest
 
 
-@pytest.mark.smoke
 @pytest.mark.parametrize(
-    ("filename", "helper_module", "helper_name"),
+    ("filename", "suite_name", "helper_module", "helper_name"),
     [
-        ("test_distributed_census_skeleton.py", "support.census_harness", "run_census_criterion_1"),
-        ("test_distributed_census_topologies.py", "support.census_harness", "run_census_row"),
-        ("test_merged_save_durability.py", "test_merged_load_identity", "_rank_trace"),
+        (
+            "test_distributed_census_skeleton.py",
+            "lifecycle",
+            "torchlens._distributed",
+            "_lifecycle",
+        ),
+        (
+            "test_distributed_census_topologies.py",
+            "run_census_row",
+            "support.census_harness",
+            "run_census_row",
+        ),
+        (
+            "test_merged_save_durability.py",
+            "_rank_trace",
+            "test_merged_load_identity",
+            "_rank_trace",
+        ),
     ],
 )
 def test_helper_imports_ignore_an_installed_tests_package(
-    monkeypatch: pytest.MonkeyPatch, filename: str, helper_module: str, helper_name: str
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    suite_name: str,
+    helper_module: str,
+    helper_name: str,
 ) -> None:
     """Load test suites while an unrelated installed ``tests`` owns that name.
 
@@ -28,6 +46,8 @@ def test_helper_imports_ignore_an_installed_tests_package(
         Restores the import cache after simulating the foreign package.
     filename:
         Test suite whose module-level imports must remain collectable.
+    suite_name:
+        Binding of the shared helper in that suite.
     helper_module:
         Repository module that exports the shared helper.
     helper_name:
@@ -48,7 +68,7 @@ def test_helper_imports_ignore_an_installed_tests_package(
     suite = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(suite)
 
-    assert getattr(suite, helper_name) is getattr(
+    assert getattr(suite, suite_name) is getattr(
         importlib.import_module(helper_module), helper_name
     )
     assert sys.modules["tests"] is foreign_tests

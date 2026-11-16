@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from torchlens.split.errors import SplitRequestError
+
+from ..._ir.container import rebuild_container_from_spec
 from ...backends.tf.op_callback_capture import TFOpCapture
 from ...backends.tf.validation import _replay_raw_op
-from ...ir.container import rebuild_container_from_spec, reorder_container_leaves
+from .._capture_projection import reorder_container_leaves
 from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
@@ -123,6 +126,7 @@ class _TfGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} source value is unavailable.",
                 context=self._context(node, "missing source value"),
+                code=SplitUnsupportedError.code,
             )
         return _tf().convert_to_tensor(value)
 
@@ -158,6 +162,7 @@ class _TfGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} references unavailable TensorFlow parent {parent_label!r}.",
                 context=self._context(node, "missing parent value"),
+                code=SplitUnsupportedError.code,
             )
         return overlay[parent_id]
 
@@ -233,6 +238,7 @@ class _TfGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} has unresolved TensorFlow input slot {input_record.input_index}.",
                 context=self._context(node, "unresolved TF input"),
+                code=SplitUnsupportedError.code,
             )
         return inputs
 
@@ -244,6 +250,7 @@ class _TfGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} has no TensorFlow op capture.",
                 context=self._context(node, "missing TF op capture"),
+                code=SplitUnsupportedError.code,
             )
         try:
             output = _replay_raw_op(capture, self._tf_inputs(capture, node, overlay))
@@ -251,6 +258,7 @@ class _TfGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"TensorFlow split replay failed for {node.label!r}: {exc}",
                 context=self._context(node, "TF raw-op replay failed"),
+                code=SplitUnsupportedError.code,
             ) from exc
         if isinstance(output, (tuple, list)):
             return output[capture.output_index]
@@ -296,6 +304,7 @@ class TfGeneratedPrefix(_TfGeneratedSegmentBase):
                     split_point=self.spec.boundary,
                     reason="input count mismatch",
                 ),
+                code=SplitUnsupportedError.code,
             )
         if self.graph.shape_program is not None:
             self._shape_binding = self.graph.shape_program.bind_flat_values(
@@ -398,7 +407,9 @@ class TfGeneratedSuffix(_TfGeneratedSegmentBase):
                 return None
             return overlay[next(reversed(overlay))]
         leaves = [
-            (node.output_container_path, self._output_leaf(node, overlay)) for node in output_nodes
+            (path, self._output_leaf(node, overlay))
+            for node in output_nodes
+            for path in (node.output_container_paths or (node.output_container_path,))
         ]
         spec = next(
             (node.output_container_spec for node in output_nodes if node.output_container_spec),
@@ -466,7 +477,10 @@ class TfSplitAdapter(SplitPolicyMixin):
             return value
         current = int(value.shape[axis])
         if current <= 0:
-            raise ValueError("Cannot resize an empty batch axis.")
+            raise SplitRequestError(
+                "Cannot resize an empty batch axis.",
+                code=SplitRequestError.code,
+            )
         tf = _tf()
         with tf.device(value.device):
             indexes = tf.range(batch_size) % current
@@ -533,4 +547,4 @@ class TfSplitAdapter(SplitPolicyMixin):
         return SegmentBundle(prefix=prefix, training_prefix=training_prefix, suffix=suffix)
 
 
-__all__ = ["TfGeneratedPrefix", "TfGeneratedSuffix", "TfSplitAdapter"]
+__all__ = ("TfGeneratedPrefix", "TfGeneratedSuffix", "TfSplitAdapter")

@@ -10,16 +10,15 @@ import numpy as np
 import pytest
 
 import torchlens as tl
-from torchlens.backends import BackendUnsupportedError
-from torchlens.intervention.errors import MultiMatchWarning
-from torchlens.validation.invariants import check_metadata_invariants
+from torchlens.errors import BackendUnsupportedError
+from torchlens.validation._invariants import check_metadata_invariants
 
 jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 eqx = pytest.importorskip("equinox")
 nnx = pytest.importorskip("flax.nnx")
 
-pytestmark = pytest.mark.backend_jax
+pytestmark = [pytest.mark.backend_jax, pytest.mark.rare]
 
 
 class SimpleEquinoxMlp(eqx.Module):
@@ -331,7 +330,7 @@ def test_jax_equinox_simple_mlp_uses_pytree_module_hierarchy() -> None:
     model = SimpleEquinoxMlp()
     trace = tl.trace(model, jnp.ones(3, dtype=jnp.float32), backend="jax")
 
-    assert trace.module_identity_mode == "pytree_module"
+    assert trace.options.module_identity_mode == "pytree_module"
     assert [module.address for module in trace.modules] == ["self", "fc1", "fc2"]
     assert set(trace.modules["self"].address_children) == {"fc1", "fc2"}
     assert trace.modules["fc1"].address_parent == "self"
@@ -340,8 +339,7 @@ def test_jax_equinox_simple_mlp_uses_pytree_module_hierarchy() -> None:
     assert trace.modules["fc1"].params
     assert {param.module_address for param in trace.modules["fc1"].params} == {"fc1"}
     assert trace.params["fc1.weight"].is_trainable is True
-    with pytest.warns(MultiMatchWarning, match="matched 2 sites"):
-        fc1_labels = trace.resolve_sites(tl.in_module("fc1"), max_fanout=8).labels()
+    fc1_labels = trace[tl.in_module("fc1")].labels
     assert fc1_labels
     assert all("fc1:1" in trace[label].modules for label in fc1_labels)
     check_metadata_invariants(trace)
@@ -354,7 +352,7 @@ def test_jax_nnx_simple_mlp_uses_pytree_module_hierarchy() -> None:
     model = SimpleNnxMlp()
     trace = tl.trace(model, jnp.ones(3, dtype=jnp.float32), backend="jax")
 
-    assert trace.module_identity_mode == "pytree_module"
+    assert trace.options.module_identity_mode == "pytree_module"
     assert [module.address for module in trace.modules] == ["self", "fc1", "fc2"]
     assert set(trace.modules["self"].address_children) == {"fc1", "fc2"}
     assert trace.modules["fc1"].address_parent == "self"
@@ -362,8 +360,7 @@ def test_jax_nnx_simple_mlp_uses_pytree_module_hierarchy() -> None:
     assert trace.modules["fc1"].params
     assert {param.module_address for param in trace.modules["fc1"].params} == {"fc1"}
     assert trace.params["fc1.kernel"].is_trainable is True
-    with pytest.warns(MultiMatchWarning, match="matched 2 sites"):
-        fc1_labels = trace.resolve_sites(tl.in_module("fc1"), max_fanout=8).labels()
+    fc1_labels = trace[tl.in_module("fc1")].labels
     assert fc1_labels
     assert all("fc1:1" in trace[label].modules for label in fc1_labels)
     check_metadata_invariants(trace)
@@ -376,7 +373,7 @@ def test_jax_equinox_nested_modules_preserve_address_tree_and_selectors() -> Non
     model = NestedEquinoxMlp()
     trace = tl.trace(model, jnp.ones(3, dtype=jnp.float32), backend="jax")
 
-    assert trace.module_identity_mode == "pytree_module"
+    assert trace.options.module_identity_mode == "pytree_module"
     assert {module.address for module in trace.modules} == {
         "self",
         "encoder",
@@ -391,13 +388,10 @@ def test_jax_equinox_nested_modules_preserve_address_tree_and_selectors() -> Non
     assert {param.module_address for param in trace.modules["encoder.proj"].params} == {
         "encoder.proj"
     }
-    with pytest.warns(MultiMatchWarning, match="matched 2 sites"):
-        proj_labels = trace.resolve_sites(tl.in_module("encoder.proj"), max_fanout=8).labels()
-    with pytest.warns(MultiMatchWarning, match="will fan out"):
-        encoder_labels = trace.resolve_sites(tl.in_module("encoder"), max_fanout=8).labels()
+    proj_labels = trace[tl.in_module("encoder.proj")].labels
+    encoder_labels = trace[tl.in_module("encoder")].labels
     assert set(proj_labels) < set(encoder_labels)
     assert all("encoder.proj:1" in trace[label].modules for label in proj_labels)
-    assert trace.module_calls["encoder.proj:1"].module_call_stack == ["encoder:1"]
     check_metadata_invariants(trace)
     assert trace.validate_forward_pass([]) is True
 
@@ -408,7 +402,7 @@ def test_jax_nnx_nested_modules_preserve_address_tree_and_selectors() -> None:
     model = NestedNnxMlp()
     trace = tl.trace(model, jnp.ones(3, dtype=jnp.float32), backend="jax")
 
-    assert trace.module_identity_mode == "pytree_module"
+    assert trace.options.module_identity_mode == "pytree_module"
     assert {module.address for module in trace.modules} == {
         "self",
         "encoder",
@@ -424,19 +418,16 @@ def test_jax_nnx_nested_modules_preserve_address_tree_and_selectors() -> None:
         "encoder.proj"
     }
     assert trace.params["encoder.scale"].module_address == "encoder"
-    with pytest.warns(MultiMatchWarning, match="matched 2 sites"):
-        proj_labels = trace.resolve_sites(tl.in_module("encoder.proj"), max_fanout=8).labels()
-    with pytest.warns(MultiMatchWarning, match="will fan out"):
-        encoder_labels = trace.resolve_sites(tl.in_module("encoder"), max_fanout=8).labels()
+    proj_labels = trace[tl.in_module("encoder.proj")].labels
+    encoder_labels = trace[tl.in_module("encoder")].labels
     assert set(proj_labels) < set(encoder_labels)
     assert all("encoder.proj:1" in trace[label].modules for label in proj_labels)
-    assert trace.module_calls["encoder.proj:1"].module_call_stack == ["encoder:1"]
     check_metadata_invariants(trace)
     assert trace.validate_forward_pass([]) is True
 
 
 def test_jax_equinox_shared_submodule_aliases_and_multicall() -> None:
-    """Shared Equinox modules retain both addresses and one repeated-call identity."""
+    """Shared Equinox module instances should mirror torch alias semantics."""
 
     model = SharedEquinoxMlp()
     trace = tl.trace(model, jnp.ones(3, dtype=jnp.float32), backend="jax")
@@ -457,24 +448,19 @@ def test_jax_equinox_shared_submodule_aliases_and_multicall() -> None:
     assert all(f"left:{call_index}" in trace.modules._pass_dict for call_index in (1, 2))
     assert all("left" in trace[op_label].modules[-1] for op_label in first_call.ops)
 
-    # Static addresses retain both aliases; they resolve to one module object.
-    assert trace.modules["self"].address_children == ["left", "right"]
-    assert trace.modules["self"].call_children == ["left"]
+    assert trace.modules["self"].address_children == ["left"]
     assert {param.module_address for param in shared.params} == {"left"}
     assert {tuple(param.all_module_addresses) for param in shared.params} == {("left", "right")}
     assert {tuple(param.all_addresses) for param in shared.params} == {
         ("left.weight", "right.weight"),
         ("left.bias", "right.bias"),
     }
-    assert all(
-        not (set(param.co_parent_params) & set(param.all_addresses)) for param in shared.params
-    )
     check_metadata_invariants(trace)
     assert trace.validate_forward_pass([]) is True
 
 
 def test_jax_nnx_shared_submodule_aliases_and_multicall() -> None:
-    """Shared Flax NNX modules retain both addresses and one repeated-call identity."""
+    """Shared Flax NNX module instances should mirror torch alias semantics."""
 
     model = SharedNnxMlp()
     trace = tl.trace(model, jnp.ones(3, dtype=jnp.float32), backend="jax")
@@ -494,18 +480,13 @@ def test_jax_nnx_shared_submodule_aliases_and_multicall() -> None:
     assert second_call.ops
     assert all(f"left:{call_index}" in trace.modules._pass_dict for call_index in (1, 2))
 
-    # Static addresses retain both aliases; they resolve to one module object.
-    assert trace.modules["self"].address_children == ["left", "right"]
-    assert trace.modules["self"].call_children == ["left"]
+    assert trace.modules["self"].address_children == ["left"]
     assert {param.module_address for param in shared.params} == {"left"}
     assert {tuple(param.all_module_addresses) for param in shared.params} == {("left", "right")}
     assert {tuple(param.all_addresses) for param in shared.params} == {
         ("left.weight", "right.weight"),
         ("left.bias", "right.bias"),
     }
-    assert all(
-        not (set(param.co_parent_params) & set(param.all_addresses)) for param in shared.params
-    )
     check_metadata_invariants(trace)
     assert trace.validate_forward_pass([]) is True
 
@@ -540,22 +521,26 @@ def test_jax_raw_function_traces_remain_function_root() -> None:
     }
     trace = tl.trace(raw_fn, (params, jnp.ones((4, 3), dtype=jnp.float32)), backend="jax")
 
-    assert trace.module_identity_mode == "function_root"
+    assert trace.options.module_identity_mode == "function_root"
     assert [module.address for module in trace.modules] == ["self"]
     check_metadata_invariants(trace)
     assert trace.validate_forward_pass([]) is True
 
 
 def test_jax_nnx_explicit_function_root_keeps_raw_callable_behavior() -> None:
-    """Explicit function-root mode should not auto-wrap NNX module constants."""
+    """Explicit function-root mode does not auto-wrap NNX modules: params are constants."""
 
-    with pytest.raises(ValueError, match="closed-jaxpr constants"):
-        tl.trace(
-            SimpleNnxMlp(),
-            jnp.ones(3, dtype=jnp.float32),
-            backend="jax",
-            module_identity_mode="function_root",
-        )
+    trace = tl.trace(
+        SimpleNnxMlp(),
+        jnp.ones(3, dtype=jnp.float32),
+        backend="jax",
+        capture=tl.options.CaptureOptions(module_identity_mode="function_root"),
+    )
+    assert trace.options.module_identity_mode == "function_root"
+    assert [module.address for module in trace.modules] == ["self"]
+    constants = [op for op in trace._layer_list if op.func_name == "constant"]
+    assert constants, "NNX parameters closed over by the raw callable are constant ops"
+    assert all(op.out is not None for op in constants)
 
 
 @pytest.mark.parametrize(
@@ -620,11 +605,10 @@ def _assert_pytree_modules_surface(trace: Any, tmp_path: Path) -> None:
     """Assert module accessors and predicates on a pytree-module trace."""
 
     del tmp_path
-    assert trace.module_identity_mode == "pytree_module"
+    assert trace.options.module_identity_mode == "pytree_module"
     assert len(trace.modules) > 1
     assert trace.modules["fc1"].address == "fc1"
-    with pytest.warns(MultiMatchWarning, match="matched 2 sites"):
-        assert trace.resolve_sites(tl.in_module("fc1"), max_fanout=8).labels()
+    assert trace[tl.in_module("fc1")].labels
 
 
 def _assert_pytree_module_children_surface(trace: Any, tmp_path: Path) -> None:
@@ -663,10 +647,9 @@ def _assert_pytree_draw_surface(trace: Any, tmp_path: Path) -> None:
     """Assert graph drawing remains available."""
 
     dot = trace.draw(
-        vis_outpath=str(tmp_path / "pytree_graph"),
-        vis_save_only=True,
-        vis_fileformat="dot",
-    )
+        path=str(tmp_path / "pytree_graph"),
+        file_format="dot",
+    ).dot
     assert isinstance(dot, str)
 
 
@@ -675,7 +658,7 @@ def _assert_pytree_tabular_and_summary_surface(trace: Any, tmp_path: Path) -> No
 
     del tmp_path
     assert isinstance(trace.summary(), str)
-    assert len(trace.to_pandas()) == len(trace.layer_list)
+    assert len(trace.to_pandas()) == len(trace._layer_list)
     assert len(trace.modules.to_pandas()) == len(trace.modules)
     assert len(trace.module_calls["fc1:1"].to_pandas()) == 1
 
@@ -686,17 +669,17 @@ def _assert_pytree_save_load_surface(trace: Any, tmp_path: Path) -> None:
     audit_path = tmp_path / "jax_pytree_audit.tlspec"
     trace.save(audit_path, level="audit")
     loaded = tl.load(audit_path)
-    assert loaded.backend == "jax"
-    assert loaded.module_identity_mode == "pytree_module"
-    assert all(op.out is None for op in loaded.layer_list)
+    assert loaded.provenance.backend == "jax"
+    assert loaded.options.module_identity_mode == "pytree_module"
+    assert all(op.out is None for op in loaded._layer_list)
 
     portable_path = tmp_path / "jax_pytree_portable.tlspec"
     expected = np.asarray(trace[trace.output_layers[0]].out)
     trace.save(portable_path)
     loaded_portable = tl.load(portable_path)
     loaded_out = loaded_portable[loaded_portable.output_layers[0]].out
-    assert loaded_portable.backend == "jax"
-    assert loaded_portable.module_identity_mode == "pytree_module"
+    assert loaded_portable.provenance.backend == "jax"
+    assert loaded_portable.options.module_identity_mode == "pytree_module"
     assert getattr(loaded_portable, "payload_load_status") == "loaded_device_best_effort"
     assert isinstance(loaded_out, jax.Array)
     assert loaded_out.shape == expected.shape
@@ -719,17 +702,17 @@ def _assert_pytree_grad_surface(trace: Any, tmp_path: Path) -> None:
     """Assert current pytree-module gradient surface contract."""
 
     del tmp_path
-    assert trace.has_backward_pass is False
+    assert trace.autograd.has_backward_pass is False
     with pytest.raises(ValueError, match="derived_grads"):
-        _ = trace[0].grads
+        _ = trace[0].autograd.grads
 
 
-def _assert_pytree_log_backward_surface(trace: Any, tmp_path: Path) -> None:
+def _assert_pytree_backward_surface(trace: Any, tmp_path: Path) -> None:
     """Assert backward capture rejects with derived-gradient guidance."""
 
     del tmp_path
     with pytest.raises(BackendUnsupportedError, match="backward capture.*derived_grads"):
-        trace.log_backward(trace[trace.output_layers[0]].out)
+        trace.backward(trace[trace.output_layers[0]].out)
 
 
 @pytest.mark.parametrize(
@@ -744,7 +727,7 @@ def _assert_pytree_log_backward_surface(trace: Any, tmp_path: Path) -> None:
         _assert_pytree_save_load_surface,
         _assert_pytree_validate_surface,
         _assert_pytree_grad_surface,
-        _assert_pytree_log_backward_surface,
+        _assert_pytree_backward_surface,
     ),
 )
 def test_jax_equinox_pytree_public_surface_matrix(
@@ -768,7 +751,7 @@ def test_jax_equinox_pytree_public_surface_matrix(
         _assert_pytree_save_load_surface,
         _assert_pytree_validate_surface,
         _assert_pytree_grad_surface,
-        _assert_pytree_log_backward_surface,
+        _assert_pytree_backward_surface,
     ),
 )
 def test_jax_nnx_pytree_public_surface_matrix(

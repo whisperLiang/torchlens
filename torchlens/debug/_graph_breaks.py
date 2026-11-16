@@ -11,11 +11,20 @@ from typing import Any, cast
 import torch
 from torch import nn
 
+from .. import _state
+from .._debug_report import Report, rows_of
 from .._errors import _actionable_message, _ActionableErrorMixin
-from .._input_coerce import _coerce_input_args
+from .._input_coerce import _coerce_inputs
+from .._utils import _torch_compat
+from .._utils._record_group_table import record_member
+from .._utils.arg_handling import normalize_input_args
+from .._utils.rng import _snapshot_cuda_rng_states
+from ..backends.torch.wrappers import unwrap_torch, wrap_torch
 from ..errors._base import CompatibilityError
-from ..utils import _torch_compat
-from ..utils.arg_handling import normalize_input_args
+from ._dynamo_explain_shapes import (
+    _DynamoExplainOutputError,
+    normalize_dynamo_explain_output,
+)
 
 
 class GraphBreaksUnavailableError(_ActionableErrorMixin, CompatibilityError, RuntimeError):
@@ -24,6 +33,14 @@ class GraphBreaksUnavailableError(_ActionableErrorMixin, CompatibilityError, Run
     Keeps its historical ``RuntimeError`` base while joining the taxonomy
     with a stable code and a default remedy, so single-message raise sites
     and existing ``except RuntimeError`` callers stay valid (R64).
+
+    Examples
+    --------
+    >>> err = GraphBreaksUnavailableError("no explain")
+    >>> err.fields["code"]
+    'graph_breaks_unavailable'
+    >>> isinstance(err, RuntimeError), isinstance(err, tl.errors.CompatibilityError)
+    (True, True)
     """
 
     code: str = "graph_breaks_unavailable"
@@ -66,6 +83,14 @@ class GraphBreaksNormalizationError(_ActionableErrorMixin, CompatibilityError, R
     Keeps its historical ``RuntimeError`` base while joining the taxonomy
     with a stable code and a default remedy, so single-message raise sites
     and existing ``except RuntimeError`` callers stay valid (R64).
+
+    Examples
+    --------
+    >>> err = GraphBreaksNormalizationError("odd shape")
+    >>> err.fields["code"]
+    'graph_breaks_normalization_failed'
+    >>> isinstance(err, RuntimeError), isinstance(err, tl.errors.CompatibilityError)
+    (True, True)
     """
 
     code: str = "graph_breaks_normalization_failed"
@@ -128,7 +153,7 @@ class GraphBreak:
 
 
 @dataclass(frozen=True)
-class GraphBreakReport:
+class GraphBreakReport(Report):
     """Structured Dynamo graph-break correlation result.
 
     Attributes
@@ -138,6 +163,28 @@ class GraphBreakReport:
     """
 
     breaks: tuple[GraphBreak, ...]
+
+    _subject_text = "compiled model"
+
+    def _report_status(self) -> str:
+        """The verdict token on the card's lead line."""
+
+        return f"{len(self.breaks)} breaks" if self.breaks else "no_breaks"
+
+    def _report_findings(self) -> list[str]:
+        """One-line findings for the card, most severe first."""
+
+        return [
+            f"{item.reason} at {item.source_file}:{item.line_number}"
+            if item.source_file is not None
+            else item.reason
+            for item in self.breaks
+        ]
+
+    def _report_rows(self) -> list[dict[str, Any]] | None:
+        """The natural table rows behind ``to_pandas()``."""
+
+        return rows_of(self.breaks)
 
     def __len__(self) -> int:
         """Return the number of graph breaks.
@@ -167,10 +214,9 @@ def _snapshot_model_state(model: nn.Module) -> tuple[dict[str, torch.Tensor], An
 
     with torch.no_grad():
         params = {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
-    cpu_rng = torch.get_rng_state()
-    # Initialized-CUDA-only, latch-guarded (R36-4): the bare is_available()
+    cpu_rng = torch.default_generator.get_state()
+    # Initialized-CUDA-only, latch-guarded: the bare is_available
     # gate allocated a CUDA context per visible device on CPU-only runs.
-    from ..utils.rng import _snapshot_cuda_rng_states
 
     cuda_rng = _snapshot_cuda_rng_states() or None
     return params, cpu_rng, cuda_rng
@@ -218,9 +264,6 @@ def _clean_torch() -> Iterator[None]:
         they were installed on entry.
     """
 
-    from .. import _state
-    from ..backends.torch.wrappers import unwrap_torch, wrap_torch
-
     was_decorated = bool(getattr(_state, "_is_decorated", False))
     if was_decorated:
         unwrap_torch()
@@ -253,11 +296,12 @@ def _model_call_args(
         Positional and keyword arguments for Dynamo explain.
     """
 
-    coerced = _coerce_input_args(model, x)
-    args = tuple(normalize_input_args(coerced, model))
     input_kwargs = trace_kwargs.get("input_kwargs")
-    kwargs = dict(input_kwargs) if isinstance(input_kwargs, dict) else {}
-    return args, kwargs
+    coerced, routed_kwargs = _coerce_inputs(
+        model, x, dict(input_kwargs) if isinstance(input_kwargs, dict) else None
+    )
+    args = tuple(normalize_input_args(coerced, model))
+    return args, dict(routed_kwargs or {})
 
 
 def _op_locations(op: Any) -> tuple[tuple[str, int], ...]:
@@ -275,7 +319,7 @@ def _op_locations(op: Any) -> tuple[tuple[str, int], ...]:
     """
 
     locations: list[tuple[str, int]] = []
-    for frame in getattr(op, "code_context", ()) or ():
+    for frame in record_member(op, "code_context", ()) or ():
         source_file = getattr(frame, "file", None)
         line_number = getattr(frame, "line_number", None)
         if source_file is None or not isinstance(line_number, int):
@@ -310,7 +354,7 @@ def _correlate_break(trace: Any, record: Any) -> GraphBreak:
         )
     source_file = os.path.abspath(record.source_file)
     distances: list[tuple[int, int, str]] = []
-    for op in trace.layer_list:
+    for op in trace._layer_list:
         label = str(getattr(op, "label", getattr(op, "layer_label", "<unknown>")))
         same_file_lines = [line for filename, line in _op_locations(op) if filename == source_file]
         if same_file_lines:
@@ -338,7 +382,7 @@ def _correlate_break(trace: Any, record: Any) -> GraphBreak:
     return GraphBreak(record.reason, record.source_file, record.line_number, labels, None)
 
 
-def graph_breaks(model: nn.Module, x: Any, **trace_kwargs: Any) -> GraphBreakReport:
+def graph_breaks(model: nn.Module, inputs: Any, **trace_kwargs: Any) -> GraphBreakReport:
     """Report Dynamo graph breaks and correlate them to eager trace operations.
 
     The Dynamo probe runs against ORIGINAL (unwrapped) torch so TorchLens's
@@ -347,7 +391,7 @@ def graph_breaks(model: nn.Module, x: Any, **trace_kwargs: Any) -> GraphBreakRep
     neither the probe nor the eager correlation trace mutates the caller's
     model. Both runs observe identical state, so a stateful branching model
     takes the same path in the probe and the correlation trace. The Dynamo
-    result is normalized through ``torchlens.utils._torch_compat`` without
+    result is normalized through ``torchlens.debug._dynamo_explain_shapes`` without
     torch-version parsing. Correlation uses recorded :class:`FuncCallLocation`
     file/line evidence; empty matches state why no correlation was possible.
 
@@ -355,7 +399,7 @@ def graph_breaks(model: nn.Module, x: Any, **trace_kwargs: Any) -> GraphBreakRep
     ----------
     model:
         Eager PyTorch module to inspect.
-    x:
+    inputs:
         Model input accepted by :func:`torchlens.trace`.
     **trace_kwargs:
         Additional keyword arguments forwarded to :func:`torchlens.trace`.
@@ -371,13 +415,22 @@ def graph_breaks(model: nn.Module, x: Any, **trace_kwargs: Any) -> GraphBreakRep
         If this torch runtime lacks ``torch._dynamo.explain``.
     GraphBreaksNormalizationError
         If the runtime returns an unrecognized explain-result shape.
+
+    Examples
+    --------
+    >>> try:
+    ...     report = graph_breaks(model, x)
+    ... except tl.errors.GraphBreaksUnavailableError:
+    ...     report = None
+    >>> report is None or len(report) == 0
+    True
     """
 
     if not _torch_compat.HAS_DYNAMO_EXPLAIN:
         raise GraphBreaksUnavailableError(
             "torch._dynamo.explain is unavailable in this torch runtime"
         )
-    args, kwargs = _model_call_args(model, x, trace_kwargs)
+    args, kwargs = _model_call_args(model, inputs, trace_kwargs)
     snapshot = _snapshot_model_state(model)
     try:
         with _clean_torch():
@@ -392,13 +445,13 @@ def graph_breaks(model: nn.Module, x: Any, **trace_kwargs: Any) -> GraphBreakRep
         # runs for correlation to be valid), not the probe's mutated state.
         _restore_model_state(model, snapshot)
         try:
-            normalized = _torch_compat.normalize_dynamo_explain_output(raw_explanation)
-        except _torch_compat._DynamoExplainOutputError as exc:
+            normalized = normalize_dynamo_explain_output(raw_explanation)
+        except _DynamoExplainOutputError as exc:
             raise GraphBreaksNormalizationError(str(exc)) from exc
 
-        from .. import trace as capture_trace
+        from .._user_public_impls import trace as capture_trace
 
-        eager_trace = capture_trace(model, x, **trace_kwargs)
+        eager_trace = capture_trace(model, inputs, **trace_kwargs)
         return GraphBreakReport(
             tuple(_correlate_break(eager_trace, record) for record in normalized)
         )

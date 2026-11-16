@@ -1,4 +1,4 @@
-"""Tests for the torch version-compatibility shim (torchlens/utils/_torch_compat.py).
+"""Tests for the torch version-compatibility shim (torchlens/_utils/_torch_compat.py).
 
 The shim lets TorchLens run on torch 2.1+ by routing the two torch-2.4-only
 autocast-query APIs (``is_autocast_enabled(device_type)`` /
@@ -12,15 +12,18 @@ when we cannot install an actual torch-2.1 environment.
 
 from __future__ import annotations
 
+import sys
 import warnings
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
 import pytest
 import torch
 
-from torchlens.utils import _torch_compat as tc
-from torchlens.utils.rng import log_current_autocast_state
+from torchlens._utils import _kernel_probes, _torch_compat as tc
+from torchlens._utils._kernel_probes import _solves_identity_system
+from torchlens._utils.rng import log_current_autocast_state
 
 # The functorch transform-level API (torch._C._functorch.maybe_current_level) is a
 # torch-2.4+ addition, genuinely absent on the supported 2.1-2.3 range. Probe torch
@@ -40,9 +43,6 @@ class _UnreadableNamesSentinel:
         """Raise when the named-dimension metadata is inspected."""
 
         raise AssertionError("names must not be read when the capability is absent")
-
-
-pytestmark = pytest.mark.smoke
 
 
 def test_modern_branch_matches_torch_directly() -> None:
@@ -163,6 +163,19 @@ def test_capability_attrs_cover_all_has_flags() -> None:
     assert not duplicates, f"duplicated capability inventory rows: {duplicates}"
 
 
+def test_missing_batched_collective_wait_is_visible(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Optional list-valued completion degrades separately from scalar completion."""
+
+    monkeypatch.setattr(tc, "_FUNCOL_WAIT_INTERPOSITION_PROBED", True)
+    monkeypatch.setattr(tc, "HAS_FUNCOL_WAIT_INTERPOSITION", True)
+    monkeypatch.setattr(tc, "_FUNCOL_WAIT_REDISPATCH", (object(), lambda: None))
+    monkeypatch.setattr(torch.ops._c10d_functional, "wait_tensors", None, raising=False)
+    with pytest.warns(UserWarning, match="HAS_FUNCOL_BATCHED_WAIT_INTERPOSITION"):
+        assert tc.get_funcol_wait_redispatch(batched=True) is None
+    assert tc.HAS_FUNCOL_WAIT_INTERPOSITION is True
+    assert tc.HAS_FUNCOL_BATCHED_WAIT_INTERPOSITION is False
+
+
 def test_untyped_storage_wrapper_cache_probe_matches_runtime() -> None:
     """Storage weak-key safety capability follows live wrapper identity behavior."""
 
@@ -236,7 +249,7 @@ def test_accumulate_grad_absence_uses_name_matching(monkeypatch: pytest.MonkeyPa
 @pytest.mark.parametrize(
     ("helper_name", "flag_name", "expected"),
     [
-        ("get_functorch_maybe_current_level", "HAS_FUNCTORCH_LEVEL_API", None),
+        ("get_functorch_transform_probe", "HAS_FUNCTORCH_INTERPRETER_STACK_API", None),
         ("get_functorch_wrapped_tensor_checker", "HAS_FUNCTORCH_WRAPPED_TENSOR_API", None),
         ("get_fx_graph_module_type", "HAS_FX_GRAPH_MODULE", None),
     ],
@@ -254,6 +267,36 @@ def test_nested_private_helper_absence_marks_capability(
     with pytest.warns(UserWarning, match=flag_name):
         assert getattr(tc, helper_name)() is expected
     assert getattr(tc, flag_name) is False
+
+
+def test_functorch_transform_probe_falls_back_to_the_interpreter_stack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without ``maybe_current_level`` (torch 2.1, 2.2) the probe reads the interpreter stack."""
+
+    _reset_capability(monkeypatch, "HAS_FUNCTORCH_LEVEL_API")
+    _reset_capability(monkeypatch, "HAS_FUNCTORCH_INTERPRETER_STACK_API")
+    monkeypatch.setitem(
+        tc._ATTRIBUTE_PROBES, "HAS_FUNCTORCH_LEVEL_API", ("torch:_C._functorch.absent_level_api",)
+    )
+    monkeypatch.delenv("TORCHLENS_SUPPRESS_TORCH_CAPABILITY_WARNINGS", raising=False)
+    with warnings.catch_warnings():
+        # The fallback is no degradation: an absent level API alone stays silent.
+        warnings.simplefilter("error", tc.TorchCapabilityWarning)
+        probe = tc.get_functorch_transform_probe()
+    assert probe is not None
+    assert probe() is None
+    inside: list[object] = []
+
+    def row_fn(row: torch.Tensor) -> torch.Tensor:
+        """Record the probe's answer inside the transform."""
+
+        inside.append(probe())
+        return row
+
+    torch.func.vmap(row_fn)(torch.ones(2, 3))
+    assert inside and all(level is not None for level in inside)
+    assert tc.HAS_FUNCTORCH_INTERPRETER_STACK_API is True
 
 
 @pytest.mark.parametrize(
@@ -314,8 +357,10 @@ def test_private_torch_capability_flags_present_on_supported_range() -> None:
         "HAS_TORCH_FUNC",
         "HAS_FUNCTORCH_APIS",
         "HAS_FUNCTORCH_LEVEL_API",
+        "HAS_FUNCTORCH_INTERPRETER_STACK_API",
         "HAS_FUNCTORCH_WRAPPED_TENSOR_API",
         "HAS_JIT_BUILTIN_TABLE",
+        "HAS_COND_HIGHER_ORDER_OP",
         "HAS_JIT_BOOLEAN_DISPATCH_TABLE",
         "HAS_JIT_OVERLOAD_RESOLVER",
         "HAS_DEVICE_CONTEXT_DISPATCH",
@@ -325,6 +370,7 @@ def test_private_torch_capability_flags_present_on_supported_range() -> None:
         "HAS_DYNAMO_OPTIMIZED_MODULE",
         "HAS_DYNAMO_ORIG_CALLABLE_MARKER",
         "HAS_TENSOR_SEQUENCE_SLOT_FIX",
+        "HAS_LEGACY_CONSTRUCTOR_NEW_PATCH",
         "HAS_DISPATCH_MODE_STACK_QUERY",
     }
     # NOT floor-required, verified rather than assumed: HAS_NAMED_TENSOR_API is
@@ -359,8 +405,10 @@ def test_torch_capability_snapshot_contract() -> None:
         "HAS_VARIABLE_FUNCTIONS": True,
         "HAS_TORCH_VF": True,
         "HAS_TORCH_FUNC": True,
+        "HAS_SPARSE_INVARIANT_CHECK": True,
         "HAS_FUNCTORCH_APIS": True,
         "HAS_FUNCTORCH_LEVEL_API": _HAS_FUNCTORCH_LEVEL_API,
+        "HAS_FUNCTORCH_INTERPRETER_STACK_API": True,
         "HAS_FUNCTORCH_WRAPPED_TENSOR_API": True,
         "HAS_JIT_BUILTIN_TABLE": True,
         # fix-capture-r3 R56: TorchScript compatibility while wrapped needs the
@@ -378,15 +426,92 @@ def test_torch_capability_snapshot_contract() -> None:
         # supported range -- hardcoded True as a tripwire; a build without it
         # degrades to the open-bracket heuristic behind this named flag.
         "HAS_CURRENT_GRAPH_TASK_ID": True,
+        # The executing-node resolver matches backward FLOPs to the node that
+        # ran them; a build without it charges the innermost node marker.
+        "HAS_CURRENT_AUTOGRAD_NODE": tc.HAS_CURRENT_AUTOGRAD_NODE,
+        "HAS_ORIGINAL_VIEW_TRACKING": tc.HAS_ORIGINAL_VIEW_TRACKING,
+        # The unchecked view replay; older torch spells it ``_view_func``.
+        "HAS_VIEW_FUNC_UNSAFE": tc.HAS_VIEW_FUNC_UNSAFE,
+        # Newer-torch surfaces a model may call (torch 2.3+ and 2.5+): absence is healthy.
+        "HAS_REV_VIEW_FUNC_UNSAFE": tc.HAS_REV_VIEW_FUNC_UNSAFE,
+        "HAS_SDPA_GQA": tc.HAS_SDPA_GQA,
+        "HAS_SDPA_EMPTY_ROW_ZERO": tc.HAS_SDPA_EMPTY_ROW_ZERO,
         "HAS_FX_GRAPH_MODULE": True,
         "HAS_NAMED_TENSOR_API": tc.HAS_NAMED_TENSOR_API,
         "HAS_CACHED_UNTYPED_STORAGE_WRAPPER": tc.HAS_CACHED_UNTYPED_STORAGE_WRAPPER,
         "HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE": (
             tc.HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE
         ),
+        "HAS_SUBCLASS_CTOR_IN_DISPATCH_MODE": tc.HAS_SUBCLASS_CTOR_IN_DISPATCH_MODE,
+        # TorchScript call boundary: ScriptFunction.__call__ replaceable from Python
+        # (a pybind11 heap type). Without it a scripted call stays a census gap with
+        # its advisory; mirror the live value.
+        "HAS_SCRIPT_FUNCTION_CALL_HOOK": tc.HAS_SCRIPT_FUNCTION_CALL_HOOK,
+        # Whether the optional flash-attn-4 distribution is installed (a package probe, not
+        # a torch surface); mirror the live value.
+        "HAS_FLASH_ATTENTION_4_INTERFACE": tc.HAS_FLASH_ATTENTION_4_INTERFACE,
+        # Function.apply: a Python classmethod through torch 2.13, the C descriptor from 2.14.
+        "HAS_FUNCTION_APPLY_SLOT": True,
+        # The HOP entry compile's environment factory (torch 2.13); mirror the live value.
+        "HAS_HOP_COMPILATION_ENV": tc.HAS_HOP_COMPILATION_ENV,
         "HAS_DYNAMO_OPTIMIZED_MODULE": True,
         "HAS_DYNAMO_ORIG_CALLABLE_MARKER": tc.HAS_DYNAMO_ORIG_CALLABLE_MARKER,
         "HAS_DYNAMO_EXPLAIN": tc.HAS_DYNAMO_EXPLAIN,
+        # F04 one-backward reads: GradientEdge addressing and Node prehooks
+        # postdate the torch>=2.1 floor (OPTIONAL flags -- absence is a
+        # healthy old install; the read refuses typed). Mirror the live
+        # values so floor legs stay green.
+        "HAS_GRADIENT_EDGE": tc.HAS_GRADIENT_EDGE,
+        "HAS_NODE_PREHOOK": tc.HAS_NODE_PREHOOK,
+        # The in-place view-write rebind proves its binding from node creation
+        # order; without it the rebind refuses. Mirror the live value (not
+        # measured on the floor matrix).
+        "HAS_NODE_SEQUENCE_NR": tc.HAS_NODE_SEQUENCE_NR,
+        # L8 floor fixes: deterministic uninit-memory fill, device-agnostic
+        # GradScaler, torch.nn.attention, torch.nn.RMSNorm, and tuple-dim
+        # any()/all() all postdate the torch>=2.1 floor (OPTIONAL flags --
+        # absence is a healthy old install with a real fallback or nothing to
+        # shim). Build-dependent, so mirror the live post-snapshot capability.
+        "HAS_DETERMINISTIC_FILL_FLAG": tc.HAS_DETERMINISTIC_FILL_FLAG,
+        "HAS_FP32_PRECISION_CONTROLS": tc.HAS_FP32_PRECISION_CONTROLS,
+        "HAS_AMP_GRADSCALER": tc.HAS_AMP_GRADSCALER,
+        "HAS_NN_ATTENTION_MODULE": tc.HAS_NN_ATTENTION_MODULE,
+        "HAS_RMSNORM_MODULE": tc.HAS_RMSNORM_MODULE,
+        # torch.mps memory queries postdate the torch>=2.1 floor (torch 2.5):
+        # absence leaves an MPS save budget honestly unmeasured. Build-dependent,
+        # so mirror the live post-snapshot capability.
+        "HAS_MPS_MEMORY_QUERY": tc.HAS_MPS_MEMORY_QUERY,
+        # torch.backends.mha (the nn.MultiheadAttention / TransformerEncoderLayer
+        # fused fast-path switch) postdates the torch>=2.1 floor too: absence is a
+        # healthy old install with a real fallback (force_mha_slow_path flips the
+        # affected modules' own training flag instead). Build-dependent, so mirror
+        # the live post-snapshot capability.
+        "HAS_MHA_FASTPATH_SWITCH": tc.HAS_MHA_FASTPATH_SWITCH,
+        "HAS_REDUCE_TUPLE_DIM": tc.HAS_REDUCE_TUPLE_DIM,
+        # CPU Half-dtype kernel coverage (addmm/layer_norm/nextafter) and
+        # Float8 empty-fill under deterministic mode both postdate the torch
+        # 2.1 floor: genuine old-torch CPU limitations. Build-dependent, so
+        # mirror the live post-snapshot capability.
+        "HAS_CPU_HALF_KERNELS": tc.HAS_CPU_HALF_KERNELS,
+        "HAS_CPU_FLOAT8_DETERMINISTIC_FILL": tc.HAS_CPU_FLOAT8_DETERMINISTIC_FILL,
+        # Whether the CPU eval batch_norm kernel leaves a running_var residual
+        # at a non-zero mean (x86 yes, Apple ARM no): kernel-dependent, so
+        # mirror the live post-snapshot capability.
+        "HAS_EVAL_BATCH_NORM_MEAN_RESIDUAL": tc.HAS_EVAL_BATCH_NORM_MEAN_RESIDUAL,
+        # torch.sparse.spsolve on CUDA needs a cuDSS build, which official wheels
+        # lack. Build- and device-dependent, so mirror the live post-snapshot
+        # capability.
+        "HAS_SPARSE_SPSOLVE_CUDA": tc.HAS_SPARSE_SPSOLVE_CUDA,
+        # Test-only structure-only-belt provenance signal: whether meta-tensor
+        # scalar extraction raises torch's own guard (torch 2.1-2.2 fall
+        # through to a generic NotImplementedError instead). Build-dependent,
+        # so mirror the live post-snapshot capability.
+        "HAS_META_ITEM_GUARD": tc.HAS_META_ITEM_GUARD,
+        # torch builds compiled against NumPy 1.x (torch 2.1-2.2) lose the
+        # torch<->numpy bridge under NumPy 2. Every CI row pairs a working
+        # build, but the value is environment-dependent: mirror it.
+        "HAS_NUMPY_BRIDGE": tc.HAS_NUMPY_BRIDGE,
+        "HAS_TORCH_CPP_EXTENSION": tc.HAS_TORCH_CPP_EXTENSION,
         # W21 cold-start: FSDP wrapper detection is lazily probed (never imports
         # torch.distributed.fsdp on plain captures); distributed availability is
         # build-dependent, so mirror the live post-snapshot capability.
@@ -398,6 +523,11 @@ def test_torch_capability_snapshot_contract() -> None:
         # structural namespace matching. Build-dependent, so mirror the live
         # post-snapshot capability.
         "HAS_DTENSOR": tc.HAS_DTENSOR,
+        # F27: lazily probed at first Kineto extraction / memory-profile
+        # read; the snapshot reads whatever the probe state is.
+        "HAS_KINETO_INMEMORY_EVENTS": tc.HAS_KINETO_INMEMORY_EVENTS,
+        "HAS_KINETO_EVENT_SCOPE": tc.HAS_KINETO_EVENT_SCOPE,
+        "HAS_MEMORY_PROFILE": tc.HAS_MEMORY_PROFILE,
         "HAS_DEVICE_MESH": tc.HAS_DEVICE_MESH,
         "HAS_PIPELINING": tc.HAS_PIPELINING,
         # Dynamo/fake-mode boundary probes. Without them a compiled region reached
@@ -420,6 +550,9 @@ def test_torch_capability_snapshot_contract() -> None:
         "HAS_DISABLE_TORCH_FUNCTION": True,
         "HAS_VARIABLE_FUNCTIONS_CLASS": True,
         "HAS_FAKE_TENSOR_MODE": tc.HAS_FAKE_TENSOR_MODE,
+        # cond_op, or on torch 2.1 the bare cond operator: present on every supported
+        # torch, hardcoded True as a tripwire for the completeness witness cond rule.
+        "HAS_COND_HIGHER_ORDER_OP": True,
         "HAS_DTENSOR_SHARD_GEOMETRY": tc.HAS_DTENSOR_SHARD_GEOMETRY,
         # L8/C2 funcol boundary capture degrades independently when group
         # resolution or dispatcher-level wait interposition is unavailable.
@@ -427,17 +560,23 @@ def test_torch_capability_snapshot_contract() -> None:
         # retaining their lazy-probe lifecycle.
         "HAS_FUNCOL_GROUP_RESOLUTION": tc.HAS_FUNCOL_GROUP_RESOLUTION,
         "HAS_FUNCOL_WAIT_INTERPOSITION": tc.HAS_FUNCOL_WAIT_INTERPOSITION,
+        "HAS_FUNCOL_BATCHED_WAIT_INTERPOSITION": tc.HAS_FUNCOL_BATCHED_WAIT_INTERPOSITION,
         # fix/private-probe-routing: the remaining L8/C2 funcol private touches
         # (module object for the arm-time wraps, ACT class for inner-tensor
         # unwrapping) resolve through compat. Distributed availability is
         # build-dependent, so mirror the live post-snapshot capability.
         "HAS_FUNCOL_MODULE": tc.HAS_FUNCOL_MODULE,
+        "HAS_FLEX_GEMM": tc.HAS_FLEX_GEMM,
         "HAS_ASYNC_COLLECTIVE_TENSOR": tc.HAS_ASYNC_COLLECTIVE_TENSOR,
         # L9 backward-residual private touches, compat-routed. The autograd
         # engine callback handle exists across the whole supported range --
         # hardcoded True as a tripwire; the non-reentrant _checkpoint_hook
         # class is version-dependent, so mirror the live capability.
         "HAS_CHECKPOINT_HOOK_CLASS": tc.HAS_CHECKPOINT_HOOK_CLASS,
+        # torch 2.14 interposes _checkpoint_internal_hook between
+        # _checkpoint_hook/_recomputation_hook and saved_tensors_hooks;
+        # version-dependent, so mirror the live capability.
+        "HAS_CHECKPOINT_INTERNAL_HOOK_CLASS": tc.HAS_CHECKPOINT_INTERNAL_HOOK_CLASS,
         "HAS_AUTOGRAD_ENGINE_QUEUE_CALLBACK": True,
         "HAS_TRACING_TENSOR_TYPES": tc.HAS_TRACING_TENSOR_TYPES,
         # Compile rung-2 probes: set_stance (torch >= 2.6) lets capture run
@@ -445,6 +584,9 @@ def test_torch_capability_snapshot_contract() -> None:
         # compile counters back tl.debug.count_compiles. Build-dependent, so
         # mirror the live values.
         "HAS_SET_STANCE": tc.HAS_SET_STANCE,
+        # CUDA-graph bindings exist only on CUDA builds; mirror the live value.
+        "HAS_CUDA_GRAPHS": tc.HAS_CUDA_GRAPHS,
+        "HAS_TORCH_FUNCTION_STACK_SURGERY": tc.HAS_TORCH_FUNCTION_STACK_SURGERY,
         "HAS_DYNAMO_COMPILE_COUNTERS": tc.HAS_DYNAMO_COMPILE_COUNTERS,
         # fp8 dtypes exist on every torch build we support, but the set grew across
         # 2.x, so mirror the live value rather than hardcoding True.
@@ -474,6 +616,10 @@ def test_torch_capability_snapshot_contract() -> None:
         # runtime capabilities of the interpreter, so mirror the live values.
         "HAS_CODE_POSITIONS": tc.HAS_CODE_POSITIONS,
         "HAS_CODE_QUALNAME": tc.HAS_CODE_QUALNAME,
+        # Direct ``module.forward(x)`` detection: the caller frame against torch's
+        # Module.__call__ dispatch code. Present across the supported range;
+        # without it the fast run keeps refusing hook-invisible module calls.
+        "HAS_MODULE_CALL_DISPATCH_FRAME": True,
         # Identity-shim sites (sf-fastpath): torch-internal `x is F.y` checks
         # normalized while wrappers are installed. The transformer flag and the
         # private expanded-weights machinery exist across the supported range
@@ -482,7 +628,15 @@ def test_torch_capability_snapshot_contract() -> None:
         "HAS_TRANSFORMER_ACTIVATION_FASTPATH_FLAG": True,
         "HAS_ATTENTION_CAUSAL_BIAS": tc.HAS_ATTENTION_CAUSAL_BIAS,
         "HAS_EXPANDED_WEIGHTS_CONV_PICKER": True,
+        # The lazy-module materialization allowlist the identity shim resolves
+        # through the wrapper ledger exists across the supported range.
+        "HAS_LAZY_MODULE_ALLOWED_METHODS": True,
+        # Declined-protocol redispatch skips torch's disabled-handler sentinel,
+        # present across the supported range.
+        "HAS_DISABLED_TORCH_FUNCTION_IMPL": True,
         "HAS_TENSOR_SEQUENCE_SLOT_FIX": True,
+        # Legacy tensor-constructor capture: CPython type-layout probe.
+        "HAS_LEGACY_CONSTRUCTOR_NEW_PATCH": True,
         # r-b7 R42-1/6: the six ambient execution-context HAS_* flags and the
         # HAS_AUTOCAST_DEVICE_TYPE_ARG alias are RETIRED — every control they
         # guarded is a public torch surface older than the 2.1 floor, so the
@@ -526,10 +680,10 @@ def test_completeness_census_check_fails_closed_on_probe_failure(
     the census-blind ``_disable_current_modes()`` regions it exists to cover.
     """
 
-    from torchlens.backends.torch import completeness_witness as cw
+    import torchlens.backends.torch._completeness_storage
 
     monkeypatch.setattr(tc, "get_current_dispatch_mode_stack", lambda: None)
-    assert cw._completeness_census_active() is False
+    assert torchlens.backends.torch._completeness_storage._completeness_census_active() is False
 
 
 def test_completeness_census_check_reads_live_stack(
@@ -537,13 +691,14 @@ def test_completeness_census_check_reads_live_stack(
 ) -> None:
     """The census check still discriminates active vs inactive census modes."""
 
+    import torchlens.backends.torch._completeness_storage
     from torchlens.backends.torch import completeness_witness as cw
 
     census_mode = cw._CompletenessDispatchMode.__new__(cw._CompletenessDispatchMode)
     monkeypatch.setattr(tc, "get_current_dispatch_mode_stack", lambda: [census_mode])
-    assert cw._completeness_census_active() is True
+    assert torchlens.backends.torch._completeness_storage._completeness_census_active() is True
     monkeypatch.setattr(tc, "get_current_dispatch_mode_stack", lambda: [])
-    assert cw._completeness_census_active() is False
+    assert torchlens.backends.torch._completeness_storage._completeness_census_active() is False
 
 
 def test_dispatch_mode_stack_probe_demotes_on_raise(
@@ -610,7 +765,7 @@ def test_capability_warning_category_is_typed(monkeypatch: pytest.MonkeyPatch) -
 def test_tf_runtime_support_is_feature_probed() -> None:
     """r-b4 R26-6b: an odd version string no longer disables backend='tf'."""
 
-    from torchlens.backends.default_specs import _tf_runtime_supported
+    from torchlens.backends._default_specs import _tf_runtime_supported
 
     class _Backend:
         @staticmethod
@@ -658,15 +813,14 @@ def test_force_eager_stance_scope_exit_owned_with_construction(
 
     handle = _RecordingStance()
     monkeypatch.setattr(tc, "HAS_SET_STANCE", True)
-    monkeypatch.setattr(torch.compiler, "set_stance", lambda mode: handle)
+    monkeypatch.setattr(torch.compiler, "set_stance", lambda mode: handle, raising=False)
 
     class _Interrupt(KeyboardInterrupt):
         pass
 
-    with pytest.raises(_Interrupt):
-        with tc.force_eager_stance_scope() as active:
-            assert active is True
-            raise _Interrupt("body interrupted")
+    with pytest.raises(_Interrupt), tc.force_eager_stance_scope() as active:
+        assert active is True
+        raise _Interrupt("body interrupted")
 
     assert handle.exits == 1
 
@@ -684,9 +838,423 @@ def test_force_eager_stance_scope_construction_failure_degrades_without_exit(
     def _refuse(mode: str) -> object:
         raise ValueError("stance refused")
 
-    monkeypatch.setattr(torch.compiler, "set_stance", _refuse)
+    monkeypatch.setattr(torch.compiler, "set_stance", _refuse, raising=False)
 
     with tc.force_eager_stance_scope() as active:
         assert active is False
     # The capability flag degraded (monkeypatch restores it at teardown).
     assert tc.HAS_SET_STANCE is False
+
+
+def test_fill_uninitialized_memory_flag_visible_in_capability_snapshot() -> None:
+    """``HAS_DETERMINISTIC_FILL_FLAG`` and friends are published, not silent.
+
+    L8 floor fix: a torch build whose ``torch.utils.deterministic`` submodule
+    is absent (torch 2.1.x) must still show the flag in the diagnostic
+    snapshot (``tl.report.doctor()`` / ``tl.report.doctor()``), mirroring the
+    live capability rather than dropping the key.
+    """
+
+    snapshot = tc.get_torch_capability_snapshot()
+    assert snapshot["HAS_DETERMINISTIC_FILL_FLAG"] == tc.HAS_DETERMINISTIC_FILL_FLAG
+    assert snapshot["HAS_AMP_GRADSCALER"] == tc.HAS_AMP_GRADSCALER
+    assert snapshot["HAS_NN_ATTENTION_MODULE"] == tc.HAS_NN_ATTENTION_MODULE
+    assert snapshot["HAS_RMSNORM_MODULE"] == tc.HAS_RMSNORM_MODULE
+    assert snapshot["HAS_MHA_FASTPATH_SWITCH"] == tc.HAS_MHA_FASTPATH_SWITCH
+    assert snapshot["HAS_REDUCE_TUPLE_DIM"] == tc.HAS_REDUCE_TUPLE_DIM
+    assert snapshot["HAS_CPU_HALF_KERNELS"] == tc.HAS_CPU_HALF_KERNELS
+    assert snapshot["HAS_EVAL_BATCH_NORM_MEAN_RESIDUAL"] == tc.HAS_EVAL_BATCH_NORM_MEAN_RESIDUAL
+    assert snapshot["HAS_MPS_MEMORY_QUERY"] == tc.HAS_MPS_MEMORY_QUERY
+    assert snapshot["HAS_CPU_FLOAT8_DETERMINISTIC_FILL"] == tc.HAS_CPU_FLOAT8_DETERMINISTIC_FILL
+    assert snapshot["HAS_SPARSE_SPSOLVE_CUDA"] == tc.HAS_SPARSE_SPSOLVE_CUDA
+    assert snapshot["HAS_SPARSE_INVARIANT_CHECK"] is True
+
+
+def test_read_fill_uninitialized_memory_returns_none_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The read degrades to ``None`` (never crashes) when the submodule is absent."""
+
+    monkeypatch.setattr(tc, "_torch_deterministic_module", None)
+    assert tc.read_fill_uninitialized_memory() is None
+
+
+def test_write_fill_uninitialized_memory_noops_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The write is a no-op (never crashes) when the submodule is absent."""
+
+    monkeypatch.setattr(tc, "_torch_deterministic_module", None)
+    tc.write_fill_uninitialized_memory(True)  # must not raise
+
+
+def test_read_fill_uninitialized_memory_reads_live_module_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The read/write pair round-trips through a stubbed submodule when present."""
+
+    stub = SimpleNamespace(fill_uninitialized_memory=True)
+    monkeypatch.setattr(tc, "_torch_deterministic_module", stub)
+    assert tc.read_fill_uninitialized_memory() is True
+    tc.write_fill_uninitialized_memory(False)
+    assert stub.fill_uninitialized_memory is False
+
+
+def test_get_mha_fastpath_enabled_returns_none_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The read degrades to ``None`` (never crashes) when the switch is absent."""
+
+    monkeypatch.setattr(tc, "_MHA_FASTPATH_SWITCH_PROBED", True)
+    monkeypatch.setattr(tc, "HAS_MHA_FASTPATH_SWITCH", False)
+    assert tc.get_mha_fastpath_enabled() is None
+
+
+def test_set_mha_fastpath_enabled_noops_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The write is a no-op (never crashes) when the switch is absent."""
+
+    monkeypatch.setattr(tc, "_MHA_FASTPATH_SWITCH_PROBED", True)
+    monkeypatch.setattr(tc, "HAS_MHA_FASTPATH_SWITCH", False)
+    tc.set_mha_fastpath_enabled(True)  # must not raise
+
+
+@pytest.mark.skipif(
+    not tc.get_mha_fastpath_switch_support(),
+    reason="torch.backends.mha postdates the torch>=2.1 floor",
+)
+def test_get_set_mha_fastpath_enabled_round_trips_when_present() -> None:
+    """The read/write pair round-trips through the live public switch."""
+
+    prior = tc.get_mha_fastpath_enabled()
+    try:
+        tc.set_mha_fastpath_enabled(False)
+        assert tc.get_mha_fastpath_enabled() is False
+        tc.set_mha_fastpath_enabled(True)
+        assert tc.get_mha_fastpath_enabled() is True
+    finally:
+        tc.set_mha_fastpath_enabled(bool(prior))
+
+
+@pytest.mark.skipif(
+    not tc.get_mha_fastpath_switch_support(),
+    reason="torch.backends.mha postdates the torch>=2.1 floor",
+)
+def test_force_mha_slow_path_uses_the_public_switch_when_present() -> None:
+    """The switch is held off inside the block and restored after it."""
+
+    model = torch.nn.MultiheadAttention(4, 2, batch_first=True)
+    prior = tc.get_mha_fastpath_enabled()
+    with tc.force_mha_slow_path(model):
+        assert tc.get_mha_fastpath_enabled() is False
+    assert tc.get_mha_fastpath_enabled() == prior
+
+
+def test_force_mha_slow_path_falls_back_to_a_training_flip_when_switch_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Absent the switch, the affected modules' own training flag is flipped."""
+
+    monkeypatch.setattr(tc, "_MHA_FASTPATH_SWITCH_PROBED", True)
+    monkeypatch.setattr(tc, "HAS_MHA_FASTPATH_SWITCH", False)
+    encoder_layer = torch.nn.TransformerEncoderLayer(4, 2, 8, batch_first=True).eval()
+    bare_mha = torch.nn.MultiheadAttention(4, 2, batch_first=True).eval()
+    model = torch.nn.ModuleDict({"layer": encoder_layer, "mha": bare_mha})
+    assert encoder_layer.training is False
+    assert encoder_layer.self_attn.training is False
+    assert bare_mha.training is False
+    with tc.force_mha_slow_path(model):
+        assert encoder_layer.training is True
+        assert encoder_layer.self_attn.training is True
+        assert bare_mha.training is True
+        # Untouched siblings keep their eval state -- only the two fast-path
+        # gate classes flip, never a cascading .train() over every submodule.
+        assert encoder_layer.dropout1.training is False
+    assert encoder_layer.training is False
+    assert encoder_layer.self_attn.training is False
+    assert bare_mha.training is False
+
+
+def test_force_mha_slow_path_restores_on_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A block that raises still restores the prior state (finally-path pin)."""
+
+    monkeypatch.setattr(tc, "_MHA_FASTPATH_SWITCH_PROBED", True)
+    monkeypatch.setattr(tc, "HAS_MHA_FASTPATH_SWITCH", False)
+    model = torch.nn.MultiheadAttention(4, 2, batch_first=True).eval()
+    with pytest.raises(RuntimeError, match="boom"), tc.force_mha_slow_path(model):
+        assert model.training is True
+        raise RuntimeError("boom")
+    assert model.training is False
+
+
+def test_tensor_any_over_dims_matches_native_any_on_every_axis_combo() -> None:
+    """The multi-axis ``any`` helper matches ``tensor.any(dim=<int>)`` chaining."""
+
+    mask = torch.zeros((2, 3, 4), dtype=torch.bool)
+    mask[1, 2, 3] = True
+    for dims in ((0,), (1, 2), (0, 2), (0, 1, 2), ()):
+        expected = mask
+        for axis in sorted(dims, reverse=True):
+            expected = expected.any(dim=axis)
+        assert torch.equal(tc.tensor_any_over_dims(mask, dims), expected)
+
+
+def test_tensor_any_over_dims_fallback_matches_native_tuple_dim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The torch-2.1 fallback path is byte-identical to the native tuple-dim call."""
+
+    if not tc.get_reduce_tuple_dim_support():
+        pytest.skip("native tuple-dim any() unavailable; nothing to compare against")
+    mask = torch.rand((3, 4, 5)) > 0.5
+    monkeypatch.setattr(tc, "get_reduce_tuple_dim_support", lambda: False)
+    fallback = tc.tensor_any_over_dims(mask, (0, 2))
+    monkeypatch.setattr(tc, "get_reduce_tuple_dim_support", lambda: True)
+    native = tc.tensor_any_over_dims(mask, (0, 2))
+    assert torch.equal(fallback, native)
+
+
+def test_view_func_replay_falls_back_to_the_older_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without ``Tensor._view_func_unsafe`` view replay resolves to ``Tensor._view_func``.
+
+    The replay itself is exercised end to end through this fallback by the
+    ``_view_func`` cases of ``tests/test_view_func_replay.py`` on a torch that
+    lacks the newer spelling.
+    """
+
+    monkeypatch.setitem(
+        tc._ATTRIBUTE_PROBES, "HAS_VIEW_FUNC_UNSAFE", ("torch:Tensor._no_such_view_func",)
+    )
+    assert tc.get_view_func_replay() is torch.Tensor._view_func
+    monkeypatch.undo()
+    expected = getattr(torch.Tensor, "_view_func_unsafe", torch.Tensor._view_func)
+    assert tc.get_view_func_replay() is expected
+
+
+def test_probe_gradient_edge_is_functional_not_just_attribute_presence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe calls real autograd.grad, not just hasattr (torch 2.2-2.3 trap).
+
+    L8 floor fix: torch 2.2-2.3 ships ``torch.autograd.graph.GradientEdge``
+    but its OWN ``_make_grads`` internal crashes with
+    ``AttributeError: 'GradientEdge' object has no attribute 'is_nested'``
+    when a GradientEdge is used as an output with an explicit cotangent --
+    exactly what the one-backward read engine does. The probe must catch
+    this and return False on such a build.
+    """
+
+    def _broken_grad(*args: object, **kwargs: object) -> None:
+        raise AttributeError("'GradientEdge' object has no attribute 'is_nested'")
+
+    monkeypatch.setattr(torch.autograd, "grad", _broken_grad)
+    assert tc._probe_gradient_edge() is False
+
+
+def test_probe_gradient_edge_true_when_autograd_grad_succeeds() -> None:
+    """On a healthy torch build the functional probe reports True."""
+
+    if not tc.get_gradient_edge_support():
+        pytest.skip("this torch build genuinely lacks working GradientEdge support")
+    assert tc._probe_gradient_edge() is True
+
+
+def test_get_gradient_edge_support_is_lazy_and_caches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real autograd probe runs at most once per latch, not at import time.
+
+    L8 floor fix: the first ``torch.autograd.grad`` call in a process can pay
+    a one-time engine-initialization cost of tens of milliseconds, which must
+    land on the first real one-backward read (or the first forced diagnostic
+    probe), never on a plain ``import torchlens`` -- the import-hygiene
+    budget. This pins the latch/cache behavior independent of the real probe
+    result.
+    """
+
+    calls = 0
+    real_probe = tc._probe_gradient_edge
+
+    def _counting_probe() -> bool:
+        nonlocal calls
+        calls += 1
+        return real_probe()
+
+    monkeypatch.setattr(tc, "_probe_gradient_edge", _counting_probe)
+    monkeypatch.setattr(tc, "_GRADIENT_EDGE_PROBED", False)
+    monkeypatch.setattr(tc, "HAS_GRADIENT_EDGE", False)
+
+    first = tc.get_gradient_edge_support()
+    second = tc.get_gradient_edge_support()
+    assert calls == 1, "the probe must not re-run once latched"
+    assert first == second == tc.HAS_GRADIENT_EDGE
+
+
+@pytest.mark.parametrize(
+    "getter_name",
+    [
+        "get_reduce_tuple_dim_support",
+        "get_cpu_half_kernels_support",
+        "get_eval_batch_norm_mean_residual_support",
+        "get_cpu_float8_deterministic_fill_support",
+        "get_sparse_spsolve_cuda_support",
+    ],
+)
+def test_real_op_probe_getters_are_lazy_and_cache(
+    getter_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each real-tensor-op probe latches after one call (import-hygiene budget).
+
+    L8 floor fix: HAS_CPU_HALF_KERNELS, HAS_CPU_FLOAT8_DETERMINISTIC_FILL, and
+    HAS_REDUCE_TUPLE_DIM all run real tensor ops (addmm/layer_norm/nextafter,
+    a deterministic-mode empty-fill, a tuple-dim any()) that measurably
+    inflated a plain ``import torchlens``. Each is on the same lazy-probe
+    pattern as HAS_GRADIENT_EDGE: this pins that the underlying probe
+    function runs at most once per latch, independent of which real value it
+    returns on this torch build.
+    """
+
+    getter = getattr(tc, getter_name)
+    probe_name = {
+        "get_reduce_tuple_dim_support": "_probe_reduce_tuple_dim",
+        "get_cpu_half_kernels_support": "_probe_cpu_half_kernels",
+        "get_eval_batch_norm_mean_residual_support": "_probe_eval_batch_norm_mean_residual",
+        "get_cpu_float8_deterministic_fill_support": "_probe_cpu_float8_deterministic_fill",
+        "get_sparse_spsolve_cuda_support": "_probe_sparse_spsolve_cuda",
+    }[getter_name]
+    probed_name = {
+        "get_reduce_tuple_dim_support": "_REDUCE_TUPLE_DIM_PROBED",
+        "get_cpu_half_kernels_support": "_CPU_HALF_KERNELS_PROBED",
+        "get_eval_batch_norm_mean_residual_support": "_EVAL_BATCH_NORM_MEAN_RESIDUAL_PROBED",
+        "get_cpu_float8_deterministic_fill_support": "_CPU_FLOAT8_DETERMINISTIC_FILL_PROBED",
+        "get_sparse_spsolve_cuda_support": "_SPARSE_SPSOLVE_CUDA_PROBED",
+    }[getter_name]
+    flag_name = {
+        "get_reduce_tuple_dim_support": "HAS_REDUCE_TUPLE_DIM",
+        "get_cpu_half_kernels_support": "HAS_CPU_HALF_KERNELS",
+        "get_eval_batch_norm_mean_residual_support": "HAS_EVAL_BATCH_NORM_MEAN_RESIDUAL",
+        "get_cpu_float8_deterministic_fill_support": "HAS_CPU_FLOAT8_DETERMINISTIC_FILL",
+        "get_sparse_spsolve_cuda_support": "HAS_SPARSE_SPSOLVE_CUDA",
+    }[getter_name]
+
+    calls = 0
+    real_probe = getattr(tc, probe_name)
+
+    def _counting_probe() -> bool:
+        nonlocal calls
+        calls += 1
+        return real_probe()
+
+    monkeypatch.setattr(tc, probe_name, _counting_probe)
+    monkeypatch.setattr(tc, probed_name, False)
+    monkeypatch.setattr(tc, flag_name, False)
+
+    first = getter()
+    second = getter()
+    assert calls == 1, "the probe must not re-run once latched"
+    assert first == second == getattr(tc, flag_name)
+
+
+def test_spsolve_cuda_probe_is_false_without_the_op_or_a_cuda_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing op or missing CUDA answers ``False`` before any tensor op runs."""
+
+    def _must_not_run(*_args: object, **_kwargs: object) -> torch.Tensor:
+        raise AssertionError("the probe must not solve without a CUDA device")
+
+    monkeypatch.setattr(torch.sparse, "spsolve", _must_not_run, raising=False)
+    monkeypatch.setattr(_kernel_probes, "_is_cuda_available", lambda: False)
+    assert _kernel_probes.probe_sparse_spsolve_cuda() is False
+    monkeypatch.setattr(_kernel_probes, "_is_cuda_available", lambda: True)
+    monkeypatch.delattr(torch.sparse, "spsolve")
+    assert _kernel_probes.probe_sparse_spsolve_cuda() is False
+
+
+def test_spsolve_solve_step_catches_only_the_no_cudss_refusal() -> None:
+    """Only torch's cuDSS refusal reads as absent; any other error propagates."""
+
+    def _no_cudss(*_args: object, **_kwargs: object) -> torch.Tensor:
+        raise RuntimeError(
+            "Calling linear solver with sparse tensors requires compiling "
+            "PyTorch with CUDA cuDSS and is not supported in ROCm build."
+        )
+
+    def _other_fault(*_args: object, **_kwargs: object) -> torch.Tensor:
+        raise RuntimeError("CUDA error: an illegal memory access was encountered")
+
+    assert _solves_identity_system(_no_cudss, "cpu") is False
+    assert _solves_identity_system(lambda matrix, rhs: rhs, "cpu") is True
+    with pytest.raises(RuntimeError, match="illegal memory access"):
+        _solves_identity_system(_other_fault, "cpu")
+    if hasattr(torch.sparse, "spsolve"):
+        # The real op has no CPU kernel: the dispatcher's refusal is not the
+        # cuDSS refusal, so it propagates instead of reading as absent.
+        with pytest.raises(RuntimeError) as info:
+            _solves_identity_system(torch.sparse.spsolve, "cpu")
+        assert "cuDSS" not in str(info.value)
+
+
+def test_module_existence_probe_imports_no_missing_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe resolves a nested module whose ancestors were never imported.
+
+    ``find_spec`` would import ``fd_probe_pkg`` and ``fd_probe_pkg.sub`` to read their
+    ``__path__``; the probe must answer from disk and leave ``sys.modules`` untouched.
+    """
+
+    leaf_dir = tmp_path / "fd_probe_pkg" / "sub"
+    leaf_dir.mkdir(parents=True)
+    (tmp_path / "fd_probe_pkg" / "__init__.py").write_text("raise RuntimeError('imported')\n")
+    (leaf_dir / "__init__.py").write_text("raise RuntimeError('imported')\n")
+    (leaf_dir / "leaf.py").write_text("")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    before = set(sys.modules)
+
+    assert tc.torch_module_exists_without_importing("fd_probe_pkg.sub.leaf")
+    assert tc.torch_module_exists_without_importing("fd_probe_pkg.sub")
+    assert not tc.torch_module_exists_without_importing("fd_probe_pkg.sub.missing")
+    assert not tc.torch_module_exists_without_importing("fd_probe_pkg.missing.leaf")
+    assert not {name for name in sys.modules if name.startswith("fd_probe_pkg")}
+    assert set(sys.modules) - before == set()
+    assert tc.torch_module_exists_without_importing("fd_probe_pkg.sub.leaf", unloaded=True)
+    monkeypatch.setitem(sys.modules, "fd_probe_blocked", None)  # an import block is in sys.modules
+    assert tc.torch_module_exists_without_importing("fd_probe_blocked")
+    assert not tc.torch_module_exists_without_importing("fd_probe_blocked", unloaded=True)
+
+
+def test_module_existence_probe_matches_imported_torch_modules() -> None:
+    """Imported modules count as existing; a non-package leaf has no children."""
+
+    assert tc.torch_module_exists_without_importing("torch")
+    assert tc.torch_module_exists_without_importing("torch.nn.functional")
+    assert not tc.torch_module_exists_without_importing("torch.nn.functional", unloaded=True)
+    assert not tc.torch_module_exists_without_importing("torch.nn.functional.no_such_child")
+    assert not tc.torch_module_exists_without_importing("torch.no_such_module_fd")
+
+
+def test_unimported_rng_extras_are_classified_whatever_was_imported_first() -> None:
+    """A find_spec-detected RNG endpoint has its row even if its ancestor is unimported.
+
+    The torch 2.1/2.2 floor carries ``torch.distributed.pipeline.sync.checkpoint``,
+    which nothing imports eagerly. The surface table is built at ``torchlens`` import;
+    if the row depended on the ancestor already being imported, a later import of the
+    pipeline package (by any other test or user code) would expose an unclassified
+    RNG endpoint. On torch without the module the row must be absent.
+    """
+
+    from torchlens._utils.rng.registry import _TORCH_RNG_UNIMPORTED_MODULE_EXTRAS, TORCH_RNG_SURFACE
+
+    targets = {row.target for row in TORCH_RNG_SURFACE}
+    torch_root = Path(torch.__file__).parent
+    for target, _note in _TORCH_RNG_UNIMPORTED_MODULE_EXTRAS:
+        # Independent oracle: the module's source file in the installed torch tree.
+        relative = Path(*target.rpartition(".")[0].split(".")[1:])
+        on_disk = (torch_root / relative).with_suffix(".py").is_file() or (
+            torch_root / relative / "__init__.py"
+        ).is_file()
+        assert (target in targets) is on_disk, target

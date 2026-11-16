@@ -278,6 +278,7 @@ def test_compact_replay_and_recut_restore_captured_cpu_autocast() -> None:
             assert not torch.is_autocast_enabled("cpu")
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_compact_preparation_releases_cuda_activation_archive() -> None:
     """Allocator bytes prove compact preparation releases physical CUDA storage."""
@@ -579,7 +580,7 @@ def test_compact_buffer_lookup_keeps_last_value_without_retaining_owner() -> Non
         del runtime, graph, model
         gc.collect()
         assert owner() is None
-        assert all(buffer.handle is value for buffer, value in zip(references, values))
+    assert all(buffer.handle is value for buffer, value in zip(references, values, strict=True))
 
 
 @pytest.mark.parametrize("retain_trace", [False, True])
@@ -714,5 +715,6 @@ def test_training_with_explicit_compact_retention_preserves_gradients() -> None:
 def test_trace_retention_flag_rejects_non_boolean_values(value: Any) -> None:
     """Retention is a closed boolean policy, not an arbitrary truthy object."""
 
-    with pytest.raises(TypeError, match="retain_trace"):
+    with pytest.raises(TypeError, match="retain_trace") as raised:
         SplitFeatures(retain_trace=value)
+    assert raised.value.fields["code"] == "split_argument_type"

@@ -8,8 +8,6 @@ from torch import nn
 
 import torchlens as tl
 
-pytestmark = pytest.mark.smoke
-
 
 def test_forward_duration_does_not_depend_on_wall_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     """A wall-clock tick shared by short ops must not erase their durations."""
@@ -20,6 +18,6 @@ def test_forward_duration_does_not_depend_on_wall_clock(monkeypatch: pytest.Monk
     try:
         measured = [op for op in trace.ops if op.func_name in {"linear", "relu"}]
         assert len(measured) == 2
-        assert all(float(op.func_duration) > 0 for op in measured)
+        assert all(float(op.cost.duration) > 0 for op in measured)
     finally:
         trace.cleanup()

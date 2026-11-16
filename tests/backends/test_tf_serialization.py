@@ -14,13 +14,17 @@ from conftest import tensorflow_backend_modules
 tf, keras, _TF_BACKEND_SKIP_REASON = tensorflow_backend_modules()
 del keras
 
+import torch  # noqa: E402
+
 import torchlens as tl  # noqa: E402
-from torchlens.backends import (  # noqa: E402
+from torchlens._io.format3.codec_policy import backend_materializes  # noqa: E402
+from torchlens.backends.registry import get_backend_spec  # noqa: E402
+from torchlens.errors import (  # noqa: E402
     BackendPayloadUnsupportedError,
     BackendRuntimeCompatibilityError,
 )
 from torchlens.validation import validate_tlspec  # noqa: E402
-from torchlens.validation.invariants import check_metadata_invariants  # noqa: E402
+from torchlens.validation._invariants import check_metadata_invariants  # noqa: E402
 
 pytestmark = [
     pytest.mark.tf_backend,
@@ -28,6 +32,7 @@ pytestmark = [
         _TF_BACKEND_SKIP_REASON is not None,
         reason=_TF_BACKEND_SKIP_REASON or "TensorFlow backend stack is supported",
     ),
+    pytest.mark.rare,
 ]
 
 
@@ -122,11 +127,33 @@ def test_tf_default_tlspec_round_trip_materializes_payloads(tmp_path: Path) -> N
     loaded = tl.load(path)
     restored = _saved_output(loaded)
 
-    assert loaded.backend == "tf"
+    assert loaded.provenance.backend == "tf"
     assert check_metadata_invariants(loaded) is True
     assert isinstance(restored, tf.Tensor)
     assert restored.dtype == tf.float32
     np.testing.assert_allclose(restored.numpy(), expected.numpy())
+
+
+def test_tf_tlspec_round_trip_keeps_scalar_shape(tmp_path: Path) -> None:
+    """A 0-d op output loads back 0-d, not ``(1,)``.
+
+    ``np.ascontiguousarray`` promotes a 0-d host array to shape ``(1,)``; the
+    TensorFlow materializer passed its result straight to ``convert_to_tensor``,
+    so a saved scalar came back one-dimensional.
+    """
+
+    x = tf.constant([[1.0, -2.0], [3.0, 4.0]], dtype=tf.float32)
+    trace = tl.trace(lambda value: tf.reduce_sum(value), x, backend="tf")
+    saved = trace[trace.output_layers[0]].out
+    assert tuple(saved.shape) == ()
+    path = tmp_path / "tf_scalar.tlspec"
+
+    trace.save(path)
+    loaded = tl.load(path)
+
+    restored = loaded[loaded.output_layers[0]].out
+    assert tuple(restored.shape) == ()
+    np.testing.assert_allclose(np.asarray(restored), np.asarray(saved))
 
 
 def test_tf_bfloat16_tlspec_round_trip_preserves_logical_dtype_and_bits(
@@ -167,11 +194,14 @@ def test_tf_tlspec_manifest_runtime_fingerprint_and_version_mismatch(
 
     assert manifest["schema_version"] == 2
     assert manifest["backend"] == "tf"
-    assert manifest["torch_version"] is None
+    # Saved format 3 stamps the writer's torch (a writer identity field) on every artifact,
+    # keeps only the include flags in payload_policy, and reads the payload policy and its
+    # materialization from the backend spec.
+    assert manifest["torch_version"] == torch.__version__
     assert manifest["backend_runtime"]["name"] == "tf"
     assert manifest["backend_runtime"]["version"] == tf.__version__
-    assert manifest["payload_policy"]["policy"] == "array_payloads"
-    assert manifest["payload_policy"]["materialization_supported"] is True
+    assert get_backend_spec("tf").serialization_policy.payload_policy == "array_payloads"
+    assert backend_materializes(manifest["backend"]) is True
     assert manifest["body_format"] == "safetensors"
 
     manifest["backend_runtime"]["version"] = "0.0.not-the-installed-tensorflow"

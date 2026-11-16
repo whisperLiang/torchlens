@@ -21,7 +21,7 @@ import torchlens as tl
 from torchlens import _state
 from torchlens._errors import ArgumentTypeError
 from torchlens.backends.torch.wrappers import wrap_torch
-from torchlens.intervention.runtime import active_intervention_context
+from torchlens.intervention._runtime import active_intervention_context
 
 
 class _TinyModel(nn.Module):
@@ -36,27 +36,24 @@ class _TinyModel(nn.Module):
         return out + y if y is not None else out
 
 
-@pytest.mark.smoke
 def test_tensor_input_kwargs_refuses_typed_naming_the_tuple_spelling() -> None:
     """The natural multi-input misspelling must refuse at entry, typed."""
 
     model = _TinyModel()
     q, k = torch.randn(1, 4), torch.randn(1, 4)
     with pytest.raises(ArgumentTypeError, match="tuple"):
-        tl.trace(model, q, k)
+        tl.trace(model, q, input_kwargs=k)
 
 
-@pytest.mark.smoke
 def test_tensor_in_layers_to_save_slot_refuses_typed() -> None:
-    """A third positional tensor lands in layers_to_save: name the mistake."""
+    """Positional values past inputs are refused with a typed error."""
 
     model = _TinyModel()
     q, k, v = torch.randn(1, 4), torch.randn(1, 4), torch.randn(1, 4)
     with pytest.raises(ArgumentTypeError, match="tuple"):
-        tl.trace(model, q, {"y": k}, v)  # dict kwargs fine; tensor in 4th slot
+        tl.trace(model, q, {"y": k}, v)  # past the two positional slots
 
 
-@pytest.mark.smoke
 def test_tuple_spelling_still_works() -> None:
     """The documented multi-input spelling stays green."""
 
@@ -64,7 +61,6 @@ def test_tuple_spelling_still_works() -> None:
     assert trace.outcome.status.name == "COMPLETE"
 
 
-@pytest.mark.smoke
 def test_overrides_membership_resolves_wrappers_while_wrapped() -> None:
     """The documented author checks must answer True in both epochs."""
 
@@ -88,7 +84,6 @@ def test_overrides_membership_resolves_wrappers_while_wrapped() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_out_of_order_context_unwind_never_resurrects_a_dead_plan() -> None:
     """A non-top context exit splices out; the final exit restores the true
     pre-window state instead of re-publishing a dead context."""
@@ -114,7 +109,6 @@ def test_out_of_order_context_unwind_never_resurrects_a_dead_plan() -> None:
     assert _state._active_hook_plan is base_plan
 
 
-@pytest.mark.smoke
 def test_lifo_context_nesting_still_restores_exactly() -> None:
     """Ordinary nested publication keeps exact save/restore semantics."""
 

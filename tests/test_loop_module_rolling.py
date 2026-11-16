@@ -11,8 +11,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.options import CaptureOptions
-from torchlens.visualization._render_nodes import compute_default_node_lines
+from torchlens._visualization._pass_label_placement import place_pass_labels
+from torchlens._visualization._render_nodes import compute_default_node_lines
 
 # Session-private output root (conftest exports it before collection); the
 # repo-local fallback raced across parallel worktree lanes (b2p2 R77).
@@ -210,6 +210,26 @@ class InsideOutsideBlock(nn.Module):
         return y
 
 
+class BranchingLoopBody(nn.Module):
+    """Recurrent cell whose last pass takes an extra branch op."""
+
+    def __init__(self) -> None:
+        """Initialize the hidden projection."""
+
+        super().__init__()
+        self.lin = nn.Linear(4, 4, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run a tanh cell three times and double the state on the last pass."""
+
+        h = x
+        for step in range(3):
+            h = torch.tanh(self.lin(h))
+            if step == 2:
+                h = h * 2
+        return h
+
+
 class DeepLoopBody(nn.Module):
     """Loop body with three operations."""
 
@@ -319,7 +339,7 @@ class TwoDistinctLoops(nn.Module):
 
 
 class BufferRewriteLoops(nn.Module):
-    """Buffer rewritten across repeated loop bodies."""
+    """Buffer read and rewritten on every pass of one loop body."""
 
     def __init__(self) -> None:
         """Initialize the state buffer."""
@@ -328,13 +348,14 @@ class BufferRewriteLoops(nn.Module):
         self.register_buffer("state", torch.zeros(4))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Read and rewrite the buffer across two loops."""
+        """Read and rewrite the buffer five times from one loop body.
+
+        One loop, so the read and the rewrite are each one layer with five passes
+        (two loops would be two places in the code, so two layers each).
+        """
 
         y = x
-        for _ in range(2):
-            y = y + self.state
-            self.state = self.state + 1
-        for _ in range(3):
+        for _ in range(5):
             y = y + self.state
             self.state = self.state + 1
         return y
@@ -552,7 +573,7 @@ def test_bare_functional_op_chain_is_not_a_loop() -> None:
     tanh_layers = [label for label in trace.layer_labels if label.startswith("tanh")]
     assert len(tanh_layers) == 2
     for label in tanh_layers:
-        assert trace[label].num_passes == 1
+        assert trace.layers[label].num_passes == 1
 
 
 def test_reused_single_op_module_stays_a_loop() -> None:
@@ -565,20 +586,20 @@ def test_reused_single_op_module_stays_a_loop() -> None:
     trace = _trace(ReusedReluLoop())
     relu_layers = [label for label in trace.layer_labels if label.startswith("relu")]
     assert len(relu_layers) == 1
-    assert trace[relu_layers[0]].num_passes == 4
+    assert trace.layers[relu_layers[0]].num_passes == 4
 
 
 def _trace(model: nn.Module) -> tl.Trace:
     """Trace a demo model deterministically."""
 
     torch.manual_seed(0)
-    return tl.trace(model, torch.randn(1, 4), capture=CaptureOptions(layers_to_save="none"))
+    return tl.trace(model, torch.randn(1, 4), save="none")
 
 
 def _first_layer(trace: tl.Trace, layer_type: str) -> tl.Layer:
     """Return the first rendered layer of a given type."""
 
-    for layer in trace.layer_logs.values():
+    for layer in trace._layer_logs.values():
         if layer.layer_type == layer_type:
             return layer
     raise AssertionError(f"No layer of type {layer_type!r}.")
@@ -608,12 +629,11 @@ def _render_source(
     """Render a graph format and return the emitted Graphviz source."""
 
     return trace.draw(
-        vis_mode="rolled",
-        vis_save_only=True,
-        vis_fileformat=file_format,
-        vis_outpath=str(tmp_path / name),
+        rolled=True,
+        file_format=file_format,
+        path=str(tmp_path / name),
         **kwargs,
-    )
+    ).dot
 
 
 def _dot_self_edge_attrs(dot: str) -> list[str]:
@@ -643,7 +663,7 @@ def _dot_edge_attrs(dot: str, tail: str, head: str) -> list[str]:
 def _html_label_lines(attrs: str, kind: str) -> list[str] | None:
     """Return the visible text lines of an HTML ``kind=<...>`` edge label.
 
-    ``kind`` is ``"label"``, ``"headlabel"``, or ``"taillabel"``.  Returns None
+    ``kind`` is ``"label"``, ``"xlabel"``, ``"headlabel"``, or ``"taillabel"``.  Returns None
     when the edge carries no such HTML label.  Tags (including ``<BR/>`` line
     breaks) are treated as line separators, so a two-line combined label yields
     two entries.
@@ -670,15 +690,14 @@ def _dot_node_shapes(dot: str) -> dict[str, str]:
     return shapes
 
 
-@pytest.mark.smoke
 def test_reused_single_op_module_count_is_depth_invariant(tmp_path: Path) -> None:
     """A reused single-op module keeps the honest count at shallow and deep depth."""
 
     trace = _trace(ReusedReluLoop())
     assert _normalized_title(trace, "relu", "relu") == "relu (x4)"
 
-    shallow_dot = _render_dot(trace, tmp_path, "relu_shallow", vis_call_depth=1)
-    deep_dot = _render_dot(trace, tmp_path, "relu_deep", vis_call_depth=1000)
+    shallow_dot = _render_dot(trace, tmp_path, "relu_shallow", depth=1)
+    deep_dot = _render_dot(trace, tmp_path, "relu_deep", depth=1000)
 
     assert "relu_1_1 (x4)" in shallow_dot
     assert "relu_1_1 (x4)" in deep_dot
@@ -691,7 +710,7 @@ def test_multi_op_loop_body_keeps_plain_counts(tmp_path: Path) -> None:
     assert _normalized_title(trace, "linear", "lin") == "lin (x3)"
     assert _normalized_title(trace, "relu", "relu") == "relu (x3)"
 
-    dot = _render_dot(trace, tmp_path, "multiop_loop", vis_call_depth=1000)
+    dot = _render_dot(trace, tmp_path, "multiop_loop", depth=1000)
     assert "sites" not in dot
     assert "×" not in dot
     assert 'label="↻"' not in dot
@@ -702,7 +721,7 @@ def test_colon_call_ranges_disambiguate_split_regions(tmp_path: Path) -> None:
 
     distinct_trace = _trace(TwoDistinctLoops())
     assert _normalized_title(distinct_trace, "linear", "lin") == "lin:1-2,3-5"
-    distinct_dot = _render_dot(distinct_trace, tmp_path, "two_loops", vis_call_depth=1)
+    distinct_dot = _render_dot(distinct_trace, tmp_path, "two_loops", depth=1)
     assert "@shared:1-2,3-5" in distinct_dot
     assert "calls" not in distinct_dot
 
@@ -710,24 +729,44 @@ def test_colon_call_ranges_disambiguate_split_regions(tmp_path: Path) -> None:
     assert _normalized_title(inside_outside_trace, "linear", "lin") == "lin:1,2-4"
 
 
-def test_inside_outside_relu_continuous_chain_is_one_atomic_rectangle(tmp_path: Path) -> None:
-    """A continuous relu chain rolls to one atomic-module rectangle with a plain count.
+def test_continuous_relu_chain_is_one_atomic_rectangle(tmp_path: Path) -> None:
+    """A continuous relu chain from one loop line rolls to one atomic-module rectangle.
 
-    ``InsideOutsideRelu`` feeds each relu into the next, so all five calls form one
-    recurrent chain at a single site -- it rolls to one node, marked as the atomic
-    ``@relu`` module (a rectangle), with a plain ``(x5)`` count and no split range.
+    ``ReusedReluLoop`` feeds each relu call into the next from one loop line, so all
+    four calls form one recurrent chain at a single site -- it rolls to one node,
+    marked as the atomic ``@relu`` module (a rectangle), with a plain ``(x4)`` count
+    and no split range.
+    """
+
+    trace = _trace(ReusedReluLoop())
+    assert _normalized_title(trace, "relu", "relu") == "relu (x4)"
+
+    dot = _render_dot(trace, tmp_path, "relu_loop_chain", depth=1)
+    assert "relu_1_1 (x4)" in dot
+    # Atomic single-op module is marked as a module and rendered as a rectangle.
+    assert "@relu" in dot
+    assert _dot_node_shapes(dot).get("relu_1_1 (x4)") == "box"
+    # Single contiguous site -> no split call range on the marking.
+    assert "@relu:" not in dot
+
+
+def test_inside_outside_relu_chain_splits_at_the_outside_line(tmp_path: Path) -> None:
+    """A stateless relu called once before its loop is two layers, two atomic rectangles.
+
+    ``InsideOutsideRelu`` chains the outside call into four loop calls. ``nn.ReLU``
+    owns no state, so its calls group by call site (``callsite_v2``): the outside
+    line is one layer and the loop line a 4-pass layer, and the markings name the
+    calls each rectangle holds (``@relu:1`` and ``@relu:2-5``).
     """
 
     trace = _trace(InsideOutsideRelu())
-    assert _normalized_title(trace, "relu", "relu") == "relu (x5)"
-
-    dot = _render_dot(trace, tmp_path, "inside_outside_relu", vis_call_depth=1)
-    assert "relu_1_1 (x5)" in dot
-    # Atomic single-op module is marked as a module and rendered as a rectangle.
-    assert "@relu" in dot
-    assert _dot_node_shapes(dot).get("relu_1_1 (x5)") == "box"
-    # Single contiguous site -> no split call range on the marking.
-    assert "@relu:" not in dot
+    dot = _render_dot(trace, tmp_path, "inside_outside_relu", depth=1)
+    shapes = _dot_node_shapes(dot)
+    assert shapes.get("relu_1_1") == "box"
+    assert shapes.get("relu_2_2") == "box"
+    assert "@relu:1" in dot
+    assert "@relu:2-5" in dot
+    assert "relu_1_1 (x" not in dot
 
 
 def test_separable_atomic_module_marks_distinct_calls(tmp_path: Path) -> None:
@@ -740,9 +779,11 @@ def test_separable_atomic_module_marks_distinct_calls(tmp_path: Path) -> None:
     already maximally collapsed.
     """
 
+    # ``nn.ReLU`` owns no state, so its calls group by call site (``callsite_v2``):
+    # the outside line is one layer and the loop line a 3-pass layer.
     trace = _trace(InsideOutsideReluSeparable())
-    shallow_dot = _render_dot(trace, tmp_path, "relu_sep_shallow", vis_call_depth=1)
-    deep_dot = _render_dot(trace, tmp_path, "relu_sep_deep", vis_call_depth=1000)
+    shallow_dot = _render_dot(trace, tmp_path, "relu_sep_shallow", depth=1)
+    deep_dot = _render_dot(trace, tmp_path, "relu_sep_deep", depth=1000)
 
     for dot in (shallow_dot, deep_dot):
         shapes = _dot_node_shapes(dot)
@@ -760,10 +801,8 @@ def test_inside_outside_block_module_uses_plain_count(tmp_path: Path) -> None:
     """A collapsed multi-op block used outside and inside one loop shows plain counts."""
 
     trace = _trace(InsideOutsideBlock())
-    expanded_dot = _render_dot(
-        trace, tmp_path, "inside_outside_block_expanded", vis_call_depth=1000
-    )
-    collapsed_dot = _render_dot(trace, tmp_path, "inside_outside_block_collapsed", vis_call_depth=1)
+    expanded_dot = _render_dot(trace, tmp_path, "inside_outside_block_expanded", depth=1000)
+    collapsed_dot = _render_dot(trace, tmp_path, "inside_outside_block_collapsed", depth=1)
 
     assert "linear_1_1 (x5)" in expanded_dot
     assert "relu_1_2 (x5)" in expanded_dot
@@ -775,8 +814,8 @@ def test_clean_reused_block_keeps_plain_counts(tmp_path: Path) -> None:
     """A reused multi-op block in one loop keeps plain module and op counts."""
 
     trace = _trace(CollapsedBlockRecurrence())
-    expanded_dot = _render_dot(trace, tmp_path, "block_expanded", vis_call_depth=1000)
-    collapsed_dot = _render_dot(trace, tmp_path, "block_collapsed", vis_call_depth=1)
+    expanded_dot = _render_dot(trace, tmp_path, "block_expanded", depth=1000)
+    collapsed_dot = _render_dot(trace, tmp_path, "block_collapsed", depth=1)
 
     assert "linear_1_1 (x3)" in expanded_dot
     assert "relu_1_2 (x3)" in expanded_dot
@@ -789,36 +828,40 @@ def test_buffer_versions_use_colon_ranges(tmp_path: Path) -> None:
     """Rolled buffer nodes use the module-address colon range form."""
 
     trace = _trace(BufferRewriteLoops())
-    dot = _render_dot(trace, tmp_path, "buffers", show_buffer_layers="always")
+    dot = _render_dot(trace, tmp_path, "buffers", show_buffers="always")
     assert "@state:1-6" in dot
     assert "@state v1-6" not in dot
     assert "buffer_versions" not in dot
 
 
-def test_recurrent_self_loop_combines_in_out_into_one_midpoint_label(tmp_path: Path) -> None:
-    """A rolled recurrence self-loop merges In/Out into one midpoint label.
+def test_recurrent_self_loop_merges_in_out_into_one_label_placed_at_its_node(
+    tmp_path: Path,
+) -> None:
+    """A rolled recurrence self-loop merges In/Out into one label beside its node.
 
-    Self-loops crowd separate head/tail labels against the node, and a recurrence
-    self-edge never carries argument/conditional labels, so the In/Out pass ranges
-    are merged into a single two-line HTML midpoint ``label`` (which graphviz
-    reserves layout space for), with ``In`` above ``Out`` for the default
-    bottom-up layout. Parallel fan-out has no self-edge at all.
+    Both ends of a self-loop are one node, so its pass ranges stay one two-line HTML
+    label, ``In`` above ``Out`` for the default bottom-up layout.  It is the loop's
+    tail label, so the post-layout chooser places it beside the node clear of the
+    loop and its neighbours, as it places every rolled pass label; Graphviz's own
+    midpoint spot for a self-loop label crossed nearby edges and nodes in sideways
+    drawings.  Parallel fan-out has no self-edge at all.
     """
 
     recurrent_trace = _trace(ReusedReluLoop())
-    recurrent_dot = _render_dot(recurrent_trace, tmp_path, "relu_self_edge", vis_call_depth=1000)
+    drawn = _render_dot(recurrent_trace, tmp_path, "relu_self_edge", depth=1000)
+    assert "labelangle=" not in drawn  # placement goes only into the image's source
+    recurrent_dot = place_pass_labels(drawn, engine="dot", timeout=60)
     recurrent_self_edges = _dot_self_edge_attrs(recurrent_dot)
     assert len(recurrent_self_edges) == 1
     recurrent_attrs = recurrent_self_edges[0]
-    # One combined midpoint label, not separate head/tail labels.
     assert "headlabel" not in recurrent_attrs
-    assert "taillabel" not in recurrent_attrs
-    # HTML form, In above Out for the bottom-up default.
-    assert _html_label_lines(recurrent_attrs, "label") == ["In 2-4", "Out 1-3"]
+    assert _html_label_lines(recurrent_attrs, "label") is None
+    assert _html_label_lines(recurrent_attrs, "taillabel") == ["In 2-4", "Out 1-3"]
+    assert "labelangle=" in recurrent_attrs and "minlen" not in recurrent_attrs
     assert "↻" not in recurrent_attrs
 
     fanout_trace = _trace(ParallelFanout())
-    fanout_dot = _render_dot(fanout_trace, tmp_path, "parallel_fanout", vis_call_depth=1000)
+    fanout_dot = _render_dot(fanout_trace, tmp_path, "parallel_fanout", depth=1000)
     assert _dot_self_edge_attrs(fanout_dot) == []
 
 
@@ -826,115 +869,139 @@ def test_self_loop_label_order_flips_with_layout_direction(tmp_path: Path) -> No
     """The self-loop's In/Out order follows flow: In above Out only bottom-up."""
 
     trace = _trace(ReusedReluLoop())
-    topdown_dot = _render_dot(
-        trace, tmp_path, "relu_topdown", vis_call_depth=1000, vis_direction="topdown"
-    )
+    topdown_dot = _render_dot(trace, tmp_path, "relu_topdown", depth=1000, direction="topdown")
     self_edges = _dot_self_edge_attrs(topdown_dot)
     assert len(self_edges) == 1
     # Top-down flow points down, so Out (tail) is placed above In (head).
-    assert _html_label_lines(self_edges[0], "label") == ["Out 1-3", "In 2-4"]
+    assert _html_label_lines(self_edges[0], "taillabel") == ["Out 1-3", "In 2-4"]
 
 
-def test_recurrence_back_edge_merges_in_out_into_one_midpoint_label(tmp_path: Path) -> None:
-    """A rolled recurrence back-edge merges In/Out into one midpoint label.
+def test_recurrence_back_edge_puts_out_at_its_tail_and_in_at_its_head(tmp_path: Path) -> None:
+    """A rolled recurrence back-edge labels each end at its own node.
 
-    ``TanhRNNCellLoop`` rolls to a two-op cycle whose back-edge
-    (``tanh_1_2 -> linear_1_1``) runs anti-parallel to the forward edge between
-    the same two nodes; four head/tail labels would fight for that narrow band,
-    so the back-edge's annotations merge into one midpoint ``label`` (graphviz
-    reserves dummy-node space for it, pushing the anti-parallel curves apart).
-    The forward edge keeps its separate head/tail labels: a forward edge may
-    also carry argument or conditional midpoint labels.
+    Restored behaviour (JMT, 3 Nov 2026): ``Out`` names the passes the edge leaves
+    its tail on and sits at the tail, ``In`` names the passes it enters its head on
+    and sits at the head; a merged two-line label floated between the nodes and
+    belonged to neither.  ``TanhRNNCellLoop`` rolls to a two-op cycle whose
+    back-edge (``tanh_1_2 -> linear_1_1``) is the return arc.  The forward edge runs
+    on every pass at both ends, so it carries no pass label, only a blank midpoint
+    slot that keeps the two curves apart.
     """
 
-    dot = _render_dot(_trace(TanhRNNCellLoop()), tmp_path, "rnn_back_edge", vis_call_depth=1000)
+    dot = _render_dot(_trace(TanhRNNCellLoop()), tmp_path, "rnn_back_edge", depth=1000)
 
     back_edges = _dot_edge_attrs(dot, "tanh_1_2", "linear_1_1")
     assert len(back_edges) == 1
     back_attrs = back_edges[0]
-    assert "headlabel" not in back_attrs
-    assert "taillabel" not in back_attrs
-    assert _html_label_lines(back_attrs, "label") == ["In 2-4", "Out 1-3"]
+    assert _html_label_lines(back_attrs, "taillabel") == ["Out 1-3"]
+    assert _html_label_lines(back_attrs, "headlabel") == ["In 2-4"]
+    assert _html_label_lines(back_attrs, "label") is None
+    assert _html_label_lines(back_attrs, "xlabel") is None
 
     forward_edges = _dot_edge_attrs(dot, "linear_1_1", "tanh_1_2")
     assert len(forward_edges) == 1
     forward_attrs = forward_edges[0]
-    assert _html_label_lines(forward_attrs, "headlabel") == ["In 1-4"]
-    assert _html_label_lines(forward_attrs, "taillabel") == ["Out 1-4"]
-    assert _html_label_lines(forward_attrs, "label") is None
+    assert "headlabel" not in forward_attrs
+    assert "taillabel" not in forward_attrs
+    assert _html_label_lines(forward_attrs, "label") == []
+    # Graphviz 2.43 rejects an empty FONT element as a syntax error.
+    assert re.search(r"<FONT[^>]*></FONT>", dot, flags=re.IGNORECASE) is None
 
 
-def test_buffer_edges_merge_annotations_into_midpoint_labels(tmp_path: Path) -> None:
-    """Buffer-incident edges merge their pass annotations into midpoint labels.
+def test_buffer_edges_label_each_end_at_its_node(tmp_path: Path) -> None:
+    """Buffer-incident edges put each pass annotation at the node it describes.
 
-    A buffer's read and write edges run anti-parallel in the same narrow band
-    (the geometry the back-edge merge solves), and the read edge curves enough
-    that even its own head label collides with its own spline -- so buffer
-    edges always merge. The double-annotation read edge gets a two-line
-    midpoint label; single-annotation edges get a one-line midpoint label
-    instead of a head/tail label.
+    Restored head/tail placement (JMT, 3 Nov 2026): each edge labels only the ends
+    that a strict subset of their node's passes use, ``Out`` at the tail and ``In``
+    at the head, never as a midpoint label between the two nodes.
     """
 
-    dot = _render_dot(
-        _trace(BufferRewriteLoops()), tmp_path, "buffer_edges", show_buffer_layers="always"
-    )
+    dot = _render_dot(_trace(BufferRewriteLoops()), tmp_path, "buffer_edges", show_buffers="always")
 
     read_edges = _dot_edge_attrs(dot, "buffer_1", "add_1_1")
     assert len(read_edges) == 1
-    assert _html_label_lines(read_edges[0], "label") == ["In 1-5", "Out 1-5"]
+    # Every pass of the read uses the edge, so only the buffer end is labelled.
+    assert _html_label_lines(read_edges[0], "taillabel") == ["Out 1-5"]
 
     fanout_read_edges = _dot_edge_attrs(dot, "buffer_1", "add_2_2")
     assert len(fanout_read_edges) == 1
-    assert _html_label_lines(fanout_read_edges[0], "label") == ["Out 1-5"]
+    assert _html_label_lines(fanout_read_edges[0], "taillabel") == ["Out 1-5"]
 
     write_edges = _dot_edge_attrs(dot, "add_2_2", "buffer_1")
     assert len(write_edges) == 1
-    assert _html_label_lines(write_edges[0], "label") == ["In 2-6"]
+    # The write edge closes the loop: its pass range sits at the buffer it enters.
+    assert _html_label_lines(write_edges[0], "headlabel") == ["In 2-6"]
 
     for attrs in (read_edges[0], fanout_read_edges[0], write_edges[0]):
-        assert "headlabel" not in attrs
-        assert "taillabel" not in attrs
+        assert _html_label_lines(attrs, "label") in (None, [])
+        assert _html_label_lines(attrs, "xlabel") is None
 
 
-def test_varying_forward_edges_keep_html_head_tail_labels(tmp_path: Path) -> None:
-    """Forward edges that vary across passes keep HTML head/tail In/Out labels.
+def test_varying_forward_edges_label_their_partial_ends_at_the_node(tmp_path: Path) -> None:
+    """Rolled edges label only the ends a strict subset of passes use, at that end.
 
-    ``DeepLoopBody`` is a three-op cycle: its body edges stay forward edges with
-    separate head/tail labels, emitted as borderless one-cell HTML tables so the
-    text keeps an even transparent margin from the node and arrowhead (graphviz
-    allocates no layout space for plain head/tail labels). Body edges of a
-    >=3-op cycle bow near the merged back-edge midpoint label, so they carry
-    audit-derived per-edge ``labeldistance``/``labelangle`` placement attrs;
-    straight edges (e.g. the input edge) keep graphviz's default placement.
+    ``DeepLoopBody`` is a three-op cycle. The body edges run on every pass at
+    both ends, so they carry no pass label; the input edge (pass 1 only) and the
+    back-edge (passes 1-2 into 2-3) keep theirs, each beside its node: the input
+    edge's ``In 1`` as the head label at the loop's first op, the back-edge's
+    ``Out 1-2`` at its tail and ``In 2-3`` at its head (restored head/tail
+    placement, JMT 3 Nov 2026).  Only pass-labelled edges get a chosen
+    labeldistance/labelangle; unlabelled body edges carry none.
     """
 
-    dot = _render_dot(_trace(DeepLoopBody()), tmp_path, "deep_forward", vis_call_depth=1000)
+    drawn = _render_dot(_trace(DeepLoopBody()), tmp_path, "deep_forward", depth=1000)
+    assert "labelangle=" not in drawn  # placement goes only into the image's source
+    dot = place_pass_labels(drawn, engine="dot", timeout=60)
 
     body_out = _dot_edge_attrs(dot, "linear_1_1", "relu_1_2")
     assert len(body_out) == 1
-    assert _html_label_lines(body_out[0], "taillabel") == ["Out 1-3"]
+    assert _html_label_lines(body_out[0], "label") is None
 
     body_in = _dot_edge_attrs(dot, "relu_1_2", "layernorm_1_3")
     assert len(body_in) == 1
-    assert _html_label_lines(body_in[0], "headlabel") == ["In 1-3"]
+    assert _html_label_lines(body_in[0], "label") is None
 
-    # Cycle body edges carry tuned tangent-relative placement (values are
-    # tunable constants -- assert presence, not numbers).
-    for attrs in (body_out[0], body_in[0]):
-        assert "labeldistance=" in attrs
-        assert "labelangle=" in attrs
-
-    # The straight input edge keeps default placement and its head label.
     input_edge = _dot_edge_attrs(dot, "input_1", "linear_1_1")
     assert len(input_edge) == 1
     assert _html_label_lines(input_edge[0], "headlabel") == ["In 1"]
-    assert "labeldistance=" not in input_edge[0]
-    assert "labelangle=" not in input_edge[0]
+    assert _html_label_lines(input_edge[0], "label") is None
 
-    # The cycle's back-edge merges to a midpoint label like any recurrence.
+    for attrs in (body_out[0], body_in[0], input_edge[0]):
+        assert "taillabel" not in attrs
+    for attrs in (body_out[0], body_in[0]):
+        assert "headlabel" not in attrs
+        assert "labeldistance=" not in attrs
+        assert "labelangle=" not in attrs
+    assert "labeldistance=" in input_edge[0] and "labelangle=" in input_edge[0]
+
     back_edge = _dot_edge_attrs(dot, "layernorm_1_3", "linear_1_1")
     assert len(back_edge) == 1
-    assert _html_label_lines(back_edge[0], "label") == ["In 2-3", "Out 1-2"]
+    assert _html_label_lines(back_edge[0], "taillabel") == ["Out 1-2"]
+    assert _html_label_lines(back_edge[0], "headlabel") == ["In 2-3"]
+    assert _html_label_lines(back_edge[0], "xlabel") is None
+
+
+def test_rolled_edges_label_only_ends_a_strict_subset_of_passes_uses(tmp_path: Path) -> None:
+    """An edge end that every pass of its node uses carries no pass label.
+
+    In ``BranchingLoopBody`` the body edge ``linear -> tanh`` runs on all three
+    passes at both ends and carries no text (it used to read ``In 1-3 / Out
+    1-3``); the input edge (pass 1), the back-edge (passes 1-2 into 2-3) and the
+    branch edge (pass 3 only) keep exactly their partial ends.
+    """
+
+    dot = _render_dot(_trace(BranchingLoopBody()), tmp_path, "branching_loop", depth=1000)
+    texts: set[str] = set()
+    for line in dot.splitlines():
+        if " -> " in line:
+            for kind in ("label", "xlabel", "headlabel", "taillabel"):
+                texts.update(_html_label_lines(line, kind) or [])
+    assert texts == {"In 1", "In 2-3", "Out 1-2", "Out 3"}, sorted(texts)
+    body = _dot_edge_attrs(dot, "linear_1_1", "tanh_1_2")
+    assert len(body) == 1
+    # Blank, not absent: the back-edge joins the same two nodes, and the blank
+    # slot keeps Graphviz from bundling the loop's two splines into one line.
+    assert _html_label_lines(body[0], "label") == []
 
 
 def test_atomic_single_op_module_collapse_preserves_op_render(tmp_path: Path) -> None:
@@ -946,8 +1013,8 @@ def test_atomic_single_op_module_collapse_preserves_op_render(tmp_path: Path) ->
     """
 
     trace = _trace(ReusedReluLoop())
-    expanded_dot = _render_dot(trace, tmp_path, "relu_expanded", vis_call_depth=1000)
-    collapsed_dot = _render_dot(trace, tmp_path, "relu_collapsed", vis_call_depth=1)
+    expanded_dot = _render_dot(trace, tmp_path, "relu_expanded", depth=1000)
+    collapsed_dot = _render_dot(trace, tmp_path, "relu_collapsed", depth=1)
 
     for dot in (expanded_dot, collapsed_dot):
         assert "cluster_relu" not in dot
@@ -960,78 +1027,79 @@ def test_atomic_single_op_module_collapse_preserves_op_render(tmp_path: Path) ->
 
 
 @pytest.mark.heavy
-@pytest.mark.parametrize(
-    ("name", "model_type", "kwargs"),
-    [
-        ("inside_outside_relu", InsideOutsideRelu, {"vis_call_depth": 1}),
+def test_render_loop_module_rolling_demos() -> None:
+    """Render SVG, PDF, and PNG demos into the committed test-output folder."""
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    demos: list[tuple[str, nn.Module, dict[str, object], str]] = [
+        ("inside_outside_relu", InsideOutsideRelu(), {"depth": 1}, "init+forward"),
         (
             "inside_outside_relu_separable",
-            InsideOutsideReluSeparable,
-            {"vis_call_depth": 1},
+            InsideOutsideReluSeparable(),
+            {"depth": 1},
+            "init+forward",
         ),
         (
             "inside_outside_block_collapsed",
-            InsideOutsideBlock,
-            {"vis_call_depth": 1},
+            InsideOutsideBlock(),
+            {"depth": 1},
+            "init+forward",
         ),
         (
             "inside_outside_block_expanded",
-            InsideOutsideBlock,
-            {"vis_call_depth": 1000},
+            InsideOutsideBlock(),
+            {"depth": 1000},
+            "init+forward",
         ),
-        ("deep_loop_body", DeepLoopBody, {"vis_call_depth": 1000}),
-        ("rnn_cell", TanhRNNCellLoop, {"vis_call_depth": 1000}),
+        ("deep_loop_body", DeepLoopBody(), {"depth": 1000}, "init+forward"),
+        ("rnn_cell", TanhRNNCellLoop(), {"depth": 1000}, "init+forward"),
         (
             "repeated_block_stack_collapsed",
-            RepeatedBlockStack,
-            {"vis_call_depth": 1},
+            RepeatedBlockStack(),
+            {"depth": 1},
+            "init+forward",
         ),
         (
             "repeated_block_stack_expanded",
-            RepeatedBlockStack,
-            {"vis_call_depth": 1000},
+            RepeatedBlockStack(),
+            {"depth": 1000},
+            "init+forward",
         ),
-        ("two_distinct_loops", TwoDistinctLoops, {"vis_call_depth": 1}),
+        ("two_distinct_loops", TwoDistinctLoops(), {"depth": 1}, "init+forward"),
         (
             "buffer_loop",
-            BufferRewriteLoops,
-            {"show_buffer_layers": "always"},
+            BufferRewriteLoops(),
+            {"show_buffers": "always"},
+            "init+forward",
         ),
-        ("nested_loop", NestedLoopBlock, {"vis_call_depth": 1}),
-        ("parallel_fanout", ParallelFanout, {"vis_call_depth": 1}),
-    ],
-)
-def test_render_loop_module_rolling_demos(
-    name: str, model_type: type[nn.Module], kwargs: dict[str, object]
-) -> None:
-    """Render every model in SVG, PDF, and PNG into the session-private output folder."""
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        ("nested_loop", NestedLoopBlock(), {"depth": 1}, "init+forward"),
+        ("parallel_fanout", ParallelFanout(), {"depth": 1}, "init+forward"),
+    ]
     # Magic-byte / markup signatures so a no-op renderer (no file, or an empty
     # one) cannot pass: PDF starts with %PDF, PNG with the 8-byte PNG header,
     # and SVG payloads contain an <svg element.
     _format_signature = {"pdf": b"%PDF", "png": b"\x89PNG\r\n\x1a\n"}
-    trace = _trace(model_type())
-    for file_format in ("svg", "pdf", "png"):
-        artifact = OUTPUT_DIR / f"{name}.{file_format}"
-        artifact.unlink(missing_ok=True)
-        dot = trace.draw(
-            vis_mode="rolled",
-            vis_save_only=True,
-            vis_fileformat=file_format,
-            vis_outpath=str(OUTPUT_DIR / name),
-            code_panel="init+forward",
-            **kwargs,
-        )
-        assert isinstance(dot, str) and "digraph" in dot, (
-            f"expected non-empty DOT source for {name} ({file_format})"
-        )
-        assert artifact.exists(), f"expected render artifact at {artifact}"
-        blob = artifact.read_bytes()
-        assert blob, f"expected non-empty artifact at {artifact}"
-        if file_format in _format_signature:
-            assert blob.startswith(_format_signature[file_format]), (
-                f"expected {artifact} to be a valid {file_format} artifact"
+    for name, model, kwargs, code_panel in demos:
+        trace = _trace(model)
+        for file_format in ("svg", "pdf", "png"):
+            artifact = OUTPUT_DIR / f"{name}.{file_format}"
+            artifact.unlink(missing_ok=True)
+            dot = trace.draw(
+                rolled=True,
+                file_format=file_format,
+                path=str(OUTPUT_DIR / name),
+                code_panel=code_panel,
+                **kwargs,
+            ).dot
+            assert isinstance(dot, str) and "digraph" in dot, (
+                f"expected non-empty DOT source for {name} ({file_format})"
             )
-        else:  # svg
-            assert b"<svg" in blob, f"expected {artifact} to contain SVG markup"
+            assert artifact.exists(), f"expected render artifact at {artifact}"
+            blob = artifact.read_bytes()
+            assert blob, f"expected non-empty artifact at {artifact}"
+            if file_format in _format_signature:
+                assert blob.startswith(_format_signature[file_format]), (
+                    f"expected {artifact} to be a valid {file_format} artifact"
+                )
+            else:  # svg
+                assert b"<svg" in blob, f"expected {artifact} to contain SVG markup"

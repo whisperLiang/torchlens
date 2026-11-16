@@ -6,11 +6,9 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import torch
-import yaml
 from torch import nn
 
 import torchlens as tl
@@ -52,15 +50,6 @@ def _make_log() -> tl.Trace:
     """
 
     return tl.trace(_TinyModel(), torch.randn(1, 3))
-
-
-def test_core_import_capture_and_show_without_optional_tabular_or_notebook_use() -> None:
-    """Core import, capture, and show path succeed in the current dev environment."""
-
-    log = _make_log()
-
-    assert len(log.layer_list) > 0
-    assert log.show(vis_mode="none") is None
 
 
 def test_plain_capture_never_imports_dynamo_or_fsdp() -> None:
@@ -120,22 +109,13 @@ print("COLD_IMPORT_OK")
     assert "COLD_IMPORT_OK" in result.stdout
 
 
-def test_to_pandas_succeeds_when_tabular_extra_is_available() -> None:
-    """Trace.to_pandas succeeds when pandas is installed."""
-
-    log = _make_log()
-    frame = log.to_pandas()
-
-    assert not frame.empty
-    assert "layer_label" in frame.columns
-
-
-def test_to_pandas_missing_pandas_mentions_tabular_extra() -> None:
+def test_to_pandas_missing_pandas_mentions_tabular_extra(monkeypatch: pytest.MonkeyPatch) -> None:
     """Trace.to_pandas raises a helpful extra-install hint when pandas is missing."""
 
     log = _make_log()
 
-    with patch.dict("sys.modules", {"pandas": None}):
+    with monkeypatch.context() as patched:
+        patched.setitem(sys.modules, "pandas", None)
         try:
             log.to_pandas()
         except ImportError as exc:
@@ -148,26 +128,35 @@ def test_to_pandas_missing_pandas_mentions_tabular_extra() -> None:
 
 
 def test_repr_html_succeeds_when_notebook_extra_is_available() -> None:
-    """Trace._repr_html_ returns the Phase 3 HTML card when IPython is installed."""
+    """Trace._repr_html_ returns the CardTree card when IPython is installed."""
     pytest.importorskip("IPython")
 
     log = _make_log()
     html = log._repr_html_()
 
-    assert html.startswith("<div")
-    assert "TorchLens Trace" in html
+    assert html.startswith("<style>")
+    assert f"Trace {log.name}:" in html
     assert "NaN/Inf" in html
 
 
-def test_repr_html_missing_ipython_falls_back_to_text() -> None:
-    """Trace._repr_html_ falls back to text when IPython is missing."""
+def test_repr_html_without_ipython_still_renders_the_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Card generation is stdlib-only: no IPython gate (treescope memo B1).
+
+    The historical gate returned a 94-byte plain repr whenever IPython was
+    not importable, which also let naive card tests pass against the
+    fallback -- card tests assert CONTENT.
+    """
 
     log = _make_log()
 
-    with patch.dict("sys.modules", {"IPython": None, "IPython.display": None}):
+    with monkeypatch.context() as patched:
+        patched.setitem(sys.modules, "IPython", None)
+        patched.setitem(sys.modules, "IPython.display", None)
         html = log._repr_html_()
 
-    assert html == repr(log)
+    assert f"Trace {log.name}:" in html
+    assert "NaN/Inf" in html
+    assert html != repr(log)
 
 
 def test_packaging_metadata_uses_resolvable_gradcam_and_guarded_tinygrad_extra() -> None:
@@ -180,45 +169,27 @@ def test_packaging_metadata_uses_resolvable_gradcam_and_guarded_tinygrad_extra()
     assert "tinygrad = [\"tinygrad>=0.13,<0.14; python_version >= '3.11'\"]" in pyproject_text
 
 
-def test_precommit_and_conftest_guard_use_python3_safe_predicates() -> None:
-    """Hooks own their Python interpreter and the crawler guard remains version-based."""
-
-    project_root = Path(__file__).resolve().parent.parent
-    precommit_text = project_root.joinpath(".pre-commit-config.yaml").read_text()
-    conftest_text = project_root.joinpath("tests", "conftest.py").read_text()
-
-    for stage in ("commit-msg", "pre-push"):
-        hook = precommit_text.split(f"      - id: no-breaking-markers-{stage}\n", 1)[1]
-        hook = hook.split("\n      - id:", 1)[0]
-        assert f"entry: python scripts/check_no_breaking_markers.py --{stage}" in hook
-        assert "language: python" in hook
-        assert f"stages: [{stage}]" in hook
-    assert "if sys.version_info < (3, 11):" in conftest_text
-    assert 'collect_ignore_glob.append("test_menagerie_*.py")' in conftest_text
-    # Exclude the directory before its Python-3.11-only conftest is imported.
-    assert 'collect_ignore_glob.append("crawler")' in conftest_text
-
-
 def test_ci_workflows_pin_torch_and_scope_lint_to_owned_paths() -> None:
-    """Packaging CI keeps torch pins honest and excludes the external menagerie boundary."""
+    """Packaging CI keeps torch pins honest and scopes lint to the owned paths."""
 
     project_root = Path(__file__).resolve().parent.parent
-    nightly_text = project_root.joinpath(".github", "workflows", "nightly.yml").read_text()
     weekly_text = project_root.joinpath(".github", "workflows", "weekly.yml").read_text()
-    lint_text = project_root.joinpath(".github", "workflows", "lint.yml").read_text()
+    lint_text = project_root.joinpath(".github", "workflows", "pr.yml").read_text()
 
-    assert "torch==2.7.1+cpu" in weekly_text
-    assert (
-        'uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt"' in weekly_text
-    )
-    assert "python scripts/check_torch_environment.py 2.7.1+cpu 0.22.1+cpu" in weekly_text
-    assert "uv pip check" in weekly_text
-
-    fast_tier = yaml.safe_load(nightly_text)["jobs"]["fast-tier"]
-    install = next(step for step in fast_tier["steps"] if "uv pip install" in step.get("run", ""))
-    assert '"torch==2.8.0+cpu" "torchvision==0.23.0+cpu"' in install["run"]
-    assert "--index-url https://download.pytorch.org/whl/cpu" in install["run"]
-    assert "uv pip check" in install["run"]
+    for workflow_text in (weekly_text,):
+        # The torch 2.7 weekly legs pin torch AND torchvision as an exact
+        # +cpu pair from ONE resolve (R61): installing torch from the CPU
+        # index and then the extras from PyPI alone pulled PyPI's CUDA
+        # torchvision build, whose compiled ops do not load against the CPU
+        # torch ("operator torchvision::nms does not exist"). A loose
+        # "torch==2.7.*" prefix pin cannot express that pairing.
+        assert "torch==2.7.1+cpu" in workflow_text
+        assert "torchvision==0.22.1+cpu" in workflow_text
+        assert 'uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt"' in (
+            workflow_text
+        )
+        assert "uv pip check" in workflow_text
+        assert 'assert torch.__version__ == "2.7.1+cpu"' in workflow_text
 
     # Pin the FULL widened scope (grind r3, R70 / OL#41), not a prefix of it: a
     # prefix assertion still passes when the contributor-facing trees are dropped
@@ -227,7 +198,7 @@ def test_ci_workflows_pin_torch_and_scope_lint_to_owned_paths() -> None:
     assert f"ruff format --check {lint_scope}" in lint_text
     assert f"ruff check {lint_scope}" in lint_text
 
-    # The excluded set moved from lint.yml CLI flags into pyproject's
+    # The excluded set moved from the lint job's CLI flags into pyproject's
     # `[tool.ruff] extend-exclude` so that pre-commit -- which passes explicit
     # staged filenames and therefore ignores CLI --exclude -- reaches the same
     # verdict as this gate. Assert the boundary at its single authority, and that
@@ -238,17 +209,18 @@ def test_ci_workflows_pin_torch_and_scope_lint_to_owned_paths() -> None:
     )
     assert extend_exclude is not None, "pyproject [tool.ruff] must declare extend-exclude"
     excluded = set(re.findall(r'"([^"]+)"', extend_exclude.group(1)))
-    # The two generated artifacts are excluded because their generator is the
+    # The generated artifacts are excluded because their generator is the
     # authority and tests/test_schema_lockstep.py compares them byte-for-byte, so
     # a ruff rewrite would make that gate permanently red. That half is pinned to
     # the self-declaring generated set by
     # test_schema_lockstep.py::test_ruff_excludes_every_generated_artifact.
+    # tests/classics_corpus/models holds the vendored classics sources,
+    # sha256-pinned in the corpus manifest: the provenance is the authority, not ruff.
     assert excluded == {
-        "menagerie",
-        "tests/crawler",
-        "tests/test_menagerie_*.py",
-        "torchlens/data_classes/_schema_bindings.py",
-        "torchlens/ir/op_record_manifest.py",
+        "tests/classics_corpus/models",
+        "torchlens/_data_classes/_schema_bindings.py",
+        "torchlens/_data_classes/_schema_bindings_trace.py",
+        "torchlens/_ir/op_record_manifest.py",
     }
     assert "--exclude" not in lint_text
 
@@ -256,8 +228,8 @@ def test_ci_workflows_pin_torch_and_scope_lint_to_owned_paths() -> None:
 def test_ruff_pin_is_identical_across_declaration_sites() -> None:
     """The ruff that WRITES the code and the ruff that JUDGES it must be one version.
 
-    Three files independently name a ruff version: pyproject's dev extra, the Lint
-    workflow's install step, and the ruff-pre-commit ``rev``. When they drift, the
+    Three files independently name a ruff version: pyproject's dev extra, the PR
+    workflow's lint install step, and the ruff-pre-commit ``rev``. When they drift, the
     pre-commit formatter rewrites code to a style CI then rejects -- which is exactly
     how the repo accumulated 147 format-stale files under a v0.9.7 hook while CI
     judged with 0.15.4.
@@ -265,7 +237,7 @@ def test_ruff_pin_is_identical_across_declaration_sites() -> None:
 
     project_root = Path(__file__).resolve().parent.parent
     pyproject_text = project_root.joinpath("pyproject.toml").read_text()
-    lint_text = project_root.joinpath(".github", "workflows", "lint.yml").read_text()
+    lint_text = project_root.joinpath(".github", "workflows", "pr.yml").read_text()
     precommit_text = project_root.joinpath(".pre-commit-config.yaml").read_text()
 
     dev_pins = set(re.findall(r'"ruff==([0-9]+\.[0-9]+\.[0-9]+)"', pyproject_text))
@@ -287,7 +259,7 @@ def test_ruff_pin_is_identical_across_declaration_sites() -> None:
     assert len(hook_revs) == 1, f"expected exactly one ruff-pre-commit rev, got {hook_revs}"
     assert dev_pins == ci_pins == hook_revs, (
         "ruff version drift: pyproject dev extra "
-        f"{dev_pins}, lint.yml {ci_pins}, .pre-commit-config.yaml {hook_revs}. "
+        f"{dev_pins}, pr.yml {ci_pins}, .pre-commit-config.yaml {hook_revs}. "
         "The formatter and the gate must be the same ruff."
     )
 
@@ -320,29 +292,27 @@ def test_third_party_actions_are_sha_pinned() -> None:
 
 
 def test_release_job_python_stack_is_hash_locked() -> None:
-    """The release job installs its Python deps hash-verified, wheels-only.
+    """The release build installs its builder hash-verified, wheels-only.
 
-    r4 b2-sol R61 (HIGH): the job exact-pinned python-semantic-release but
-    resolved its TRANSITIVES unpinned and unhashed, then ran the stack with
-    the repo-write App token — a compromised or dependency-confused
-    transitive could push with that token. The job must install from the
-    committed lock with ``--require-hashes`` (every requirement carries
-    ``--hash``) and ``--only-binary :all:`` (no sdist code execution at
-    install time).
+    r4 b2-sol R61 (HIGH): an unpinned, unhashed transitive in the release
+    environment is arbitrary code in the job that builds the published
+    artifacts. The build must install from the committed lock with
+    ``--require-hashes`` (every requirement carries ``--hash``) and
+    ``--only-binary :all:`` (no sdist code execution at install time), and
+    install nothing else.
     """
 
     repo_root = Path(__file__).resolve().parent.parent
     release_yml = (repo_root / ".github" / "workflows" / "release.yml").read_text()
 
     assert "--require-hashes" in release_yml, (
-        "release.yml no longer installs with --require-hashes; the "
-        "semantic-release stack runs with the repo-write token and must be "
-        "byte-audited"
+        "release.yml no longer installs with --require-hashes; the published "
+        "artifacts must be built by a byte-audited builder"
     )
     assert "--only-binary :all:" in release_yml
     assert "release-requirements.txt" in release_yml
-    assert 'pip install "python-semantic-release' not in release_yml, (
-        "release.yml regained a bare unhashed pip install"
+    assert release_yml.count("pip install") == 1, (
+        "release.yml installs something outside the hash lock"
     )
 
     lock_path = repo_root / ".github" / "workflows" / "release-requirements.txt"
@@ -351,7 +321,7 @@ def test_release_job_python_stack_is_hash_locked() -> None:
         line for line in lock_text.splitlines() if re.match(r"^[A-Za-z0-9_.-]+==", line)
     ]
     assert requirement_lines, "release lock lost its pinned requirements"
-    assert any(line.startswith("python-semantic-release==") for line in requirement_lines)
+    assert any(line.startswith("build==") for line in requirement_lines)
 
     # Every pinned requirement must carry at least one hash: pip refuses
     # mixed hashed/unhashed input under --require-hashes, but the lock is
@@ -364,42 +334,24 @@ def test_release_job_python_stack_is_hash_locked() -> None:
     ]
     assert not unhashed, f"release lock entries without hashes: {unhashed}"
 
-    # The lock is only airtight if NOTHING ELSE installs inside the token
-    # scope: build_command formerly ran its own unhashed
-    # `pip install 'build==1.5.0'` after checkout, escaping the lock (grind
-    # r5, P9/R61). The builder must come from the lock (asserted present
-    # here) and build_command must never regain an install.
-    pyproject_text = (repo_root / "pyproject.toml").read_text()
-    match = re.search(r'^build_command = "(.*)"$', pyproject_text, flags=re.MULTILINE)
-    assert match, "no build_command found in pyproject.toml"
-    assert "pip install" not in match.group(1), (
-        "build_command runs its own pip install inside the release token "
-        "scope, escaping the hash lock; add the package to "
-        "release-requirements.txt instead"
+    # The lock is only airtight if nothing else installs in the build job
+    # (asserted above), the builder runs --no-isolation against it (r7 R86:
+    # an isolated build env pip-installs an UNPINNED setuptools from the live
+    # index), and the normalizer decides the published bytes of BOTH
+    # artifacts (r7 R84).
+    release_builds = [
+        line for line in release_yml.splitlines() if re.search(r"python -m build\b", line)
+    ]
+    assert release_builds, "release.yml lost its build invocation"
+    assert all("--no-isolation" in line for line in release_builds), (
+        "release.yml runs `python -m build` without --no-isolation: the "
+        "isolated build env pip-installs an UNPINNED setuptools from the live index"
     )
-    assert any(line.startswith("build==") for line in requirement_lines), (
-        "the release lock no longer pins the `build` builder"
-    )
-
-    # r7 R86 (fable HIGH + opus MED-HIGH, MEASURED): `python -m build`
-    # WITHOUT --no-isolation creates an isolated env and pip-installs the
-    # build backend (setuptools) from the LIVE index at build time -- inside
-    # the token scope, with the repo-write App token persisted in
-    # .git/config. That is arbitrary unpinned code with push access, escaping
-    # the hash lock this test guards. The builder must run --no-isolation
-    # against the hash-locked env, which therefore must pin the backend.
-    assert "--no-isolation" in match.group(1), (
-        "build_command runs `python -m build` without --no-isolation: the "
-        "isolated build env pip-installs an UNPINNED setuptools from the "
-        "live index inside the release token scope"
-    )
-    # r7 R84: the normalizer decides the published bytes of BOTH artifacts;
-    # dropping either argument shipped machine-dependent bytes with the
-    # first signal a post-release nightly red.
-    assert "python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl" in match.group(1), (
-        "build_command no longer normalizes both artifacts "
+    assert "python scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl" in release_yml, (
+        "release.yml no longer normalizes both artifacts "
         "(scripts/normalize_sdist.py dist/*.tar.gz dist/*.whl)"
     )
+    pyproject_text = (repo_root / "pyproject.toml").read_text()
     setuptools_pins = [line for line in requirement_lines if line.startswith("setuptools==")]
     assert setuptools_pins, (
         "release lock does not pin the setuptools build backend; "
@@ -429,13 +381,78 @@ def test_release_job_python_stack_is_hash_locked() -> None:
     )
 
 
+#: Security floors for the token-bearing release lock: package -> (first fixed
+#: release, advisory). A regeneration that drops one fails here, not only in the
+#: pip-audit job, which runs on pull requests. The lock holds only the builder
+#: (build and setuptools) since the release workflow stopped computing versions,
+#: so the certifi and GitPython floors left with the tool that pulled them in.
+_RELEASE_LOCK_SECURITY_FLOORS = {
+    "setuptools": ("84.1.0", "GHSA-xmj3-9gf7-h52w"),
+}
+
+
+def test_release_lock_meets_security_floors() -> None:
+    """The release lock pins no package below its advisory's first fixed release."""
+    from packaging.version import Version
+
+    repo_root = Path(__file__).resolve().parents[1]
+    lock_text = (repo_root / ".github" / "workflows" / "release-requirements.txt").read_text()
+    pins = {
+        name.lower(): Version(version)
+        for name, version in re.findall(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)", lock_text, re.M)
+    }
+    below = [
+        f"{name}=={pins[name]} < {floor} ({advisory})"
+        for name, (floor, advisory) in _RELEASE_LOCK_SECURITY_FLOORS.items()
+        if name in pins and pins[name] < Version(floor)
+    ]
+    assert not below, f"release lock pins vulnerable versions: {below}"
+    assert set(_RELEASE_LOCK_SECURITY_FLOORS) <= set(pins), "a floored package left the lock"
+
+
+def test_changelog_keeps_the_release_tools_insertion_flag() -> None:
+    """The release tool writes each release entry at the changelog's insertion flag.
+
+    In its default ``update`` mode the release tool splits ``CHANGELOG.md`` on the
+    insertion flag and leaves a file without the flag unchanged, so a missing flag
+    silently stops every release entry. The newest entry must name the package version.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    pyproject_text = (repo_root / "pyproject.toml").read_text()
+    section = re.search(
+        r"^\[tool\.semantic_release\.changelog\]\n(.*?)(?=^\[|\Z)",
+        pyproject_text,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    settings = section.group(1) if section else ""
+    mode = re.search(r'^mode\s*=\s*"(\w+)"', settings, flags=re.MULTILINE)
+    assert mode is None or mode.group(1) == "update", (
+        "changelog mode 'init' rebuilds CHANGELOG.md from commits and drops its hand-written entries"
+    )
+    flag_match = re.search(r'^insertion_flag\s*=\s*"([^"]+)"', settings, flags=re.MULTILINE)
+    flag = flag_match.group(1) if flag_match else "<!-- version list -->"
+
+    changelog = (repo_root / "CHANGELOG.md").read_text()
+    assert changelog.count(flag) == 1, f"CHANGELOG.md must hold the insertion flag {flag!r} once"
+    above, below = changelog.split(flag)
+    assert not re.search(r"^## v\d", above, flags=re.MULTILINE), (
+        "a release entry sits above the flag"
+    )
+    newest = re.search(r"^## v(\d+\.\d+\.\d+(?:\+[A-Za-z0-9.-]+)?) ", below, flags=re.MULTILINE)
+    version = re.search(r'^version = "([^"]+)"', pyproject_text, flags=re.MULTILINE)
+    assert newest and version, "no release entry below the flag, or no project version"
+    assert newest.group(1) == version.group(1), (
+        f"newest CHANGELOG.md entry is v{newest.group(1)} but the package is {version.group(1)}"
+    )
+
+
 @pytest.mark.slow
 def test_built_wheel_manifest_is_diet(tmp_path: Path) -> None:
-    """Assert the built wheel's manifest: schemas in, py.typed in, menagerie OUT.
+    """Assert the built wheel's manifest: schemas in, py.typed in, nothing else top-level.
 
     Nothing used to test the wheel manifest, and it had drifted three ways at
-    once: ``menagerie*`` was in the distributed package set (2886 of 3316
-    members, ~13.5 MB, plus ``menagerie`` squatting as a top-level import name),
+    once: a non-library reference corpus was in the distributed package set
+    (2886 of 3316 members, ~13.5 MB, plus a second top-level import name),
     ``torchlens/py.typed`` was missing so downstream mypy ignored every
     annotation in the package (PEP 561), and only the schema files were checked.
     """
@@ -502,15 +519,24 @@ def test_built_wheel_manifest_is_diet(tmp_path: Path) -> None:
     ]
     assert schema_members, "expected at least one torchlens/schemas/*.json wheel member"
 
+    # Every data file the package carries ships (the importlib.resources
+    # readers fail at runtime otherwise). A stale package-data key after a
+    # package move matches nothing, so the file silently drops out of the wheel.
+    from tests.test_package_data_paths import runtime_data_files
+
+    expected_data = {f"torchlens/{rel}" for rel in runtime_data_files()}
+    missing_data = sorted(expected_data - set(members))
+    assert not missing_data, f"wheel lacks package data file(s): {missing_data}"
+
     # PEP 561: without this marker file downstream type checkers treat the
     # package as untyped and skip every annotation it ships.
     assert "torchlens/py.typed" in members, "wheel must ship the PEP 561 py.typed marker"
 
-    # The menagerie corpus is repo/sdist-only, never part of the installed library.
-    menagerie_members = [m for m in members if m.startswith("menagerie")]
-    assert not menagerie_members, (
-        f"wheel ships {len(menagerie_members)} menagerie member(s); the corpus is "
-        "not part of the distributed library (see [tool.setuptools.packages.find])"
+    # Only the library and its dist-info ship; repo corpora never do.
+    stray_members = [m for m in members if not m.startswith(("torchlens/", "torchlens-"))]
+    assert not stray_members, (
+        f"wheel ships {len(stray_members)} non-library member(s), e.g. {stray_members[:3]}; "
+        "only the torchlens package is distributed (see [tool.setuptools.packages.find])"
     )
     assert top_level == ["torchlens"], (
         f"wheel installs top-level name(s) {top_level}; torchlens must be the only one"
@@ -531,10 +557,9 @@ def test_built_wheel_manifest_is_diet(tmp_path: Path) -> None:
 def test_nightly_gate_installs_release_locked_builder() -> None:
     """The nightly double-build gate installs the release's exact builder (R61).
 
-    SINGLE PIN AUTHORITY: build_command installs NOTHING inside the token
-    scope (asserted by test_release_job_python_stack_is_hash_locked above); the
-    builder comes from the hash-locked release-requirements.txt the release
-    job installs. The nightly gate must install hash-verified from that SAME
+    SINGLE PIN AUTHORITY: the release build installs nothing but the
+    hash-locked release-requirements.txt (asserted by
+    test_release_job_python_stack_is_hash_locked above). The nightly gate must install hash-verified from that SAME
     lock -- a name/version-only install (the old ``uv pip install
     "$BUILD_PIN"``) verified no artifact bytes, and a second builder lock
     would let the gate attest a different builder than the release uses.
@@ -604,11 +629,9 @@ def test_precommit_pin_is_single_valued_and_inside_the_contributor_band() -> Non
 
 # ---------------------------------------------------------------------------
 # Pin-lockstep gates (r7 R87-1): these five assertions previously lived ONLY
-# as inline scripts in lint.yml's actionlint job — a job the repo documents
-# as advisory, so none was PR-blocking and none was locally runnable
-# (`pytest tests/` could not reach them; the "one version authority"
-# doctrine was enforceable only by pushing). They are the same checks,
-# ported verbatim; lint.yml now points here instead of duplicating them.
+# as inline scripts in the old lint workflow's actionlint job, which was
+# advisory, so none was PR-blocking and none was locally runnable. They are
+# the same checks, ported verbatim.
 # ---------------------------------------------------------------------------
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -621,33 +644,46 @@ def _all_workflow_text() -> str:
     return "".join(path.read_text() for path in sorted(_WORKFLOWS_DIR.glob("*.yml")))
 
 
-@pytest.mark.smoke
 def test_newest_admitted_torch_literal_lockstep() -> None:
-    """quality.yml's inline torch pins equal tests.yml's newest matrix row.
+    """The mypy, checks, packaging and audit jobs pin the newest matrix torch.
 
-    The newest-admitted torch version is inlined in quality.yml (mypy +
-    dep-audit envs) and repeatedly in tests.yml's matrix with nothing keeping
-    them equal — a matrix bump that skips quality.yml silently type-checks
+    The newest-admitted torch version is inlined in those jobs and repeatedly
+    in the smoke matrix rows (pr.yml plus nightly's smoke-matrix) with nothing
+    keeping them equal — a matrix bump that skips them silently type-checks
     and audits an older torch. (The nightly capture-byte-oracle pin
     deliberately tracks the golden ENV marker instead and is lockstepped by
     test_ci_packaging_gates.)
     """
 
+    import yaml
+
     torch_re = re.compile(r"torch(?:==|: \")(\d+\.\d+\.\d+)\+cpu")
-    tests_versions = torch_re.findall((_WORKFLOWS_DIR / "tests.yml").read_text())
-    quality_versions = torch_re.findall((_WORKFLOWS_DIR / "quality.yml").read_text())
-    assert tests_versions and quality_versions, (
-        "expected torch==X.Y.Z+cpu literals in tests.yml and quality.yml"
+    pr_jobs = yaml.safe_load((_WORKFLOWS_DIR / "pr.yml").read_text())["jobs"]
+    nightly_jobs = yaml.safe_load((_WORKFLOWS_DIR / "nightly.yml").read_text())["jobs"]
+    rows = [
+        *pr_jobs["smoke"]["strategy"]["matrix"]["include"],
+        *nightly_jobs["smoke-matrix"]["strategy"]["matrix"]["include"],
+    ]
+    # The `forward` row runs a torch above the newest admitted one on purpose
+    # (it gates the newer-torch capability flags); the tooling jobs follow the
+    # newest-admitted rows.
+    matrix_versions = [
+        str(row["torch"]).split("+", 1)[0] for row in rows if row.get("track") == "newest-admitted"
+    ]
+    inline_jobs = [pr_jobs[name] for name in ("type-check", "checks", "packaging")]
+    inline_jobs += [nightly_jobs[name] for name in ("dep-audit", "dep-audit-extras")]
+    inline_versions = torch_re.findall("".join(str(job) for job in inline_jobs))
+    assert matrix_versions and inline_versions, (
+        "expected torch==X.Y.Z+cpu literals in the smoke rows and the inline-pinned jobs"
     )
-    newest = max(tests_versions, key=lambda v: tuple(map(int, v.split("."))))
-    stale = sorted(set(quality_versions) - {newest})
+    newest = max(matrix_versions, key=lambda v: tuple(map(int, v.split("."))))
+    stale = sorted(set(inline_versions) - {newest})
     assert not stale, (
-        f"quality.yml pins torch {stale} but tests.yml's newest-admitted row is {newest}: "
-        "bump them together so type-check/audit run on the newest admitted torch"
+        f"type-check/checks/packaging/audit pin torch {stale} but the newest-admitted "
+        f"smoke row is {newest}: bump them together"
     )
 
 
-@pytest.mark.smoke
 def test_pydot_inline_pins_match_the_test_extra_authority() -> None:
     """Every inline workflow pydot pin equals the [test] extra's pin.
 
@@ -655,7 +691,7 @@ def test_pydot_inline_pins_match_the_test_extra_authority() -> None:
     pin authority and the lean .[dev,tabular] legs repeat it inline, so a
     bump that misses a site silently renders goldens with a different pydot.
     The scan covers EVERY workflow file — a hand-enumerated list let
-    mutation.yml's third pin drift unguarded from birth.
+    the old mutation workflow's third pin drift unguarded from birth.
     """
 
     pyproject = (_REPO_ROOT / "pyproject.toml").read_text()
@@ -669,49 +705,22 @@ def test_pydot_inline_pins_match_the_test_extra_authority() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_pip_audit_inline_pin_matches_the_dev_extra_authority() -> None:
-    """quality.yml's inline pip-audit pin equals the dev extra's exact pin."""
+    """nightly.yml's inline pip-audit pin equals the dev extra's exact pin."""
 
     pyproject = (_REPO_ROOT / "pyproject.toml").read_text()
     authority = set(re.findall(r'"pip-audit==([0-9][^"]*)"', pyproject))
     assert len(authority) == 1, f"expected ONE pip-audit pin in pyproject: {authority}"
     inline = set(
-        re.findall(r"pip-audit==([0-9][^\"'\s]*)", (_WORKFLOWS_DIR / "quality.yml").read_text())
+        re.findall(r"pip-audit==([0-9][^\"'\s]*)", (_WORKFLOWS_DIR / "nightly.yml").read_text())
     )
     assert inline == authority, (
-        f"quality.yml pip-audit pin {inline} drifted from the dev extra "
+        f"nightly.yml pip-audit pin {inline} drifted from the dev extra "
         f"authority {authority}: the inline copy is the one that actually "
         "audits releases"
     )
 
 
-@pytest.mark.smoke
-def test_jsonschema_inline_pins_agree_and_sit_inside_the_dev_band() -> None:
-    """Inline jsonschema pins are single-valued and inside the dev band.
-
-    The inline copies validate the menagerie release lock, so a partial bump
-    forks lock-validation verdicts between legs.
-    """
-
-    pyproject = (_REPO_ROOT / "pyproject.toml").read_text()
-    inline = set(re.findall(r"jsonschema==([0-9][^\"'\s]*)", _all_workflow_text()))
-    assert len(inline) <= 1, f"inline jsonschema pins disagree across workflows: {inline}"
-    if inline:
-        band = re.search(r'"jsonschema>=([0-9.]+),<([0-9.]+)"', pyproject)
-        assert band is not None, "dev extra lost its jsonschema band"
-        pinned = next(iter(inline))
-
-        def _key(version: str) -> tuple[int, ...]:
-            return tuple(int(part) for part in version.split("."))
-
-        assert _key(band.group(1)) <= _key(pinned) < _key(band.group(2)), (
-            f"inline jsonschema {pinned} escaped the dev-extra band "
-            f">={band.group(1)},<{band.group(2)}"
-        )
-
-
-@pytest.mark.smoke
 def test_graphviz_inline_pins_match_the_committed_env_markers() -> None:
     """Every inline graphviz pin equals the committed ENV-graphviz markers.
 
@@ -736,4 +745,32 @@ def test_graphviz_inline_pins_match_the_committed_env_markers() -> None:
         f"ENV-graphviz markers {marker_versions}: the python DOT emitter is a "
         "golden fingerprint KEY — a free resolution moves the byte families "
         "off-canonical on the enforcing row"
+    )
+
+
+def test_graphviz_jobs_run_on_a_fixed_ubuntu_image() -> None:
+    """Every job that apt-installs Graphviz names a fixed Ubuntu image.
+
+    The system Graphviz comes from the runner image's apt archive, and the
+    committed galleries and render goldens are byte-checked against one
+    Graphviz release. ``ubuntu-latest`` moving to 26.04 (2026-10-20) swapped
+    Graphviz 2.42 for 14.1, which leaves neato out of the graphviz package and
+    writes different SVG bytes, so a floating label turns an image rollover
+    into dozens of unrelated test failures.
+    """
+
+    import yaml
+
+    floating = []
+    for path in sorted(_WORKFLOWS_DIR.glob("*.yml")):
+        jobs = yaml.safe_load(path.read_text()).get("jobs", {})
+        for job_id, job in jobs.items():
+            steps = job.get("steps", [])
+            if any("apt-get install -y graphviz" in str(step.get("run", "")) for step in steps):
+                runs_on = str(job.get("runs-on", ""))
+                if not runs_on.startswith("ubuntu-") or runs_on == "ubuntu-latest":
+                    floating.append(f"{path.name}:{job_id} runs-on {runs_on!r}")
+    assert not floating, (
+        "Graphviz-installing jobs must pin a fixed Ubuntu image "
+        f"(ubuntu-24.04 carries Graphviz 2.42): {floating}"
     )

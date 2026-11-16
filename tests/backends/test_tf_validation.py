@@ -9,10 +9,10 @@ import pytest
 from conftest import tensorflow_backend_modules
 
 import torchlens as tl
+from torchlens._validation_status import ValidationStatus
 from torchlens.backends.tf import TFBackend
 from torchlens.backends.tf.validation import replay_allowlist
-from torchlens.validation.invariants import check_metadata_invariants
-from torchlens.validation.status import ValidationReplayStatus
+from torchlens.validation._invariants import check_metadata_invariants
 
 tf, keras, _TF_BACKEND_SKIP_REASON = tensorflow_backend_modules()
 
@@ -23,6 +23,7 @@ pytestmark = [
         _TF_BACKEND_SKIP_REASON is not None,
         reason=_TF_BACKEND_SKIP_REASON or "TensorFlow backend stack is supported",
     ),
+    pytest.mark.rare,
 ]
 
 
@@ -85,7 +86,7 @@ class PollutingModule(tf.Module):
         return x + 1.0
 
 
-def _validate(trace: Any) -> bool | ValidationReplayStatus:
+def _validate(trace: Any) -> bool | ValidationStatus:
     """Validate a trace through the TensorFlow backend.
 
     Parameters
@@ -95,7 +96,7 @@ def _validate(trace: Any) -> bool | ValidationReplayStatus:
 
     Returns
     -------
-    bool | ValidationReplayStatus
+    bool | ValidationStatus
         Backend validation result.
     """
 
@@ -116,7 +117,24 @@ def _failures(trace: Any) -> tuple[str, ...]:
         Failure reason strings.
     """
 
-    return tuple(getattr(trace, "_tf_validation_result").failures)
+    return tuple(_result(trace).failures)
+
+
+def _result(trace: Any) -> Any:
+    """Return the detailed TensorFlow validation result of a validated trace.
+
+    Parameters
+    ----------
+    trace
+        TensorFlow trace already validated.
+
+    Returns
+    -------
+    Any
+        The ``TFValidationResult`` the backend attached.
+    """
+
+    return getattr(trace, "_tf_validation_result", None)
 
 
 def test_tf_validation_fails_when_interior_callback_record_is_dropped() -> None:
@@ -148,12 +166,21 @@ def test_tf_validation_fails_on_initializer_contamination() -> None:
 
 
 def test_tf_validation_identity_annotation_passes_legitimate_passthrough() -> None:
-    """Identity is classified as a label-preserving annotation."""
+    """Identity is classified as a label-preserving annotation.
+
+    The graph needs at least one genuinely replayable (non-exempt) node:
+    a bare ``tf.identity`` call is the ONLY op, so with Identity exempted as
+    an annotation ``num_replayed_ops`` would be 0 and validation would
+    legitimately refuse to call that "passed" (exemptions alone cannot
+    produce a passing result -- see ``validation/_status.py``'s
+    ``no_nodes_replay_validated`` guard). Add a real op so the identity
+    passthrough is checked alongside something replay actually verifies.
+    """
 
     def identity(x: Any) -> Any:
-        """Return an eager TensorFlow identity."""
+        """Return an eager TensorFlow identity composed with a real op."""
 
-        return tf.identity(x)
+        return tf.identity(x) + 0.0
 
     trace = tl.trace(identity, tf.constant([1.0, 2.0]), backend="tf")
 
@@ -161,7 +188,7 @@ def test_tf_validation_identity_annotation_passes_legitimate_passthrough() -> No
     assert trace.validation_replay_status.state == "passed"
     assert (
         getattr(trace, "_tf_validation_result").classes[
-            next(op._label_raw for op in trace.layer_list if op.func_name == "Identity")
+            next(op._label_raw for op in trace._layer_list if op.func_name == "Identity")
         ]
         == "annotation"
     )
@@ -197,17 +224,17 @@ def test_tf_validation_reports_unverified_for_pure_allowlist_gap() -> None:
     """A classified pure op outside the replay allowlist is not a green pass."""
 
     def mostly_unverified(x: Any) -> Any:
-        """Use a classified but non-allowlisted pure op."""
+        """Use a classified but non-allowlisted pure op (``Pack``)."""
 
-        return tf.math.exp(x)
+        return tf.stack([x, x])
 
     trace = tl.trace(mostly_unverified, tf.constant([1.0, 2.0]), backend="tf")
     result = _validate(trace)
 
-    assert isinstance(result, ValidationReplayStatus)
+    assert isinstance(result, ValidationStatus)
     assert result.state == "unverified"
-    assert result.pure_unverified_node_count == 1
-    assert result.replayed_node_count == 0
+    assert result.num_pure_unverified_ops == 1
+    assert result.num_replayed_ops == 0
 
 
 def test_tf_validation_fails_on_unclassified_op_type() -> None:
@@ -219,7 +246,7 @@ def test_tf_validation_fails_on_unclassified_op_type() -> None:
         return x + tf.constant([1.0, 2.0])
 
     trace = tl.trace(chain, tf.constant([1.0, 2.0]), backend="tf")
-    add = next(op for op in trace.layer_list if op.func_name == "AddV2")
+    add = next(op for op in trace._layer_list if op.func_name == "AddV2")
     add.func_name = "DefinitelyUnknownTfOp"
 
     assert _validate(trace) is False
@@ -242,15 +269,15 @@ def test_tf_validation_positive_cnn_and_transformer_report_replay_coverage() -> 
         status = trace.validation_replay_status
 
         assert result is True or (
-            isinstance(result, ValidationReplayStatus) and result.state == "unverified"
+            isinstance(result, ValidationStatus) and result.state == "unverified"
         )
-        assert status.failed_node_count == 0
-        assert status.replayed_node_count > 0
+        assert status.num_failed_ops == 0
+        assert status.num_replayed_ops > 0
         assert getattr(trace, "_tf_validation_result").replayed_histogram
 
 
 def test_tf_num_layers_with_params_populated_in_object_module_mode() -> None:
-    """``_finish_trace`` must populate ``trace.num_layers_with_params``.
+    """``_finish_trace`` must populate ``trace._num_layers_with_params``.
 
     Sibling-gap regression test for the Paddle backend's identical bug: TF's
     ``TFBackend._finish_trace`` (``torchlens/backends/tf/backend.py``) calls
@@ -259,7 +286,7 @@ def test_tf_num_layers_with_params_populated_in_object_module_mode() -> None:
     ``_param_logs`` are attached correctly) but -- before this fix -- without
     ``count_layers_with_attached_params=True`` and without
     ``update_param_totals_from_layers=True``, so the trace-level summary
-    counter ``trace.num_layers_with_params`` stayed at its dataclass default
+    counter ``trace._num_layers_with_params`` stayed at its dataclass default
     of ``0`` for every parameterized Keras model. That trips the
     ``[param_xrefs]`` metadata invariant
     (``_check_layer_param_aggregate_dedup``) for any object-module-mode
@@ -270,6 +297,116 @@ def test_tf_num_layers_with_params_populated_in_object_module_mode() -> None:
 
     trace = tl.trace(SmallCnn(), tf.ones((1, 8, 8, 1), dtype=tf.float32), backend="tf")
 
-    assert trace.module_identity_mode == "object_module"
-    assert trace.num_layers_with_params > 0
+    assert trace.options.module_identity_mode == "object_module"
+    assert trace._num_layers_with_params > 0
     assert check_metadata_invariants(trace) is True
+
+
+def test_tf_public_validate_forward_scope_does_not_raise() -> None:
+    """``tl.validate(scope="forward", backend="tf")`` validates instead of refusing.
+
+    ``validate_metadata`` is a validation switch: forwarding it into the TF
+    capture made every public forward-scope call raise
+    ``BackendUnsupportedError``.
+    """
+
+    def chain(x: Any) -> Any:
+        """Return a small replayable op chain."""
+
+        return tf.nn.relu(x * tf.constant([2.0, -1.0]) + tf.constant([1.0, 1.0]))
+
+    x = tf.constant([1.0, 3.0])
+    assert tl.validate(chain, x, scope="forward", backend="tf") is True
+    assert tl.validate(chain, x, scope="forward", backend="tf", validate_metadata=False) is True
+
+
+def test_tf_public_validate_forward_scope_still_fails_closed() -> None:
+    """The public entry still returns False for an unclassified op type."""
+
+    def cumulative(x: Any) -> Any:
+        """Use an op type the TF classifier does not know."""
+
+        return tf.math.cumsum(x) + tf.constant([1.0, 1.0])
+
+    with pytest.warns(Warning, match="tl.validate FAILED"):
+        assert (
+            tl.validate(cumulative, tf.constant([1.0, 3.0]), scope="forward", backend="tf") is False
+        )
+
+
+def _depthwise_relu6(x: Any, kernel: Any) -> Any:
+    """Run pad, depthwise convolution, ``relu6`` (the MobileNet block shape).
+
+    Parameters
+    ----------
+    x
+        NHWC input.
+    kernel
+        Depthwise kernel.
+
+    Returns
+    -------
+    Any
+        Block output.
+    """
+
+    padded = tf.pad(x, [[0, 0], [1, 1], [1, 1], [0, 0]])
+    y = tf.nn.depthwise_conv2d(padded, kernel, strides=[1, 1, 1, 1], padding="VALID")
+    return tf.nn.relu6(y * 4.0)
+
+
+def _depthwise_inputs() -> tuple[Any, Any]:
+    """Return deterministic depthwise-block inputs."""
+
+    x = tf.reshape(tf.range(32, dtype=tf.float32) / 8.0 - 1.5, (1, 4, 4, 2))
+    kernel = tf.reshape(tf.range(18, dtype=tf.float32) / 9.0 - 0.5, (3, 3, 2, 1))
+    return x, kernel
+
+
+def test_tf_validation_replays_depthwise_conv_and_relu6() -> None:
+    """MobileNet's pad, depthwise conv and ``relu6`` replay instead of failing or skipping."""
+
+    trace = tl.trace(_depthwise_relu6, _depthwise_inputs(), backend="tf")
+
+    assert _validate(trace) is True
+    replayed = _result(trace).replayed_histogram
+    assert replayed["DepthwiseConv2dNative"] == 1
+    assert replayed["Relu6"] == 1
+    assert replayed["Pad"] == 1
+
+
+def test_tf_validation_depthwise_and_relu6_corruption_fails() -> None:
+    """A corrupted pad, depthwise or ``relu6`` payload fails replay, never passes."""
+
+    for op_type in ("Pad", "DepthwiseConv2dNative", "Relu6"):
+        trace = tl.trace(_depthwise_relu6, _depthwise_inputs(), backend="tf")
+        target = next(op for op in trace._layer_list if op.func_name == op_type)
+        target.out = target.out + 0.5
+
+        assert _validate(trace) is False
+        assert any(op_type in failure for failure in _failures(trace))
+
+
+def test_tf_function_root_trace_has_buffers_and_graph_shape_hash() -> None:
+    """A function-root preview trace carries ``buffers`` and a graph hash."""
+
+    def chain(x: Any) -> Any:
+        """Return a small op chain."""
+
+        return tf.nn.relu(x + tf.constant([1.0, 2.0]))
+
+    def other(x: Any) -> Any:
+        """Return a different op chain."""
+
+        return tf.math.tanh(x + tf.constant([1.0, 2.0]))
+
+    x = tf.constant([1.0, 3.0])
+    first = tl.trace(chain, x, backend="tf")
+    second = tl.trace(chain, x, backend="tf")
+    different = tl.trace(other, x, backend="tf")
+
+    assert first.options.module_identity_mode == "function_root"
+    assert first.buffers is not None and len(first.buffers) == 0
+    assert isinstance(first.provenance.fingerprint, str)
+    assert first.provenance.fingerprint == second.provenance.fingerprint
+    assert different.provenance.fingerprint != first.provenance.fingerprint

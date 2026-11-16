@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,7 @@ from torch import nn
 pd = pytest.importorskip("pandas")
 
 import torchlens as tl  # noqa: E402
-from torchlens.constants import (  # noqa: E402
+from torchlens._constants import (  # noqa: E402
     BUFFER_LOG_FIELD_ORDER,
     GRAD_FN_LOG_FIELD_ORDER,
     GRAD_FN_PASS_LOG_FIELD_ORDER,
@@ -21,7 +22,7 @@ from torchlens.constants import (  # noqa: E402
     MODULE_PASS_LOG_FIELD_ORDER,
     PARAM_LOG_FIELD_ORDER,
 )
-from torchlens.data_classes.buffer import _TO_PANDAS_EXCLUDED_BUFFER_FIELDS  # noqa: E402
+from torchlens._data_classes.buffer import _TO_PANDAS_EXCLUDED_BUFFER_FIELDS  # noqa: E402
 
 
 class _RecordExportModel(nn.Module):
@@ -49,8 +50,8 @@ def record_export_trace() -> tl.Trace:
     torch.manual_seed(0)
     model = _RecordExportModel()
     x = torch.randn(2, 3, requires_grad=True)
-    trace = tl.trace(model, x, save_grads="all")
-    trace.log_backward(trace[trace.output_layers[0]].out, retain_graph=True)
+    trace = tl.trace(model, x, capture=tl.options.CaptureOptions(save_grads="all"))
+    trace.backward(trace[trace.output_layers[0]].out, retain_graph=True)
     return trace
 
 
@@ -71,11 +72,18 @@ def _assert_round_trip(record: Any, columns: list[str], tmp_path: Path) -> None:
 
     csv_path = tmp_path / f"{type(record).__name__}.csv"
     tl.export.csv(record, csv_path)
-    csv_df = pd.read_csv(csv_path)
+    # tl.export.csv prepends the capture-honesty disclosure as a comment line.
+    csv_df = pd.read_csv(csv_path, comment="#")
 
     json_path = tmp_path / f"{type(record).__name__}.json"
     tl.export.json(record, json_path, orient="records")
-    json_df = pd.read_json(json_path, orient="records")
+    # tl.export.json writes the torchlens.table_export.v1 honesty ENVELOPE
+    # ({schema, capture_honesty, orient, rows}), not a bare records array --
+    # consumers read the rows key.
+    envelope = json.loads(json_path.read_text())
+    assert envelope["schema"] == "torchlens.table_export.v1"
+    assert envelope["orient"] == "records"
+    json_df = pd.DataFrame(envelope["rows"])
 
     for actual in (csv_df, json_df):
         assert list(actual.columns) == list(expected.columns)
@@ -106,7 +114,7 @@ def test_forward_record_exports_round_trip(record_export_trace: tl.Trace, tmp_pa
     _assert_round_trip(op, ["label", "layer_label", "type"], tmp_path)
     _assert_round_trip(layer, ["layer_label", "layer_type", "num_passes"], tmp_path)
     _assert_round_trip(module, ["layer_label", "layer_type", "num_ops"], tmp_path)
-    _assert_round_trip(module_call, ["address", "call_index", "call_label"], tmp_path)
+    _assert_round_trip(module_call, ["address", "call_index", "label"], tmp_path)
     _assert_round_trip(param, ["address", "name", "num_params"], tmp_path)
     _assert_round_trip(buffer, ["address", "name", "call_index"], tmp_path)
 
@@ -114,11 +122,81 @@ def test_forward_record_exports_round_trip(record_export_trace: tl.Trace, tmp_pa
 def test_backward_record_exports_round_trip(record_export_trace: tl.Trace, tmp_path: Path) -> None:
     """Backward records expose the full tabular export quartet."""
 
-    grad_fn = next(record for record in record_export_trace.grad_fns if record.num_calls == 1)
+    grad_fn = next(
+        record for record in record_export_trace.autograd.grad_fns if record.num_calls == 1
+    )
     grad_fn_call = grad_fn.calls[0]
 
     assert list(grad_fn.to_pandas().columns) == GRAD_FN_LOG_FIELD_ORDER
     assert list(grad_fn_call.to_pandas().columns) == GRAD_FN_PASS_LOG_FIELD_ORDER
 
     _assert_round_trip(grad_fn, ["label", "class_name", "num_calls"], tmp_path)
-    _assert_round_trip(grad_fn_call, ["call_index", "call_label"], tmp_path)
+    _assert_round_trip(grad_fn_call, ["call_index", "label"], tmp_path)
+
+
+@pytest.fixture
+def record_export_recording() -> tuple[tl.Recording, nn.Module, torch.Tensor]:
+    """Return a sparse recording of the export model with its model and input."""
+
+    torch.manual_seed(0)
+    model = _RecordExportModel()
+    x = torch.randn(2, 3)
+    return tl.record(model, x, save=tl.func("relu")), model, x
+
+
+def test_recording_to_agent_json_matches_cooked_trace(
+    record_export_recording: tuple[tl.Recording, nn.Module, torch.Tensor],
+) -> None:
+    """Recording.to_agent_json cooks through to_trace and delegates (RC-271)."""
+
+    recording, _model, _x = record_export_recording
+    card = recording.to_agent_json(max_ops=4)
+    cooked = recording.to_trace().to_agent_json(max_ops=4)
+    assert isinstance(card, dict)
+    assert card["schema"] == cooked["schema"]
+    assert set(card) == set(cooked)
+    json.dumps(card)
+
+
+def test_recording_xarray_export_cooks_first(
+    record_export_recording: tuple[tl.Recording, nn.Module, torch.Tensor],
+) -> None:
+    """tl.export.xarray accepts a Recording by cooking it (RC-271)."""
+
+    xr = pytest.importorskip("xarray")
+    recording, _model, _x = record_export_recording
+    dataset = tl.export.xarray(recording)
+    assert isinstance(dataset, xr.Dataset)
+    expected = tl.export.xarray(recording.to_trace())
+    assert list(dataset.data_vars) == list(expected.data_vars)
+
+
+def test_recording_save_round_trips_through_load(
+    record_export_recording: tuple[tl.Recording, nn.Module, torch.Tensor], tmp_path: Path
+) -> None:
+    """Recording.save writes the cooked Trace artifact that tl.load reads back (RC-271)."""
+
+    recording, _model, _x = record_export_recording
+    target = tmp_path / "recording.tlspec"
+    recording.save(target)
+    assert target.exists()
+    with pytest.raises(Exception, match="exists|overwrite"):
+        recording.save(target)
+    recording.save(target, overwrite=True)
+    loaded = tl.load(target)
+    assert isinstance(loaded, tl.Trace)
+    assert len(loaded.ops) == len(recording.to_trace().ops)
+
+
+def test_recording_io_save_cooks_first(
+    record_export_recording: tuple[tl.Recording, nn.Module, torch.Tensor], tmp_path: Path
+) -> None:
+    """torchlens._io.bundle.save (tl.save) accepts a Recording by cooking it (RC-271)."""
+
+    from torchlens._io.bundle import save as io_save
+
+    recording, _model, _x = record_export_recording
+    target = tmp_path / "io.tlspec"
+    io_save(recording, str(target))
+    assert target.exists()
+    assert len(tl.load(target).ops) == len(recording.to_trace().ops)

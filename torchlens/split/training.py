@@ -7,6 +7,8 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from torchlens.split.errors import SplitRequestError
+
 from ._mlx_training import MlxTrainingEngine
 from ._torch_buffer_state import _mutable_boundary_buffers
 from .boundary import ReplayBoundary
@@ -69,6 +71,7 @@ def _require_torch(runtime: Any) -> Any:
                 split_point=runtime.request.boundary,
                 reason="unsupported split training",
             ),
+            code=SplitUnsupportedError.code,
         )
     import torch
 
@@ -112,6 +115,7 @@ def _require_training_boundary(runtime: Any, boundary: Any) -> None:
         raise SplitUnsupportedError(
             "backward_prefix requires a boundary from run_training_prefix().",
             context=_context(runtime, "boundary is not graph-connected"),
+            code=SplitUnsupportedError.code,
         )
 
 
@@ -149,6 +153,7 @@ def _default_loss(torch: Any, output: Any, targets: Any) -> Any:
                 split_point="",
                 reason="default loss requires tensor output and target",
             ),
+            code=SplitUnsupportedError.code,
         )
     if (
         targets.dtype in (torch.int8, torch.int16, torch.int32, torch.int64, torch.long)
@@ -326,6 +331,7 @@ def _default_tf_loss(tf: Any, output: Any, targets: Any) -> Any:
                 split_point="",
                 reason="default loss requires tensor output",
             ),
+            code=SplitUnsupportedError.code,
         )
     if isinstance(targets, tf.Tensor) and getattr(targets.dtype, "is_integer", False):
         if len(output.shape) >= 2 and len(targets.shape) == len(output.shape) - 1:
@@ -389,7 +395,11 @@ def _train_suffix_tf(
     optimizer_applied = False
     if optimizer is not None and suffix_vars:
         var_grads = tape.gradient(loss, suffix_sources)
-        pairs = [(grad, var) for grad, var in zip(var_grads, suffix_vars) if grad is not None]
+        pairs = [
+            (grad, var)
+            for grad, var in zip(var_grads, suffix_vars, strict=True)
+            if grad is not None
+        ]
         if pairs:
             optimizer.apply_gradients(pairs)
             optimizer_applied = True
@@ -416,6 +426,7 @@ def _default_paddle_loss(paddle: Any, output: Any, targets: Any) -> Any:
                 split_point="",
                 reason="default loss requires tensor output",
             ),
+            code=SplitUnsupportedError.code,
         )
     if isinstance(targets, paddle.Tensor) and "int" in str(getattr(targets, "dtype", "")):
         if len(output.shape) >= 2 and len(targets.shape) == len(output.shape) - 1:
@@ -518,6 +529,7 @@ def _train_suffix_jax(
         raise SplitUnsupportedError(
             "JAX split training returns gradients; apply optimizer updates outside TorchLens.",
             context=_context(runtime, "jax optimizer unsupported"),
+            code=SplitUnsupportedError.code,
         )
     import jax
 
@@ -578,6 +590,7 @@ def _default_tinygrad_loss(output: Any, targets: Any) -> Any:
                 split_point="",
                 reason="default loss requires tensor output",
             ),
+            code=SplitUnsupportedError.code,
         )
     target_dtype = str(getattr(targets, "dtype", ""))
     if isinstance(targets, Tensor) and "int" in target_dtype and len(output.shape) >= 2:
@@ -595,6 +608,7 @@ def _require_tinygrad_optimizer(runtime: Any, optimizer: Any) -> None:
         raise SplitUnsupportedError(
             "tinygrad split training optimizer must expose zero_grad() and step().",
             context=_context(runtime, "invalid tinygrad optimizer"),
+            code=SplitUnsupportedError.code,
         )
 
 
@@ -883,6 +897,7 @@ def training_engine_for(backend: str) -> BackendTrainingEngine:
                 split_point="",
                 reason="unsupported split training",
             ),
+            code=SplitUnsupportedError.code,
         ) from exc
 
 
@@ -906,9 +921,13 @@ def train_suffix_result(
             raise SplitUnsupportedError(
                 "Boundary-only VJPs and phase hooks require a single Torch suffix batch.",
                 context=_context(runtime, "unsupported suffix execution options"),
+                code=SplitUnsupportedError.code,
             )
         if boundary_gradients_only and optimizer is not None:
-            raise ValueError("Boundary-only gradients cannot update a suffix optimizer")
+            raise SplitRequestError(
+                "Boundary-only gradients cannot update a suffix optimizer",
+                code=SplitRequestError.code,
+            )
         loss, gradients, applied = _execute_torch_suffix(
             runtime,
             boundary,
@@ -939,6 +958,7 @@ def train_suffix_result(
             raise SplitUnsupportedError(
                 f"backend={runtime.adapter.name!r} does not support suffix microbatch training.",
                 context=_context(runtime, "unsupported suffix microbatch training"),
+                code=SplitUnsupportedError.code,
             )
         from ._microbatch import train_torch_microbatches
 
@@ -1050,6 +1070,7 @@ def _backward_prefix_tf(
         raise SplitUnsupportedError(
             "TensorFlow backward_prefix requires a live GradientTape boundary.",
             context=_context(runtime, "missing tensorflow gradient tape"),
+            code=SplitUnsupportedError.code,
         )
     grads = tape.gradient(targets, gradient_sources, output_gradients=output_grads)
     result = {
@@ -1058,7 +1079,9 @@ def _backward_prefix_tf(
         if grad is not None
     }
     if optimizer is not None:
-        pairs = [(grad, source) for source, grad in zip(sources, grads) if grad is not None]
+        pairs = [
+            (grad, source) for source, grad in zip(sources, grads, strict=True) if grad is not None
+        ]
         if pairs:
             optimizer.apply_gradients(pairs)
     return result
@@ -1106,6 +1129,7 @@ def _backward_prefix_jax(
         raise SplitUnsupportedError(
             "JAX split training returns gradients; apply optimizer updates outside TorchLens.",
             context=_context(runtime, "jax optimizer unsupported"),
+            code=SplitUnsupportedError.code,
         )
     import jax
 
@@ -1166,7 +1190,7 @@ def backward_prefix(
     )
 
 
-__all__ = [
+__all__ = (
     "BackendTrainingEngine",
     "BoundaryGradients",
     "JaxTrainingEngine",
@@ -1179,4 +1203,4 @@ __all__ = [
     "train_suffix",
     "train_suffix_result",
     "training_engine_for",
-]
+)

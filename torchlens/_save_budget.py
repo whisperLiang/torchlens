@@ -1,17 +1,14 @@
 """Running budget for retained activation bytes, with a typed refusal.
-
 ``tl.trace(model, x)`` retains every operation's output by default. That is the
 right default for the models TorchLens was designed around and a footgun at
 frontier shapes: a first-time user pointing the default at a large model gets an
 OOM kill (or an allocator ``RuntimeError`` from somewhere deep inside torch)
 rather than an explanation.
-
 This module makes that failure more predictable without claiming a general OOM
 guarantee. The primary retained copy is admitted from source-tensor bytes before
 allocation, then alias-aware physical storage is reconciled after user transforms.
 The model forward, cross-device temporaries, and transform-only deltas can allocate
 before their size is knowable.
-
 The accounting is deliberately a **lower bound, labelled as one**. At the moment
 of the trip the forward is incomplete, so the true footprint of the finished
 capture would have been larger; the error says exactly that instead of
@@ -33,16 +30,29 @@ or any other drop of the last live reference — credits its storage back.
 from __future__ import annotations
 
 import contextlib
-import os
 import warnings
 import weakref
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeGuard
 
 import torch
 
 from ._errors import InvalidArgumentError
+from ._literals import SaveBudgetOption
+from ._memory_probes import (  # noqa: F401  (``_available_host_bytes`` is read by diagnostics)
+    _available_host_bytes,
+    available_device_bytes,
+)
+from ._state import pause_logging
+from ._utils._byte_format import format_bytes
+from ._utils._display_bounded import short_dataclass_repr
+from ._utils._storage_refs import payload_weakref_is_safe
+from ._utils._torch_symbols import tensor_read
 from .errors._base import CaptureError
+
+#: A retained payload the accountant charges: a tensor, or a storage kept as a
+#: saved argument (``Tensor.set_(storage, ...)``).
+RetainedPayload = torch.Tensor | torch.UntypedStorage | torch.TypedStorage
 
 __all__ = [
     "ACCOUNTING_PHASES",
@@ -55,8 +65,6 @@ __all__ = [
     "resolve_save_budget",
 ]
 
-SaveBudgetOption = str | int | float | None
-"""Accepted ``save_budget`` spellings: ``"auto"``, a fraction, bytes, or ``None``."""
 
 DEFAULT_SAVE_BUDGET_FRACTION = 0.5
 """Fraction of a device's *available* memory the ``"auto"`` budget allows.
@@ -67,8 +75,6 @@ pass itself, which allocates live intermediates alongside every payload
 TorchLens retains.
 """
 
-_BYTES_UNITS = (("TB", 1024**4), ("GB", 1024**3), ("MB", 1024**2), ("KB", 1024), ("B", 1))
-
 
 class SaveBudgetExceededError(CaptureError, RuntimeError):
     """Raised when retained activation bytes cross the configured save budget.
@@ -77,101 +83,16 @@ class SaveBudgetExceededError(CaptureError, RuntimeError):
     ``committed_bytes`` or ``projected_bytes``, ``budget_bytes``, ``device``,
     ``num_saved``, ``label``, ``accounting_phase``) so callers branch on numbers
     rather than parsing the message.
+
+    Examples
+    --------
+    >>> opts = tl.options.CaptureOptions(save_budget=16)
+    >>> try:
+    ...     tl.trace(model, x, capture=opts)
+    ... except SaveBudgetExceededError as err:
+    ...     print(type(err).__name__)
+    SaveBudgetExceededError
     """
-
-
-def format_bytes(num_bytes: float) -> str:
-    """Render a byte count in the largest unit that keeps it readable.
-
-    Parameters
-    ----------
-    num_bytes:
-        Byte count.
-
-    Returns
-    -------
-    str
-        Human-readable size such as ``"1.44 GB"``.
-    """
-
-    for unit, scale in _BYTES_UNITS:
-        if abs(num_bytes) >= scale or unit == "B":
-            if unit == "B":
-                return f"{int(num_bytes)} B"
-            return f"{num_bytes / scale:.2f} {unit}"
-    return f"{int(num_bytes)} B"
-
-
-def _available_host_bytes() -> int | None:
-    """Return available host RAM in bytes, or ``None`` when unmeasurable.
-
-    Returns
-    -------
-    int | None
-        Available bytes. Prefers ``MemAvailable`` from ``/proc/meminfo`` because
-        it accounts for reclaimable cache, and falls back to the POSIX
-        available-pages count. When neither is available, use optional psutil
-        (including on Windows). Swap is not counted as available RAM.
-    """
-
-    try:
-        with open("/proc/meminfo", encoding="ascii") as meminfo:
-            for line in meminfo:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
-    except Exception:
-        pass
-    try:
-        sysconf = getattr(os, "sysconf")
-        pages = sysconf("SC_AVPHYS_PAGES")
-        page_size = sysconf("SC_PAGE_SIZE")
-        if pages > 0 and page_size > 0:
-            return int(pages) * int(page_size)
-    except Exception:
-        pass
-    try:
-        import psutil
-
-        return int(psutil.virtual_memory().available)
-    except (ImportError, OSError):
-        pass
-    return None
-
-
-def available_device_bytes(device: torch.device) -> int | None:
-    """Return the memory headroom for one device, or ``None`` when unmeasurable.
-
-    Parameters
-    ----------
-    device:
-        Device whose free memory is queried.
-
-    Returns
-    -------
-    int | None
-        Free bytes, or ``None`` when this device type exposes no headroom query.
-        ``None`` means *unbudgeted and reported as such*, never "assume
-        infinite silently".
-    """
-
-    device_type = device.type
-    if device_type == "cpu":
-        return _available_host_bytes()
-    if device_type == "cuda":
-        try:
-            # Pin the query to THIS device explicitly (R36-7b): mem_get_info
-            # resolves an index-less device to the CURRENT device, so a
-            # capture saving to cuda:1 while cuda:0 is current read the wrong
-            # card's headroom.
-            with torch.cuda.device(device):
-                free_bytes, _total = torch.cuda.mem_get_info(device)
-            return int(free_bytes)
-        except Exception:
-            return None
-    if device_type == "meta":
-        # Meta tensors have no storage, so nothing is ever really committed.
-        return None
-    return None
 
 
 @dataclass(frozen=True)
@@ -292,6 +213,8 @@ class _RetainedStorageEntry:
 class _DeviceLedger:
     """Per-device running total and resolved limit."""
 
+    __repr__ = short_dataclass_repr
+
     committed_bytes: int = 0
     num_saved: int = 0
     limit_bytes: int | None = None
@@ -366,7 +289,7 @@ class _PayloadWatcher(weakref.ref):
 
     def __new__(
         cls,
-        payload: torch.Tensor,
+        payload: RetainedPayload,
         budget_ref: weakref.ref,
         ledger_key: str,
         identity: tuple[Any, ...],
@@ -379,7 +302,7 @@ class _PayloadWatcher(weakref.ref):
 
     def __init__(
         self,
-        payload: torch.Tensor,
+        payload: RetainedPayload,
         budget_ref: weakref.ref,
         ledger_key: str,
         identity: tuple[Any, ...],
@@ -496,7 +419,7 @@ class SaveBudget:
             Ledger with its limit resolved on first use.
         """
 
-        # Canonicalize the ledger identity (R36-7b): ``torch.device("cuda")``
+        # Canonicalize the ledger identity: ``torch.device("cuda")``
         # and ``torch.device("cuda:0")`` are the SAME physical device, but
         # ``str()`` keyed them into two ledgers, each enforcing only half the
         # footprint against a full-device limit.
@@ -575,7 +498,7 @@ class SaveBudget:
         try:
             self._raise_if_over_budget(label, device, ledger, phase=_SITE_PHASES[site][0])
         except BaseException:
-            # Refusal rollback (r8 R34, opus A): the refused reservation used
+            # Refusal rollback: the refused reservation used
             # to stay CHARGED -- never-allocated bytes inflated every later
             # figure (a second refusal reported phantom activations) and,
             # under return_partial/attach_partial recovery, a fresh save that
@@ -588,7 +511,7 @@ class SaveBudget:
     def commit(
         self,
         reservation: _BudgetReservation | None,
-        payloads: tuple[torch.Tensor | None, ...],
+        payloads: tuple[RetainedPayload | None, ...],
     ) -> None:
         """Replace one estimate with alias-aware physical retained storage.
 
@@ -623,7 +546,7 @@ class SaveBudget:
     def charge_retained(
         self,
         label: str,
-        payloads: tuple[torch.Tensor | None, ...],
+        payloads: tuple[RetainedPayload | None, ...],
     ) -> None:
         """Charge already-allocated retained payloads with no prior admission.
 
@@ -648,7 +571,7 @@ class SaveBudget:
     def _charge_physical(
         self,
         label: str,
-        payloads: tuple[torch.Tensor | None, ...],
+        payloads: tuple[RetainedPayload | None, ...],
         *,
         phase: str,
     ) -> None:
@@ -665,11 +588,17 @@ class SaveBudget:
         """
 
         for payload in payloads:
-            if not isinstance(payload, torch.Tensor):
+            if not _is_chargeable_payload(payload):
+                # A meta tensor has no physical storage to charge (see the
+                # is_meta short-circuit in _retained_storage_identities,
+                # which makes the identity loop below a no-op for it
+                # anyway); skip BEFORE ever opening its device's ledger, so
+                # a meta-only payload never spuriously creates (and warns
+                # on) an unmeasurable "meta" save-budget ledger.
                 continue
             ledger_key = str(payload.device)
             ledger = self._ledger_for(payload.device)
-            # Component-granular identities (r8 R34, sol 1): the historical
+            # Component-granular identities (sol 1): the historical
             # ONE aggregate identity per sparse wrapper made two retained
             # sparse tensors sharing index storage charge the shared indices
             # TWICE ((indices+values_a) + (indices+values_b) instead of the
@@ -696,7 +625,7 @@ class SaveBudget:
 
     def _watch_payload(
         self,
-        payload: torch.Tensor,
+        payload: RetainedPayload,
         ledger_key: str,
         identity: tuple[Any, ...],
     ) -> None:
@@ -716,8 +645,13 @@ class SaveBudget:
         The watcher holds the budget weakly so the accountant never keeps itself
         alive through its own callbacks. A payload that cannot be weak-referenced
         keeps the historical permanent charge (conservative: never a zero-commit).
+        So does a storage payload on a torch without a retained storage wrapper
+        (``HAS_CACHED_UNTYPED_STORAGE_WRAPPER`` false, torch 2.1): a weak reference
+        to such a wrapper can leave freed memory behind and crash CPython later.
         """
 
+        if not payload_weakref_is_safe(payload):
+            return
         budget_ref = self._self_ref
         if budget_ref is None:
             budget_ref = self._self_ref = weakref.ref(self)
@@ -849,8 +783,10 @@ class SaveBudget:
             "instead of saving every activation\n"
             "    - save less AND stream those selected payloads to disk: "
             "save=tl.func('relu'), storage=tl.to_disk('run.tlspec')\n"
+            "    - keep per-op statistics only (one Spine per op, no payload): "
+            "tl.trace(model, x, save='stats'), read with tl.stats.site_stats(trace)\n"
             "    - keep metadata only: "
-            "capture=tl.options.CaptureOptions(layers_to_save='none') "
+            "save='none' "
             "(the graph is still captured)\n"
             "    - raise or lift the budget deliberately: "
             "capture=tl.options.CaptureOptions(save_budget=<bytes|fraction>), or "
@@ -858,13 +794,40 @@ class SaveBudget:
         )
 
 
-def _retained_storage_identities(tensor: torch.Tensor) -> list[tuple[tuple[Any, ...], int]]:
+def _is_chargeable_payload(payload: object) -> TypeGuard[RetainedPayload]:
+    """Return whether ``payload`` is a non-meta tensor or storage the ledger charges."""
+
+    if isinstance(payload, torch.Tensor):
+        return not payload.is_meta
+    if isinstance(payload, (torch.UntypedStorage, torch.TypedStorage)):
+        return payload.device.type != "meta"
+    return False
+
+
+def _storage_payload_identities(
+    storage: torch.UntypedStorage | torch.TypedStorage,
+) -> list[tuple[tuple[Any, ...], int]]:
+    """Return the physical identity and byte size of a storage payload.
+
+    The identity has the strided-tensor form, so a storage argument and a
+    tensor on the same storage are charged once.
+    """
+
+    if storage.device.type == "meta":
+        return []
+    with pause_logging():
+        untyped = storage.untyped() if isinstance(storage, torch.TypedStorage) else storage
+        num_bytes = int(untyped.nbytes())
+        return [((str(untyped.device), int(untyped.data_ptr()), num_bytes), num_bytes)]
+
+
+def _retained_storage_identities(tensor: RetainedPayload) -> list[tuple[tuple[Any, ...], int]]:
     """Return one device-scoped physical identity + byte size per storage.
 
     Parameters
     ----------
     tensor:
-        Retained tensor payload.
+        Retained tensor payload, or a storage kept as a saved argument.
 
     Returns
     -------
@@ -874,18 +837,34 @@ def _retained_storage_identities(tensor: torch.Tensor) -> list[tuple[tuple[Any, 
         (COO and compressed layouts) have no top-level storage and yield one
         entry PER COMPONENT (index tensor(s) AND values), so partially
         overlapping sparse tensors dedup on the shared component instead of
-        double-charging it under one aggregate identity (r8 R34, sol 1).
+        double-charging it under one aggregate identity (sol 1).
         The historical fallback billed unreadable payloads at
         ``numel() * element_size()`` — LOGICAL dense bytes — under an
-        id-based identity.
+        id-based identity. A meta-device tensor has no physical storage at
+        all and always yields an empty list (see the ``is_meta`` note below).
     """
 
-    from ._state import pause_logging
+    # A meta tensor carries no real bytes, ever -- ``retained_activation_bytes``
+    # already skips meta payloads explicitly for this reason. Without this
+    # early return, ``tensor.untyped_storage()`` is inconsistent for meta
+    # tensors across the torch>=2.1 floor: on torch 2.1/2.2 it either raises
+    # or hands back a storage whose ``nbytes()``/``data_ptr()`` are not
+    # reliably zero, so the ``except Exception`` fallback below bills the
+    # tensor's LOGICAL ``numel() * element_size()`` bytes against a device
+    # that never actually committed any memory -- a save-budget admission for
+    # "meta" that should never exist (observed: a save_arg_values capture
+    # over a meta-device argument spuriously creates and warns on a "meta"
+    # device ledger). Checking this up front is correct on every torch
+    # version, not a version-gated shim.
+    if isinstance(tensor, (torch.UntypedStorage, torch.TypedStorage)):
+        return _storage_payload_identities(tensor)
+    if tensor.is_meta:
+        return []
 
     with pause_logging():
         try:
             if tensor.layout is not torch.strided:
-                from .utils.tensor_utils import sparse_component_tensors
+                from ._utils._sparse_parts import sparse_component_tensors
 
                 device = str(tensor.device)
                 return [
@@ -899,13 +878,9 @@ def _retained_storage_identities(tensor: torch.Tensor) -> list[tuple[tuple[Any, 
                     )
                     for component in sparse_component_tensors(tensor)
                 ]
-            storage = tensor.untyped_storage()
+            storage = tensor_read(tensor, "untyped_storage")(tensor)
             num_bytes = int(storage.nbytes())
-            identity: tuple[Any, ...] = (
-                str(tensor.device),
-                int(storage.data_ptr()),
-                num_bytes,
-            )
+            identity: tuple[Any, ...] = (str(tensor.device), int(storage.data_ptr()), num_bytes)
             return [(identity, num_bytes)]
         except Exception:
             num_bytes = int(tensor.numel() * tensor.element_size())
@@ -931,3 +906,54 @@ def _retained_storage_identity(tensor: torch.Tensor) -> tuple[tuple[Any, ...], i
         total_bytes,
     )
     return aggregate, total_bytes
+
+
+def retained_activation_bytes(ops: Any) -> int:
+    """Return alias-aware physical bytes of the activations actually retained.
+
+    The ONE byte model's aggregate read (brainpipe): a saved
+    op contributes the physical storage of what capture actually kept -- the
+    raw payload, the transformed payload, or both -- with each physical
+    storage counted ONCE across the whole trace (dedup-shared and aliased
+    payloads never double-charge). The historical aggregate summed the RAW
+    ``activation_memory`` field for every saved op, over-reporting by the
+    full reduction factor whenever a transform dropped the raw payload
+    (87-190x measured on real models in the sweep's configuration).
+
+    Runs on LIVE payload tensors only (the capture-time accounting seam);
+    a payload-absent saved op (disk-only routes) falls back to its recorded
+    transformed-else-raw metadata size, without alias awareness.
+
+    Parameters
+    ----------
+    ops:
+        Iterable of finished op records.
+
+    Returns
+    -------
+    int
+        Total retained activation bytes.
+    """
+
+    total = 0
+    seen: set[tuple[Any, ...]] = set()
+    for op in ops:
+        if not getattr(op, "has_saved_activation", False) or getattr(op, "_graph_is_orphan", False):
+            continue
+        counted_payload = False
+        for payload in (getattr(op, "out", None), getattr(op, "_payload_transformed_out", None)):
+            if not isinstance(payload, torch.Tensor) or payload.is_meta:
+                continue
+            counted_payload = True
+            for identity, num_bytes in _retained_storage_identities(payload):
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                total += int(num_bytes)
+        if not counted_payload:
+            transformed_bytes = getattr(op, "_cost_transformed_activation_memory", None)
+            if getattr(op, "out", None) is None and transformed_bytes:
+                total += int(transformed_bytes)
+            else:
+                total += int(getattr(op, "_cost_activation_memory", 0) or 0)
+    return total

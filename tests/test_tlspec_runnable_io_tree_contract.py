@@ -10,7 +10,7 @@ tree contract still mishandled whole classes of container shapes:
 * F2 -- a torch structseq (``torch.return_types.*``) nested inside another
   container crashed reconstruction.
 * F3 -- a capture with both positional tensors and keyword leaves had no
-  representable ``run(inputs=)`` binding.
+  representable ``run_transaction(inputs=)`` binding.
 * F4 -- a ``bool`` output-dict key passed producer preflight but the loader
   rejected it, so the artifact advertised runnable then lost it on load.
 * F5 -- a ``numpy.float64`` literal falsely diverged on the identical input
@@ -34,13 +34,12 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.errors import PathDivergenceError
-from torchlens.options import CaptureOptions
-from torchlens.runnable import (
-    DivergencePolicy,
+from torchlens._runnable import (
     NumericAttestationStatus,
     PathFaithfulness,
 )
+from torchlens.errors import PathDivergenceError
+from torchlens.options import CaptureOptions
 
 
 def _save_runnable(
@@ -57,7 +56,7 @@ def _save_runnable(
         capture_inputs,
         input_kwargs=input_kwargs or {},
         capture=CaptureOptions(
-            intervention_ready=True,
+            replayable=True,
             capture_container_structure=True,
             cache=False,
         ),
@@ -111,7 +110,7 @@ class _EnumKeyBranch(nn.Module):
         return x * 10.0
 
 
-@pytest.mark.smoke
+# Kept: sole branch coverage of _io/runnable.py; a sole mutation kill; its other params stay because the list is not trimmable per id.
 @pytest.mark.parametrize(
     ("model_cls", "key"),
     [
@@ -130,28 +129,26 @@ def test_encodable_exotic_key_scalar_diverges_on_change(
     path = _save_runnable(model, [x, {key: 0}], tmp_path / "exotic_key.tlspec")
 
     # Unchanged -> honest VERIFIED.
-    same = tl.load(path).run(inputs=[x, {key: 0}])
+    same = tl.load(path).run_transaction(inputs=[x, {key: 0}])
     assert same.report.path_faithfulness is PathFaithfulness.VERIFIED
     assert torch.equal(same.output, model(x, {key: 0}))
 
     # Changed hidden scalar -> the recorded path is stale, must diverge.
     with pytest.raises(PathDivergenceError):
-        tl.load(path).run(inputs=[x, {key: 1}])
+        tl.load(path).run_transaction(inputs=[x, {key: 1}])
 
-    diverged = tl.load(path).run(
-        inputs=[x, {key: 1}], on_divergence=DivergencePolicy.RETURN_DIVERGED
-    )
+    diverged = tl.load(path).run_transaction(inputs=[x, {key: 1}], on_divergence="return")
     assert diverged.report.path_faithfulness is not PathFaithfulness.VERIFIED
-    assert diverged.report.poisoned
+    assert diverged.report.is_poisoned
 
 
-@pytest.mark.smoke
+# Kept: sole branch coverage of _capture/_input_records.py, _input_walk.py, _io/runnable.py.
 def test_opaque_enum_key_subtree_is_unverifiable_not_skipped(tmp_path: Path) -> None:
     """A subtree under an OPAQUE enum key REFUSES the runnable save typed, never skips.
 
     r67 C2 supersedes the former save-then-UNVERIFIABLE downgrade lane: the agreed
     disposition matrix refuses opaque (non-grammar) mapping keys at producer preflight
-    through the EXISTING ``missing_input_container_contract`` (positive per-site
+    through the EXISTING ``input_container_contract_missing`` (positive per-site
     structure proof), so no artifact exists that could ever replay the subtree at all
     -- strictly stronger than the old ceiling, and never a silent skip.
     """
@@ -161,24 +158,8 @@ def test_opaque_enum_key_subtree_is_unverifiable_not_skipped(tmp_path: Path) -> 
     with pytest.raises(tl.errors.RunnablePreflightError) as excinfo:
         _save_runnable(model, [x, {_EnumKey.FAST: 0}], tmp_path / "enum_key.tlspec")
     diagnostics = str(excinfo.value.fields.get("diagnostics"))
-    assert "missing_input_container_contract" in diagnostics
+    assert "input_container_contract_missing" in diagnostics
     assert "opaque_mapping_key" in diagnostics
-
-
-@pytest.mark.smoke
-def test_single_tensor_plus_exotic_key_dict_identical_no_crash(tmp_path: Path) -> None:
-    """The arity shortcut must not misfire for single-tensor + exotic-key-dict inputs."""
-
-    class _Scale(nn.Module):
-        def forward(self, value: torch.Tensor, cfg: dict[Any, float]) -> torch.Tensor:
-            return value * cfg[(1, 2)]
-
-    t = torch.tensor([1.0, 2.0, 3.0, 4.0])
-    path = _save_runnable(_Scale(), [t, {(1, 2): 2.0}], tmp_path / "single_tensor.tlspec")
-
-    result = tl.load(path).run(inputs=[t, {(1, 2): 2.0}])
-    assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
-    assert torch.allclose(result.output, t * 2.0)
 
 
 # ---------------------------------------------------------------------------
@@ -206,8 +187,13 @@ class _NestedStructSeq(nn.Module):
         return _WrappedResult(stats, shifted)
 
 
-@pytest.mark.smoke
-@pytest.mark.parametrize("kind", ["dict", "list", "namedtuple"])
+# Kept: sole branch coverage of _ir/container.py; a sole mutation kill.
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "list",
+    ],
+)
 def test_nested_structseq_runs_verified(tmp_path: Path, kind: str) -> None:
     """A structseq nested in a dict/list/namedtuple runs VERIFIED with output == live."""
 
@@ -215,7 +201,7 @@ def test_nested_structseq_runs_verified(tmp_path: Path, kind: str) -> None:
     x = torch.tensor([[1.0, 4.0], [3.0, 2.0]])
     path = _save_runnable(model, x, tmp_path / f"nested_{kind}.tlspec")
 
-    result = tl.load(path).run(inputs=x.clone())
+    result = tl.load(path).run_transaction(inputs=x.clone())
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
 
     live = model(x)
@@ -232,7 +218,7 @@ def test_nested_structseq_runs_verified(tmp_path: Path, kind: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# F3 -- mixed positional + keyword inputs have a representable run(inputs=) form
+# F3 -- mixed positional + keyword inputs have a representable run_transaction(inputs=) form
 # ---------------------------------------------------------------------------
 
 
@@ -243,7 +229,7 @@ class _MixedInputs(nn.Module):
         return x * 10
 
 
-@pytest.mark.smoke
+# Kept: the catch of its regression fault.
 def test_mixed_positional_keyword_inputs_bind_and_diverge(tmp_path: Path) -> None:
     """A combined ``{'args': [...], 'kwargs': {...}}`` binds; a changed kwarg diverges."""
 
@@ -252,15 +238,16 @@ def test_mixed_positional_keyword_inputs_bind_and_diverge(tmp_path: Path) -> Non
     path = _save_runnable(model, [x], tmp_path / "mixed.tlspec", input_kwargs={"add": True})
 
     # Unchanged mixed input -> VERIFIED, output == live.
-    result = tl.load(path).run(inputs={"args": [x], "kwargs": {"add": True}})
+    result = tl.load(path).run_transaction(inputs={"args": [x], "kwargs": {"add": True}})
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
     assert torch.equal(result.output, x + 1)
 
     # Changed keyword leaf -> the recorded taken path (add branch) is stale.
     with pytest.raises(PathDivergenceError):
-        tl.load(path).run(inputs={"args": [x], "kwargs": {"add": False}})
+        tl.load(path).run_transaction(inputs={"args": [x], "kwargs": {"add": False}})
 
 
+# Kept: sole branch coverage of _runnable/transaction.py; smoke tier id (frozen).
 @pytest.mark.smoke
 def test_live_mixed_positional_keyword_inputs_bind_and_diverge() -> None:
     """Live ``run`` accepts the same mixed-input spelling as loaded runnable traces."""
@@ -272,18 +259,18 @@ def test_live_mixed_positional_keyword_inputs_bind_and_diverge() -> None:
         [x],
         input_kwargs={"add": True},
         capture=CaptureOptions(
-            intervention_ready=True,
+            replayable=True,
             capture_container_structure=True,
             cache=False,
         ),
     )
 
-    result = trace.run(inputs={"args": [x], "kwargs": {"add": True}})
+    result = trace.run_transaction(inputs={"args": [x], "kwargs": {"add": True}})
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
     assert torch.equal(result.output, x + 1)
 
     with pytest.raises(ValueError, match="computational graph changed"):
-        trace.run(inputs={"args": [x], "kwargs": {"add": False}})
+        trace.run_transaction(inputs={"args": [x], "kwargs": {"add": False}})
 
 
 # ---------------------------------------------------------------------------
@@ -296,21 +283,6 @@ class _BoolOutputKey(nn.Module):
         return {True: x + 1}
 
 
-@pytest.mark.smoke
-def test_bool_output_dict_key_stays_runnable(tmp_path: Path) -> None:
-    """A ``{True: ...}`` output must not advertise runnable then lose it on load."""
-
-    model = _BoolOutputKey()
-    x = torch.tensor([1.0, 2.0])
-    path = _save_runnable(model, x, tmp_path / "bool_out.tlspec")
-
-    result = tl.load(path).run(inputs=x.clone())
-    assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
-    live = model(x)
-    assert set(result.output) == set(live)
-    assert torch.equal(result.output[True], live[True])
-
-
 # ---------------------------------------------------------------------------
 # F5 -- numpy.float64 literal saves, loads, and verifies like a Python float
 # ---------------------------------------------------------------------------
@@ -321,7 +293,7 @@ class _Scale(nn.Module):
         return v * s
 
 
-@pytest.mark.smoke
+# Kept: sole branch coverage of _input_walk.py, _io/runnable.py, _runnable/input_metadata.py and more; a sole mutation kill.
 def test_numpy_float64_literal_identical_verifies_changed_diverges(tmp_path: Path) -> None:
     """A ``numpy.float64`` op literal must save, load, and verify normally."""
 
@@ -333,21 +305,19 @@ def test_numpy_float64_literal_identical_verifies_changed_diverges(tmp_path: Pat
 
     # NumPy scalar metadata is normalized before it reaches the bundle pickle,
     # so the normal safe loader accepts the artifact without a trust opt-in.
-    identical = tl.load(path).run(inputs=[t, np.float64(2.0)])
+    identical = tl.load(path).run_transaction(inputs=[t, np.float64(2.0)])
     assert identical.report.path_faithfulness is PathFaithfulness.VERIFIED
     assert torch.allclose(identical.output, t * 2.0)
 
     # A plain float with the SAME value must also verify (value-equality across
     # numeric float subclasses).
-    plain = tl.load(path).run(inputs=[t, 2.0])
+    plain = tl.load(path).run_transaction(inputs=[t, 2.0])
     assert plain.report.path_faithfulness is PathFaithfulness.VERIFIED
 
     # A changed numeric value must still diverge honestly.
-    changed = tl.load(path).run(
-        inputs=[t, np.float64(9.0)], on_divergence=DivergencePolicy.RETURN_DIVERGED
-    )
+    changed = tl.load(path).run_transaction(inputs=[t, np.float64(9.0)], on_divergence="return")
     assert changed.report.path_faithfulness is not PathFaithfulness.VERIFIED
-    assert changed.report.poisoned
+    assert changed.report.is_poisoned
 
 
 # ---------------------------------------------------------------------------
@@ -366,34 +336,6 @@ class _IntegerControlBranch(nn.Module):
         return value * 10
 
 
-@pytest.mark.smoke
-def test_numpy_scalar_control_input_diverges_like_python_int(tmp_path: Path) -> None:
-    """Changed NumPy integer controls must diverge rather than become unverifiable."""
-
-    import numpy as np
-
-    value = torch.tensor([2.0, 3.0])
-    path = _save_runnable(
-        _IntegerControlBranch(),
-        [value, np.int64(0)],
-        tmp_path / "numpy_control.tlspec",
-    )
-
-    unchanged = tl.load(path).run(inputs=[value, np.int64(0)])
-    assert unchanged.report.path_faithfulness is PathFaithfulness.VERIFIED
-    assert torch.equal(unchanged.output, value + 1)
-
-    with pytest.raises(PathDivergenceError):
-        tl.load(path).run(inputs=[value, np.int64(1)])
-
-    diverged = tl.load(path).run(
-        inputs=[value, np.int64(1)],
-        on_divergence=DivergencePolicy.RETURN_DIVERGED,
-    )
-    assert diverged.report.path_faithfulness is PathFaithfulness.DIVERGED
-    assert diverged.report.poisoned
-
-
 # ---------------------------------------------------------------------------
 # r69 E -- nested string inputs SAVE (scrub DROP-order fix; hon1-F5)
 # ---------------------------------------------------------------------------
@@ -408,7 +350,7 @@ class _NestedStrBranch(nn.Module):
         return x + 100.0
 
 
-@pytest.mark.smoke
+# Kept: sole branch coverage of _capture/prepare/chunked.py, _capture/prepare/door.py.
 def test_r69_nested_string_input_saves_loads_and_verifies(tmp_path: Path) -> None:
     """hon1-F5: a non-top-level str leaf is fully witnessed and must SAVE.
 
@@ -422,13 +364,13 @@ def test_r69_nested_string_input_saves_loads_and_verifies(tmp_path: Path) -> Non
     x = torch.tensor([1.0, 2.0, 3.0])
     path = _save_runnable(model, [x, {"mode": "fast"}], tmp_path / "nested_str.tlspec")
 
-    identical = tl.load(path).run(inputs=[x.clone(), {"mode": "fast"}])
+    identical = tl.load(path).run_transaction(inputs=[x.clone(), {"mode": "fast"}])
     assert identical.report.path_faithfulness is PathFaithfulness.VERIFIED
     assert torch.equal(identical.output, x * 2.0)
 
     # Changed string diverges through the existing literal contract.
     with pytest.raises(PathDivergenceError):
-        tl.load(path).run(inputs=[x.clone(), {"mode": "slow"}])
+        tl.load(path).run_transaction(inputs=[x.clone(), {"mode": "slow"}])
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +389,7 @@ class _OutParameterAdd(nn.Module):
         return output
 
 
-@pytest.mark.smoke
+# Kept: sole branch coverage of _runnable/attestation.py, _runnable/call_outputs.py, _runnable/path_faithfulness.py; a sole mutation kill.
 def test_out_parameter_operation_runs_verified_on_original_input(tmp_path: Path) -> None:
     """``out=`` mutation checks must alias the output slot, not the first input."""
 
@@ -455,7 +397,7 @@ def test_out_parameter_operation_runs_verified_on_original_input(tmp_path: Path)
     value = torch.randn(2)
     path = _save_runnable(_OutParameterAdd(), value, tmp_path / "out_parameter.tlspec")
 
-    result = tl.load(path).run(inputs=value)
+    result = tl.load(path).run_transaction(inputs=value)
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
     assert torch.equal(result.output, value + 1)

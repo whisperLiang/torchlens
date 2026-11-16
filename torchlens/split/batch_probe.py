@@ -50,4 +50,5 @@ class BatchProbeResult:
                 split_point=split_point,
                 reason="batch probe did not pass",
             ),
+            code=SplitBoundaryError.code,
         )

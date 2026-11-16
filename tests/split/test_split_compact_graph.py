@@ -12,7 +12,7 @@ import pytest
 import torch
 from dag_helpers import smallest_transfer_partitions
 
-from torchlens.ir.refs import TensorRef
+from torchlens._ir.refs import TensorRef
 from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, prepare_graph
 from torchlens.split._torch_compact import compact_torch_graph
 from torchlens.split.adapters.torch import TorchSplitAdapter
@@ -96,7 +96,7 @@ def test_compact_graph_releases_diagnostic_payloads_and_capture_objects() -> Non
     activation_refs = [
         weakref.ref(op.out)
         for op in trace
-        if not (op.is_input or op.is_buffer) and isinstance(op.out, torch.Tensor)
+        if not (op.is_input or op.graph.is_buffer) and isinstance(op.out, torch.Tensor)
     ]
     assert activation_refs
     assert all(node.op.out is None for node in graph.nodes if not node.is_buffer)

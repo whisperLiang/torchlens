@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
-from ..constants import PRIMITIVE_OP_FIELD_ORDER
-from ..data_classes.aten_op import AtenOp, OpRef, _ModePausedInteriorGap
+from .._constants import PRIMITIVE_OP_FIELD_ORDER
+from .._data_classes.aten_op import AtenOp, OpRef, _ModePausedInteriorGap
+from .._io import ArtifactError
 
 if TYPE_CHECKING:
-    from ..data_classes.trace import Trace
-    from .invariants import MetadataInvariantError
+    from .._data_classes.trace import Trace
 
 _CAPTURE_PHASES = frozenset({"forward", "backward", "setup"})
 _OWNER_STATUSES = frozenset({"forward_op", "backward_grad_fn_call", "orphan", "unresolved"})
@@ -36,8 +36,6 @@ def _primitive_failure(message: str) -> None:
         Always.
     """
 
-    from .invariants import MetadataInvariantError
-
     raise MetadataInvariantError("primitive_op_invariants", message)
 
 
@@ -62,7 +60,7 @@ def _check_op_ref(ref: Any, ops: list[Any], *, row_label: str) -> None:
         )
     op = ops[ref.op_row_index]
     actual_label = getattr(op, "layer_label", None)
-    actual_func_call_id = getattr(op, "func_call_id", None)
+    actual_func_call_id = record_member(op, "func_call_id", None)
     if actual_label != ref.op_label or actual_func_call_id != ref.func_call_id:
         _primitive_failure(
             f"{row_label} parent OpRef witnesses disagree with dense row {ref.op_row_index}"
@@ -229,10 +227,8 @@ def _check_profile_rows(trace: Trace, profile: Any) -> list[Any]:
         _primitive_failure("event-owner evidence contains duplicate sequences")
     if set(evidence) != {row.sequence for row in rows}:
         _primitive_failure("event-owner evidence does not exactly cover primitive rows")
-    ops = list(trace.ops)
-    grad_fn_labels = {
-        str(grad_fn.label) for grad_fn in (getattr(trace, "grad_fn_logs", {}) or {}).values()
-    }
+    ops = list(trace._layer_list)
+    grad_fn_labels = {str(grad_fn.label) for grad_fn in (trace._grad_fn_logs or {}).values()}
     labels: set[str] = set()
     sequences: set[int] = set()
     partitions: dict[tuple[str, object], list[int]] = defaultdict(list)
@@ -322,6 +318,162 @@ def _check_non_torch_primitive_op_inert(trace: Trace) -> None:
         )
 
 
+def _value_failure(message: str) -> NoReturn:
+    """Raise the ATen-values invariant error.
+
+    Parameters
+    ----------
+    message
+        Human-readable invariant failure.
+
+    Raises
+    ------
+    MetadataInvariantError
+        With check name and refusal code ``aten_values_consistent`` (an
+        INTERNAL tripwire: it fires only on a capture defect).
+    """
+
+    raise MetadataInvariantError(
+        "aten_values_consistent",
+        f"{message}. Remedy: report this as a TorchLens bug.",
+        code="aten_values_consistent",
+    )
+
+
+def _value_leaves(value: Any) -> tuple[Any, ...] | None:
+    """Return the tensor leaves of a kept ``AtenOp.out``, or ``None`` if malformed."""
+
+    import torch
+
+    if isinstance(value, torch.Tensor):
+        return (value,)
+    if isinstance(value, tuple | list) and all(isinstance(item, torch.Tensor) for item in value):
+        return tuple(value)
+    return None
+
+
+def _same_values(leaf: Any, target: Any) -> bool:
+    """Return whether two strided tensors hold identical values (NaN-aware)."""
+
+    import torch
+
+    if leaf.shape != target.shape or leaf.dtype != target.dtype:
+        return False
+    if leaf.layout != torch.strided or target.layout != torch.strided:
+        return True  # outside the dense comparison contract; shape and dtype agreed
+    a = leaf.detach().to(target.device)
+    b = target.detach()
+    if a.is_floating_point() or a.is_complex():
+        return bool(torch.all(a.eq(b) | (a.isnan() & b.isnan())))
+    return bool(torch.equal(a, b))
+
+
+def _check_row_values(row: Any, ops: list[Any]) -> None:
+    """Per-row value contract: shape/dtype per fact, and ``save=`` pruning honored."""
+
+    if row.out is None:
+        return
+    if row.outcome != "returned":
+        _value_failure(f"{row.label} kept a value although its call raised")
+    leaves = _value_leaves(row.out)
+    if leaves is None:
+        _value_failure(f"{row.label}.out is neither a tensor nor a tuple of tensors")
+    facts = tuple(row.output_tensor_facts or ())
+    if len(leaves) != len(facts):
+        _value_failure(f"{row.label} kept {len(leaves)} values for {len(facts)} output facts")
+    for leaf, fact in zip(leaves, facts, strict=True):
+        if tuple(leaf.shape) != tuple(fact.shape) or str(leaf.dtype) != str(fact.dtype):
+            _value_failure(f"{row.label} value disagrees with its output fact {fact!r}")
+    if row.owner_status == "forward_op" and not any(
+        bool(getattr(op, "has_saved_activation", False))
+        for op in _owning_compute_ops(row.parent_op_refs, ops)
+    ):
+        _value_failure(f"{row.label} kept a value although no owning Op saved its output")
+
+
+def _owning_compute_ops(refs: Any, ops: list[Any]) -> list[Any]:
+    """Return the Ops a partition's references name, minus synthetic boundary rows.
+
+    A synthetic ``output`` (or ``input``) node copies its producer's
+    ``func_call_id`` but dispatched nothing itself, and its ``out`` is the tensor
+    the model returned, which a later in-place call may have mutated; it is not
+    a party to the value contract.
+    """
+
+    owners = []
+    for ref in refs:
+        if not 0 <= ref.op_row_index < len(ops):
+            continue
+        op = ops[ref.op_row_index]
+        if getattr(op, "type", None) in ("input", "output"):
+            continue
+        owners.append(op)
+    return owners
+
+
+def _check_partition_values(owner_rows: list[Any], ops: list[Any]) -> None:
+    """Some ATen value beneath each saved, non-buffer owner Op equals that Op's out."""
+
+    import torch
+
+    leaves = [
+        leaf for row in owner_rows if row.out is not None for leaf in _value_leaves(row.out) or ()
+    ]
+    if not leaves:
+        return
+    for op in _owning_compute_ops(owner_rows[0].parent_op_refs, ops):
+        target = getattr(op, "out", None)
+        if record_member(op, "is_buffer", False) or not getattr(op, "has_saved_activation", False):
+            continue
+        if not isinstance(target, torch.Tensor):
+            continue
+        if not any(_same_values(leaf, target) for leaf in leaves):
+            _value_failure(
+                f"no ATen value recorded beneath {op.layer_label} equals its saved output"
+            )
+
+
+def _check_aten_values_consistent(trace: Trace) -> None:
+    """Validate kept ATen output values against facts, ``save=`` and the owner Op.
+
+    Every kept ``AtenOp.out`` matches its ``output_tensor_facts`` leaf for leaf
+    (count, shape, dtype), belongs to a returned call, and survives only when an
+    Op of the owning call saved its output. For captures with ``save_mode="copy"``,
+    each saved owner Op whose interior was fully observed (no disclosed gap) has
+    its ``out`` reproduced exactly by one of the ATen values recorded beneath it.
+
+    Parameters
+    ----------
+    trace
+        Postprocessed torch Trace.
+
+    Raises
+    ------
+    MetadataInvariantError
+        If any kept ATen value breaks the contract.
+    """
+
+    profile = trace._primitive_op_profile
+    if profile is None:
+        return
+    ops = list(trace._layer_list)
+    partitions: dict[int, list[Any]] = defaultdict(list)
+    for row in profile.primitive_ops:
+        _check_row_values(row, ops)
+        if row.capture_phase == "forward" and row.owner_status == "forward_op":
+            partitions[row.owner_func_call_id].append(row)
+    if trace._options_save_mode != "copy":
+        return
+    gap_owners = {
+        gap.owner_func_call_id
+        for gap in profile.mode_paused_interior
+        if gap.capture_phase == "forward"
+    }
+    for owner, rows in partitions.items():
+        if owner not in gap_owners:
+            _check_partition_values(rows, ops)
+
+
 def validate_loaded_primitive_profile(trace: Trace) -> None:
     """Fail closed on a switched pre-release primitive profile before exposure.
 
@@ -332,12 +484,9 @@ def validate_loaded_primitive_profile(trace: Trace) -> None:
 
     Raises
     ------
-    TorchLensIOError
+    ArtifactError
         With ``primitive_op_schema_invalid`` or ``primitive_op_fk_invalid``.
     """
-
-    from .._io import TorchLensIOError
-    from .invariants import MetadataInvariantError
 
     profile = getattr(trace, "_primitive_op_profile", None)
     if profile is None:
@@ -360,14 +509,19 @@ def validate_loaded_primitive_profile(trace: Trace) -> None:
             if any(marker in detail for marker in fk_markers)
             else "primitive_op_schema_invalid"
         )
-        raise TorchLensIOError(
+        raise ArtifactError(
             f"Primitive-operation profile failed pre-release validation: {detail}",
             code=code,
             remedy="re-capture and re-save the trace; do not edit primitive profile metadata",
         ) from exc
 
 
+# Bottom import: the hub defines this error before it imports its split modules.
+from .._utils._record_group_table import record_member  # noqa: E402
+from ._invariants import MetadataInvariantError  # noqa: E402
+
 __all__ = [
+    "_check_aten_values_consistent",
     "_check_non_torch_primitive_op_inert",
     "_check_primitive_op_invariants",
     "validate_loaded_primitive_profile",

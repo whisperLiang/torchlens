@@ -2,7 +2,7 @@
 
 Paddle dygraph is eager: the capture wrapper holds the concrete output of every
 wrapped call before the caller sees it, so ``trace(intervene=...)`` and
-``trace(halt=...)`` apply live with real predicate-time values. The runtime is
+``trace(stop_after=...)`` apply live with real predicate-time values. The runtime is
 deliberately fail-closed: unsupported helper specs, non-forward directions,
 isolation requests, and non-tensor replacements refuse typed instead of
 silently not intervening.
@@ -16,16 +16,29 @@ from __future__ import annotations
 import time
 import warnings
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ... import _state
-from ...fastlog.exceptions import PredicateError
-from ...intervention.predicates import as_intervention_decision
-from ...intervention.selectors import BaseSelector
-from ...intervention.types import FireRecord, HelperSpec, InterventionDecision, TargetSpec
-from ...ir.intervention import FireResult
-from ...ir.predicate import RecordContext
+from ..._capture._stop_after_policy import settle_unfired_stop_after
+from ..._ir.intervention import FireResult
+from ..._ir.op_record import amend_module_exit_intervention
+from ..._ir.predicate import RecordContext
+from ..._ir.selector_eval import (
+    module_address_matches,
+    module_union_addresses,
+    selector_contains_kind,
+)
+from ..._selection.selectors import BaseSelector
+from ...intervention._predicates import as_intervention_decision
+from ...intervention._types import Edit, FireRecord, InterventionDecision, TargetSpec
+from ...recording._exceptions import PredicateError
+from .._protocols.paddle import (
+    PADDLE_REFUSAL_BACKWARD,
+    PADDLE_REFUSAL_FOREIGN,
+    PADDLE_REFUSAL_OPTION,
+    PADDLE_REFUSAL_PREDICATE,
+)
 from ..registry import BackendUnsupportedError
 
 _PADDLE_SUPPORTED_HELPER_NAMES = ("add", "replace_with", "scale", "zero_ablate")
@@ -79,19 +92,36 @@ class PaddleInterventionRuntime:
         intervene
             Public ``trace(intervene=...)`` predicate, or ``None``.
         halt
-            Public ``trace(halt=...)`` predicate, or ``None``.
+            Public ``trace(stop_after=...)`` predicate, or ``None``.
         """
 
         if intervene is not None and not callable(intervene):
             raise BackendUnsupportedError(
                 "paddle backend trace(intervene=...) requires a callable predicate "
                 "such as tl.when(condition, action); got "
-                f"{type(intervene).__name__!s}."
+                f"{type(intervene).__name__!s}.",
+                code=PADDLE_REFUSAL_OPTION,
+                option="intervene",
             )
         if halt is not None and not callable(halt):
             raise BackendUnsupportedError(
-                "paddle backend trace(halt=...) requires a callable predicate "
-                f"returning bool; got {type(halt).__name__!s}."
+                "paddle backend trace(stop_after=...) requires a callable predicate "
+                f"returning bool; got {type(halt).__name__!s}.",
+                code=PADDLE_REFUSAL_OPTION,
+                option="halt",
+            )
+        from ...intervention.hooks import split_site_branches
+
+        selector = getattr(intervene, "selector", None)
+        _validate_module_selector(selector)
+        if selector is not None and any(
+            universe != "activation" for universe, _branch in split_site_branches(selector)
+        ):
+            raise BackendUnsupportedError(
+                "paddle backend preview supports forward interventions only; the site "
+                f"{selector!r} addresses a gradient, which needs true backward capture "
+                "that paddle does not declare. Use the PyTorch backend for gradient edits.",
+                code=PADDLE_REFUSAL_BACKWARD,
             )
         self._backend = backend
         self.intervene = intervene
@@ -112,14 +142,16 @@ class PaddleInterventionRuntime:
             Normalized decision when the predicate matched.
         """
 
-        if self.intervene is None:
+        if self.intervene is None or selector_contains_kind(
+            getattr(self.intervene, "selector", None), "module"
+        ):
             return None
         result = self.intervene(ctx)
         try:
             decision = as_intervention_decision(result)
         except TypeError as exc:
             raise PredicateError(
-                "intervene predicate must return InterventionDecision, HelperSpec, "
+                "intervene predicate must return InterventionDecision, Edit, "
                 "callable, or None. "
                 "Remedy: return one of those values from the intervene predicate.",
                 ctx=ctx,
@@ -162,7 +194,7 @@ class PaddleInterventionRuntime:
         """
 
         self._reject_unsupported_decision(decision)
-        helper_spec = decision.hook if isinstance(decision.hook, HelperSpec) else None
+        helper_spec = decision.hook if isinstance(decision.hook, Edit) else None
         hook_fn = self._resolve_hook(decision)
         with _state.pause_logging():
             replacement = hook_fn(tensor)
@@ -170,25 +202,12 @@ class PaddleInterventionRuntime:
             raise BackendUnsupportedError(
                 "paddle backend trace(intervene=...) hooks must return a "
                 f"paddle.Tensor; hook for site {ctx.label_raw!r} returned "
-                f"{type(replacement).__name__!s}."
+                f"{type(replacement).__name__!s}.",
+                code=PADDLE_REFUSAL_PREDICATE,
             )
         replaced = replacement is not tensor
         self.fire_count += 1
-        fire_record = FireRecord(
-            target_label=ctx.label_raw,
-            call_label=ctx.label_raw,
-            func_call_id=ctx.func_call_id,
-            container_path=container_path,
-            engine="paddle_wrapper",
-            helper=helper_spec,
-            site_label=ctx.label_raw,
-            timing="post",
-            direction="forward",
-            helper_name=helper_spec.helper_name if helper_spec is not None else None,
-            timestamp=time.time(),
-            call_index=ctx.raw_index,
-            replaced=replaced,
-        )
+        fire_record = _fire_record(ctx, container_path, helper_spec, replaced)
         fire_result = FireResult(
             plan_id=f"paddle-intervene-{self.fire_count}",
             site_label=ctx.label_raw,
@@ -253,12 +272,21 @@ class PaddleInterventionRuntime:
         frozen_target = target.freeze()
         if all(existing.freeze() != frozen_target for existing in spec.targets):
             spec.targets.append(target)
-        helper_spec = decision.hook if isinstance(decision.hook, HelperSpec) else None
+        helper_spec = decision.hook if isinstance(decision.hook, Edit) else None
         spec.add_hook(
             target,
             decision.hook,
             helper=helper_spec,
-            metadata={"created_by": "intervene_predicate", "direction": "forward"},
+            metadata={"created_by": "intervene_predicate", "signal": "forward"},
+        )
+
+    def settle_unfired(self, trace: Any) -> None:
+        """Disclose an unfired intervene selector; refuse an unfired stop_after like torch."""
+
+        self.warn_if_zero_matches()
+        # A selector is the selector-shaped site; any other callable is exploratory.
+        settle_unfired_stop_after(
+            trace, self.halt, selector_shaped=isinstance(self.halt, BaseSelector)
         )
 
     def warn_if_zero_matches(self) -> None:
@@ -282,17 +310,12 @@ class PaddleInterventionRuntime:
             Normalized intervention decision.
         """
 
-        if decision.direction != "forward":
-            raise BackendUnsupportedError(
-                "paddle backend preview supports forward interventions only; "
-                f"direction {decision.direction!r} needs true backward capture, "
-                "which paddle does not declare. Use the PyTorch backend for "
-                "backward interventions."
-            )
         if decision.isolate:
             raise BackendUnsupportedError(
                 "paddle backend preview does not support isolate=True intervention "
-                "decisions; backend isolation is a torch capture feature."
+                "decisions; backend isolation is a torch capture feature.",
+                code=PADDLE_REFUSAL_OPTION,
+                option="isolate",
             )
 
     def _resolve_hook(self, decision: InterventionDecision) -> Callable[[Any], Any]:
@@ -310,16 +333,18 @@ class PaddleInterventionRuntime:
         """
 
         hook = decision.hook
-        if isinstance(hook, HelperSpec):
+        if isinstance(hook, Edit):
             return self._resolve_helper_hook(hook)
         if callable(hook):
             return hook
         raise BackendUnsupportedError(
             "paddle backend trace(intervene=...) decisions must carry a builtin "
-            f"helper spec or a callable hook; got {type(hook).__name__!s}."
+            f"helper spec or a callable hook; got {type(hook).__name__!s}.",
+            code=PADDLE_REFUSAL_OPTION,
+            option="intervene",
         )
 
-    def _resolve_helper_hook(self, helper: HelperSpec) -> Callable[[Any], Any]:
+    def _resolve_helper_hook(self, helper: Edit) -> Callable[[Any], Any]:
         """Return the Paddle adapter for one builtin helper spec.
 
         The builtin helper factories build torch hooks, so each supported
@@ -338,7 +363,7 @@ class PaddleInterventionRuntime:
         """
 
         paddle = self._backend.paddle
-        name = helper.helper_name
+        name = helper.name
         args = tuple(helper.args)
         if name == "zero_ablate":
             return lambda out: paddle.zeros_like(out)
@@ -368,7 +393,9 @@ class PaddleInterventionRuntime:
         raise BackendUnsupportedError(
             f"paddle backend preview has no adapter for intervention helper "
             f"{name!r}; supported builtin helpers: {supported}. Pass a callable "
-            "hook operating on paddle.Tensor values, or use the PyTorch backend."
+            "hook operating on paddle.Tensor values, or use the PyTorch backend.",
+            code=PADDLE_REFUSAL_OPTION,
+            option="intervene",
         )
 
     def _reject_foreign_tensor(self, value: Any, *, helper_name: str) -> None:
@@ -386,7 +413,8 @@ class PaddleInterventionRuntime:
         if module_root == "torch":
             raise BackendUnsupportedError(
                 f"paddle backend intervention helper {helper_name!r} received a "
-                "torch.Tensor argument; pass a paddle.Tensor or Python scalar."
+                "torch.Tensor argument; pass a paddle.Tensor or Python scalar.",
+                code=PADDLE_REFUSAL_FOREIGN,
             )
 
 
@@ -394,3 +422,148 @@ __all__ = [
     "PaddleInterventionCapture",
     "PaddleInterventionRuntime",
 ]
+
+
+def _fire_record(
+    ctx: RecordContext, container_path: tuple[Any, ...], helper_spec: Edit | None, replaced: bool
+) -> FireRecord:
+    """Fire metadata of one applied Paddle intervention."""
+
+    return FireRecord(
+        target_label=ctx.label_raw,
+        call_label=ctx.label_raw,
+        func_call_id=ctx.func_call_id,
+        container_path=container_path,
+        engine="paddle_wrapper",
+        edit=helper_spec,
+        site_label=ctx.label_raw,
+        timing="post",
+        signal="forward",
+        edit_name=helper_spec.name if helper_spec is not None else None,
+        timestamp=time.time(),
+        call_index=ctx.raw_index,
+        replaced=replaced,
+    )
+
+
+def _validate_module_selector(selector: Any) -> None:
+    """Refuse mixed module trees before any forward executes."""
+
+    if selector_contains_kind(selector, "module") and module_union_addresses(selector) is None:
+        raise BackendUnsupportedError(
+            "paddle backend module interventions require tl.module(...) or a union "
+            "of module selectors; mixed or negated module selectors are unsupported.",
+            code=PADDLE_REFUSAL_OPTION,
+            option="intervene",
+        )
+
+
+def _apply_module_exit(trace: Any, frame: Any, output: Any) -> Any:
+    """Apply one selected module call to all its output tensor leaves."""
+
+    runtime = trace._paddle_intervention_runtime
+    if runtime is None:
+        return output
+    predicate = runtime.intervene
+    addresses = module_union_addresses(getattr(predicate, "selector", None))
+    if not addresses or not any(
+        module_address_matches((frame.address, frame.call_index), address) for address in addresses
+    ):
+        return output
+    backend = runtime._backend
+    by_id = {}
+    replacements = {}
+    for path, tensor in backend._iter_tensors_with_paths(output):
+        if id(tensor) not in by_id:
+            by_id[id(tensor)] = _emit_module_leaf(trace, runtime, tensor)
+        replacements[path] = by_id[id(tensor)]
+    return _replace_leaves(output, replacements)
+
+
+def _replace_leaves(output: Any, replacements: dict[Any, Any], path: tuple[Any, ...] = ()) -> Any:
+    """Rebuild the supported output containers with edited leaves."""
+
+    if path in replacements:
+        return replacements[path]
+    if isinstance(output, tuple):
+        return tuple(
+            _replace_leaves(item, replacements, (*path, i)) for i, item in enumerate(output)
+        )
+    if isinstance(output, list):
+        return [_replace_leaves(item, replacements, (*path, i)) for i, item in enumerate(output)]
+    if isinstance(output, dict):
+        return {
+            key: _replace_leaves(item, replacements, (*path, key)) for key, item in output.items()
+        }
+    return output
+
+
+@dataclass(frozen=True)
+class _ReplacementBoundaryPredicate:
+    """Fire one module edit's decision at its own replacement boundary op only.
+
+    Equivalent here to ``tl.when(tl.func("interventionreplacement"), decision)``:
+    the Paddle intervention path reads only the decision's hook and isolate flag,
+    and a func selector matches the captured function name or the layer type.
+    """
+
+    decision: InterventionDecision | None
+
+    def __call__(self, ctx: Any) -> InterventionDecision | None:
+        """Return the decision for the boundary op and ``None`` for any other op."""
+
+        names = (getattr(ctx, "func_name", None), getattr(ctx, "layer_type", None))
+        return self.decision if "interventionreplacement" in names else None
+
+
+def _copy_leaf(tensor: Any) -> Any:
+    """Copy the raw producer value without changing its label or existing consumers."""
+
+    return tensor.clone()
+
+
+def _emit_module_leaf(trace: Any, runtime: Any, tensor: Any) -> Any:
+    """Record a declared replacement through Paddle's existing replay machinery."""
+
+    backend = runtime._backend
+    label = backend.tensor_store.get_label(tensor)
+    predicate = runtime.intervene
+    runtime.intervene = _ReplacementBoundaryPredicate(predicate.decision)
+    try:
+        with _state.pause_logging():
+            raw = _copy_leaf(tensor)
+            replacement = backend.emit_paddle_operation(
+                trace,
+                "interventionreplacement",
+                _copy_leaf,
+                (tensor,),
+                {},
+                raw,
+                module_stack=tuple(trace._paddle_module_stack),
+            )
+    finally:
+        runtime.intervene = predicate
+    events = trace.capture_events
+    boundary = events.op_event_by_label_raw[backend.tensor_store.get_label(replacement)]
+    event = events.op_event_by_label_raw.get(label)
+    if event is not None:
+        fires = tuple(
+            replace(
+                fire,
+                site_label=label,
+                fire_record=replace(
+                    fire.fire_record, target_label=label, func_call_id=event.func_call_id
+                ),
+            )
+            for fire in boundary.fire_results
+        )
+        events.append_amendment(
+            amend_module_exit_intervention(
+                event.seq,
+                label,
+                intervention_fired=True,
+                is_edited=boundary.is_edited,
+                fire_results=(*event.fire_results, *fires),
+            )
+        )
+    return replacement

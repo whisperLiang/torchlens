@@ -100,6 +100,7 @@ def test_placed_prefix_optimizer_uses_training_state(
             torch.testing.assert_close(runtime.replay(x), reference(x), atol=1e-5, rtol=1e-4)
 
 
+@pytest.mark.cuda
 def test_training_prefix_parameters_with_captured_inference_sources() -> None:
     """The training getter binds live replicas even when inference uses captured state."""
 

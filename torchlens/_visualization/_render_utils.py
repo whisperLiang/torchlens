@@ -1,0 +1,675 @@
+"""Internal Graphviz rendering helpers shared across rendering paths.
+
+Private module: not part of the public API. Provides rendering primitives
+shared by single-trace graph rendering and any internal bundle renderers, so
+we have one canonical implementation of file-format dispatch, direction
+translation, module cluster styling, and HTML label escaping.
+
+Keep this module narrow on purpose -- only primitives that take no
+Trace/Bundle context and can be reasoned about as pure utilities.
+The orchestration that knows WHICH nodes / edges / module paths to use
+lives in the per-input-shape callers, such as ``_render_dot.draw`` for
+Trace.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import re
+import subprocess
+import sys
+import threading
+import warnings
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, Any, cast
+
+from .._errors import InvalidArgumentError
+from .._utils.display import user_stacklevel
+from ._fonts import graphviz_font_env
+from ._frame_penwidth import (  # noqa: F401  (spellings kept for importers)
+    MAX_MODULE_PENWIDTH,
+    MIN_MODULE_PENWIDTH,
+    PENWIDTH_RANGE,
+    compute_module_penwidth,
+)
+from ._render_names import DEFAULT_DRAW_STEM  # noqa: F401  (spelling kept for importers)
+
+#: Live viewer child handles. Retained so every launch can reap
+#: previously-exited viewers; without this the discarded ``Popen`` handle left
+#: one persistent zombie per process (each new spawn reaped the previous
+#: corpse, so the census never returned to baseline).
+_VIEWER_PROCS: list[subprocess.Popen[bytes]] = []
+
+
+def _reap_finished_viewers() -> None:
+    """Drop (and thereby reap) every viewer child that has already exited."""
+
+    _VIEWER_PROCS[:] = [proc for proc in _VIEWER_PROCS if proc.poll() is None]
+
+
+def _wait_and_release_viewer(proc: subprocess.Popen[bytes]) -> None:
+    """Reap one viewer child the moment it exits.
+
+    The registry alone reaped only on the
+    NEXT launch, so one ``draw()`` that opened a viewer left one zombie for
+    the life of the process — and retaining the ``Popen`` handle disabled
+    even the finalizer's opportunistic reap. A per-viewer daemon waiter
+    holds no lock, blocks nothing, and removes the handle as soon as the
+    child is waited on; the launch-time sweep stays as a belt for waiter
+    threads that die abnormally.
+    """
+
+    try:
+        proc.wait()
+    finally:
+        with contextlib.suppress(ValueError):  # already swept at next launch
+            _VIEWER_PROCS.remove(proc)
+
+
+def _is_interactive_display_context() -> bool:
+    """Return whether launching a GUI viewer is reasonable in this process.
+
+    Returns
+    -------
+    bool
+        ``False`` on Linux shells with no display variables or SSH sessions
+        without X/Wayland forwarding; otherwise ``True``.
+    """
+
+    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    if sys.platform.startswith("linux") and not has_display:
+        return False
+    return not (os.environ.get("SSH_CONNECTION") and not has_display)
+
+
+def _open_file_quietly(filepath: str, *, announce_headless: bool = False) -> bool:
+    """Open ``filepath`` in the platform default viewer, suppressing viewer noise.
+
+    Replaces ``graphviz.backend.viewing.view`` to (a) silence ``xdg-open``
+    stderr on headless Linux boxes that have no registered viewer and
+    (b) skip the attempt entirely when no display is detected.
+
+    Parameters
+    ----------
+    filepath:
+        Rendered artifact path to open.
+    announce_headless:
+        If ``True``, emit one stderr line when the viewer is skipped because
+        the current process appears headless.
+
+    Returns
+    -------
+    bool
+        ``True`` if a viewer launch was attempted, otherwise ``False``.
+    """
+
+    # In a notebook the figure is rendered inline via IPython ``display()``;
+    # launching a desktop viewer is never appropriate there, and a
+    # "headless, skipping auto-open" note would be misleading noise. Bail out
+    # before any viewer launch or announcement.
+    from .._utils.display import in_notebook
+
+    if in_notebook():
+        return False
+
+    if not _is_interactive_display_context():
+        if announce_headless:
+            print(
+                "torchlens.draw: headless context detected; "
+                f"rendered file at {filepath}, skipping auto-open.",
+                file=sys.stderr,
+            )
+        return False
+    try:
+        if sys.platform == "win32":
+            os.startfile(filepath)
+        else:
+            opener = "open" if sys.platform == "darwin" else "xdg-open"
+            # Retain the handle and reap prior viewer children
+            # (the discarded Popen left one persistent zombie per process),
+            # and detach the viewer into its own session so a later render
+            # timeout kill cannot orphan its grandchildren onto us.
+            _reap_finished_viewers()
+            viewer = subprocess.Popen(
+                [opener, filepath],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            _VIEWER_PROCS.append(viewer)
+            # Asynchronous wait so the FINAL viewer of a process is reaped
+            # too, not only viewers followed by another launch.
+            threading.Thread(
+                target=_wait_and_release_viewer,
+                args=(viewer,),
+                name="torchlens-viewer-reaper",
+                daemon=True,
+            ).start()
+        return True
+    except (FileNotFoundError, OSError):
+        return False  # no viewer available; silently skip
+
+
+if TYPE_CHECKING:
+    import graphviz
+
+
+# Recognised file extensions that callers may include on ``vis_outpath``.
+# Mirrors the legacy list in ``_render_dot.draw`` (kept as a tuple
+# so it stays cheap and immutable).
+_KNOWN_EXTS = ("pdf", "png", "jpg", "svg", "jpeg", "bmp", "pic", "tif", "tiff", "dot")
+
+# Default subprocess timeout for Graphviz render calls. Mirrors the
+# legacy literal that lived inside ``_render_dot.draw``.
+RENDER_TIMEOUT_SECONDS = 120
+
+# The bounded-subprocess spawn discipline (process-group teardown, Linux
+# PR_SET_PDEATHSIG parent-death binding, kill-grace escalation) lives in
+# ``utils/_subprocess`` so non-visualization callers (the doctor ``dot``
+# probe, the bundle git-provenance stamp) can share it without this module's
+# hard ``graphviz`` import. Render call sites and tests monkeypatch
+# ``_render_utils.run_bounded_subprocess``, so the viz-facing wrapper lives
+# here and adds the ONE viz-specific behavior on top of the shared seam.
+from .._utils._subprocess import (  # noqa: E402
+    _HAS_PROCESS_GROUPS,  # noqa: F401  (re-export: tests pin the spawn contract)
+    run_bounded_subprocess as _run_bounded_subprocess_shared,
+)
+
+
+def run_bounded_subprocess(
+    cmd: list[str],
+    *,
+    timeout: float,
+    check: bool = True,
+    capture_output: bool = True,
+    input: bytes | str | None = None,
+    cwd: str | None = None,
+    text: bool = False,
+) -> subprocess.CompletedProcess[Any]:
+    """Run ``cmd`` through the shared bounded spawn seam, refusing typed.
+
+    Delegates to :func:`torchlens._utils._subprocess.run_bounded_subprocess`
+    (the ONE spawn discipline) and adds the viz-specific door: a missing
+    Graphviz binary raises the typed install-remedy refusal instead of a raw
+    ``FileNotFoundError: 'dot'`` naming neither Graphviz nor the remedy.
+    The doctor ``dot`` probe, by contrast, wants the raw signal
+    and calls the shared seam directly. Tests monkeypatch this function to
+    simulate Graphviz outcomes. Every Graphviz child renders with the bundled
+    font (:func:`torchlens._visualization._fonts.graphviz_font_env`).
+    """
+
+    try:
+        return _run_bounded_subprocess_shared(
+            cmd,
+            timeout=timeout,
+            check=check,
+            capture_output=capture_output,
+            input=input,
+            cwd=cwd,
+            text=text,
+            env=graphviz_font_env(),
+        )
+    except FileNotFoundError as exc:
+        # The class is defined in _render_common, which top-imports this
+        # module: reach it through the public taxonomy (resolved on first
+        # use) so this module stays out of the renderer's import cycle.
+        # The single most common cold-user viz failure: the Graphviz BINARY
+        # is not installed (the python 'graphviz' package alone does not
+        # ship it); the class carries the install remedy.
+        from ..errors import GraphvizUnavailableError  # deferred: cycle _visualization
+
+        raise GraphvizUnavailableError(
+            f"TorchLens could not render this graph: the Graphviz executable "
+            f"{cmd[0]!r} was not found on PATH",
+            executable=cmd[0],
+        ) from exc
+
+
+_VISUALIZER_DIR_MARKER = "torchlens_visualizers_"
+
+
+def relativize_visualizer_image(path: str) -> str:
+    """Return an image path relative to the trace visualizer scratch root.
+
+    Node ``image=`` attributes used to embed the absolute
+    ``tempfile.mkdtemp`` visualizer path, so every run's DOT differed in
+    every image node and byte-comparison/golden hashing was impossible for
+    those features. Emitting the path RELATIVE to the scratch root keeps
+    per-run bytes out of the source entirely; T9 (grind-p3) supplies the
+    root to Graphviz as the render subprocess working directory (the dot
+    engine) instead of an in-source ``imagepath`` graph attribute, so
+    user-saved DOT stays free of the per-run temp path. Paths outside a
+    visualizer scratch dir (user-supplied images) pass through unchanged.
+    """
+
+    marker_index = path.find(_VISUALIZER_DIR_MARKER)
+    if marker_index == -1:
+        return path
+    separator_index = path.find(os.sep, marker_index)
+    if separator_index == -1:
+        return path
+    return path[separator_index + 1 :]
+
+
+def resolve_draw_outpath(
+    vis_outpath: str | None, fileformat: str, announce_path: bool | None
+) -> tuple[str, bool]:
+    """Return the stem a draw writes under and whether it announces the path.
+
+    Parameters
+    ----------
+    vis_outpath:
+        User-provided render output path, or ``None`` for a bare draw.
+    fileformat:
+        Rendered file format.
+    announce_path:
+        Explicit announce choice, or ``None`` to announce exactly for a bare draw.
+
+    Returns
+    -------
+    tuple[str, bool]
+        Output stem without a render extension, and the announce flag.
+    """
+    # a bare draw (no vis_outpath) writes a collision-safe file and
+    # always prints where; an explicit path is written exactly, as before.
+    # ``Trace.draw`` resolves the collision-safe path itself and says so.
+    if announce_path is None:
+        announce_path = vis_outpath is None
+    resolved_outpath = (
+        collision_safe_outpath(DEFAULT_DRAW_STEM, fileformat)
+        if vis_outpath is None
+        else strip_known_extension(vis_outpath)
+    )
+    return resolved_outpath, announce_path
+
+
+def collision_safe_outpath(stem: str, fileformat: str) -> str:
+    """Return a fresh output stem for a draw call that named no path.
+
+    A bare ``draw()`` must never overwrite an earlier picture: the
+    first call in a directory writes ``<stem>.<format>``, later calls write
+    ``<stem>-2.<format>``, ``<stem>-3.<format>`` and so on. A candidate is
+    taken when either the rendered file or the bare DOT source path (Graphviz
+    writes the source at the stem itself before rendering) already exists.
+
+    Parameters
+    ----------
+    stem:
+        Base file name, relative to the current working directory.
+    fileformat:
+        Graphviz output format; the extension checked for collisions.
+
+    Returns
+    -------
+    str
+        Output path WITHOUT the extension, as ``RenderTarget.outpath`` takes it.
+    """
+
+    candidate = stem
+    counter = 2
+    while os.path.exists(f"{candidate}.{fileformat}") or os.path.exists(candidate):
+        candidate = f"{stem}-{counter}"
+        counter += 1
+    return candidate
+
+
+def announce_written_graph(path: str) -> None:
+    """Print where a bare draw wrote its picture (always, verbose or not).
+
+    Parameters
+    ----------
+    path:
+        Rendered file path, extension included.
+    """
+
+    print(f"TorchLens graph written to {path}")
+
+
+def strip_known_extension(outpath: str) -> str:
+    """Strip a recognised image extension off ``outpath`` if present.
+
+    The Graphviz Python binding wants the basename without an extension --
+    it adds the extension itself based on the requested ``format``. Users
+    who pass ``"out.pdf"`` should still get ``"out.pdf"`` rather than
+    ``"out.pdf.pdf"``, so we trim a trailing recognised extension.
+    """
+
+    parts = outpath.split(".")
+    if len(parts) > 1 and parts[-1].lower() in _KNOWN_EXTS:
+        return ".".join(parts[:-1])
+    return outpath
+
+
+#: TorchLens vis-direction literal -> Graphviz ``rankdir``.
+_DIRECTION_TO_RANKDIR: dict[str, str] = {
+    "bottomup": "BT",
+    "topdown": "TB",
+    "leftright": "LR",
+    "rightleft": "RL",
+}
+
+
+def direction_to_rankdir(direction: str) -> str:
+    """Translate a TorchLens vis-direction literal into a Graphviz ``rankdir``.
+
+    Accepted inputs: ``'bottomup'``, ``'topdown'``, ``'leftright'``,
+    ``'rightleft'``.  Raises ``InvalidArgumentError`` on anything else so
+    callers don't silently render with the Graphviz default when a typo'd
+    direction sneaks through.
+    """
+
+    rankdir = _DIRECTION_TO_RANKDIR.get(direction)
+    if rankdir is not None:
+        return rankdir
+    raise InvalidArgumentError(
+        "direction must be one of 'bottomup', 'topdown', 'leftright', or 'rightleft'; "
+        f"got {direction!r}",
+        code="visualization_direction_invalid",
+        remedy="pass direction='bottomup', 'topdown', 'leftright', or 'rightleft'",
+        argument="direction",
+    )
+
+
+def html_escape(value: str) -> str:
+    """Escape the three Graphviz HTML-label specials.
+
+    Graphviz HTML-like labels reserve ``<``, ``>``, and ``&``; embedding any
+    of those raw breaks the parser.  Mirrors ``html.escape`` minus the
+    ``quote`` argument because Graphviz attribute values are themselves
+    already inside double quotes (no need to escape ``"``).
+    """
+
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+#: An absolute POSIX or Windows file path: a root (``/`` or ``C:\\``), then
+#: directory segments, then the file name kept by ``strip_path_directories``.
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w.~-])(?:[A-Za-z]:[\\/]|/)(?:[^\s()\[\]'\"<>:/\\]+[\\/])+")
+
+
+def _add_svg_accessibility(path: str, aria_label: str) -> None:
+    """Add figure-level accessibility attributes to a rendered SVG.
+
+    Parameters
+    ----------
+    path:
+        Rendered SVG path.
+    aria_label:
+        Root SVG accessibility label.
+
+    Returns
+    -------
+    None
+        The SVG is updated in place when it exists.
+    """
+
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as handle:
+        svg = handle.read()
+    if "aria-label=" not in svg:
+        escaped_label = html_escape(aria_label).replace('"', "&quot;")
+        svg = re.sub(
+            r"<svg\b",
+            f'<svg role="img" aria-label="{escaped_label}"',
+            svg,
+            count=1,
+        )
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(svg)
+
+
+def strip_path_directories(text: str) -> str:
+    """Drop the directories of absolute file paths in ``text``, keeping file names.
+
+    Header lines that cite a source location (the capture advisories' "first
+    at /path/to/model.py:224") are drawn into every saved figure; the full
+    path leaked the local directory layout into shared pictures and widened
+    the header. The file name and line number stay.
+    """
+
+    return _ABSOLUTE_PATH_RE.sub("", text)
+
+
+def make_module_cluster_label(
+    title: str,
+    module_type: str | None = None,
+    *,
+    title_already_escaped: bool = False,
+) -> str:
+    """Return the HTML-style label string for a module cluster.
+
+    Mirrors the legacy format used by ``_render_flow._setup_subgraphs_recurse``:
+    ``<<B>@title</B><br align='left'/>(type)<br align='left'/>>``.  The
+    ``module_type`` line is omitted when no type information is available
+    (which is the case for bundle clusters because the supergraph stores
+    the module path string but not the underlying module class).
+
+    ``title_already_escaped`` lets the Trace path keep its existing
+    raw-title behaviour (where the title may itself contain ``:`` and is
+    fed verbatim) while the bundle path can opt-in to escaping arbitrary
+    user-provided strings.
+    """
+
+    title_str = title if title_already_escaped else html_escape(title)
+    if module_type:
+        return (
+            f"<<B>@{title_str}</B><br align='left'/>({html_escape(module_type)})<br align='left'/>>"
+        )
+    return f"<<B>@{title_str}</B><br align='left'/>>"
+
+
+def cluster_caption_attrs(rankdir: str | None = None) -> dict[str, str]:
+    """Return ``labelloc``/``labeljust`` that put a module box caption top left on the page.
+
+    JMT ruled on 29 Oct 2026 that nested-module labels sit in the top-left
+    corner of their box, where they are least in the way, whatever the flow
+    direction or where the members sit. Graphviz's dot engine reads a cluster's
+    ``labelloc`` and ``labeljust`` in rank coordinates: under ``rankdir=BT``
+    ``t`` lands at the page bottom, and under ``rankdir=RL`` ``l`` lands at the
+    right (measured on Graphviz 2.43). Those two directions get the swapped
+    value so the caption lands top left. ``rankdir=None`` is for engines that
+    place clusters in page coordinates (``neato -n``, the rank engine).
+
+    Parameters
+    ----------
+    rankdir:
+        The dot graph's rank direction (``"TB"``, ``"BT"``, ``"LR"``, ``"RL"``),
+        or ``None`` for page coordinates.
+    """
+
+    return {
+        "labelloc": "b" if rankdir == "BT" else "t",
+        "labeljust": "r" if rankdir == "RL" else "l",
+    }
+
+
+def make_module_cluster_attrs(
+    *,
+    title: str,
+    module_type: str | None,
+    line_style: str,
+    penwidth: float,
+    fillcolor: str = "white",
+    title_already_escaped: bool = False,
+    rankdir: str | None = None,
+) -> dict[str, str]:
+    """Return the standard cluster attribute dict used by both renderers.
+
+    Centralises the Graphviz attrs that Trace and bundle clusters share:
+    HTML label, caption placement (top left on the page for ``rankdir``),
+    ``filled,<line_style>``
+    style, fill colour, and depth-aware penwidth.  Module-type information is
+    optional: bundle clusters omit it because the supergraph doesn't preserve
+    the module class, while Trace clusters always pass it through.
+    """
+
+    return {
+        "label": make_module_cluster_label(
+            title, module_type, title_already_escaped=title_already_escaped
+        ),
+        **cluster_caption_attrs(rankdir),
+        "style": f"filled,{line_style}",
+        "fillcolor": fillcolor,
+        "penwidth": str(penwidth),
+        # Border breathing room. The memo's fix ladder ends with margin
+        # 20 -> 8 (D18c: page area DOWN 6-22%, last five violations closed),
+        # but that measurement holds AFTER the wave-4 midpoint conversion of
+        # the argument channel: with head/tail labels still in use, margin 8
+        # regresses three clean toy-gate entries ('In 1' head labels
+        # penetrate the tighter border ~3 pt) and the whole-corpus
+        # monotonicity gate rejects it. The margin flip ships WITH the
+        # midpoint conversion (shed wave-4 tail), never before it.
+        "margin": "20",
+    }
+
+
+StyleOverride = Mapping[str, str] | Callable[[Any], Mapping[str, str] | None]
+
+
+def resolve_style_override(
+    override: StyleOverride | None,
+    context: Any,
+) -> dict[str, str]:
+    """Resolve a per-node or per-edge style override.
+
+    Parameters
+    ----------
+    override:
+        Static attribute mapping or callable receiving ``context``.
+    context:
+        Node or edge context passed to callable overrides.
+
+    Returns
+    -------
+    dict[str, str]
+        Graphviz attributes with string values.
+    """
+
+    if override is None:
+        return {}
+    resolved = override(context) if callable(override) else override
+    if resolved is None:
+        return {}
+    return {str(key): str(value) for key, value in resolved.items()}
+
+
+def merge_node_style(
+    base_style: Mapping[str, str],
+    node_overrides: Mapping[str, StyleOverride] | None,
+    graph_node_label: str,
+    context: Any,
+) -> dict[str, str]:
+    """Return merged Graphviz node style attributes.
+
+    Parameters
+    ----------
+    base_style:
+        Default node attributes.
+    node_overrides:
+        Optional mapping from node names to static or callable overrides.
+    graph_node_label:
+        Node key to look up in ``node_overrides``.
+    context:
+        Node context passed to callable overrides.
+
+    Returns
+    -------
+    dict[str, str]
+        Merged node attributes.
+    """
+
+    merged = {str(key): str(value) for key, value in base_style.items()}
+    if node_overrides is not None:
+        merged.update(resolve_style_override(node_overrides.get(graph_node_label), context))
+    return merged
+
+
+def merge_edge_style(
+    base_style: Mapping[str, str],
+    edge_overrides: Mapping[tuple[str, str], StyleOverride] | None,
+    edge_key: tuple[str, str],
+    context: Any,
+) -> dict[str, str]:
+    """Return merged Graphviz edge style attributes.
+
+    Parameters
+    ----------
+    base_style:
+        Default edge attributes.
+    edge_overrides:
+        Optional mapping from ``(source, target)`` keys to overrides.
+    edge_key:
+        Edge key to look up.
+    context:
+        Edge context passed to callable overrides.
+
+    Returns
+    -------
+    dict[str, str]
+        Merged edge attributes.
+    """
+
+    merged = {str(key): str(value) for key, value in base_style.items()}
+    if edge_overrides is not None:
+        merged.update(resolve_style_override(edge_overrides.get(edge_key), context))
+    return merged
+
+
+def render_dot_to_file(
+    dot: graphviz.Digraph,
+    outpath: str,
+    file_format: str,
+    save_only: bool,
+    *,
+    timeout_seconds: int = RENDER_TIMEOUT_SECONDS,
+    timeout_warning: str | None = None,
+) -> str:
+    """Render ``dot`` to ``outpath.<file_format>``, optionally previewing it.
+
+    Mirrors the dot/save/subprocess/view flow used internally by
+    ``_render_dot.draw`` and ``_render_entrypoints.render_backward_graph``,
+    factored out so the multi-trace renderer can share the same plumbing.
+
+    Returns the DOT source string (``dot.source``) regardless of whether
+    the subprocess render succeeded -- failures are surfaced via
+    ``warnings.warn`` to match existing behaviour.
+    """
+
+    parent = os.path.dirname(os.path.abspath(outpath))
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, exist_ok=True)
+
+    source_path = dot.save(outpath)
+    render_succeeded = False
+    try:
+        rendered_path = f"{outpath}.{file_format}"
+        from .render_execution import atomic_render_target, surface_layout_stderr
+
+        # Atomic publish + exit-0 stderr surfacing (vizmech).
+        with atomic_render_target(rendered_path) as temp_rendered_path:
+            cmd = [dot.engine, f"-T{file_format}", "-o", temp_rendered_path, source_path]
+            completed = run_bounded_subprocess(cmd, timeout=timeout_seconds)
+        surface_layout_stderr(completed.stderr, engine=dot.engine)
+        render_succeeded = True
+        if not save_only:
+            _open_file_quietly(rendered_path)
+    except subprocess.TimeoutExpired:
+        warnings.warn(
+            timeout_warning
+            or (
+                f"Graphviz render timed out ({timeout_seconds}s). "
+                f"DOT source saved to '{source_path}'."
+            ),
+            stacklevel=user_stacklevel(),
+        )
+    except subprocess.CalledProcessError as exc:
+        warnings.warn(
+            f"Graphviz render failed: {exc.stderr.decode()}",
+            stacklevel=user_stacklevel(),
+        )
+    finally:
+        if render_succeeded and os.path.exists(source_path):
+            os.remove(source_path)
+    return cast(str, dot.source)

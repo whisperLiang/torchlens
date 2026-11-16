@@ -5,11 +5,13 @@ from __future__ import annotations
 from math import prod
 from typing import Any
 
+from torchlens.split.errors import SplitRequestError
+
 from ...backends.registry import TINYGRAD_BACKEND_NAME
+from ...backends.tinygrad._uop_graph import _replace_uop_source_at_path
 from ...backends.tinygrad.backend import (
     TinygradBackend,
     TinygradUOpCapture,
-    _replace_uop_source_at_path,
     _source_matches_payload,
 )
 from ..boundary import ReplayBoundary
@@ -337,6 +339,7 @@ class _TinygradGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} source value is unavailable.",
                 context=self._context(node, "missing source value"),
+                code=SplitUnsupportedError.code,
             )
         return self._move_source_to_device(value, target_device)
 
@@ -353,6 +356,7 @@ class _TinygradGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} references unavailable tinygrad parent {parent_label!r}.",
                 context=self._context(node, "missing parent value"),
+                code=SplitUnsupportedError.code,
             )
         return overlay[parent_id]
 
@@ -396,7 +400,8 @@ class _TinygradGeneratedSegmentBase:
         if len(source_shape) != len(target_shape):
             return value.uop
         if any(
-            source != target and source != 1 for source, target in zip(source_shape, target_shape)
+            source != target and source != 1
+            for source, target in zip(source_shape, target_shape, strict=True)
         ):
             return value.uop
         if source_shape == target_shape:
@@ -422,6 +427,7 @@ class _TinygradGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"tinygrad dynamic-batch replay cannot inspect {node.label!r} shape literal.",
                 context=self._context(node, "uninspectable dynamic shape literal"),
+                code=SplitUnsupportedError.code,
             )
         replacement = self.graph.shape_program.rewrite(
             node.canonical_id,
@@ -436,6 +442,7 @@ class _TinygradGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"tinygrad dynamic-batch replay failed for {node.label!r}: {exc}",
                 context=self._context(node, "dynamic shape rewrite failed"),
+                code=SplitUnsupportedError.code,
             ) from exc
 
     def _rewrite_dynamic_uop_src(
@@ -587,6 +594,7 @@ class _TinygradGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} has no tinygrad UOp capture.",
                 context=self._context(node, "missing tinygrad UOp capture"),
+                code=SplitUnsupportedError.code,
             )
         if node.op_type == "buffer":
             # BUFFER UOps identify an allocation, not a portable parameter
@@ -629,6 +637,7 @@ class _TinygradGeneratedSegmentBase:
                 raise SplitUnsupportedError(
                     f"{node.label!r} has invalid tinygrad parent arg position {position!r}.",
                     context=self._context(node, "invalid parent position"),
+                    code=SplitUnsupportedError.code,
                 )
             if _is_tinygrad_literal_uop(src[position]):
                 continue
@@ -678,6 +687,7 @@ class _TinygradGeneratedSegmentBase:
                 f"tinygrad split replay failed for {node.label!r}: {exc}; "
                 f"shape_recipes={recipes!r}",
                 context=self._context(node, "tinygrad UOp replay failed"),
+                code=SplitUnsupportedError.code,
             ) from exc
 
     def _execute_nodes(
@@ -735,6 +745,7 @@ class TinygradGeneratedPrefix(_TinygradGeneratedSegmentBase):
                     split_point=self.spec.boundary,
                     reason="input count mismatch",
                 ),
+                code=SplitUnsupportedError.code,
             )
         overlay = dict(zip(self.graph.input_node_ids, input_leaves))
         if self.graph.shape_program is not None:
@@ -893,7 +904,10 @@ class TinygradSplitAdapter(SplitPolicyMixin):
         normalized_axis = axis if axis >= 0 else len(value.shape) + axis
         current = int(value.shape[normalized_axis])
         if current <= 0:
-            raise ValueError("Cannot resize an empty batch axis.")
+            raise SplitRequestError(
+                "Cannot resize an empty batch axis.",
+                code=SplitRequestError.code,
+            )
         copies, remainder = divmod(batch_size, current)
         parts = [value] * copies
         if remainder:
@@ -977,13 +991,13 @@ def _nested_close(left: Any, right: Any, *, atol: float, rtol: float) -> bool:
     if isinstance(left, list) and isinstance(right, list):
         return len(left) == len(right) and all(
             _nested_close(l_item, r_item, atol=atol, rtol=rtol)
-            for l_item, r_item in zip(left, right)
+            for l_item, r_item in zip(left, right, strict=True)
         )
     return abs(float(left) - float(right)) <= atol + rtol * abs(float(right))
 
 
-__all__ = [
+__all__ = (
     "TinygradGeneratedPrefix",
     "TinygradGeneratedSuffix",
     "TinygradSplitAdapter",
-]
+)

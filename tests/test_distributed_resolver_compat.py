@@ -6,10 +6,8 @@ from typing import Any
 
 import pytest
 
+from torchlens._utils import _torch_compat as tc
 from torchlens.backends.torch.funcol import _resolve_funcol_process_group
-from torchlens.utils import _torch_compat as tc
-
-pytestmark = pytest.mark.smoke
 
 
 @pytest.fixture(autouse=True)

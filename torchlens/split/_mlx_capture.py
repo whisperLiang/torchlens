@@ -63,4 +63,4 @@ def mlx_capture_state(model: Any) -> Iterator[None]:
             python_state.restore()
 
 
-__all__ = ["mlx_capture_state"]
+__all__ = ("mlx_capture_state",)

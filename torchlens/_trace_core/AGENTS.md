@@ -2,7 +2,7 @@
 
 Private per-trace columnar store substrate. Nothing in this package is public API; public
 classes (`Trace`, `Op`, ...) present rows from here as facades. The architecture of record is
-`docs/reference/trace_core_design.md` - read it first; this file only names entry points.
+`docs/internal/reference/trace_core_design.md` - read it first; this file only names entry points.
 
 ## core.py
 - `TraceCore` is the one per-trace store: the op store, per-kind row tables (`kind_rows`),
@@ -15,13 +15,16 @@ classes (`Trace`, `Op`, ...) present rows from here as facades. The architecture
 - `OpRowStore` holds op rows, described by `OpStoreLayout`. Rows are row-major while
   building; `freeze()` class-swaps in `_SealedRowMajorOpRowStore` (the sealed row-major
   variant used under the columnar-transpose threshold).
-- `DetachedOpStore` backs single-row detached records (`Op.copy()`, pickle restore, preview
+- `DetachedOpStore` backs single-row detached records (`Op._copy_with_shallow_fields()`, pickle restore, preview
   backends); `OpStoreView` is the per-fork copy-on-write view used by `Trace.fork()`.
 - Audit instrumentation for the postprocess step contracts: `begin_cell_write_audit()` /
   `end_cell_write_audit()` (class-swap to `_AuditedOpRowStore` / `_CombinedAuditOpRowStore`,
   results as `StepAuditResult`).
 - `mark_op_row_released()`, `row_clone_scope()`, and `cow_copy_value()` support removal scrub
   and fork copying.
+- `eviction_walk.py`: the payload eviction walk `OpRowStore._evict_tensor_payloads` runs when
+  the last owning core dies (tensors in builtin containers become `None`; one `_EvictTypes`
+  set per sweep learns the types it may skip without a call).
 
 ## Relations and views
 - `relations.py`: `EdgeTable` is the canonical dataflow edge-occurrence table (`Edge` rows,
@@ -59,3 +62,9 @@ classes (`Trace`, `Op`, ...) present rows from here as facades. The architecture
 - The label-to-row binding (`TraceCore.label_rows`) is established at the freeze; do not
   read it from unfrozen cores.
 - Dedicated unit suite: `tests/test_trace_core_substrate.py` (per the package docstring).
+- The payload eviction walk (`_evict_payloads_in_cell` and its list, mapping, tuple and set
+  helpers) dispatches on exact type first; its result must stay equal to the plain
+  `isinstance` chain it replaced, which `tests/test_perf7_eviction_walk.py` keeps as the
+  reference. Fork reads (`OpStoreView.cell_get`, `cow_copy_value`) return atomic values
+  without the isolation call; `tests/test_perf7_fork_reads.py` keeps the former code as the
+  reference.

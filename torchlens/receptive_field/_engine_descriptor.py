@@ -21,7 +21,7 @@ from ._types import (
 )
 
 if TYPE_CHECKING:
-    from ..data_classes.op import Op
+    from .._data_classes.op import Op
 
 
 def _descriptor(op: Op, state: _InputState) -> ReceptiveField:
@@ -40,7 +40,7 @@ def _descriptor(op: Op, state: _InputState) -> ReceptiveField:
             io_role=state.io_role,
             input_op_label=state.input_op_label,
             input_shape=state.input_shape,
-            layout=layout,
+            axis_roles=layout,
             axes=None,
             status=status,
             alignment=ReceptiveFieldAlignment.NOT_APPLICABLE,
@@ -80,7 +80,7 @@ def _descriptor(op: Op, state: _InputState) -> ReceptiveField:
         io_role=state.io_role,
         input_op_label=state.input_op_label,
         input_shape=state.input_shape,
-        layout=layout,
+        axis_roles=layout,
         axes=public_axes,
         status=status,
         alignment=alignment,
@@ -117,7 +117,7 @@ def _public_axis(axis_index: int, extent: int, state: _AxisState, op: Op) -> Rec
             # source index entirely, which no exactness flag can repair.
             # Degrade to an honest whole-extent envelope; an extent-1 axis
             # keeps the geometry's own exactness because its whole extent IS
-            # the only representable index (disputed-r3 F1/F2).
+            # the only representable index.
             return ReceptiveFieldAxis(
                 axis_index,
                 None,

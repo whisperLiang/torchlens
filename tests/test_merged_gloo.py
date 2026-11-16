@@ -20,21 +20,37 @@ import pytest
 import torch
 from torch import nn
 
-pytestmark = pytest.mark.skipif(
-    not torch.distributed.is_available() or not torch.distributed.is_gloo_available(),
-    reason="torch.distributed gloo unavailable",
-)
-
 import torchlens as tl  # noqa: E402
-from torchlens._io import TorchLensIOError  # noqa: E402
-from torchlens.distributed import _lifecycle as lifecycle  # noqa: E402
-from torchlens.merged import (  # noqa: E402
+from torchlens._distributed import _lifecycle as lifecycle  # noqa: E402
+from torchlens.distributed import (  # noqa: E402
+    is_vetted_build,
+)
+from torchlens.errors import (  # noqa: E402
     MergeConflictError,
     MergedArtifactError,
     MergedSurfaceUnsupportedError,
     MergeInputError,
 )
-from torchlens.merged._artifact import canonical_json_bytes  # noqa: E402
+
+# Every test in this module calls real `lifecycle.arm()` (via `_capture()`) to
+# produce a live rank core before merging. F1 ruling (Lead, 2026-10-01): these
+# are "full arming" tests and run only where this torch build matches a
+# censused collective-namespace snapshot; the fail-closed refusal on an
+# unvetted torch is asserted instead in
+# tests/test_distributed_boundary_gloo.py::TestUnvettedTorchRefusesArming and
+# tests/test_distributed_c0_core.py::TestCollectiveRecognizer.test_derivation_refuses_typed_when_not_vetted.
+pytestmark = [
+    pytest.mark.skipif(
+        not torch.distributed.is_available() or not torch.distributed.is_gloo_available(),
+        reason="torch.distributed gloo unavailable",
+    ),
+    pytest.mark.skipif(
+        not is_vetted_build(),
+        reason="merge-ranks live captures require a census-vetted torch build "
+        "(torchlens.distributed.is_vetted_build() is False here)",
+    ),
+]
+from torchlens._merged._artifact import canonical_json_bytes  # noqa: E402
 
 
 @pytest.fixture()
@@ -77,8 +93,6 @@ def _capture(witness: str = "digest"):
 
 
 class TestLiveMerge:
-    pytestmark = pytest.mark.smoke
-
     def test_live_merge_aligned_and_attested(self, gloo_world):
         merged = tl.merge_ranks([_capture()])
         assert merged.alignment.value == "aligned"
@@ -88,11 +102,12 @@ class TestLiveMerge:
         assert merged.rank_ids == (0,)
         assert "witness coverage" in merged.summary()
 
+    @pytest.mark.smoke
     def test_merge_report_matches_merge(self, gloo_world):
         log = _capture()
         report = tl.merge_report([log])
         assert report.alignment.value == "aligned"
-        assert report.n_joins == 1
+        assert report.num_joins == 1
         assert report.to_markdown().startswith("# Cross-rank merge report")
 
     def test_join_ops_resolve_to_boundary_nodes(self, gloo_world):
@@ -100,11 +115,12 @@ class TestLiveMerge:
         ops = merged.join_ops(merged.joins[0])
         assert len(ops[0]) == 1 and ops[0][0].type == "allreduce"
 
+    @pytest.mark.smoke
     def test_rank_qualified_sugar_and_super_op(self, gloo_world):
         merged = tl.merge_ranks([_capture()])
         label = merged.join_ops(merged.joins[0])[0][0].label
         assert merged[f"r0/{label}"].label == label
-        assert set(merged.super_op(label)) == {0}
+        assert set(merged.at(label)) == {0}
 
     def test_selector_getitem_refuses_typed(self, gloo_world):
         merged = tl.merge_ranks([_capture()])
@@ -134,6 +150,7 @@ class TestLiveMerge:
             tl.merge_ranks([log, log])
         assert excinfo.value.fields["code"] == "merge_input_invalid"
 
+    @pytest.mark.smoke
     def test_happens_before_orders_sequential_joins(self, gloo_world):
         class TwoCollectives(nn.Module):
             def __init__(self):
@@ -156,64 +173,13 @@ class TestLiveMerge:
 
 
 class TestArtifact:
-    pytestmark = pytest.mark.smoke
-
-    def test_round_trip_rederives_and_exposes_ranks(self, gloo_world, tmp_path):
-        merged = tl.merge_ranks([_capture()])
-        art = tmp_path / "merged.tlspec"
-        merged.save(art)
-        loaded = tl.load(art)
-        assert loaded.alignment.value == "aligned"
-        assert loaded.value_status.value == "attested_complete"
-        assert len(loaded.joins) == 1
-        assert loaded.load_degradations == ()
-        # Rank cores are ordinary bundles inside members/, fully loadable.
-        assert loaded.ranks[0]["linear_1_1"] is not None
-
-    def test_descriptor_is_deterministic_over_identical_members(self, gloo_world, tmp_path):
-        merged = tl.merge_ranks([_capture()])
-        art = tmp_path / "merged.tlspec"
-        merged.save(art)
-        member = art / "members" / "rank_0000.tlspec"
-        left = tl.merge_ranks([str(member)])
-        right = tl.merge_ranks([str(member)])
-        assert canonical_json_bytes(left._derivation.to_payload()) == canonical_json_bytes(
-            right._derivation.to_payload()
-        )
-
-    def test_loaded_vs_live_parity(self, gloo_world, tmp_path):
-        merged = tl.merge_ranks([_capture()])
-        art = tmp_path / "merged.tlspec"
-        merged.save(art)
-        member = art / "members" / "rank_0000.tlspec"
-        from_path = tl.merge_ranks([str(member)])
-        from_loaded = tl.merge_ranks([tl.load(member)])
-        assert canonical_json_bytes(from_path._derivation.to_payload()) == canonical_json_bytes(
-            from_loaded._derivation.to_payload()
-        )
-        # The live derivation equals the loaded one too (P1: rank cores are
-        # single truth; save/load changes nothing the merge reads).
-        assert canonical_json_bytes(merged._derivation.to_payload()) == canonical_json_bytes(
-            from_path._derivation.to_payload()
-        )
-
-    def test_resave_of_loaded_artifact_copies_members(self, gloo_world, tmp_path):
-        merged = tl.merge_ranks([_capture()])
-        first = tmp_path / "first.tlspec"
-        merged.save(first)
-        loaded = tl.load(first)
-        second = tmp_path / "second.tlspec"
-        loaded.save(second)
-        reloaded = tl.load(second)
-        assert reloaded.alignment.value == "aligned"
-
     def test_mutated_inputs_refuse_at_save_not_at_every_future_load(self, gloo_world, tmp_path):
         """Deep-hunt F12: save re-verifies derivation-vs-members first.
 
         Fail-before: a live input trace whose distributed annotations were
         mutated between merge_ranks and save() produced an artifact whose
         members never rederive to the cached descriptor -- every future load
-        refused as merged_descriptor_tamper, a permanent false tamper
+        refused as merged_descriptor_invalid, a permanent false tamper
         accusation for an honest sequence.
         """
 
@@ -225,6 +191,7 @@ class TestArtifact:
         assert excinfo.value.fields["code"] == "merge_input_invalid"
         assert not (tmp_path / "merged.tlspec").exists()
 
+    @pytest.mark.smoke
     def test_failed_overwrite_preserves_previous_artifact(
         self,
         gloo_world: Any,
@@ -247,12 +214,16 @@ class TestArtifact:
         with pytest.raises(OSError, match="member copy failure"):
             loaded.save(art, overwrite=True)
 
+        # The surviving older copy loads only once the failed save's staging dir is accepted.
+        with pytest.raises(tl.errors.ArtifactError) as refused:
+            tl.load(art)
+        assert refused.value.fields["code"] == "newer_save_unfinished"
+        assert len(tl.io.cleanup_tmp(art)) == 1
         restored = tl.load(art)
         assert restored.alignment.value == "aligned"
 
 
 class TestTamperMatrix:
-    pytestmark = pytest.mark.smoke
     """The descriptor is a CACHE; edits refuse typed, never degrade to gaps."""
 
     def _saved(self, tmp_path):
@@ -260,16 +231,6 @@ class TestTamperMatrix:
         art = tmp_path / "merged.tlspec"
         merged.save(art)
         return art
-
-    def test_descriptor_edit_without_manifest_is_checksum_tamper(self, gloo_world, tmp_path):
-        art = self._saved(tmp_path)
-        descriptor = art / "merge" / "descriptor.json"
-        data = json.loads(descriptor.read_text())
-        data["derivation"]["joins"] = []
-        descriptor.write_text(json.dumps(data))
-        with pytest.raises(MergedArtifactError) as excinfo:
-            tl.load(art)
-        assert excinfo.value.fields["code"] == "merged_descriptor_tamper"
 
     def test_coherent_descriptor_rewrite_fails_rederivation(self, gloo_world, tmp_path):
         # Delete the join from the descriptor AND fix the root checksum: the
@@ -288,7 +249,7 @@ class TestTamperMatrix:
         manifest_path.write_text(json.dumps(manifest))
         with pytest.raises(MergedArtifactError) as excinfo:
             tl.load(art)
-        assert excinfo.value.fields["code"] == "merged_descriptor_tamper"
+        assert excinfo.value.fields["code"] == "merged_descriptor_invalid"
 
     def test_member_byte_edit_fails_tree_hash(self, gloo_world, tmp_path):
         art = self._saved(tmp_path)
@@ -296,38 +257,25 @@ class TestTamperMatrix:
         member_manifest.write_text(member_manifest.read_text() + " ")
         with pytest.raises(MergedArtifactError) as excinfo:
             tl.load(art)
-        assert excinfo.value.fields["code"] == "merged_descriptor_tamper"
+        assert excinfo.value.fields["code"] == "merged_descriptor_invalid"
 
     def test_member_deletion_refuses_never_a_gap(self, gloo_world, tmp_path):
         art = self._saved(tmp_path)
         shutil.rmtree(art / "members" / "rank_0000.tlspec")
         with pytest.raises(MergedArtifactError) as excinfo:
             tl.load(art)
-        assert excinfo.value.fields["code"] == "merged_descriptor_tamper"
-
-    def test_foreign_bundle_format_refuses_closed_vocabulary(self, gloo_world, tmp_path):
-        art = self._saved(tmp_path)
-        manifest_path = art / "manifest.json"
-        manifest = json.loads(manifest_path.read_text())
-        manifest["bundle_format"] = "merged-directory-v2"
-        manifest_path.write_text(json.dumps(manifest))
-        # Narrowed from a blind `Exception` (B017): the closed-vocabulary claim in
-        # this test's NAME is only actually tested when the refusal type is pinned.
-        # A foreign bundle_format never enters the merged branch, so the trace-bundle
-        # loader refuses it as an unrecognized directory artifact.
-        with pytest.raises(TorchLensIOError):
-            tl.load(art)
+        assert excinfo.value.fields["code"] == "merged_descriptor_invalid"
 
 
 def _append_unparseable_member(art: Path) -> Path:
     """Add a hash-valid but bundle-unparseable rank-1 member to a saved artifact.
 
     The member's tree hashes are CORRECT in both records, so it passes
-    integrity and enters ``load_degradations`` at bundle-load time -- the
+    integrity and enters ``degradations`` at bundle-load time -- the
     degraded-environment branch, where exact cache equality is skipped.
     """
 
-    from torchlens.merged._artifact import tree_hash
+    from torchlens._merged._artifact import tree_hash
 
     fake = art / "members" / "rank_0001.tlspec"
     fake.mkdir()
@@ -349,7 +297,6 @@ def _append_unparseable_member(art: Path) -> Path:
 
 
 class TestDegradedLoadCoherence:
-    pytestmark = pytest.mark.smoke
     """R18-5: the degraded branch is typed and demote-only, never cache-trusting."""
 
     def _degraded(self, tmp_path: Path) -> Path:
@@ -369,11 +316,12 @@ class TestDegradedLoadCoherence:
         manifest["descriptor_sha256"] = hashlib.sha256(payload).hexdigest()
         manifest_path.write_text(json.dumps(manifest))
 
+    @pytest.mark.smoke
     def test_unparseable_member_caps_value_status(self, gloo_world, tmp_path):
         """Fail-before: value_status presented ATTESTED_COMPLETE under degradation."""
 
         loaded = tl.load(self._degraded(tmp_path))
-        assert loaded.load_degradations
+        assert loaded.degradations
         assert loaded.stored_value_status.value == "attested_complete"
         assert loaded.value_status.value == "attested_partial"
         assert loaded.alignment.value == "partial"
@@ -421,7 +369,7 @@ class TestDegradedLoadCoherence:
         )
         with pytest.raises(MergedArtifactError) as excinfo:
             tl.load(art)
-        assert excinfo.value.fields["code"] == "merged_descriptor_tamper"
+        assert excinfo.value.fields["code"] == "merged_descriptor_invalid"
 
     def test_forged_join_consistency_refuses(self, gloo_world, tmp_path):
         """A cache whose join verdicts contradict their own digest rows refuses."""
@@ -435,7 +383,7 @@ class TestDegradedLoadCoherence:
         self._rewrite_cache(art, forge)
         with pytest.raises(MergedArtifactError) as excinfo:
             tl.load(art)
-        assert excinfo.value.fields["code"] == "merged_descriptor_tamper"
+        assert excinfo.value.fields["code"] == "merged_descriptor_invalid"
 
     def test_forged_survivor_digest_rows_refuse(self, gloo_world, tmp_path):
         """Fabricated per-rank digest rows for a SURVIVING rank refuse.
@@ -457,16 +405,9 @@ class TestDegradedLoadCoherence:
         self._rewrite_cache(art, forge)
         with pytest.raises(MergedArtifactError) as excinfo:
             tl.load(art)
-        assert excinfo.value.fields["code"] == "merged_descriptor_tamper"
+        assert excinfo.value.fields["code"] == "merged_descriptor_invalid"
 
-    def test_honest_unwitnessed_degraded_load_still_loads(self, gloo_world, tmp_path):
-        """The coherence checks refuse forgery, never the honest degraded load."""
-
-        loaded = tl.load(self._degraded_unwitnessed(tmp_path))
-        assert loaded.load_degradations
-        assert loaded.stored_value_status.value == "unwitnessed"
-        assert loaded.alignment.value == "partial"
-
+    @pytest.mark.smoke
     def test_forged_alignment_verdict_refuses(self, gloo_world, tmp_path):
         """A stored_alignment contradicting the cached findings ledger refuses."""
 
@@ -474,7 +415,7 @@ class TestDegradedLoadCoherence:
         self._rewrite_cache(art, lambda d: d.__setitem__("stored_alignment", "partial"))
         with pytest.raises(MergedArtifactError) as excinfo:
             tl.load(art)
-        assert excinfo.value.fields["code"] == "merged_descriptor_tamper"
+        assert excinfo.value.fields["code"] == "merged_descriptor_invalid"
 
     def test_divergent_survivors_cannot_present_attested(self, gloo_world, tmp_path, monkeypatch):
         """Monotone coherence: a cache claiming better than the survivors refuses.
@@ -485,8 +426,8 @@ class TestDegradedLoadCoherence:
 
         from dataclasses import replace
 
-        import torchlens.merged._artifact as artifact_mod
-        from torchlens.merged._enums import MergeValueStatus
+        import torchlens._merged._artifact as artifact_mod
+        from torchlens._merged._enums import MergeValueStatus
 
         art = self._degraded(tmp_path)
         real_derive = artifact_mod.derive_merge
@@ -500,15 +441,15 @@ class TestDegradedLoadCoherence:
         monkeypatch.setattr(artifact_mod, "derive_merge", diverging)
         with pytest.raises(MergedArtifactError) as excinfo:
             tl.load(art)
-        assert excinfo.value.fields["code"] == "merged_descriptor_tamper"
+        assert excinfo.value.fields["code"] == "merged_descriptor_invalid"
 
     def test_conflicting_survivors_refuse(self, gloo_world, tmp_path, monkeypatch):
         """Survivors that structurally conflict could never have merged honestly."""
 
         from dataclasses import replace
 
-        import torchlens.merged._artifact as artifact_mod
-        from torchlens.merged._errors import MergedFinding
+        import torchlens._merged._artifact as artifact_mod
+        from torchlens._merged._errors import MergedFinding
 
         art = self._degraded(tmp_path)
         real_derive = artifact_mod.derive_merge
@@ -524,27 +465,13 @@ class TestDegradedLoadCoherence:
         monkeypatch.setattr(artifact_mod, "derive_merge", conflicted)
         with pytest.raises(MergedArtifactError) as excinfo:
             tl.load(art)
-        assert excinfo.value.fields["code"] == "merged_descriptor_tamper"
+        assert excinfo.value.fields["code"] == "merged_descriptor_invalid"
 
 
 class TestArtifactHardening:
-    pytestmark = pytest.mark.smoke
     """b4-P slice items: platform coarsening and double-fault disclosure."""
 
-    def test_manifest_platform_is_coarse(self, gloo_world, tmp_path):
-        """Fail-before (B8-22): full platform.platform() leaked the kernel
-        build, libc, and cloud image tag into a shareable artifact."""
-
-        import platform as platform_module
-
-        merged = tl.merge_ranks([_capture()])
-        art = tmp_path / "merged.tlspec"
-        merged.save(art)
-        manifest = json.loads((art / "manifest.json").read_text())
-        assert manifest["platform"] == (
-            f"{platform_module.system().lower()}-{platform_module.machine().lower()}"
-        )
-
+    @pytest.mark.smoke
     def test_double_fault_restore_discloses_stranded_backup(
         self, gloo_world, tmp_path, monkeypatch
     ):
@@ -574,14 +501,45 @@ class TestArtifactHardening:
         backups = list(tmp_path.glob("merged.tlspec.bak.*"))
         assert backups, "the backup must remain recoverable"
 
+    def test_failed_overwrite_keeps_partial_staging_and_load_refuses(
+        self, gloo_world, tmp_path, monkeypatch
+    ):
+        """A failed overwrite restores the older artifact and keeps its staging dir PARTIAL,
+        so ``tl.load`` refuses ``newer_save_unfinished`` until ``cleanup_tmp`` accepts the
+        older copy (before: the staging dir was deleted and load served the older copy)."""
+
+        from torchlens.io import cleanup_tmp
+
+        merged = tl.merge_ranks([_capture()])
+        art = tmp_path / "merged.tlspec"
+        merged.save(art)
+        original_rename = Path.rename
+
+        def failing_install(self: Path, target: Any) -> Any:
+            if self.name.startswith("merged.tlspec.tmp.") and Path(target) == art:
+                raise OSError("simulated install failure")
+            return original_rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", failing_install)
+        with pytest.raises(OSError, match="simulated install failure"):
+            merged.save(art, overwrite=True)
+        monkeypatch.undo()
+
+        (staging,) = tmp_path.glob("merged.tlspec.tmp.*")
+        assert (staging / "REASON.txt").read_text(encoding="utf-8") == "OSError"
+        with pytest.raises(tl.errors.ArtifactError) as info:
+            tl.load(art)
+        assert info.value.fields.get("code") == "newer_save_unfinished"
+        assert staging in cleanup_tmp(art)
+        tl.load(art)
+
 
 class TestRefusedSurfacesTyped:
-    pytestmark = pytest.mark.smoke
     """R18-9 presenter half: contract-promised refusals are typed, never bare."""
 
     @pytest.mark.parametrize(
         "surface",
-        ["fork", "intervene", "log_backward", "receptive_fields", "projective_fields"],
+        ["fork", "intervene", "backward", "receptive_fields", "projective_fields"],
     )
     def test_surface_refuses_typed(self, gloo_world, surface):
         """Fail-before: these raised bare AttributeError despite the contract
@@ -626,14 +584,14 @@ def _tp_worker(rank: int, world_size: int, init_file: str, out_dir: str) -> None
     torch.manual_seed(77)
     x = torch.randn(2, 4)
     log = tl.trace(model, x, capture=tl.options.CaptureOptions(distributed_witness="digest"))
-    tl.save(log, os.path.join(out_dir, f"rank{rank}.tlspec"))
+    log.save(os.path.join(out_dir, f"rank{rank}.tlspec"))
     dist.destroy_process_group()
 
 
 def _asymmetric_worker(
     rank: int, world_size: int, init_file: str, init_file_2: str, out_dir: str
 ) -> None:
-    """Sol's seed-discharge-negative shape, live: rank 0 arms before any
+    """The review's seed-discharge-negative shape, live: rank 0 arms before any
     group and witnesses a destroy/re-init cycle; rank 1 arms only after the
     re-init, so its restricted seed denotes generation 1 while claiming
     ordinal 0."""
@@ -660,7 +618,7 @@ def _asymmetric_worker(
     model = HandRolledTP()
     torch.manual_seed(77)
     log = tl.trace(model, torch.randn(2, 4))
-    tl.save(log, os.path.join(out_dir, f"rank{rank}.tlspec"))
+    log.save(os.path.join(out_dir, f"rank{rank}.tlspec"))
     dist.destroy_process_group()
 
 

@@ -55,6 +55,37 @@ class MLXCallState:
     module_ref: Any = None
     source_ids: tuple[tuple[int, int], ...] = ()
     rng_state: tuple[Any, ...] | None = None
+    state_writes: tuple[tuple[tuple[object, ...], Any], ...] = ()
+
+
+def mlx_state_writes(before: Any, after: Any) -> tuple[tuple[tuple[object, ...], Any], ...]:
+    """Read array replacements made within one observed native module call.
+
+    Parameters
+    ----------
+    before
+        Pre-call module snapshot, retaining its original array identities.
+    after
+        Module immediately after the native call, before control returns to
+        user code. Only writes made in this interval are attested.
+
+    Returns
+    -------
+    tuple
+        Structural paths and the native post-call array values.
+    """
+
+    import mlx.core as mx
+
+    initial = {
+        path: value
+        for value, path in iter_arrays_with_paths(before, lambda a: isinstance(a, mx.array))
+    }
+    return tuple(
+        (path, value)
+        for value, path in iter_arrays_with_paths(after, lambda a: isinstance(a, mx.array))
+        if initial.get(path) is not value
+    )
 
 
 def _array_owner(module: Any, path: tuple[object, ...]) -> tuple[int, tuple[object, ...]]:
@@ -110,4 +141,4 @@ def capture_mlx_call_state(
     )
 
 
-__all__ = ["MLXCallState", "capture_mlx_call_state", "mlx_rng_scope", "snapshot_mlx_rng"]
+__all__ = ("MLXCallState", "capture_mlx_call_state", "mlx_rng_scope", "snapshot_mlx_rng")

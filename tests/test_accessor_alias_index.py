@@ -10,6 +10,7 @@ counters to unmemoized reference computations.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -17,12 +18,13 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.data_classes._trace_accessors import (
+from torchlens._data_classes._trace_accessors import (
     TraceGradFnCallAccessor,
     TraceModuleCallAccessor,
     TraceOpAccessor,
 )
-from torchlens.data_classes.op import Op
+from torchlens._data_classes.op import Op
+from torchlens._utils._record_group_table import record_member
 
 
 class Nested(nn.Module):
@@ -177,11 +179,11 @@ def _op_probe_keys(accessor: TraceOpAccessor) -> list[str]:
     for op in accessor:
         keys += [
             op.label,
-            op.label_short,
+            op.short_label,
             op._label_raw,
             op.raw_label,
             op.layer_label,
-            op.layer_label_short,
+            op.short_layer_label,
         ]
         keys += list(op.children) + list(op.parents)
     keys += ["nope", "", ":", "1", "self", "linear", "relu_1_1:99"]
@@ -191,7 +193,9 @@ def _op_probe_keys(accessor: TraceOpAccessor) -> list[str]:
 def _reference_module_call_match(accessor: TraceModuleCallAccessor, key: str) -> Any:
     """Resolve a ModuleCall key by scanning, mirroring the pre-index behavior."""
 
-    parent_matches = [call for call in accessor._list if key == getattr(call, "address", None)]
+    parent_matches = [
+        call for call in accessor._list if key == record_member(call, "address", None)
+    ]
     if len(parent_matches) == 1:
         return parent_matches[0]
     if len(parent_matches) > 1:
@@ -201,13 +205,17 @@ def _reference_module_call_match(accessor: TraceModuleCallAccessor, key: str) ->
             f"Module '{key}' has {len(parent_matches)} calls. Use a 0-based integer "
             f"position or a call-qualified label like '{key}:1'."
         )
-    return None
+    # The typed door converts a key that names exactly one call (here, a call label
+    # handed straight to the resolver) to that call; the scan mirrors it.
+    return accessor._dict.get(key)
 
 
 def _reference_grad_fn_call_match(accessor: TraceGradFnCallAccessor, key: str) -> Any:
     """Resolve a GradFnCall key by scanning, mirroring the pre-index behavior."""
 
-    parent_matches = [call for call in accessor._list if key == getattr(call, "label", None)]
+    parent_matches = [
+        call for call in accessor._list if key == getattr(call, "grad_fn_label", None)
+    ]
     if len(parent_matches) == 1:
         return parent_matches[0]
     if len(parent_matches) > 1:
@@ -220,7 +228,6 @@ def _reference_grad_fn_call_match(accessor: TraceGradFnCallAccessor, key: str) -
     return None
 
 
-@pytest.mark.smoke
 def test_op_alias_index_matches_scan_for_every_key() -> None:
     """Indexed Op resolution equals the scan for every alias, miss, and ambiguity."""
 
@@ -259,7 +266,6 @@ def test_op_alias_index_matches_scan_for_every_key() -> None:
     assert probed["ambiguous"] > 0
 
 
-@pytest.mark.smoke
 def test_module_call_and_grad_fn_call_indexes_match_scan() -> None:
     """Indexed ModuleCall/GradFnCall resolution equals the scanning form."""
 
@@ -267,14 +273,14 @@ def test_module_call_and_grad_fn_call_indexes_match_scan() -> None:
     model = Recurrent(3)
     model.eval()
     x = torch.randn(3, 6, requires_grad=True)
-    trace = tl.trace(model, x, layers_to_save="all", save_grads="all")
+    trace = tl.trace(model, x, capture=tl.options.CaptureOptions(save_grads="all"), save="all")
     try:
         loss = trace[trace.output_layers[0]].out.sum()
-        trace.log_backward(loss, retain_graph=True)
-        trace.log_backward(loss, retain_graph=True)
+        trace.backward(loss, retain_graph=True)
+        trace.backward(loss, retain_graph=True)
 
         module_calls = trace.module_calls
-        module_keys = [getattr(call, "address", None) for call in module_calls]
+        module_keys = [record_member(call, "address", None) for call in module_calls]
         module_keys += [getattr(call, "label", None) for call in module_calls]
         module_keys += ["nope", "self", "cell"]
         ambiguous_modules = 0
@@ -288,10 +294,10 @@ def test_module_call_and_grad_fn_call_indexes_match_scan() -> None:
                 assert indexed is scanned, key
         assert ambiguous_modules > 0
 
-        grad_fn_calls = trace.grad_fn_calls
+        grad_fn_calls = trace.autograd.grad_fn_calls
         assert len(grad_fn_calls) > 0
-        grad_fn_keys = [getattr(call, "label", None) for call in grad_fn_calls]
-        grad_fn_keys += [getattr(call, "call_label", None) for call in grad_fn_calls]
+        grad_fn_keys = [getattr(call, "grad_fn_label", None) for call in grad_fn_calls]
+        grad_fn_keys += [getattr(call, "label", None) for call in grad_fn_calls]
         grad_fn_keys += ["nope", "AddBackward0"]
         ambiguous_grad_fns = 0
         for key in dict.fromkeys(k for k in grad_fn_keys if isinstance(k, str)):
@@ -308,15 +314,15 @@ def test_module_call_and_grad_fn_call_indexes_match_scan() -> None:
         trace.cleanup()
 
 
-@pytest.mark.smoke
 def test_edge_counters_match_unmemoized_reference() -> None:
     """Memoized edge counting equals the direct per-edge accessor resolution."""
 
     for name, model, trace in _traces():
         try:
             ops = trace.ops
+            rows = trace._layer_list  # every row: edges touch input/output/buffer rows too
             direct_edges = {
-                (op.label, ops[child_label].label) for op in ops for child_label in op.children
+                (op.label, ops[child_label].label) for op in rows for child_label in op.children
             }
             compute_ops = trace.compute_ops
             compute_labels = {op.label for op in compute_ops}
@@ -328,22 +334,21 @@ def test_edge_counters_match_unmemoized_reference() -> None:
             }
             direct_buffer = {
                 (op.label, ops[child_label].label)
-                for op in ops
+                for op in rows
                 for child_label in op.children
-                if op.is_buffer or ops[child_label].is_buffer
+                if op.graph.is_buffer or ops[child_label].graph.is_buffer
             }
             assert trace.num_edges == len(direct_edges), name
-            assert trace.num_compute_edges == len(direct_compute), name
-            assert trace.num_buffer_edges == len(direct_buffer), name
+            assert trace.graph.num_compute_edges == len(direct_compute), name
+            assert trace.graph.num_buffer_edges == len(direct_buffer), name
             # Repeat reads must be stable once the memo is warm.
             assert trace.num_edges == len(direct_edges), name
-            assert trace.num_buffer_edges == len(direct_buffer), name
+            assert trace.graph.num_buffer_edges == len(direct_buffer), name
         finally:
             tl.release_model(model)
             trace.cleanup()
 
 
-@pytest.mark.smoke
 def test_alias_index_build_failure_falls_back_to_scan(monkeypatch: pytest.MonkeyPatch) -> None:
     """An unreadable alias on a later Op degrades to the scan, not to an error.
 
@@ -364,7 +369,7 @@ def test_alias_index_build_failure_falls_back_to_scan(monkeypatch: pytest.Monkey
         ops = list(trace.ops)
         assert len(ops) > 2
         first, last = ops[0], ops[-1]
-        probe_key = first.label_short
+        probe_key = first.short_label
         assert isinstance(probe_key, str)
 
         original = Op.raw_label
@@ -377,10 +382,10 @@ def test_alias_index_build_failure_falls_back_to_scan(monkeypatch: pytest.Monkey
             return original.fget(op)
 
         monkeypatch.setattr(Op, "raw_label", property(raising_raw_label))
-        accessor = TraceOpAccessor(ops, trace.layer_num_calls)
+        accessor = TraceOpAccessor(ops, trace._layer_num_calls)
         assert accessor._resolve_substring(probe_key) is first
         assert accessor._alias_index_unavailable is True
-        assert accessor._alias_index is None
+        assert accessor._alias_indexes is None
         # The degraded accessor stays degraded and stays correct.
         assert accessor._resolve_substring(probe_key) is first
         # A full-miss scan does reach the unreadable Op -- and must raise there
@@ -389,6 +394,80 @@ def test_alias_index_build_failure_falls_back_to_scan(monkeypatch: pytest.Monkey
             accessor._resolve_substring("definitely-not-a-label")
         with pytest.raises(RuntimeError, match="unreadable raw_label"):
             accessor._resolve_substring_by_scan("definitely-not-a-label")
+    finally:
+        tl.release_model(model)
+        trace.cleanup()
+
+
+def _scanned_layer_matches(accessor: TraceOpAccessor, key: str) -> list[Op]:
+    """Reference bare-layer-label matches by scanning every row, as before the index."""
+
+    return [op for op in accessor._list if key in {op.layer_label, op.short_layer_label}]
+
+
+def test_resolve_all_index_matches_scan_for_every_key() -> None:
+    """``resolve_all`` and ``trace[...]`` answer identically through the layer-label index.
+
+    The index serves only settled rows; the scan stays the reference, so every
+    probe key (aliases, stored edge labels, pass tokens, misses) must resolve to
+    the same Ops in the same order, or raise the same error.
+    """
+
+    probed = 0
+    for name, model, trace in _traces():
+        try:
+            accessor = trace.ops
+            assert getattr(accessor._list[-1], "_tracing_finished", False), name
+            scan_only = TraceOpAccessor(accessor._list, trace._layer_num_calls)
+            scan_only._layer_label_matches = (  # type: ignore[method-assign]
+                lambda key, a=scan_only: _scanned_layer_matches(a, key)
+            )
+            keys = _op_probe_keys(accessor)
+            keys += [f"{op.layer_label}:{token}" for op in accessor for token in ("last", "all")]
+            for key in dict.fromkeys(keys):
+                indexed = _outcome(lambda k=key, a=accessor: a.resolve_all(k))
+                scanned = _outcome(lambda k=key, a=scan_only: a.resolve_all(k))
+                if isinstance(scanned, str):
+                    assert indexed == scanned, (name, key)
+                else:
+                    assert [id(op) for op in indexed] == [id(op) for op in scanned], (name, key)
+                via_trace = _outcome(lambda k=key, t=trace: t[k])
+                assert not isinstance(via_trace, list), (name, key)
+                probed += 1
+            assert accessor._layer_label_index is not None, name
+        finally:
+            tl.release_model(model)
+            trace.cleanup()
+    assert probed > 30
+
+
+def test_resolve_all_scans_until_rows_settle() -> None:
+    """Before the last row is finished no index is built and the live scan answers."""
+
+    torch.manual_seed(0)
+    model = Recurrent()
+    model.eval()
+    trace = tl.trace(model, torch.randn(3, 6))
+    try:
+        # A trailing stand-in row whose finished flag the test controls.
+        last = SimpleNamespace(
+            label="stand_in_1_1",
+            raw_index=-1,
+            layer_label="stand_in_1_1",
+            short_layer_label="stand_in_1",
+            _tracing_finished=False,
+        )
+        ops = [*trace._layer_list, last]
+        accessor = TraceOpAccessor(ops, trace._layer_num_calls)  # type: ignore[arg-type]
+        key = next(op.layer_label for op in ops if trace._layer_num_calls[op.layer_label] > 1)
+        assert accessor.resolve_all(key) == _scanned_layer_matches(accessor, key)
+        assert accessor._layer_label_index is None
+        last._tracing_finished = True
+        assert accessor.resolve_all(key) == _scanned_layer_matches(accessor, key)
+        assert accessor._layer_label_index is not None
+        # Callers get a fresh list; mutating it leaves the index intact.
+        accessor.resolve_all(key).clear()
+        assert accessor.resolve_all(key) == _scanned_layer_matches(accessor, key)
     finally:
         tl.release_model(model)
         trace.cleanup()

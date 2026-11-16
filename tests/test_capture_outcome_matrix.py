@@ -19,13 +19,14 @@ from fixtures.capture_outcome_models import ThreeStageModel, halt_on_relu
 from torch import nn
 
 import torchlens as tl
-from torchlens.capture.outcome import (
+from torchlens._capture.outcome import (
     CaptureOutcomeError,
     CapturePhase,
     CaptureStatus,
 )
+from torchlens.errors import TorchLensWarning, TraceCaptureError
 
-pytestmark = pytest.mark.smoke
+pytestmark = pytest.mark.usefixtures("root_edits_in_place")  # D.12: no per-call mutation keyword
 
 TORCHLENS_DIR = pathlib.Path(tl.__file__).resolve().parent
 
@@ -45,58 +46,29 @@ class NaNProducingModel(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-def test_transform_introduced_nan_stays_complete() -> None:
-    """A NaN INTRODUCED by activation_transform never trips the raw tripwire."""
-
-    def poison(tensor: torch.Tensor) -> torch.Tensor:
-        return tensor * float("nan")
-
-    trace = tl.trace(
-        ThreeStageModel(),
-        torch.ones(1, 3),
-        activation_transform=poison,
-        capture=tl.options.CaptureOptions(raise_on_nan=True),
-    )
-    assert trace.outcome.status is CaptureStatus.COMPLETE
-
-
-def test_raw_nan_aborts_even_when_transform_sanitizes() -> None:
-    """A raw-tensor NaN aborts even if the transform would have removed it."""
-
-    def sanitize(tensor: torch.Tensor) -> torch.Tensor:
-        return torch.nan_to_num(tensor)
-
-    from torchlens.errors import CaptureError
-
-    with pytest.raises(CaptureError) as exc_info:
-        tl.trace(
-            NaNProducingModel(),
-            torch.ones(1, 3),
-            activation_transform=sanitize,
-            capture=tl.options.CaptureOptions(raise_on_nan=True),
-        )
-    outcome = tl.partial.from_failed_capture(exc_info.value).trace.outcome
-    assert outcome.status is CaptureStatus.ABORTED_NONFINITE
-
-
 # ---------------------------------------------------------------------------
 # No-frontier halt: FAILED/FINALIZE, never a fabricated frontier
 # ---------------------------------------------------------------------------
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _capture/finalize/settle.py.
 def test_no_frontier_halt_settles_failed_finalize(monkeypatch) -> None:
     """A halt with no recoverable tensor frontier fails typed at FINALIZE."""
 
-    import torchlens.backends.torch.ops as torch_ops
+    import torchlens._capture.stop as stop_module
+    import torchlens.backends.torch._ops_exhaustive as ops_exhaustive
+    import torchlens.backends.torch._ops_predicate_events as ops_predicate_events
     from torchlens import _state
-    from torchlens.fastlog._halt import HaltSignal
+    from torchlens.recording._halt import StopSignal
 
-    original = torch_ops.evaluate_halt_stop
+    original = stop_module.evaluate_halt_stop
 
     def _strip_frontier(trace, ctx, options, frontier_output=None):
         return original(trace, ctx, options, frontier_output=None)
 
-    monkeypatch.setattr(torch_ops, "evaluate_halt_stop", _strip_frontier)
+    # The home module and the capture modules that bound the evaluator by import.
+    for module in (stop_module, ops_exhaustive, ops_predicate_events):
+        monkeypatch.setattr(module, "evaluate_halt_stop", _strip_frontier)
 
     captured: list = []
 
@@ -109,24 +81,30 @@ def test_no_frontier_halt_settles_failed_finalize(monkeypatch) -> None:
         return False
 
     with pytest.raises(RuntimeError, match="could not identify a tensor frontier") as exc_info:
-        tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=_halt_and_orphan)
-    assert isinstance(exc_info.value.__cause__, HaltSignal)
+        tl.trace(ThreeStageModel(), torch.ones(1, 3), stop_after=_halt_and_orphan)
+    assert isinstance(exc_info.value.__cause__, StopSignal)
     outcome = captured[0].outcome
     assert outcome is not None
     assert outcome.status is CaptureStatus.FAILED
     assert outcome.phase is CapturePhase.FINALIZE
-    assert "halted finalization failed" in (outcome.settlement_note or "")
+    assert "halted finalization failed" in (outcome.note or "")
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _capture/finalize/epilogue.py.
 def test_never_fired_halt_predicate_stays_complete() -> None:
-    """A halt predicate that never fires yields an ordinary COMPLETE capture."""
+    """A halt predicate that never fires yields an ordinary COMPLETE capture.
 
-    trace = tl.trace(
-        ThreeStageModel(),
-        torch.ones(1, 3),
-        halt=lambda ctx: ctx.kind == "op" and ctx.func_name == "definitely_absent",
-    )
-    assert trace.halted is False
+    The callable never-fired policy warns (the capture ran the full forward)
+    but the product stays COMPLETE.
+    """
+
+    with pytest.warns(TorchLensWarning, match="never fired"):
+        trace = tl.trace(
+            ThreeStageModel(),
+            torch.ones(1, 3),
+            stop_after=lambda ctx: ctx.kind == "op" and ctx.func_name == "definitely_absent",
+        )
+    assert trace.is_stopped is False
     assert trace.outcome.status is CaptureStatus.COMPLETE
 
 
@@ -135,22 +113,27 @@ def test_never_fired_halt_predicate_stays_complete() -> None:
 # ---------------------------------------------------------------------------
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _io/bundle.py, backends/torch/_trace_backward.py, intervention/_trace_run.py ....
 def test_cooked_halted_trace_refuses_runnable_save_and_live_replay(tmp_path) -> None:
     recording = tl.record(
         ThreeStageModel(),
         torch.ones(1, 3),
         save=lambda ctx: ctx.kind == "op",
-        halt=halt_on_relu,
+        stop_after=halt_on_relu,
     )
     cooked = recording.to_trace()
-    assert cooked.outcome.status is CaptureStatus.HALTED
+    assert cooked.outcome.status is CaptureStatus.STOPPED
 
     from torchlens.errors import RunnablePreflightError
 
     with pytest.raises(RunnablePreflightError):
-        tl.save(cooked, tmp_path / "cooked_halted.tlspec", level="runnable", overwrite=True)
+        cooked.save(tmp_path / "cooked_halted.tlspec", level="runnable", overwrite=True)
     with pytest.raises(CaptureOutcomeError) as exc_info:
-        cooked.push()
+        cooked.do(
+            tl.func("linear"),
+            tl.scale(1.0),
+            intervention=tl.options.InterventionOptions(),
+        )
     assert exc_info.value.fields["code"] == "N5"
 
 
@@ -159,8 +142,9 @@ def test_cooked_halted_trace_refuses_runnable_save_and_live_replay(tmp_path) -> 
 # ---------------------------------------------------------------------------
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _capture/_nonfinite_prefix.py, _partial/__init__.py.
 def test_memory_error_in_postprocess_settles_failed(monkeypatch) -> None:
-    import torchlens.postprocess as pp
+    import torchlens._postprocess as pp
 
     captured: list = []
 
@@ -168,9 +152,10 @@ def test_memory_error_in_postprocess_settles_failed(monkeypatch) -> None:
         captured.append(trace)
         raise MemoryError("planted OOM")
 
-    monkeypatch.setattr(pp, "_add_output_layers", _boom)
-    with pytest.raises(MemoryError):
+    monkeypatch.setattr(pp.graph_traversal, "_add_output_layers", _boom)
+    with pytest.raises(TraceCaptureError) as _tce_info:
         tl.trace(ThreeStageModel(), torch.ones(1, 3))
+    assert isinstance(_tce_info.value.__cause__, MemoryError)
     outcome = captured[0].outcome
     assert outcome is not None
     assert outcome.status is CaptureStatus.FAILED
@@ -191,18 +176,24 @@ def test_gated_entries_consult_the_chokepoint() -> None:
     consumer of the capability table.
     """
 
-    validation_source = (TORCHLENS_DIR / "data_classes" / "_trace_validation.py").read_text(
-        encoding="utf-8"
+    # The gated entry bodies live in the record-rebuild destination modules
+    # (the `Trace` methods are thin door calls); read all three.
+    validation_source = "".join(
+        (TORCHLENS_DIR / part).read_text(encoding="utf-8")
+        for part in (
+            "validation/_trace_checks.py",
+            "intervention/_trace_run.py",
+            "backends/torch/_trace_backward.py",
+        )
     )
-    gate_calls = re.findall(r'require_capture_capability\(self, "([a-z_]+)"\)', validation_source)
-    # save_new_outs, push, push_from, run (entry pre-gate + loaded-sparse +
-    # analysis-load pre-gate + unified-live + legacy-live), log_backward,
+    gate_calls = re.findall(r'require_capture_capability\(trace, "([a-z_]+)"\)', validation_source)
+    # save_new_outs, the replay do() door, run (entry pre-gate + loaded-sparse +
+    # analysis-load pre-gate + unified-live + legacy-live), backward,
     # recording_backward, validate_forward_pass, check_metadata_invariants.
     assert sorted(gate_calls) == sorted(
         [
             "live_replay",  # save_new_outs
-            "live_replay",  # push
-            "live_replay",  # push_from
+            "live_replay",  # do(): replay door (_require_live_replay)
             "live_replay",  # run(): entry pre-gate (R06: FAILED/ABORTED/UNKNOWN
             # refuse with their N-code before the husk/_runnable read can mask it)
             "loaded_sparse_run",  # run(): loaded sparse provider
@@ -210,7 +201,7 @@ def test_gated_entries_consult_the_chokepoint() -> None:
             # generic analysis refusal's dead-end remedy)
             "live_replay",  # run(): unified live provider
             "live_replay",  # run(): legacy rerun surface
-            "backward",  # log_backward
+            "backward",  # backward
             "backward",  # recording_backward
             "validation_entry",  # validate_forward_pass
             "validation_entry",  # check_metadata_invariants
@@ -222,7 +213,7 @@ def test_gated_entries_consult_the_chokepoint() -> None:
     # No inline second authority: nothing outside the authority module reads
     # the capability table directly.
     for path in TORCHLENS_DIR.rglob("*.py"):
-        if path.name == "outcome.py" and path.parent.name == "capture":
+        if path.name == "outcome.py" and path.parent.name == "_capture":
             continue
         text = path.read_text(encoding="utf-8")
         assert "CAPTURE_OUTCOME_CAPABILITIES[" not in text, str(path)

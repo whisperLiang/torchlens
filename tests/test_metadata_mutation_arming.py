@@ -11,9 +11,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.validation.invariants import METADATA_INVARIANT_CONTRACTS, MetadataInvariantError
-
-pytestmark = pytest.mark.smoke
+from torchlens.validation._invariants import METADATA_INVARIANT_CONTRACTS, MetadataInvariantError
 
 
 def _check(name: str, trace: Any) -> None:
@@ -58,7 +56,7 @@ def test_trace_parameter_count_must_agree_with_independent_records(small_trace: 
     """A valid capture refuses a parameter count contradicting its parameter rows."""
 
     _check("trace_self_consistency", small_trace)
-    small_trace.num_param_tensors = -1
+    small_trace._num_param_tensors = -1
     with pytest.raises(MetadataInvariantError, match="num_param_tensors"):
         _check("trace_self_consistency", small_trace)
 
@@ -85,7 +83,7 @@ def test_saved_tensor_count_cannot_exceed_the_capture(small_trace: tl.Trace) -> 
     """A saved-count claim is bounded by the independent retained graph size."""
 
     _check("trace_self_consistency", small_trace)
-    small_trace.num_saved_ops = small_trace.num_tensors + 1
+    small_trace._num_saved_ops = len(small_trace) + 1
     with pytest.raises(MetadataInvariantError, match="num_saved_ops"):
         _check("trace_self_consistency", small_trace)
 
@@ -102,7 +100,7 @@ def test_special_layer_lists_require_known_labels(small_trace: tl.Trace) -> None
 @pytest.mark.parametrize(
     ("contract", "field", "value", "message"),
     [
-        ("non_torch_backward_inert", "grad_fn_order", ["forged"], "grad_fn_order"),
+        ("non_torch_backward_inert", "_autograd_grad_fn_order", ["forged"], "grad_fn_order"),
         ("non_torch_primitive_op_inert", "_primitive_op_profile", object(), "primitive profile"),
     ],
 )
@@ -111,7 +109,15 @@ def test_neutral_backend_cannot_claim_torch_execution_state(
 ) -> None:
     """A neutral analysis row rejects unsupported backward or primitive evidence."""
 
-    trace = SimpleNamespace(backend="mlx")
+    trace = SimpleNamespace(
+        _provenance_backend="mlx",
+        _autograd_has_backward_pass=False,
+        _grad_fn_logs={},
+        _autograd_grad_fn_order=[],
+        _backward_pass_logs={},
+        _autograd_backward_root_grad_fn_object_ids=[],
+        _num_backward_passes=0,
+    )
     _check(contract, trace)
     setattr(trace, field, value)
     with pytest.raises(MetadataInvariantError, match=message):
@@ -122,7 +128,7 @@ def test_neutral_graph_dangling_parent_is_a_named_metadata_error() -> None:
     """Missing graph endpoints refuse before any fuzzy or foreign lookup runs."""
 
     op = SimpleNamespace(layer_label="op", parents=(), children=())
-    trace = SimpleNamespace(layer_list=[op])
+    trace = SimpleNamespace(_layer_list=[op])
     _check("backend_neutral_graph_topology", trace)
     op.parents = ("missing",)
     with pytest.raises(MetadataInvariantError, match="outside trace labels"):
@@ -133,7 +139,7 @@ def test_parent_argument_metadata_must_be_a_mapping(small_trace: tl.Trace) -> No
     """A malformed argument-position table refuses rather than leaking AttributeError."""
 
     _check("edge_use_parent_arg_consistency", small_trace)
-    small_trace.compute_ops[0].parent_arg_positions = ["not a mapping"]
+    small_trace.compute_ops[0]._call_parent_arg_positions = ["not a mapping"]
     with pytest.raises(MetadataInvariantError, match="non-mapping parent_arg_positions"):
         _check("edge_use_parent_arg_consistency", small_trace)
 
@@ -142,7 +148,7 @@ def test_argument_position_domain_must_hold_a_mapping(small_trace: tl.Trace) -> 
     """Malformed positional entries refuse before iteration or edge reconciliation."""
 
     _check("edge_use_parent_arg_consistency", small_trace)
-    small_trace.compute_ops[0].parent_arg_positions = {"args": ["malformed"], "kwargs": {}}
+    small_trace.compute_ops[0]._call_parent_arg_positions = {"args": ["malformed"], "kwargs": {}}
     with pytest.raises(MetadataInvariantError, match="is not a mapping"):
         _check("edge_use_parent_arg_consistency", small_trace)
 
@@ -163,8 +169,8 @@ def test_pass_key_must_equal_its_recorded_pass_index(small_trace: tl.Trace, cont
     """A real per-pass row cannot disagree with its owning Layer map key."""
 
     _check(contract, small_trace)
-    small_trace.compute_ops[0].pass_index = 2
-    with pytest.raises(MetadataInvariantError, match="pass_index"):
+    small_trace.compute_ops[0].pass_number = 2
+    with pytest.raises(MetadataInvariantError, match=r"pass_(index|number)"):
         _check(contract, small_trace)
 
 
@@ -172,8 +178,8 @@ def test_layer_map_key_must_agree_with_its_layer_address(small_trace: tl.Trace) 
     """A valid Layer stored under a different key cannot pass cross-reference checks."""
 
     _check("layer_pass_layer_log_xrefs", small_trace)
-    layer = next(iter(small_trace.layer_logs.values()))
-    small_trace.layer_logs = {"forged-key": layer}
+    layer = next(iter(small_trace._layer_logs.values()))
+    small_trace._layer_logs = {"forged-key": layer}
     with pytest.raises(MetadataInvariantError, match="Layer key"):
         _check("layer_pass_layer_log_xrefs", small_trace)
 
@@ -213,12 +219,12 @@ def test_output_distance_claims_require_consistent_evidence(
 ) -> None:
     """Computed output distances and reachability flags refuse contradictory claims."""
 
-    assert small_trace.mark_layer_depths
+    assert small_trace._options_mark_layer_depths
     _check("distance_invariants", small_trace)
     op = small_trace.compute_ops[0]
-    assert op.max_distance_to_output < 10
+    assert op.graph.max_distance_to_output < 10
     assert op.output_descendants
-    setattr(op, field, value)
+    setattr(op, f"_graph_{field}", value)
     with pytest.raises(MetadataInvariantError, match=message):
         _check("distance_invariants", small_trace)
 
@@ -246,7 +252,7 @@ def test_input_node_cannot_acquire_even_a_reciprocal_self_parent(small_trace: tl
     """Reciprocal edge consistency never licenses a parent on a model input."""
 
     _check("graph_topology", small_trace)
-    source = next(op for op in small_trace.ops if op.is_input)
+    source = small_trace.input_ops[0]
     source.parents = (source.layer_label,)
     source.children = (*source.children, source.layer_label)
     with pytest.raises(MetadataInvariantError, match="Input layer .* has parents"):
@@ -257,7 +263,7 @@ def test_parent_argument_domains_are_closed(small_trace: tl.Trace) -> None:
     """A foreign argument domain must refuse even when its contents are empty."""
 
     _check("graph_topology", small_trace)
-    small_trace.compute_ops[0].parent_arg_positions["forged-domain"] = {}
+    small_trace.compute_ops[0]._call_parent_arg_positions["forged-domain"] = {}
     with pytest.raises(MetadataInvariantError, match="foreign top-level"):
         _check("graph_topology", small_trace)
 
@@ -266,7 +272,7 @@ def test_capture_order_requires_monotonic_indices(small_trace: tl.Trace) -> None
     """Reordering rows preserves every edge and index but corrupts capture order."""
 
     _check("graph_ordering", small_trace)
-    small_trace.layer_list = list(reversed(small_trace.layer_list))
+    small_trace._layer_list = list(reversed(small_trace._layer_list))
     with pytest.raises(MetadataInvariantError, match="not monotonically increasing"):
         _check("graph_ordering", small_trace)
 
@@ -288,7 +294,7 @@ def test_loop_member_labels_must_resolve(small_trace: tl.Trace) -> None:
 
     _check("loop_detection_invariants", small_trace)
     op = small_trace.compute_ops[0]
-    op.recurrent_ops = (op.label, "nonexistent-op")
+    op._graph_recurrent_ops = (op.label, "nonexistent-op")
     with pytest.raises(MetadataInvariantError, match="not in op_labels"):
         _check("loop_detection_invariants", small_trace)
 
@@ -298,9 +304,9 @@ def test_layer_equivalence_view_requires_a_set(small_trace: tl.Trace) -> None:
 
     op = small_trace.compute_ops[0]
     layer = SimpleNamespace(
-        layer_label=op.layer_label, ops={1: op}, equivalent_ops=op.equivalent_ops
+        layer_label=op.layer_label, ops={1: op}, equivalent_ops=op.graph.equivalent_ops
     )
-    small_trace.layer_logs = {op.layer_label: layer}
+    small_trace._layer_logs = {op.layer_label: layer}
     _check("equivalence_symmetry", small_trace)
     layer.equivalent_ops = ["malformed-view"]
     with pytest.raises(
@@ -314,7 +320,11 @@ def test_ungrouped_equivalence_view_cannot_name_an_absent_op() -> None:
 
     op = SimpleNamespace(label="op", equivalence_class="ungrouped", equivalent_ops={"op"})
     trace = SimpleNamespace(
-        op_labels=["op"], op_equivalence_classes={}, layer_list=[op], layer_logs={}
+        op_labels=["op"],
+        _graph_op_equivalence_classes={},
+        _layer_list=[op],
+        _layer_logs={},
+        _options_grouping_policy={},
     )
     _check("equivalence_symmetry", trace)
     op.equivalent_ops.add("nonexistent-op")
@@ -326,11 +336,11 @@ def test_layer_passes_must_agree_on_their_equivalence_family(small_trace: tl.Tra
     """A Layer cannot combine independently valid ops from different families."""
 
     first, second = small_trace.compute_ops
-    assert first.equivalent_ops != second.equivalent_ops
+    assert first.graph.equivalent_ops != second.graph.equivalent_ops
     layer = SimpleNamespace(
-        layer_label=first.layer_label, ops={1: first}, equivalent_ops=first.equivalent_ops
+        layer_label=first.layer_label, ops={1: first}, equivalent_ops=first.graph.equivalent_ops
     )
-    small_trace.layer_logs = {first.layer_label: layer}
+    small_trace._layer_logs = {first.layer_label: layer}
     _check("equivalence_symmetry", small_trace)
     layer.ops[2] = second
     with pytest.raises(MetadataInvariantError, match="ops disagree on equivalent_ops"):
@@ -350,7 +360,7 @@ def test_structural_site_keys_are_validated_on_retained_ops(small_trace: tl.Trac
     """A forged site-key string must fail the registered metadata contract."""
 
     _check("site_key_invariants", small_trace)
-    small_trace.compute_ops[0].site_key = "forged-key"
+    small_trace.compute_ops[0]._graph_site_key = "forged-key"
     with pytest.raises(MetadataInvariantError):
         _check("site_key_invariants", small_trace)
 
@@ -359,17 +369,17 @@ def test_negative_capture_duration_refuses_from_recorded_clocks(small_trace: tl.
     """Invalid clock order is checked through its derived duration."""
 
     _check("trace_self_consistency", small_trace)
-    small_trace.capture_end_time = small_trace.capture_start_time - 1
+    small_trace._provenance_end_time = small_trace._provenance_start_time - 1
     with pytest.raises(MetadataInvariantError, match="capture_duration"):
         _check("trace_self_consistency", small_trace)
 
 
-@pytest.mark.parametrize("field", ["is_branching", "is_recurrent", "max_layer_op_count"])
+@pytest.mark.parametrize("field", ["is_branching", "is_recurrent", "max_ops_per_layer"])
 def test_derived_structure_claims_cannot_be_forged(small_trace: tl.Trace, field: str) -> None:
     """Structure flags are read-only properties of the underlying graph records."""
 
     with pytest.raises(AttributeError):
-        setattr(small_trace, field, "forged")
+        setattr(small_trace.graph, field, "forged")
 
 
 def test_module_layer_counts_are_read_only_views(small_trace: tl.Trace) -> None:
@@ -377,10 +387,10 @@ def test_module_layer_counts_are_read_only_views(small_trace: tl.Trace) -> None:
 
     module = small_trace.modules["self"]
     call = next(iter(module.ops.values()))
-    assert module.num_layers == len(module.layer_labels)
+    assert len(module.layers) == len(module.layer_labels)
     assert call.num_layers == len(call.ops)
     with pytest.raises(AttributeError):
-        module.num_layers = -1
+        module.layers = ()
     with pytest.raises(AttributeError):
         call.num_layers = -1
 
@@ -450,10 +460,10 @@ def test_recurrence_pass_map_requires_all_declared_passes() -> None:
 
     layer = SimpleNamespace(num_passes=1, ops={1: object()})
     trace = SimpleNamespace(
-        is_recurrent=False,
-        layer_num_calls={"layer": 1},
+        graph=SimpleNamespace(is_recurrent=False),
+        _layer_num_calls={"layer": 1},
         layer_labels=["layer"],
-        layer_logs={"layer": layer},
+        _layer_logs={"layer": layer},
     )
     _check("recurrence_invariants", trace)
     layer.ops = {2: layer.ops[1]}
@@ -465,7 +475,7 @@ def test_recurrence_count_inventory_requires_a_retained_layer(small_trace: tl.Tr
     """A new recurrence-count key needs a layer even when it declares only one pass."""
 
     _check("recurrence_invariants", small_trace)
-    small_trace.layer_num_calls["nonexistent-layer"] = 1
+    small_trace._layer_num_calls["nonexistent-layer"] = 1
     with pytest.raises(MetadataInvariantError, match="layer_num_calls key"):
         _check("recurrence_invariants", small_trace)
 
@@ -477,7 +487,7 @@ def test_recurrent_passes_must_share_equivalence_class(recurrent_trace: tl.Trace
     passes = [op for op in recurrent_trace.ops if op.func_name == "linear"]
     assert len(passes) == 2
     assert passes[0].layer_label == passes[1].layer_label
-    passes[1].equivalence_class = "forged-family"
+    passes[1]._graph_equivalence_class = "forged-family"
     with pytest.raises(MetadataInvariantError, match="recurrent_ops type mismatch"):
         _check("loop_detection_invariants", recurrent_trace)
 
@@ -499,7 +509,7 @@ def test_recurrent_membership_must_be_symmetric(recurrent_trace: tl.Trace) -> No
     _check("loop_detection_invariants", recurrent_trace)
     passes = [op for op in recurrent_trace.ops if op.func_name == "linear"]
     assert len(passes) == 2
-    passes[1].recurrent_ops = (passes[1].label,)
+    passes[1]._graph_recurrent_ops = (passes[1].label,)
     passes[1].num_passes = 1
     with pytest.raises(MetadataInvariantError, match="Asymmetric recurrent_ops"):
         _check("loop_detection_invariants", recurrent_trace)

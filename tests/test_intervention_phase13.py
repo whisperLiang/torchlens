@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
+import pytest
 import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.intervention.resolver import SiteTable
+
+pytestmark = pytest.mark.usefixtures("root_edits_in_place")  # D.12: no per-call mutation keyword
 
 
 class M(nn.Module):
@@ -73,56 +73,32 @@ def _capture(*, name: str | None = None) -> tl.Trace:
     return tl.trace(
         M(),
         torch.randn(2, 3),
-        intervention_ready=True,
-        name=name,
+        capture=tl.options.CaptureOptions(replayable=True, name=name),
     )
 
 
 def test_auto_naming_explicit_name_and_reset_counter() -> None:
     """Automatic naming increments and explicit names are preserved."""
 
-    tl.reset_naming_counter()
+    tl.io.reset_naming_counter()
     log1 = _capture()
     log2 = _capture()
     log3 = _capture(name="custom_name")
 
-    assert log1.trace_label == "m_1"
-    assert log2.trace_label == "m_2"
-    assert log3.trace_label == "custom_name"
+    assert log1.name == "m_1"
+    assert log2.name == "m_2"
+    assert log3.name == "custom_name"
 
-    tl.reset_naming_counter("m")
+    tl.io.reset_naming_counter("m")
     log4 = _capture()
-    assert log4.trace_label == "m_1"
-
-
-def test_huggingface_suffix_is_stripped_for_auto_name() -> None:
-    """Common HuggingFace suffixes are stripped before lowercasing."""
-
-    tl.reset_naming_counter()
-    log = tl.trace(
-        BertForSequenceClassification(),
-        torch.randn(1, 2),
-        intervention_ready=True,
-    )
-
-    assert log.trace_label == "bert_1"
-
-
-def test_list_logs_returns_tuple_snapshot() -> None:
-    """The process registry exposes an immutable tuple snapshot."""
-
-    log = _capture()
-    logs = tl.list_logs()
-
-    assert isinstance(logs, tuple)
-    assert log in logs
+    assert log4.name == "m_1"
 
 
 def test_summary_includes_phase13_sections() -> None:
-    """Trace.summary includes discoverability fields."""
+    """The discoverability fields live on provenance() (summary memo 3.6)."""
 
     log = _capture(name="phase13_summary")
-    summary = log.summary()
+    summary = log.provenance.summary()
 
     assert "TorchLens Discoverability Summary" in summary
     assert "state:" in summary
@@ -136,54 +112,14 @@ def test_last_run_records_returns_tuple_snapshot() -> None:
     """Fire records from the most recent propagated run are returned as a tuple."""
 
     log = _capture()
-    log.attach_hooks(tl.func("relu"), tl.zero_ablate(), confirm_mutation=True)
-    log.replay()
+    log.do(
+        tl.func("relu"),
+        tl.zero_ablate(),
+        intervention=tl.options.InterventionOptions(),
+    )
 
     records = log.last_run_records()
 
     assert isinstance(records, tuple)
     assert len(records) >= 1
     assert records[-1].engine == "replay"
-
-
-def test_find_sites_repr_empty_one_and_many() -> None:
-    """SiteTable repr is compact for empty, single, and multi-site tables."""
-
-    log = _capture()
-
-    empty = SiteTable(())
-    one = log.find_sites(tl.func("relu"))
-    many = SiteTable(tuple(log.layer_list + log.layer_list))
-
-    assert repr(empty) == "SiteTable(0 sites)"
-    assert repr(one).startswith("SiteTable(1 site: relu")
-    assert repr(many).startswith("SiteTable(")
-    assert "..." in repr(many)
-
-
-def test_bundle_default_names_derive_from_log_names_with_collision_suffix() -> None:
-    """Implicit Bundle member names use log.trace_label and suffix collisions."""
-
-    log1 = _capture(name="same")
-    log2 = _capture(name="same")
-
-    bundle = tl.bundle([log1, log2])
-
-    assert bundle.names == ["same", "same_2"]
-    assert log1.trace_label == "same"
-    assert log2.trace_label == "same"
-
-
-def test_loaded_log_preserves_name_without_incrementing_counter(tmp_path: Path) -> None:
-    """Loading preserves saved names and does not consume fresh auto-name counters."""
-
-    tl.reset_naming_counter()
-    log = _capture(name="saved_name")
-    path = tmp_path / "saved.tl"
-    tl.save(log, path, overwrite=True)
-
-    loaded = tl.load(path)
-    fresh = _capture()
-
-    assert loaded.trace_label == "saved_name"
-    assert fresh.trace_label == "m_1"

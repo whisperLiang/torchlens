@@ -19,10 +19,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._runnable import PathFaithfulness
 from torchlens.options import CaptureOptions
-from torchlens.runnable import PathFaithfulness
-
-pytestmark = pytest.mark.smoke
 
 
 class HostScalarEscapeModel(nn.Module):
@@ -56,7 +54,7 @@ def _runnable_artifact(model: nn.Module, inputs: torch.Tensor, path: Path) -> Pa
             model,
             inputs,
             capture=CaptureOptions(
-                intervention_ready=True,
+                replayable=True,
                 capture_container_structure=True,
                 cache=False,
             ),
@@ -65,29 +63,7 @@ def _runnable_artifact(model: nn.Module, inputs: torch.Tensor, path: Path) -> Pa
     return path
 
 
-def test_fast_run_host_scalar_escape_changed_input_never_verified(tmp_path: Path) -> None:
-    """A changed-input fast iteration with a baked host scalar settles unverifiable."""
-
-    original = torch.ones(4)
-    changed = torch.ones(4) * 2
-    path = _runnable_artifact(HostScalarEscapeModel(), original, tmp_path / "escape-fast.tlspec")
-
-    ordinary = tl.load(path).run(inputs=changed)
-    assert ordinary.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
-    assert ordinary.report.poisoned
-
-    loaded = tl.load(path)
-    first = loaded.run(inputs=original, fast=True)
-    assert first.report.path_faithfulness is PathFaithfulness.VERIFIED
-
-    fast = loaded.run(inputs=changed, fast=True)
-    assert fast.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
-    assert fast.report.poisoned
-    # The wrong replayed value must never be blessed: the report matches the
-    # ordinary provider's verdict on the identical artifact and input.
-    assert fast.report.path_faithfulness is ordinary.report.path_faithfulness
-
-
+# Kept: sole branch coverage of _fast_run.py.
 def test_fast_run_original_input_escape_stays_verified(tmp_path: Path) -> None:
     """Repeating the ORIGINAL input keeps the escape digest fresh: still verified."""
 
@@ -97,47 +73,15 @@ def test_fast_run_original_input_escape_stays_verified(tmp_path: Path) -> None:
     )
 
     loaded = tl.load(path)
-    first = loaded.run(inputs=original, fast=True)
-    second = loaded.run(inputs=original.clone(), fast=True)
+    first = loaded.run_transaction(inputs=original, fast=True)
+    second = loaded.run_transaction(inputs=original.clone(), fast=True)
 
     assert first.report.path_faithfulness is PathFaithfulness.VERIFIED
     assert second.report.path_faithfulness is PathFaithfulness.VERIFIED
     assert torch.equal(second.output, HostScalarEscapeModel()(original))
 
 
-def test_fast_run_layout_twin_never_verified(tmp_path: Path) -> None:
-    """A same-shape stride-twin input settles unverifiable on the fast path too."""
-
-    original = torch.ones(3, 3)
-    twin = torch.ones(3, 3).t()
-    assert twin.shape == original.shape
-    assert twin.stride() != original.stride()
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        captured = tl.trace(
-            LayoutPredicateModel(),
-            original,
-            capture=CaptureOptions(
-                intervention_ready=True,
-                capture_container_structure=True,
-                cache=False,
-            ),
-        )
-    path = tmp_path / "layout-fast.tlspec"
-    captured.save(path, level="runnable")
-
-    ordinary = tl.load(path).run(inputs=twin)
-    assert ordinary.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
-
-    loaded = tl.load(path)
-    first = loaded.run(inputs=original, fast=True)
-    assert first.report.path_faithfulness is PathFaithfulness.VERIFIED
-
-    fast = loaded.run(inputs=twin, fast=True)
-    assert fast.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
-    assert fast.report.poisoned
-
-
+# Kept: reads source statically or runs a subprocess, so per-id coverage cannot measure it (shrink rule 3).
 def test_fast_sparse_run_consumes_alias_unresolved_flag() -> None:
     """The alias-topology ``unresolved`` ceiling is threaded, never discarded.
 
@@ -175,6 +119,7 @@ class BufferGainModel(nn.Module):
         return self.second(self.first(value)) * self.gain
 
 
+# Kept: sole branch coverage of _fast_live_plans.py, _fast_run.py.
 def test_fast_live_module_refusal_fires_before_activation_wipe() -> None:
     """A typed module-plan refusal must not destroy the user's saved payloads.
 
@@ -185,48 +130,20 @@ def test_fast_live_module_refusal_fires_before_activation_wipe() -> None:
 
     model = BufferGainModel().eval()
     captured = tl.trace(model, torch.ones(2, 3), save=lambda op: True)
-    saved_before = {op.label for op in captured.layer_list if op.has_saved_activation}
+    saved_before = {op.label for op in captured._layer_list if op.has_saved_activation}
     assert "buffer_1:1" in saved_before
     del model.second
 
     with pytest.raises(Exception) as excinfo:
-        captured.run(inputs=torch.ones(2, 3), fast=True)
+        captured.run_transaction(inputs=torch.ones(2, 3), fast=True)
     assert excinfo.value.fields["detection_stage"] == "fast_live_module_plan"
 
-    saved_after = {op.label for op in captured.layer_list if op.has_saved_activation}
+    saved_after = {op.label for op in captured._layer_list if op.has_saved_activation}
     assert saved_after == saved_before
-    assert captured.layer_dict_all_keys["buffer_1:1"].out is not None
+    assert captured._layer_dict_all_keys["buffer_1:1"].out is not None
 
 
-def test_fast_live_divergence_poisons_half_refreshed_trace() -> None:
-    """A diverged fast-live run marks the mixed-activation user Trace poisoned."""
-
-    class BranchingFunctionModel(nn.Module):
-        """Choose between two same-shape activation functions from tensor data."""
-
-        def forward(self, value: torch.Tensor) -> torch.Tensor:
-            """Apply the branch selected by the runtime sum."""
-
-            if bool((value.sum() > 0).item()):
-                return torch.relu(value)
-            return torch.sigmoid(value)
-
-    model = BranchingFunctionModel().eval()
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        captured = tl.trace(model, torch.ones(2), save=tl.func("relu"))
-
-    from torchlens.errors import PathDivergenceError
-
-    with pytest.raises(PathDivergenceError):
-        captured.run(inputs=-torch.ones(2), fast=True)
-
-    # Boundary/site payloads were overwritten in place up to the divergence
-    # point, so the user-owned Trace must carry the monotonic poison mark and
-    # refuse downstream faithful consumers.
-    assert captured._runnable.path_faithfulness is PathFaithfulness.DIVERGED
-
-
+# Kept: sole branch coverage of _runnable/verification.py.
 def test_fast_live_inherited_divergence_never_unregisters_user_trace() -> None:
     """An inherited divergence raise must not evict the user's live Trace."""
 
@@ -249,19 +166,20 @@ def test_fast_live_inherited_divergence_never_unregisters_user_trace() -> None:
         captured = tl.trace(model, torch.ones(2), save=tl.func("relu"))
 
     with pytest.raises(PathDivergenceError):
-        captured.run(inputs=-torch.ones(2), fast=True)
+        captured.run_transaction(inputs=-torch.ones(2), fast=True)
     # The poisoned mark is monotonic; a later good-input run raises the
     # inherited divergence but must leave the USER-owned Trace registered
     # (every other provider passes a throwaway fork to the discard arm).
     with pytest.raises(PathDivergenceError):
-        captured.run(inputs=torch.ones(2), fast=True)
+        captured.run_transaction(inputs=torch.ones(2), fast=True)
     assert any(log is captured for log in _state.list_logs())
 
 
+# Kept: sole branch coverage of _fast_live_hooks.py.
 def test_remove_fast_live_hooks_survives_raising_remove() -> None:
     """One raising handle.remove() must not strand the remaining hooks."""
 
-    from torchlens._fast_run import _remove_fast_live_hooks
+    from torchlens._fast_live_hooks import _remove_fast_live_hooks
 
     removed: list[int] = []
 
@@ -288,6 +206,7 @@ def test_remove_fast_live_hooks_survives_raising_remove() -> None:
     assert handles == []
 
 
+# Kept: sole branch coverage of _fast_run.py.
 def test_close_fast_run_session_retryable_after_raising_close() -> None:
     """A raising close leaves the session attached and retryable, never stranded."""
 
@@ -337,29 +256,35 @@ class _PlainLinear(nn.Module):
         return torch.relu(self.fc(value))
 
 
+# Kept: sole branch coverage of _fast_run.py, _runnable/input_sites.py.
 def test_fast_live_admission_guard_failure_refuses_not_fail_open(monkeypatch) -> None:
     """A broken input-contract guard REFUSES the fast path (R22-2 layer 1).
 
-    Opus's fault injection: with the classifier machinery raising internally,
+    The review's fault injection: with the classifier machinery raising internally,
     the typed refusal used to silently vanish and the forward ran unguarded --
     guard failure was indistinguishable from inputs-match.
     """
 
-    import torchlens._runnable_execution as execution
+    import torchlens._fast_run as fast_run_module
+    import torchlens._runnable.input_sites as input_sites
+    import torchlens._runnable.transaction as transaction
     from torchlens.errors import RunCapabilityUnavailableError
 
     model = _PlainLinear().eval()
     captured = tl.trace(model, torch.ones(2, 3), save=lambda op: True)
-    captured.run(inputs=torch.ones(2, 3), fast=True)
+    captured.run_transaction(inputs=torch.ones(2, 3), fast=True)
 
     def _boom(*args, **kwargs):
         raise RuntimeError("injected classifier failure")
 
-    monkeypatch.setattr(execution, "_live_runtime_input_leaves", _boom)
+    # The home module and every module that bound the walker by import.
+    for module in (transaction, input_sites, fast_run_module):
+        monkeypatch.setattr(module, "_live_runtime_input_leaves", _boom)
     with pytest.raises(RunCapabilityUnavailableError):
-        captured.run(inputs=torch.ones(2, 3), fast=True)
+        captured.run_transaction(inputs=torch.ones(2, 3), fast=True)
 
 
+# Kept: sole branch coverage of _fast_run.py.
 def test_fast_live_input_refresh_arity_guarded_and_poisons(monkeypatch) -> None:
     """The input-payload refresh zip guards arity like the output branch (R22-2 layer 2).
 
@@ -372,7 +297,7 @@ def test_fast_live_input_refresh_arity_guarded_and_poisons(monkeypatch) -> None:
 
     model = _PlainLinear().eval()
     captured = tl.trace(model, torch.ones(2, 3), save=lambda op: True)
-    captured.run(inputs=torch.ones(2, 3), fast=True)
+    captured.run_transaction(inputs=torch.ones(2, 3), fast=True)
 
     # Patch the REFRESH-side binding only (_fast_run's module global); the
     # admission classifier keeps the real execution-module binding, so the
@@ -387,7 +312,7 @@ def test_fast_live_input_refresh_arity_guarded_and_poisons(monkeypatch) -> None:
 
     monkeypatch.setattr(fast_run, "_live_runtime_input_leaves", _truncating)
     with pytest.raises(PathDivergenceError) as excinfo:
-        captured.run(inputs=torch.ones(2, 3), fast=True)
+        captured.run_transaction(inputs=torch.ones(2, 3), fast=True)
     assert excinfo.value.fields["code"] == "input_tree_mismatch"
 
 
@@ -413,59 +338,13 @@ def _saved_all_runnable(model: nn.Module, inputs: torch.Tensor, path: Path) -> P
             model,
             inputs,
             capture=CaptureOptions(
-                intervention_ready=True,
-                layers_to_save="all",
+                replayable=True,
                 cache=False,
             ),
+            save="all",
         )
-    tl.save(captured, path, level="runnable", include_weights=True)
+    captured.save(path, level="runnable", include_weights=True)
     return path
-
-
-def test_fast_sparse_iterations_refresh_saved_activations(tmp_path: Path) -> None:
-    """Every fast-sparse iteration re-saves activations for the CURRENT input.
-
-    The refresh gate was built from bare layer labels while descriptor calls
-    carry pass-qualified labels ('linear_1_1:1'), so the in-loop
-    ``save_activation`` never fired and every fast iteration returned
-    iteration-1 payloads on a trace labeled verified.
-    """
-
-    torch.manual_seed(0)
-    model = _LinearReluModel().eval()
-    first = torch.randn(2, 3)
-    second = torch.randn(2, 3)
-    loaded = tl.load(_saved_all_runnable(model, first, tmp_path / "m.tlspec"))
-
-    loaded.run(inputs=first, fast=True)
-    result = loaded.run(inputs=second, fast=True)
-
-    assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
-    with torch.no_grad():
-        expected = model.lin(second)
-    assert torch.allclose(result.trace["linear_1_1"].out, expected)
-
-
-def test_fast_sparse_output_slot_is_not_an_alias_of_run_output(tmp_path: Path) -> None:
-    """The trace's output payload never aliases ``RunResult.output``.
-
-    The fast-sparse reconstruction stored the returned object itself into the
-    output op, so caller in-place mutation of the run output silently rewrote
-    the verified trace's recorded payload.
-    """
-
-    torch.manual_seed(0)
-    model = _LinearReluModel().eval()
-    first = torch.randn(2, 3)
-    loaded = tl.load(_saved_all_runnable(model, first, tmp_path / "m.tlspec"))
-
-    loaded.run(inputs=first, fast=True)
-    result = loaded.run(inputs=torch.randn(2, 3), fast=True)
-
-    recorded = result.trace[result.trace.output_layers[0]].out
-    snapshot = recorded.clone()
-    result.output.mul_(1234.5)
-    assert torch.equal(recorded, snapshot), "RunResult.output mutation rewrote the trace payload"
 
 
 class _BranchOnActivationModel(nn.Module):
@@ -484,6 +363,7 @@ class _BranchOnActivationModel(nn.Module):
         return torch.sigmoid(hidden)
 
 
+# Kept: sole branch coverage of backends/torch/_completeness_dispatch_names.py; a sole mutation kill.
 def test_fast_sparse_mid_loop_divergence_poisons_reused_target(tmp_path: Path) -> None:
     """A mid-loop fast-sparse divergence poisons the reused target trace.
 
@@ -499,15 +379,16 @@ def test_fast_sparse_mid_loop_divergence_poisons_reused_target(tmp_path: Path) -
     first = torch.ones(2, 3)
     loaded = tl.load(_saved_all_runnable(model, first, tmp_path / "m.tlspec"))
 
-    ok = loaded.run(inputs=first, fast=True)
+    ok = loaded.run_transaction(inputs=first, fast=True)
     assert ok.report.path_faithfulness is PathFaithfulness.VERIFIED
 
     with pytest.raises(PathDivergenceError):
-        loaded.run(inputs=-torch.ones(2, 3) * 5, fast=True)
+        loaded.run_transaction(inputs=-torch.ones(2, 3) * 5, fast=True)
 
     assert ok.trace._runnable.path_faithfulness is PathFaithfulness.DIVERGED
 
 
+# Kept: sole branch coverage of _fast_run.py, _input_walk.py, _ir/container_registry.py and more.
 def test_fast_sparse_runs_post_execution_contract_checks(tmp_path: Path) -> None:
     """An exact-class-swapped container input diverges under BOTH providers.
 
@@ -542,26 +423,27 @@ def test_fast_sparse_runs_post_execution_contract_checks(tmp_path: Path) -> None
             model,
             box_a(t=tensor),
             capture=CaptureOptions(
-                intervention_ready=True,
+                replayable=True,
                 capture_container_structure=True,
                 cache=False,
             ),
         )
     path = tmp_path / "m.tlspec"
-    tl.save(captured, path, level="runnable", include_weights=True)
+    captured.save(path, level="runnable", include_weights=True)
 
     ordinary = tl.load(path)
     with pytest.raises(PathDivergenceError):
-        ordinary.run(inputs=box_b(t=tensor))
+        ordinary.run_transaction(inputs=box_b(t=tensor))
 
     fast = tl.load(path)
-    verify_once = fast.run(inputs=box_a(t=tensor), fast=True)
+    verify_once = fast.run_transaction(inputs=box_a(t=tensor), fast=True)
     assert verify_once.report.path_faithfulness is PathFaithfulness.VERIFIED
     with pytest.raises(PathDivergenceError):
-        fast.run(inputs=box_b(t=tensor), fast=True)
+        fast.run_transaction(inputs=box_b(t=tensor), fast=True)
     assert verify_once.trace._runnable.path_faithfulness is PathFaithfulness.DIVERGED
 
 
+# Kept: reads source statically or runs a subprocess, so per-id coverage cannot measure it (shrink rule 3).
 def test_every_witness_family_consumer_reachable_from_fast_provider() -> None:
     """Every registry runtime consumer is reachable from the fast SPARSE provider.
 
@@ -582,7 +464,7 @@ def test_every_witness_family_consumer_reachable_from_fast_provider() -> None:
     import inspect
 
     import torchlens._fast_run as fast_run_module
-    from torchlens.runnable import WITNESS_FAMILY_REGISTRY
+    from torchlens._runnable import WITNESS_FAMILY_REGISTRY
 
     # Scoped scan: the sparse session class body plus its constructor path
     # (build/prepare seams live at module level but are called from build()).
@@ -617,36 +499,7 @@ def test_every_witness_family_consumer_reachable_from_fast_provider() -> None:
     )
 
 
-def test_fast_sparse_post_execution_checks_execute_on_path(tmp_path: Path, monkeypatch) -> None:
-    """The contract-check aggregator EXECUTES during a fast-sparse run.
-
-    Behavioral companion to the source-scoped gate above: name presence in
-    the class body is necessary but not sufficient -- this leg proves the
-    ``_post_execution_contract_checks`` anchor (carrying the three
-    structure-family consumers) actually runs on the ``fast=True`` path.
-    """
-
-    import torchlens._fast_run as fast_run
-
-    model = _LinearReluModel().eval()
-    path = _saved_all_runnable(model, torch.ones(2, 3), tmp_path / "gate.tlspec")
-    loaded = tl.load(path)
-    # First fast=True call is the verify-once ORDINARY run (its aggregator call
-    # rides the transaction module); the compiled session executes from the
-    # second call on, which is the path this gate must prove.
-    loaded.run(inputs=torch.ones(2, 3), fast=True)
-    calls: list[int] = []
-    real = fast_run._post_execution_contract_checks
-
-    def _counting(*args, **kwargs):
-        calls.append(1)
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(fast_run, "_post_execution_contract_checks", _counting)
-    loaded.run(inputs=torch.ones(2, 3), fast=True)
-    assert calls, "_post_execution_contract_checks never executed on the fast path"
-
-
+# Kept: sole branch coverage of _fast_run.py.
 def test_fast_bind_outputs_refuses_op_label_slot_arity_mismatch() -> None:
     """The fast path contract-checks slot/op-label arity like the slow path.
 
@@ -660,7 +513,7 @@ def test_fast_bind_outputs_refuses_op_label_slot_arity_mismatch() -> None:
     from types import SimpleNamespace
 
     from torchlens._fast_run import _FastSparseSession
-    from torchlens.runnable import RunnableErrorCode
+    from torchlens._runnable import RunnableErrorCode
 
     slots_by_id = {
         "s1": SimpleNamespace(

@@ -1,0 +1,762 @@
+"""Parameter arguments that forward validation's own capture keeps by reference.
+
+Forward validation captures with ``save_args=True``, so every tensor
+argument of every op used to be copied, parameters included: the first
+validation trace held a full extra copy of the weights on the model's device
+until validation ended. Validation runs that capture on a deep copy of the
+model, so its parameters are validation's own. While that one capture runs,
+a plain parameter argument (or a tensor on the same storage as a parameter) is
+saved as a detached alias of that storage, sharing its version counter, instead
+of a copy, and the version counter of each such tensor and of its parameter is
+recorded.
+
+A by-reference value is the parameter's value at call time only if nothing
+wrote the parameter afterwards. An in-place write moves the version counter of
+the tensor written (a write through ``param.data`` moves only that alias's
+counter). So the counters are checked over every referenced tensor at the end
+of the capture, and again, together with the parameters' bytes against the
+replay copy's pre-capture snapshot, before that copy is restored (the restore
+rewrites every parameter whenever any state changed) and before the replay
+reads anything. On any change the whole validation reruns with every argument
+copied, exactly as before, and the rerun's trace carries a diagnostic saying
+so. A user's own ``save_args=True`` trace never sees any of this: outside
+the validation capture the copy path is unchanged. The facet patching helpers
+use the same by-reference saving for the internal traces they capture and tear
+down before returning (:func:`helper_parameter_references`), with the same
+recapture on the copy path when a referenced parameter changed.
+
+When validation runs with an ``output_device`` other than ``"same"``, the same
+capture also keeps its retained copy of every other eligible tensor argument on
+that device (one direct copy per argument) and tags the copy with the device the
+op consumed it on, so the accelerator holds no saved-argument copies beyond the
+parameter aliases. Replay moves each tagged copy back to that device, as an
+exact copy, for the one layer being checked (see
+:mod:`torchlens.validation._replay_device`). This also applies on the clone-path
+rerun; with ``output_device="same"`` nothing is moved or tagged.
+
+The same first-attempt capture also keeps a retained tensor argument by
+reference when its recorded parent op already saved the identical value, on the
+device the retained copy would live on: same dtype, shape, strides and the same bytes
+(compared bit for bit, so NaN payloads and signed zeros count). The argument is
+then saved as a detached alias of that parent's saved output, instead of a
+second copy of the same bytes. A recorded parent whose saved value differs (a
+wrong parent tag, or a value changed in place after it was saved) never matches,
+so the argument keeps its copy and every check that compares the two still sees
+the difference. The parent's saved output is TorchLens's own copy; its version
+is recorded with the parameters' and checked at the same two points, with the
+same clone-path rerun on any change. A digest of each alias's bytes is also
+taken when it is made and compared before replay, so a write that skips the
+version counter (through ``.data``, or into the storage) reruns the same way.
+When that saved output is still a pending clone-on-write alias of the live
+tensor (outputs saved with grad disabled), the argument's alias is registered
+under the same clone-on-write key, so an intercepted write to the live tensor
+copies both out with the pre-write bytes. Its version check is the registry's
+own: an unchanged version while it still shares the live storage, bit-identical
+to the saved output once copied out; its digest must match the bytes it was
+made with in both states.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import dataclasses
+import functools
+import gc
+import hashlib
+from collections.abc import Callable, Iterator
+from contextvars import ContextVar
+from typing import Any, cast
+
+import torch
+from torch import nn
+
+from ._state import pause_logging
+from ._utils import tensor_utils as _tensor_utils
+from ._utils._internal_read import internal_scalar_read
+from ._utils._tensor_label import get_tensor_label, set_tensor_label
+from ._utils.tensor_leaves import flat_byte_view
+
+FALLBACK_CHECK = "validation_parameter_reference_fallback"
+CONSUMED_DEVICE_ATTR = "_torchlens_saved_arg_consumed_device"
+"""Attribute naming the device an op consumed an offloaded saved-argument copy on."""
+
+_StorageKey = tuple[torch.device, int]
+
+
+@dataclasses.dataclass(frozen=True)
+class _ReferenceSession:
+    """One validation call; ``fallback_reason`` is set on its clone-path rerun."""
+
+    fallback_reason: str | None = None
+
+
+class _ParameterArgumentChanged(Exception):
+    """A by-reference parameter argument changed; validation reruns on the clone path."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+_SESSION: ContextVar[_ReferenceSession | None] = ContextVar(
+    "torchlens_validation_reference_session", default=None
+)
+_ACTIVE: ContextVar[ParameterArgumentReferences | None] = ContextVar(
+    "torchlens_validation_argument_references", default=None
+)
+
+
+def _storage_key(tensor: torch.Tensor) -> _StorageKey | None:
+    """Return the storage identity of a plain dense tensor, or ``None`` if not eligible."""
+
+    if type(tensor) not in (torch.Tensor, nn.Parameter) or tensor.layout is not torch.strided:
+        return None
+    # Inference tensors keep no version counter, so no guard could cover them.
+    if tensor.device.type == "meta" or tensor.is_quantized or tensor.is_inference():
+        return None
+    data_ptr = tensor.untyped_storage().data_ptr()
+    return None if data_ptr == 0 else (tensor.device, data_ptr)
+
+
+class ParameterArgumentReferences:
+    """Version guard over the parameter arguments one validation capture kept by reference.
+
+    Parameters
+    ----------
+    owners:
+        Parameters of the model being captured, by storage identity, with their
+        names. Empty when references are off (the copy path runs).
+    fallback_reason:
+        On the clone-path rerun, why the first attempt was abandoned.
+    offload_device:
+        Where retained copies of non-parameter tensor arguments are kept
+        (validation's ``output_device``), or ``None`` to keep them in place.
+    alias_saved_values:
+        Whether a retained argument identical to its parent's saved output is
+        kept as an alias of that output (see :meth:`value_alias`).
+    """
+
+    def __init__(
+        self,
+        owners: dict[_StorageKey, list[tuple[str, nn.Parameter]]],
+        fallback_reason: str | None = None,
+        offload_device: str | None = None,
+        alias_saved_values: bool = False,
+    ) -> None:
+        self._owners = owners
+        self._fallback_reason = fallback_reason
+        self._offload_device = None if offload_device is None else torch.device(offload_device)
+        self._alias_saved_values = alias_saved_values
+        self._value_aliases: dict[int, tuple[torch.Tensor, int, str]] = {}
+        self._pending_aliases: dict[int, tuple[torch.Tensor, int, str, torch.Tensor, Any]] = {}
+        self._value_digests: dict[int, bytes] = {}
+        self._versions: dict[int, tuple[torch.Tensor, int, str]] = {}
+        self._owners_seen: dict[int, tuple[str, nn.Parameter]] = {}
+        self._first_change: str | None = None
+
+    def keep(self, tensor: torch.Tensor) -> bool:
+        """Record ``tensor`` and return ``True`` when it is kept by reference."""
+
+        key = _storage_key(tensor)
+        owners = self._owners.get(key) if key is not None else None
+        if not owners:
+            return False
+        name = owners[0][0]
+        self._note(tensor, name)
+        for owner_name, owner in owners:
+            self._note(owner, owner_name)
+            self._owners_seen[id(owner)] = (owner_name, owner)
+        return True
+
+    def alias(self, tensor: torch.Tensor) -> torch.Tensor | None:
+        """Return a by-reference alias of ``tensor``, or ``None`` when it must be copied.
+
+        The alias is a plain detached tensor on the parameter's storage, sharing
+        its version counter, with the argument's ``requires_grad``: the flag
+        replay reads from a saved argument. Like the copy it replaces, it is a
+        leaf. It is never the ``nn.Parameter`` itself, so capture cleanup that
+        strips TorchLens metadata from saved arguments cannot reach the
+        parameter or its registry entry.
+        """
+
+        if not self.keep(tensor):
+            return None
+        alias = tensor.detach()
+        if tensor.requires_grad:
+            alias.requires_grad_(True)
+        return alias
+
+    @property
+    def aliases_saved_values(self) -> bool:
+        """Whether retained arguments may alias their parent's identical saved output."""
+
+        return self._alias_saved_values
+
+    def value_alias(
+        self, tensor: torch.Tensor, saved_value: Any, parent_label: str
+    ) -> torch.Tensor | None:
+        """Return an alias of ``saved_value`` standing in for a copy of ``tensor``, or ``None``.
+
+        ``saved_value`` is the saved output of the op recorded as ``tensor``'s
+        parent. The alias is taken only when that output is a plain dense
+        tensor spanning its whole storage and holds exactly the argument's value: same dtype, shape, strides and bytes, on the device
+        the retained copy would live on (with an offloading ``output_device``,
+        the bytes are compared there and the alias carries the consumed-device
+        tag, as the offloaded copy does). Like the copy it replaces, the alias
+        requires grad exactly when the copy would, and is then a non-leaf with
+        an identity gradient edge; it carries the argument's capture label. Its
+        version, shared with the parent's saved output, is recorded and checked
+        by :meth:`first_change`, and a digest of its bytes by
+        :meth:`first_digest_change`. When the output is still a pending
+        clone-on-write alias of a live tensor, the alias is registered with the
+        clone-on-write registry instead (see :meth:`_pending_value_alias`).
+        Callers hold ``pause_logging``.
+
+        This runs inside the model's forward: any exception raised while
+        deciding or building the alias is not the model's, so it is dropped and
+        the argument is copied as on the copy path (the alias is fail-closed).
+        """
+
+        if not self._alias_saved_values:
+            return None
+        try:
+            return self._build_value_alias(tensor, saved_value, parent_label)
+        except Exception:  # noqa: BLE001 - fail closed to the copy path, see docstring
+            return None
+
+    def _build_value_alias(
+        self, tensor: torch.Tensor, saved_value: Any, parent_label: str
+    ) -> torch.Tensor | None:
+        """Decide and build one :meth:`value_alias`; may raise on exotic tensors."""
+
+        target = self.retention_device(tensor)
+        with internal_scalar_read():
+            if not _value_alias_eligible(tensor, saved_value, target or tensor.device):
+                return None
+            pending_key = _pending_payload_key(saved_value)
+            consumed = tensor if target is None else _detached_on(tensor, target)
+            if pending_key is False or not _same_bits(consumed, saved_value):
+                return None
+            digest = _value_digest(saved_value)
+        if pending_key is not None:
+            if target is not None:
+                return None
+            return self._pending_value_alias(tensor, saved_value, parent_label, pending_key, digest)
+        alias = _alias_like_copy(tensor, saved_value)
+        if alias is None:
+            return None
+        _label_like(alias, tensor)
+        if target is not None:
+            setattr(alias, CONSUMED_DEVICE_ATTR, tensor.device)
+        self._value_aliases[id(alias)] = (alias, alias._version, parent_label)
+        self._value_digests[id(alias)] = digest
+        return alias
+
+    def _pending_value_alias(
+        self,
+        tensor: torch.Tensor,
+        saved_value: torch.Tensor,
+        parent_label: str,
+        key: Any,
+        digest: bytes,
+    ) -> torch.Tensor | None:
+        """Alias a parent output that is still a pending clone-on-write alias of a live tensor.
+
+        The alias is registered with the clone-on-write registry under the
+        payload's key, exactly as a second saved copy of the same live tensor
+        would be, so any intercepted write to that tensor first rebinds it to
+        fresh storage holding the pre-write bytes, together with the payload.
+        Like the deferred copy it replaces, it is a plain detached tensor, so
+        a copy that would require grad is refused (one kept on another device
+        is refused by the caller). Its version counter is the live tensor's, which legal writes
+        move, so :meth:`first_change` checks it differently (see
+        :func:`_pending_alias_change`); ``digest`` is the digest of the bytes it
+        stands for, checked by :meth:`first_digest_change` as for every alias.
+        """
+
+        if tensor.requires_grad and torch.is_grad_enabled():
+            return None
+        alias = _tensor_utils._try_defer_payload_alias(saved_value)
+        if alias is None:
+            return None
+        with _tensor_utils._paused_internal_reads():
+            if _tensor_utils._deferred_storage_key(alias) != key:
+                return None
+        _label_like(alias, tensor)
+        self._pending_aliases[id(alias)] = (alias, alias._version, parent_label, saved_value, key)
+        self._value_digests[id(alias)] = digest
+        return alias
+
+    def is_value_alias(self, tensor: torch.Tensor) -> bool:
+        """Whether ``tensor`` is an alias :meth:`value_alias` made in this capture."""
+
+        entry = self._value_aliases.get(id(tensor))
+        if entry is not None and entry[0] is tensor:
+            return True
+        pending = self._pending_aliases.get(id(tensor))
+        return pending is not None and pending[0] is tensor
+
+    @property
+    def offloads(self) -> bool:
+        """Whether retained copies of non-parameter tensor arguments move off their device."""
+
+        return self._offload_device is not None
+
+    def retention_device(self, tensor: torch.Tensor) -> torch.device | None:
+        """Return where the retained copy of ``tensor`` is kept, or ``None`` to keep it in place.
+
+        Only a plain dense tensor that is not on a parameter's storage moves,
+        and only to a device of another type (or another explicit index).
+        """
+
+        target = self._offload_device
+        if target is None or type(tensor) is not torch.Tensor:
+            return None
+        if tensor.layout is not torch.strided or tensor.device.type == "meta":
+            return None
+        if tensor.is_quantized or tensor.device == target:
+            return None
+        if tensor.device.type == target.type and target.index is None:
+            return None
+        key = _storage_key(tensor)
+        return None if key is not None and key in self._owners else target
+
+    def shares_parameter_storage(self, tensor: torch.Tensor) -> bool:
+        """Whether ``tensor`` shares storage with a live parameter of validation's copy.
+
+        Read now, from the parameter's current storage, not assumed from how
+        the tensor was made. Validation's capture charges such an alias
+        nothing: it adds no storage beyond the copy's own parameters.
+        """
+
+        key = _storage_key(tensor)
+        if key is None:
+            return False
+        return any(
+            owner.device == key[0] and owner.untyped_storage().data_ptr() == key[1]
+            for _, owner in self._owners.get(key, ())
+        )
+
+    def offload(self, tensor: torch.Tensor) -> torch.Tensor | None:
+        """Return the retained copy of ``tensor`` on the offload device, or ``None``.
+
+        The copy is one direct transfer with the argument's autograd semantics
+        (as the in-place copy it replaces), tagged with the device the op
+        consumed the argument on so replay can move it back exactly.
+        """
+
+        target = self.retention_device(tensor)
+        if target is None:
+            return None
+        from ._utils.tensor_utils import _clone_tensor_payload
+
+        moved = cast(
+            torch.Tensor,
+            _clone_tensor_payload(
+                tensor, detach_tensor=False, save_mode="copy", target_device=str(target)
+            ),
+        )
+        if moved.device == tensor.device:
+            return moved
+        setattr(moved, CONSUMED_DEVICE_ATTR, tensor.device)
+        return moved
+
+    def _note(self, tensor: torch.Tensor, name: str) -> None:
+        """Record a tensor's version the first time; flag a later different version."""
+
+        seen = self._versions.get(id(tensor))
+        if seen is None:
+            self._versions[id(tensor)] = (tensor, tensor._version, name)
+        elif seen[1] != tensor._version and self._first_change is None:
+            self._first_change = _describe_change(name, seen[1], tensor._version)
+
+    def first_change(self) -> str | None:
+        """Describe the first referenced tensor whose version moved, or ``None``."""
+
+        if self._first_change is not None:
+            return self._first_change
+        for tensor, version, name in self._versions.values():
+            if tensor._version != version:
+                return _describe_change(name, version, tensor._version)
+        for alias, version, parent_label in self._value_aliases.values():
+            if alias._version != version:
+                return (
+                    f"the saved output of {parent_label!r}, kept by reference as an argument, "
+                    f"was written in place (version {version} to {alias._version})"
+                )
+        for alias, version, parent_label, payload, key in self._pending_aliases.values():
+            change = _pending_alias_change(alias, version, payload, key)
+            if change is not None:
+                return (
+                    f"the saved output of {parent_label!r}, kept by reference as an argument "
+                    f"while its source was live, {change}"
+                )
+        return None
+
+    def first_digest_change(self) -> str | None:
+        """Name the first saved-value alias whose bytes no longer match their capture digest.
+
+        A write that does not move the version counter (through ``.data``, or
+        straight into the storage) would change an alias and its parent's saved
+        output together, so the argument check could no longer see it: the
+        digest taken when the alias was made catches it instead. An alias
+        registered under its parent's clone-on-write key is digested over the
+        bytes it stood for when it was made: still sharing the live storage, a
+        write there that the interception missed changes them; once copied out
+        it must still hold exactly those pre-write bytes.
+        """
+
+        aliases = [(key, entry[0], entry[2]) for key, entry in self._value_aliases.items()]
+        aliases += [(key, entry[0], entry[2]) for key, entry in self._pending_aliases.items()]
+        with pause_logging(), internal_scalar_read():
+            for key, alias, parent_label in aliases:
+                if _value_digest(alias) != self._value_digests[key]:
+                    return (
+                        f"the saved output of {parent_label!r}, kept by reference as an "
+                        "argument, changed bytes without a version change"
+                    )
+        return None
+
+    def first_value_change(self, snapshot: Any) -> str | None:
+        """Name the first referenced parameter whose bytes differ from ``snapshot``.
+
+        A write through ``param.data`` moves a counter of its own, not the
+        parameter's, so the parameters are also compared with the replay
+        copy's pre-capture snapshot, one entry at a time on its own device.
+        """
+
+        from ._validation_state_snapshot import _on_source_device
+        from .validation._live_model_state import _tensor_bits_equal
+
+        for name, parameter in self._owners_seen.values():
+            if name not in snapshot.tensors:
+                return f"parameter {name!r} has no pre-capture snapshot to compare"
+            if not _tensor_bits_equal(parameter.detach(), _on_source_device(snapshot, name)):
+                return f"parameter {name!r} changed value during the forward"
+        return None
+
+    def raise_if_changed(self, trace: Any = None, snapshot: Any = None) -> None:
+        """Abandon this attempt if a referenced value changed; on the rerun, record why.
+
+        Parameters
+        ----------
+        trace:
+            The validation trace about to be replayed. On the clone-path rerun
+            the fallback diagnostic is recorded on it.
+        snapshot:
+            The replay copy's pre-capture state snapshot. When given, the
+            referenced parameters' bytes are compared with it too. Call this
+            before the replay copy is restored: the restore rewrites (and so
+            moves the version of) every parameter whenever any state changed.
+        """
+
+        if self._fallback_reason is not None:
+            if trace is not None:
+                _record_fallback(trace, self._fallback_reason)
+            return
+        change = self.first_change()
+        if change is None and snapshot is not None:
+            change = self.first_value_change(snapshot)
+        if change is None and trace is not None:
+            change = self.first_digest_change()
+        if change is not None:
+            raise _ParameterArgumentChanged(change)
+
+
+def _describe_change(name: str, before: int, after: int) -> str:
+    """Name the parameter whose version counter moved."""
+
+    return f"parameter {name!r} was written in place (version {before} to {after})"
+
+
+def _value_alias_eligible(tensor: torch.Tensor, saved_value: Any, device: torch.device) -> bool:
+    """Whether ``saved_value`` could stand in for a copy of ``tensor`` kept on ``device``."""
+
+    if type(tensor) is not torch.Tensor or type(saved_value) is not torch.Tensor:
+        return False
+    for value in (tensor, saved_value):
+        if value.layout is not torch.strided or value.device.type == "meta":
+            return False
+        if value.is_quantized or value.is_inference() or value.is_conj() or value.is_neg():
+            return False
+    if (
+        tensor.dtype != saved_value.dtype
+        or tensor.shape != saved_value.shape
+        or tensor.stride() != saved_value.stride()
+        or saved_value.device != device
+        or saved_value.numel() == 0
+    ):
+        return False
+    return _spans_whole_storage(saved_value)
+
+
+def _spans_whole_storage(tensor: torch.Tensor) -> bool:
+    """Whether ``tensor`` starts at offset 0 and covers its storage end to end, densely.
+
+    A copy owns exactly its own elements; an output that is a slice of a
+    larger storage, or one with overlapping or gapped strides, is not one.
+    """
+
+    if tensor.storage_offset() != 0:
+        return False
+    span = 1
+    for size, stride in zip(tensor.shape, tensor.stride(), strict=True):
+        span += (size - 1) * abs(stride)
+    if span != tensor.numel():
+        return False
+    return span * tensor.element_size() == tensor.untyped_storage().nbytes()
+
+
+def _pending_payload_key(saved_value: torch.Tensor) -> Any:
+    """Return the clone-on-write key ``saved_value`` is pending under, ``None``, or ``False``.
+
+    ``None`` means TorchLens's own exclusive copy; a key means the payload
+    still shares a live tensor's storage (a pending clone-on-write alias);
+    ``False`` means the storage cannot be identified, which refuses the alias.
+    """
+
+    key = _tensor_utils._deferred_storage_key(saved_value)
+    if key is None:
+        return False
+    return key if key in _tensor_utils._DEFER_PENDING else None
+
+
+def _pending_alias_change(
+    alias: torch.Tensor, version: int, payload: torch.Tensor, key: Any
+) -> str | None:
+    """Describe how a registered saved-value alias changed, or ``None``.
+
+    While the alias still sits on the live storage it was registered under,
+    every legal write to that storage would have rebound it first, so a moved
+    version means a write the clone-on-write interception did not see. Once
+    rebound, it holds its own copy of the bytes the payload was rebound with
+    at the same time, so the two must still be bit-identical; a version move
+    then only means the live tensor was written, which is legal.
+    """
+
+    with _tensor_utils._paused_internal_reads():
+        if _tensor_utils._deferred_storage_key(alias) == key:
+            if alias._version != version:
+                return f"was written without interception (version {version} to {alias._version})"
+            return None
+        if _tensor_utils._deferred_storage_key(payload) == key or not _same_bits(alias, payload):
+            return "no longer equals the saved output after it was copied out"
+    return None
+
+
+def _label_like(alias: torch.Tensor, tensor: torch.Tensor) -> None:
+    """Give ``alias`` the capture label ``tensor`` carries, as its copy would have."""
+
+    label = get_tensor_label(tensor)
+    if label is not None:
+        set_tensor_label(alias, label)
+
+
+def _detached_on(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """Return a detached copy of ``tensor`` on ``device``, only to compare its bytes there."""
+
+    with torch.no_grad():
+        return tensor.detach().to(device)
+
+
+def _alias_like_copy(tensor: torch.Tensor, saved_value: torch.Tensor) -> torch.Tensor | None:
+    """Alias ``saved_value`` with the autograd state the copy of ``tensor`` would have.
+
+    The eager copy is a graph-connected clone: it requires grad, as a non-leaf,
+    exactly when ``tensor`` does under the current grad mode. A plain detached
+    alias stands in for a copy that would not; otherwise the alias gets an
+    identity gradient edge to ``saved_value`` (which is not an autograd view, so
+    an in-place write legal on the clone stays legal on it). When the parent's
+    saved output carries no gradient path, no alias is taken.
+    """
+
+    if not (tensor.requires_grad and torch.is_grad_enabled()):
+        return saved_value.detach()
+    if not saved_value.requires_grad:
+        return None
+    return _tensor_utils._mint_graph_connected_alias(saved_value)
+
+
+def _value_digest(tensor: torch.Tensor) -> bytes:
+    """Return a digest of a dense tensor's bytes (read in place on the CPU)."""
+
+    with torch.no_grad():
+        flat = tensor.detach().reshape(-1).cpu().contiguous()
+        return hashlib.blake2b(flat_byte_view(flat).numpy().data, digest_size=16).digest()
+
+
+def _same_bits(tensor: torch.Tensor, saved_value: torch.Tensor) -> bool:
+    """Whether two tensors of identical layout hold the same bytes, compared bit for bit."""
+
+    try:
+        with torch.no_grad():
+            return bool(
+                torch.equal(flat_byte_view(tensor.detach()), flat_byte_view(saved_value.detach()))
+            )
+    except (RuntimeError, TypeError, NotImplementedError):
+        return False
+
+
+def _record_fallback(trace: Any, reason: str) -> None:
+    """Record on the rerun's trace that validation used copied arguments throughout."""
+
+    from .validation._diagnostics import ValidationDiagnostic, record_validation_diagnostic
+
+    record_validation_diagnostic(
+        trace,
+        ValidationDiagnostic(
+            check_name=FALLBACK_CHECK,
+            message=(
+                "TorchLens validation reran with every argument copied because a "
+                f"value kept by reference changed during the forward: {reason}. The verdict "
+                "comes from the copied-argument run."
+            ),
+            extra={"reason": reason},
+        ),
+    )
+
+
+def _parameter_owners(model: nn.Module) -> dict[_StorageKey, list[tuple[str, nn.Parameter]]]:
+    """Map each eligible parameter storage of ``model`` to its parameters."""
+
+    owners: dict[_StorageKey, list[tuple[str, nn.Parameter]]] = {}
+    for name, parameter in model.named_parameters(remove_duplicate=False):
+        key = _storage_key(parameter)
+        if key is None:
+            continue
+        entries = owners.setdefault(key, [])
+        if all(existing is not parameter for _, existing in entries):
+            entries.append((name, parameter))
+    return owners
+
+
+def active_argument_references() -> ParameterArgumentReferences | None:
+    """Return the guard of the validation capture running in this context, if any."""
+
+    return _ACTIVE.get()
+
+
+@contextlib.contextmanager
+def parameter_argument_references(
+    model: Any, model_is_copy: bool, output_device: str = "same"
+) -> Iterator[ParameterArgumentReferences]:
+    """Keep ``model``'s parameter arguments by reference for the capture in this block.
+
+    References are on only inside a validation call wrapped by
+    :func:`with_parameter_reference_fallback`, on its first attempt, and only
+    when ``model`` is validation's deep copy. Inside such a call, an
+    ``output_device`` other than ``"same"`` also keeps the retained copies of
+    other tensor arguments on that device, on every attempt. The context is
+    cleared on every exit; on a normal exit the guard runs over every
+    referenced tensor.
+
+    Parameters
+    ----------
+    model:
+        The model the capture runs.
+    model_is_copy:
+        Whether ``model`` is validation's own deep copy (never the live model).
+    output_device:
+        Validation's ``output_device``.
+
+    Yields
+    ------
+    ParameterArgumentReferences
+        The guard (an empty one when references are off).
+    """
+
+    session = _SESSION.get()
+    offload = None if session is None or output_device == "same" else output_device
+    if session is None or session.fallback_reason is not None or not model_is_copy:
+        reason = None if session is None else session.fallback_reason
+        if offload is None:
+            yield ParameterArgumentReferences({}, reason)
+            return
+        references = ParameterArgumentReferences({}, reason, offload)
+    else:
+        references = ParameterArgumentReferences(
+            _parameter_owners(model), None, offload, alias_saved_values=True
+        )
+    token = _ACTIVE.set(references)
+    try:
+        yield references
+    finally:
+        _ACTIVE.reset(token)
+    references.raise_if_changed()
+
+
+@contextlib.contextmanager
+def helper_parameter_references(model: nn.Module) -> Iterator[ParameterArgumentReferences]:
+    """Keep ``model``'s parameter arguments by reference for one patching-helper capture.
+
+    The facet patching helpers (``tl.facets.patching.*``,
+    ``tl.mechinterp.patch_grid``/``patch_heads_grid`` and their siblings) capture
+    with ``save_args=True`` so reconstructed facets can read their op's
+    arguments, and keep a clean, a corrupted and a patched trace alive at once.
+    On the copy path each of those traces held its own copy of every weight
+    argument (GPT-2's 50257 x 768 embedding twice: the lookup and the tied
+    ``lm_head``). These traces never leave the helper: they are torn down,
+    under the helper's state guard, before it returns. So, as for validation's
+    own capture, a parameter argument is saved as a detached alias of the
+    parameter's storage instead of a copy.
+
+    The caller checks the guard after the capture (:meth:`~ParameterArgumentReferences.first_change`,
+    plus the parameters' bytes against its own pre-run snapshot, which also
+    catches a ``param.data`` write) and recaptures on the copy path when a
+    referenced parameter changed during the forward.
+
+    Parameters
+    ----------
+    model:
+        The live model the helper captures.
+
+    Yields
+    ------
+    ParameterArgumentReferences
+        The guard over the parameters kept by reference.
+    """
+
+    references = ParameterArgumentReferences(_parameter_owners(model))
+    token = _ACTIVE.set(references)
+    try:
+        yield references
+    finally:
+        _ACTIVE.reset(token)
+
+
+def with_parameter_reference_fallback(validate: Callable[..., bool]) -> Callable[..., bool]:
+    """Run ``validate`` with parameter references, rerunning on the clone path if one changed.
+
+    Parameters
+    ----------
+    validate:
+        The forward-validation function. It raises the private change signal
+        only through :class:`ParameterArgumentReferences`.
+
+    Returns
+    -------
+    Callable[..., bool]
+        The wrapped function, same arguments and verdict.
+    """
+
+    @functools.wraps(validate)
+    def run(*args: Any, **kwargs: Any) -> bool:
+        """Validate with references on; on a change, rerun with every argument copied."""
+
+        token = _SESSION.set(_ReferenceSession())
+        try:
+            return validate(*args, **kwargs)
+        except _ParameterArgumentChanged as changed:
+            reason = changed.reason
+        finally:
+            _SESSION.reset(token)
+        # The abandoned attempt's replay copy and trace sit in reference cycles;
+        # free them before the rerun makes its own copy.
+        gc.collect()
+        token = _SESSION.set(_ReferenceSession(fallback_reason=reason))
+        try:
+            return validate(*args, **kwargs)
+        finally:
+            _SESSION.reset(token)
+
+    return run

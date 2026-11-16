@@ -8,7 +8,7 @@ from enum import Enum
 from fractions import Fraction
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
-from ..selection import _SelectionOperand
+from .._selection.selection import _selection_from_box, _selection_from_gradient, _SelectionOperand
 from ._errors import ReceptiveFieldError, ReceptiveFieldValidationError
 
 if TYPE_CHECKING:
@@ -48,7 +48,16 @@ def _validate_shape(shape: tuple[int, ...], field_name: str) -> None:
 
 
 class ReceptiveFieldStatus(str, Enum):
-    """Certainty classification for geometric receptive-field descriptions."""
+    """Certainty classification for geometric receptive-field descriptions.
+
+    Examples
+    --------
+    >>> [status.value for status in ReceptiveFieldStatus][:3]
+    ['exact', 'whole_input', 'upper_bound']
+    >>> trace = tl.trace(model, x)
+    >>> trace["conv2d_2_3"].receptive_field.status is ReceptiveFieldStatus.EXACT
+    True
+    """
 
     EXACT = "exact"
     WHOLE_INPUT = "whole_input"
@@ -59,7 +68,15 @@ class ReceptiveFieldStatus(str, Enum):
 
 
 class ReceptiveFieldAlignment(str, Enum):
-    """Alignment classification for merged receptive-field geometry."""
+    """Alignment classification for merged receptive-field geometry.
+
+    Examples
+    --------
+    >>> [alignment.value for alignment in ReceptiveFieldAlignment]
+    ['aligned', 'misaligned', 'not_applicable']
+    >>> ReceptiveFieldAlignment("aligned") is ReceptiveFieldAlignment.ALIGNED
+    True
+    """
 
     ALIGNED = "aligned"
     MISALIGNED = "misaligned"
@@ -67,7 +84,17 @@ class ReceptiveFieldAlignment(str, Enum):
 
 
 class ReceptiveFieldDirection(str, Enum):
-    """Direction of influence geometry between a source and target graph point."""
+    """Direction of influence geometry between a source and target graph point.
+
+    Examples
+    --------
+    >>> [direction.value for direction in ReceptiveFieldDirection]
+    ['receptive', 'projective']
+    >>> trace = tl.trace(model, x)
+    >>> box = trace["conv2d_2_3"].receptive_field.at((4, 4))
+    >>> box.direction is ReceptiveFieldDirection.RECEPTIVE
+    True
+    """
 
     RECEPTIVE = "receptive"
     PROJECTIVE = "projective"
@@ -100,7 +127,18 @@ def _restore_legacy_receptive_field_state(instance: object, state: object) -> No
 
 @dataclass(frozen=True)
 class GridLayout:
-    """Derived input-axis roles and their operation-label provenance."""
+    """Derived input-axis roles and their operation-label provenance.
+
+    Examples
+    --------
+    >>> trace = tl.trace(model, x)
+    >>> layout = trace["conv2d_2_3"].receptive_field.axis_roles
+    >>> (isinstance(layout, GridLayout), layout.windowed_axes)
+    (True, (2, 3))
+    >>> GridLayout(axis_kinds=("pointwise", "windowed"), windowed_axes=(1,),
+    ...     source="derived", provenance=("input_1", "conv1d_1_1")).windowed_axes
+    (1,)
+    """
 
     axis_kinds: tuple[AxisKind, ...]
     windowed_axes: tuple[int, ...]
@@ -132,7 +170,19 @@ class GridLayout:
 
 @dataclass(frozen=True)
 class ReceptiveFieldAxis:
-    """Geometric receptive-field description for one model-input axis."""
+    """Geometric receptive-field description for one model-input axis.
+
+    Examples
+    --------
+    >>> trace = tl.trace(model, x)
+    >>> axes = trace["conv2d_2_3"].receptive_field.axes
+    >>> isinstance(axes[-1], ReceptiveFieldAxis)
+    True
+    >>> [axis.kind for axis in axes]
+    ['pointwise', 'full', 'windowed', 'windowed']
+    >>> (axes[-1].size, axes[-1].exact)
+    (5, True)
+    """
 
     input_axis: int
     output_axis: int | None
@@ -176,14 +226,23 @@ class ReceptiveFieldAxis:
 
 @dataclass(frozen=True)
 class ReceptiveField:
-    """Per-operation, per-input geometric receptive-field descriptor."""
+    """Per-operation, per-input geometric receptive-field descriptor.
+
+    Examples
+    --------
+    >>> trace = tl.trace(model, x)
+    >>> view = trace["conv2d_2_3"].receptive_field
+    >>> descriptor = next(iter(view.per_input.values()))
+    >>> (isinstance(descriptor, ReceptiveField), descriptor.size)
+    (True, (5, 5))
+    """
 
     __match_args__: ClassVar[tuple[str, ...]] = (
         "op_label",
         "io_role",
         "input_op_label",
         "input_shape",
-        "layout",
+        "axis_roles",
         "axes",
         "status",
         "alignment",
@@ -196,7 +255,7 @@ class ReceptiveField:
     io_role: str
     input_op_label: str
     input_shape: tuple[int, ...]
-    layout: GridLayout
+    axis_roles: GridLayout
     axes: tuple[ReceptiveFieldAxis, ...] | None
     status: ReceptiveFieldStatus
     alignment: ReceptiveFieldAlignment
@@ -218,7 +277,7 @@ class ReceptiveField:
         """
 
         _validate_shape(self.input_shape, "input_shape")
-        if len(self.layout.axis_kinds) != len(self.input_shape):
+        if len(self.axis_roles.axis_kinds) != len(self.input_shape):
             raise ValueError("layout axis count must match input_shape rank.")
         if self.axes is None:
             if self.status not in {
@@ -234,9 +293,13 @@ class ReceptiveField:
                 raise ValueError("axes must be ordered by consecutive input_axis values.")
             if any(axis.input_extent != self.input_shape[axis.input_axis] for axis in self.axes):
                 raise ValueError("axis input_extent values must match input_shape.")
-            if tuple(axis.kind for axis in self.axes) != self.layout.axis_kinds:
+            if tuple(axis.kind for axis in self.axes) != self.axis_roles.axis_kinds:
                 raise ValueError("axis kinds must match the derived layout.")
-        if self.batch_coupled and self.axes is not None and "full" not in self.layout.axis_kinds:
+        if (
+            self.batch_coupled
+            and self.axes is not None
+            and "full" not in self.axis_roles.axis_kinds
+        ):
             raise ValueError("batch_coupled requires a full derived input axis.")
 
     @property
@@ -285,10 +348,10 @@ class ReceptiveField:
         """
 
         if self.axes is None:
-            raise ReceptiveFieldError("Geometric axes are unavailable; use .gradient() instead.")
+            raise ReceptiveFieldError("Geometric axes are unavailable; use .probe_grad() instead.")
         values = tuple(getattr(axis, field_name) for axis in self.axes if axis.kind == "windowed")
         if not values:
-            raise ReceptiveFieldError("No windowed axes are available; use .gradient() instead.")
+            raise ReceptiveFieldError("No windowed axes are available; use .probe_grad() instead.")
         return values
 
     @property
@@ -337,6 +400,16 @@ class ReceptiveFieldBoxAxis:
     tight integer hull, but positions inside it may provably not influence
     the unit (dilated kernels, strided slices). ``exact`` on the parent box
     speaks to the hull, not to interior density.
+
+    Examples
+    --------
+    >>> trace = tl.trace(model, x)
+    >>> box = trace["conv2d_2_3"].receptive_field.at((0, 0))
+    >>> axis = box.axes[-1]
+    >>> (isinstance(axis, ReceptiveFieldBoxAxis), axis.kind)
+    (True, 'windowed')
+    >>> (axis.index_start, axis.clipped_start, axis.clipped_stop)
+    (-1, 0, 3)
     """
 
     input_axis: int
@@ -373,7 +446,19 @@ class ReceptiveFieldBoxAxis:
 
 @dataclass(frozen=True)
 class ReceptiveFieldBox(_SelectionOperand):
-    """Concrete per-unit geometric receptive-field answer."""
+    """Concrete per-unit geometric receptive-field answer.
+
+    Examples
+    --------
+    >>> trace = tl.trace(model, x)
+    >>> box = trace["conv2d_2_3"].receptive_field.at((4, 4))
+    >>> isinstance(box, ReceptiveFieldBox)
+    True
+    >>> [(axis.index_start, axis.index_stop) for axis in box.axes[-2:]]
+    [(2, 7), (2, 7)]
+    >>> (box.exact, box.empty)
+    (True, False)
+    """
 
     __match_args__: ClassVar[tuple[str, ...]] = (
         "op_label",
@@ -427,8 +512,6 @@ class ReceptiveFieldBox(_SelectionOperand):
         the box is exact with no sparse-possible axis, else ``upper_bound``),
         never a fuzzy mask.
         """
-
-        from ..selection import _selection_from_box
 
         return _selection_from_box(self)
 
@@ -503,8 +586,19 @@ class ReceptiveFieldBox(_SelectionOperand):
 
 
 @dataclass(frozen=True)
-class GradientReceptiveField(_SelectionOperand):
-    """Empirical receptive-field influence set measured by autograd."""
+class GradReceptiveField(_SelectionOperand):
+    """Empirical receptive-field influence set measured by autograd.
+
+    Examples
+    --------
+    >>> net = nn.Conv2d(1, 1, 3, padding=1)
+    >>> armed = tl.trace(net, torch.randn(1, 1, 6, 6, requires_grad=True),
+    ...     capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"))
+    >>> view = armed["conv2d_1_1"].receptive_field
+    >>> grad_rf = next(iter(view.probe_grad(view.center_unit(batch_index=0)).values()))
+    >>> (isinstance(grad_rf, GradReceptiveField), tuple(grad_rf.grad.shape))
+    (True, (1, 1, 6, 6))
+    """
 
     __match_args__: ClassVar[tuple[str, ...]] = (
         "op_label",
@@ -518,7 +612,7 @@ class GradientReceptiveField(_SelectionOperand):
         "cross_batch_influence",
         "atol",
         "rtol",
-        "nonfinite_count",
+        "num_nonfinite",
         "warnings",
     )
 
@@ -533,7 +627,7 @@ class GradientReceptiveField(_SelectionOperand):
     cross_batch_influence: bool
     atol: float
     rtol: float
-    nonfinite_count: int
+    num_nonfinite: int
     warnings: tuple[str, ...]
     direction: ReceptiveFieldDirection = field(
         default=ReceptiveFieldDirection.RECEPTIVE, repr=False, kw_only=True
@@ -557,8 +651,8 @@ class GradientReceptiveField(_SelectionOperand):
 
         if self.atol < 0 or self.rtol < 0:
             raise ValueError("atol and rtol must be non-negative.")
-        if self.nonfinite_count < 0:
-            raise ValueError("nonfinite_count must be non-negative.")
+        if self.num_nonfinite < 0:
+            raise ValueError("num_nonfinite must be non-negative.")
         if self.support_ranges is not None and any(
             start < 0 or stop < start for start, stop in self.support_ranges
         ):
@@ -570,8 +664,6 @@ class GradientReceptiveField(_SelectionOperand):
         The mask's own epistemics remain the RF layer's documented claim
         (relation=``exact`` w.r.t. the empirical mask), unchanged by lifting.
         """
-
-        from ..selection import _selection_from_gradient
 
         return _selection_from_gradient(self)
 
@@ -598,7 +690,15 @@ class GradientReceptiveField(_SelectionOperand):
 
 
 class ReceptiveFieldValidationStatus(str, Enum):
-    """Tri-state result of geometric and gradient containment checking."""
+    """Tri-state result of geometric and gradient containment checking.
+
+    Examples
+    --------
+    >>> [status.value for status in ReceptiveFieldValidationStatus]
+    ['pass', 'fail', 'indeterminate']
+    >>> ReceptiveFieldValidationStatus("pass").name
+    'PASS'
+    """
 
     PASS = "pass"
     FAIL = "fail"
@@ -607,7 +707,15 @@ class ReceptiveFieldValidationStatus(str, Enum):
 
 @dataclass(frozen=True)
 class ReceptiveFieldViolation:
-    """One gradient-support coordinate outside its geometric box."""
+    """One gradient-support coordinate outside its geometric box.
+
+    Examples
+    --------
+    >>> violation = ReceptiveFieldViolation(io_role="input_1", index=(0, 0, 0, 0),
+    ...     magnitude=0.5, box=None, reason="gradient outside the geometric box")
+    >>> (violation.io_role, violation.index)
+    ('input_1', (0, 0, 0, 0))
+    """
 
     io_role: str
     index: tuple[int, ...]
@@ -618,16 +726,27 @@ class ReceptiveFieldViolation:
 
 @dataclass(frozen=True)
 class ReceptiveFieldValidation:
-    """Tri-state receptive-field geometric-versus-gradient validation result."""
+    """Tri-state receptive-field geometric-versus-gradient validation result.
+
+    Examples
+    --------
+    >>> net = nn.Conv2d(1, 1, 3, padding=1)
+    >>> armed = tl.trace(net, torch.randn(1, 1, 6, 6, requires_grad=True),
+    ...     capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"))
+    >>> view = armed["conv2d_1_1"].receptive_field
+    >>> result = view.check(view.center_unit(batch_index=0))
+    >>> (isinstance(result, ReceptiveFieldValidation), result.passed, result.violations)
+    (True, True, ())
+    """
 
     __match_args__: ClassVar[tuple[str, ...]] = (
         "status",
         "op_label",
         "unit",
         "geometric",
-        "gradient",
+        "grad",
         "violations",
-        "n_violations",
+        "num_violations",
         "per_axis_excess",
         "slack_per_axis",
         "cross_batch",
@@ -639,9 +758,9 @@ class ReceptiveFieldValidation:
     op_label: str
     unit: tuple[int, ...]
     geometric: Mapping[str, ReceptiveFieldBox]
-    gradient: Mapping[str, GradientReceptiveField]
+    grad: Mapping[str, GradReceptiveField]
     violations: tuple[ReceptiveFieldViolation, ...]
-    n_violations: int
+    num_violations: int
     per_axis_excess: tuple[int, ...] | None
     slack_per_axis: tuple[int, ...] | None
     cross_batch: Literal["none", "geometric", "undeclared"]
@@ -661,9 +780,9 @@ class ReceptiveFieldValidation:
             If counts or diagnostics are structurally invalid.
         """
 
-        if self.n_violations < len(self.violations):
+        if self.num_violations < len(self.violations):
             raise ValueError("n_violations must be at least the listed violation count.")
-        if self.n_violations < 0:
+        if self.num_violations < 0:
             raise ValueError("n_violations must be non-negative.")
 
     @property
@@ -708,10 +827,23 @@ class ReceptiveFieldValidation:
 
 @dataclass(frozen=True)
 class ReceptiveFieldProfile:
-    """Tabular receptive-field report at one trace granularity."""
+    """Tabular receptive-field report at one trace granularity.
+
+    Examples
+    --------
+    >>> # requires: pandas
+    >>> profile = tl.trace(model, x).receptive_fields()
+    >>> (isinstance(profile, ReceptiveFieldProfile), profile.level)
+    (True, 'op')
+    >>> "output_op" in profile.to_pandas().columns
+    True
+    """
 
     frame: pd.DataFrame
     level: Literal["op", "layer", "call", "module"]
+
+    _PREVIEW_ROWS: ClassVar[int] = 5
+    _PREVIEW_COLUMNS: ClassVar[tuple[str, ...]] = ("name", "input_role", "status", "size", "jump")
 
     def to_pandas(self) -> pd.DataFrame:
         """Return a copy of the underlying dataframe.
@@ -724,9 +856,49 @@ class ReceptiveFieldProfile:
 
         return self.frame.copy()
 
+    def _header(self) -> str:
+        """Return the one-line identity: level and row count."""
+
+        return f"ReceptiveFieldProfile(level={self.level!r}, rows={len(self.frame)})"
+
+    def __repr__(self) -> str:
+        """Bounded preview: level, row count and the first rows of the key columns.
+
+        Returns
+        -------
+        str
+            The header line, then up to five rows; ``.to_pandas()`` holds the full table.
+        """
+
+        if self.frame.empty:
+            return self._header()
+        columns = [name for name in self._PREVIEW_COLUMNS if name in self.frame.columns]
+        preview = self.frame.loc[:, columns or list(self.frame.columns)]
+        lines = [self._header(), preview.head(self._PREVIEW_ROWS).to_string()]
+        hidden = len(self.frame) - self._PREVIEW_ROWS
+        more = f"... {hidden} more rows; " if hidden > 0 else ""
+        lines.append(f"{more}.to_pandas() returns every row and column")
+        return "\n".join(lines)
+
+    def _repr_html_(self) -> str | None:
+        """Render the profile in a notebook as the frame's HTML table under its header.
+
+        Returns
+        -------
+        str | None
+            HTML, or ``None`` when pandas' notebook HTML rendering is switched off.
+        """
+
+        from html import escape
+
+        table = self.frame._repr_html_()
+        if table is None:
+            return None
+        return f"<p>{escape(self._header())}</p>{table}"
+
 
 __all__ = [
-    "GradientReceptiveField",
+    "GradReceptiveField",
     "GridLayout",
     "ReceptiveField",
     "ReceptiveFieldAlignment",

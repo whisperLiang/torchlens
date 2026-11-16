@@ -12,8 +12,10 @@ from dataclasses import dataclass
 from math import prod
 from typing import Any, TypeVar
 
-from ..capture import flops as capture_flops
-from ..intervention.types import CapturedArgTemplate, LiteralTensor, LiteralValue
+from torchlens.split.errors import SplitRequestError
+
+from .._capture import flops as capture_flops
+from ..intervention._types import CapturedArgTemplate, LiteralTensor, LiteralValue
 from .errors import SplitUnsupportedError
 from .graph import ReplayValueRef, SplitTraceGraph, SplitTraceNode
 from .planner import SplitPlan
@@ -23,7 +25,16 @@ _Cost = TypeVar("_Cost", int, float)
 
 @dataclass(frozen=True)
 class ParameterCostFeatures:
-    """One deduplicated parameter with stable named or occurrence provenance."""
+    """One deduplicated parameter with stable named or occurrence provenance.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> profile = graph.graph_profile()
+    >>> parameter = profile.parameters[0]
+    >>> bool(parameter.aliases), parameter.bytes > 0
+    (True, True)
+    """
 
     state_id: str
     aliases: tuple[str, ...]
@@ -40,6 +51,14 @@ class NodeCostFeatures:
 
     ``output_node_ids`` identifies the indivisible native call. Its FLOPs are
     charged once on the first output row, with zero on other outputs.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> profile = graph.graph_profile()
+    >>> node = profile.nodes[0]
+    >>> bool(node.call_id), bool(node.output_node_ids)
+    (True, True)
     """
 
     node_id: str
@@ -59,7 +78,16 @@ class NodeCostFeatures:
 
 @dataclass(frozen=True)
 class TensorCostFeatures:
-    """One canonical graph value, counted once regardless of consumer count."""
+    """One canonical graph value, counted once regardless of consumer count.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> profile = graph.graph_profile()
+    >>> tensor = next(row for row in profile.tensors if row.shape is not None)
+    >>> bool(tensor.value_id), tensor.bytes is not None
+    (True, True)
+    """
 
     value_id: str
     producer_id: str | None
@@ -74,7 +102,15 @@ class TensorCostFeatures:
 
 @dataclass(frozen=True)
 class GraphProfile:
-    """Static, payload-free costs tied to a captured graph and shape contract."""
+    """Static, payload-free costs tied to a captured graph and shape contract.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> profile = graph.graph_profile()
+    >>> profile.backend, bool(profile.nodes), bool(profile.parameters)
+    ('torch', True, True)
+    """
 
     graph_identity: str | None
     backend: str
@@ -99,7 +135,16 @@ class GraphProfile:
 
 @dataclass(frozen=True)
 class PartitionMetrics:
-    """Unique logical costs; known FLOPs are a partial sum when totals are unknown."""
+    """Unique logical costs; known FLOPs are a partial sum when totals are unknown.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> partition = graph.compute_dag().to_partition(())
+    >>> analysis = graph.analyze(partition)
+    >>> analysis.metrics.unique_boundary_tensors >= 1
+    True
+    """
 
     prefix_node_ids: frozenset[str]
     suffix_node_ids: frozenset[str]
@@ -382,7 +427,10 @@ def build_graph_profile(
     """
 
     if batch_size is not None and (type(batch_size) is not int or batch_size < 1):
-        raise ValueError("batch_size must be a positive integer")
+        raise SplitRequestError(
+            "batch_size must be a positive integer",
+            code=SplitRequestError.code,
+        )
     batch = graph.traced_batch_size if batch_size is None else batch_size
     shapes, unknown = _profile_shapes(graph, batch)
     program = graph.shape_program

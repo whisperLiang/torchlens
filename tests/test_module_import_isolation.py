@@ -24,46 +24,93 @@ forgotten, and a fixed module cannot silently regress).
 
 from __future__ import annotations
 
+import ast
 import os
 import sys
 import traceback
 from pathlib import Path
 
 import pytest
+from _import_sim import PackageIndex, simulate_cold_import, simulate_every_module
 
 import torchlens as tl
 
 _PACKAGE_ROOT = Path(tl.__file__).resolve().parent
+_TESTS_ROOT = Path(__file__).resolve().parent
 
 # Modules whose standalone import is FIXED and must stay fixed.
 FIXED_IMPORT_CYCLES = (
     "torchlens.bundle",
     "torchlens._chunking",
     "torchlens._user_public_impls",
+    # _episode_ledger re-exports _episode_fold's names (C07X split); the
+    # re-export is now a lazy module __getattr__ instead of an eager bottom-
+    # of-file import, so a cold import of _episode_fold first no longer
+    # catches _episode_ledger still mid-initialization.
+    "torchlens._capture._episode_fold",
+    # The selector-evaluation entry points: ``_ir._selector_universe`` imported a
+    # ``_data_classes`` leaf at module level, which ran that package's init,
+    # whose ``op`` module imports the ``intervention`` package, whose ``spec``
+    # imports back into the still-loading ``selector_eval``. Every module whose
+    # cold import reached ``selector_eval`` first (the selection resolver, the
+    # capture predicates, the torch ops facade, recording) failed with it; the
+    # guard import is deferred now and these entries pin it.
+    "torchlens._ir.selector_eval",
+    "torchlens._ir._selector_universe",
+    "torchlens._selection.resolver",
+    "torchlens._capture.predicates",
+    "torchlens.backends.torch.ops",
+    "torchlens.recording._generation",
 )
+
+#: Modules whose standalone import legitimately requires a THIRD-PARTY package
+#: that is, BY DESIGN, never installed alongside the rest of the test
+#: environment -- a genuinely absent optional dependency, not a circular
+#: import -- so neither FIXED_IMPORT_CYCLES nor PENDING_IMPORT_CYCLES (both
+#: about the import-cycle class) is the right ledger. Keyed to the exact
+#: top-level import whose absence explains the failure; checked structurally
+#: (``importlib.util.find_spec``) so an environment that DOES install the
+#: package still gets the real standalone-import proof.
+OPTIONAL_DEPENDENCY_MODULES: dict[str, str] = {
+    # pyproject.toml: lit-nlp 1.3 requires numpy<2, so [lit] stays excluded
+    # from all/all-stretch (Batch-8 ruling) -- no CI leg ever installs it
+    # alongside the rest of the suite's extras.
+    "torchlens.bridge.lit._adapters": "lit_nlp",
+}
 
 # Modules that still fail a standalone import. Each lives outside this lane's write
 # territory (the r3 ops-split and IR packages), so the cycle is DISCLOSED here rather
 # than silently tolerated. Fixing one means deleting its row.
 PENDING_IMPORT_CYCLES = {
-    "torchlens.ir.selector_eval": (
-        "cycle through torchlens.ir.__init__ -> selector_eval -> ir.* back-edge; "
-        "torchlens/ir/ is outside the artifact-boundary lane's territory"
-    ),
-    "torchlens.backends.torch._ops_autograd": (
-        "the four _ops_* split modules import back into their sibling ops.py facade; "
-        "backends/torch/ops.py is owned by the r3 ops-split lane"
-    ),
-    "torchlens.backends.torch._ops_capture_records": (
-        "same _ops_* split-module back-edge as _ops_autograd"
-    ),
-    "torchlens.backends.torch._ops_emission": (
-        "same _ops_* split-module back-edge as _ops_autograd"
-    ),
     "torchlens.backends.torch._ops_retention": (
-        "same _ops_* split-module back-edge as _ops_autograd"
+        "_ops_retention still imports back into its sibling ops.py facade "
+        "(the other _ops_* splits import standalone since the rebind removal)"
     ),
 }
+
+
+def _optional_dependency_explains_failure(module_name: str) -> bool:
+    """Return whether ``module_name``'s declared optional package is absent.
+
+    Parameters
+    ----------
+    module_name:
+        Dotted module path looked up in ``OPTIONAL_DEPENDENCY_MODULES``.
+
+    Returns
+    -------
+    bool
+        True only when the module is registered AND its required package is
+        genuinely not installed in this environment -- an environment that
+        does install it still gets the real standalone-import proof.
+    """
+
+    required_package = OPTIONAL_DEPENDENCY_MODULES.get(module_name)
+    if required_package is None:
+        return False
+    import importlib.util
+
+    return importlib.util.find_spec(required_package) is None
 
 
 def _package_modules() -> list[str]:
@@ -237,9 +284,125 @@ def test_every_package_module_imports_standalone() -> None:
         name: error
         for name in modules
         if name not in PENDING_IMPORT_CYCLES
+        and not _optional_dependency_explains_failure(name)
         and (error := _standalone_import_error(name)) is not None
     }
     assert not failures, (
         "modules that cannot be imported standalone (fix the cycle, or disclose it in "
         f"PENDING_IMPORT_CYCLES with a reason): {failures}"
+    )
+
+
+@pytest.mark.heavy
+def test_cold_import_simulation_flags_only_the_ledger() -> None:
+    """Static arm: replay a fresh interpreter importing each module FIRST.
+
+    The forked exhaustive walk above is the ``slow`` tier, so a cycle that only
+    shows when a selector module is the first import reached the integration
+    branch unseen (``import torchlens._ir.selector_eval`` failed cold while
+    the whole suite, which imports ``torchlens.intervention`` early, stayed
+    green). This arm needs no torch and no fork: it parses the package once
+    and replays Python's module-level import order from every module as the
+    entry, so it runs per step. The forked walk stays the ground truth; this
+    is the cheap tripwire in front of it.
+    """
+
+    index = PackageIndex.build(_PACKAGE_ROOT)
+    failing = simulate_every_module(index)
+    unexpected = {
+        entry: [str(failure) for failure in failures[:3]]
+        for entry, failures in failing.items()
+        if entry not in PENDING_IMPORT_CYCLES
+    }
+    assert not unexpected, (
+        "a cold import of these modules would hit a partially initialised module "
+        "(fix the cycle, or disclose it in PENDING_IMPORT_CYCLES with a reason): "
+        f"{unexpected}"
+    )
+
+
+def test_cold_import_simulation_detects_a_planted_cycle(tmp_path: Path) -> None:
+    """The static arm is a live instrument: a planted cycle is flagged, a clean tree is not."""
+
+    package = tmp_path / "torchlens"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "a.py").write_text("from .b import helper\n\ndef shared():\n    return 1\n")
+    (package / "b.py").write_text("from .a import shared\n\ndef helper():\n    return shared()\n")
+    index = PackageIndex.build(package)
+
+    flagged = simulate_cold_import(index, "torchlens.a")
+    assert [(f.module, f.target, f.name) for f in flagged] == [
+        ("torchlens.b", "torchlens.a", "shared")
+    ]
+    assert flagged[0].cycle == ("torchlens.a", "torchlens.b")
+    # Entered from ``b`` the same cycle fails at the other edge: ``a`` asks the
+    # still-loading ``b`` for ``helper`` before ``b`` has defined it.
+    assert [(f.module, f.target, f.name) for f in simulate_cold_import(index, "torchlens.b")] == [
+        ("torchlens.a", "torchlens.b", "helper")
+    ]
+
+    (package / "b.py").write_text(
+        "def helper():\n    from .a import shared\n\n    return shared()\n"
+    )
+    assert simulate_every_module(PackageIndex.build(package)) == {}
+
+
+def _is_sys_modules_target(node: ast.expr) -> bool:
+    """True when ``node`` spells ``sys.modules`` (as a name or as a string)."""
+    if isinstance(node, ast.Constant):
+        return node.value == "sys.modules"
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "modules"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "sys"
+    )
+
+
+def _patch_dict_sys_modules_sites(tree: ast.Module) -> list[int]:
+    """Line numbers of ``patch.dict(sys.modules, ...)`` calls in ``tree``."""
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "dict"
+        and isinstance(node.func.value, (ast.Name, ast.Attribute))
+        and getattr(node.func.value, "id", getattr(node.func.value, "attr", None)) == "patch"
+        and node.args
+        and _is_sys_modules_target(node.args[0])
+    ]
+
+
+def test_no_test_snapshot_restores_sys_modules() -> None:
+    """No test may wrap ``sys.modules`` in ``unittest.mock.patch.dict``.
+
+    ``patch.dict`` restores the WHOLE mapping to its entry snapshot on exit, so
+    every module first imported inside the block (a lazily imported torchlens
+    submodule reached through the code under test) is purged from
+    ``sys.modules`` while the package attribute that was bound during the
+    import keeps the old module object. A later test that patches the module
+    through the package attribute then patches a ghost: the code under test
+    re-imports a fresh copy with default constants and the patch never lands.
+    That is an ordering dependence between unrelated test files, visible only
+    when the xdist scheduler puts them on one worker. Hide a single dependency
+    with ``monkeypatch.setitem(sys.modules, name, None)`` (inside
+    ``monkeypatch.context()`` for block scope): it restores only that key.
+    """
+
+    offenders: list[str] = []
+    for path in sorted(_TESTS_ROOT.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "patch.dict" not in source:
+            continue
+        tree = ast.parse(source, filename=str(path))
+        offenders.extend(
+            f"{path.relative_to(_TESTS_ROOT.parent)}:{lineno}"
+            for lineno in _patch_dict_sys_modules_sites(tree)
+        )
+    assert not offenders, (
+        "patch.dict on sys.modules purges modules first imported inside the block and "
+        "desynchronises sys.modules from package attributes; use "
+        "monkeypatch.setitem(sys.modules, name, None) instead: " + ", ".join(offenders)
     )

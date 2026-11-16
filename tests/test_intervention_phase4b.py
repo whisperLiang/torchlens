@@ -6,15 +6,12 @@ from collections import namedtuple
 from dataclasses import dataclass
 from typing import Any
 
-import pytest
 import torch
 
 import torchlens as tl
-from torchlens.backends.torch.ops import (
-    _replace_output_tensors_by_path,
-    _walk_output_tensors_with_paths,
-)
-from torchlens.intervention.types import (
+from torchlens.backends.torch._ops_containers import _walk_output_tensors_with_paths
+from torchlens.backends.torch._ops_interventions import _replace_output_tensors_by_path
+from torchlens.intervention._types import (
     ContainerSpec,
     DataclassField,
     DictKey,
@@ -101,17 +98,17 @@ def _component_values(paths: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
         for component in path:
             if hasattr(component, "index"):
                 path_values.append(component.index)
-            elif hasattr(component, "key"):
-                path_values.append(component.key)
-            elif hasattr(component, "name"):
-                path_values.append(component.name)
+            elif hasattr(component, "_key"):
+                path_values.append(component._key)
+            elif hasattr(component, "_name"):
+                path_values.append(component._name)
             else:
                 path_values.append(component)
         values.append(tuple(path_values))
     return values
 
 
-@pytest.mark.smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
 def test_path_walker_supports_required_output_containers() -> None:
     """Path-aware traversal preserves supported output container structure."""
 
@@ -149,6 +146,7 @@ def test_path_walker_supports_required_output_containers() -> None:
             assert {spec.kind for spec in specs} == set(expected_kinds)
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/_ops_predicates.py, campaign mutant kills.
 def test_hf_model_output_replacement_preserves_concrete_type_and_attributes() -> None:
     """Live output replacement preserves HF-style output subclasses."""
 
@@ -164,7 +162,7 @@ def test_hf_model_output_replacement_preserves_concrete_type_and_attributes() ->
     assert replaced.last_hidden_state is hidden
 
 
-@pytest.mark.smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
 def test_intervention_ready_records_unique_container_paths_for_multi_output_op() -> None:
     """Multi-output torch calls share call id while preserving per-output paths."""
 
@@ -191,18 +189,18 @@ def test_intervention_ready_records_unique_container_paths_for_multi_output_op()
     log = tl.trace(
         SplitModel(),
         torch.randn(2, 3),
-        capture=CaptureOptions(intervention_ready=True),
+        capture=CaptureOptions(replayable=True),
     )
 
-    split_layers = [layer for layer in log.layer_list if layer.func_name == "split"]
+    split_layers = [layer for layer in log._layer_list if layer.func_name == "split"]
     assert len(split_layers) == 2
-    assert len({layer.func_call_id for layer in split_layers}) == 1
+    assert len({layer.call.call_id for layer in split_layers}) == 1
     assert len({layer.container_path for layer in split_layers}) == 2
     assert {type(layer.container_path[0]) for layer in split_layers} == {TupleIndex}
     assert all(layer.container_spec is not None for layer in split_layers)
 
 
-@pytest.mark.smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
 def test_replay_templates_classify_parent_literals_and_literal_tensors() -> None:
     """Captured templates classify parent refs, literal values, and tensor literals."""
 
@@ -234,10 +232,14 @@ def test_replay_templates_classify_parent_literals_and_literal_tensors() -> None
     log = tl.trace(
         LinearShift(),
         torch.randn(4, 3),
-        capture=CaptureOptions(intervention_ready=True),
+        capture=CaptureOptions(replayable=True),
     )
 
-    templates = [layer.args_template for layer in log.layer_list if layer.args_template is not None]
+    templates = [
+        layer.call.args_template
+        for layer in log._layer_list
+        if layer.call.args_template is not None
+    ]
     flattened = [component for template in templates for component in template.args]
 
     assert any(isinstance(component, ParentRef) for component in flattened)
@@ -245,57 +247,13 @@ def test_replay_templates_classify_parent_literals_and_literal_tensors() -> None
     assert any(isinstance(component, LiteralValue) for component in flattened)
 
 
-@pytest.mark.smoke
-def test_internal_edge_uses_extend_parent_arg_locs_without_replacing_them() -> None:
-    """Edge provenance agrees with existing parent-layer arg locations."""
-
-    class AddRelus(torch.nn.Module):
-        """Model with repeated parent use."""
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Add two relu calls from the same input.
-
-            Parameters
-            ----------
-            x:
-                Input tensor.
-
-            Returns
-            -------
-            torch.Tensor
-                Sum of relu outputs.
-            """
-
-            return torch.relu(x) + torch.relu(x)
-
-    log = tl.trace(
-        AddRelus(),
-        torch.randn(2, 3),
-        capture=CaptureOptions(intervention_ready=True),
-    )
-
-    edge_layers = [layer for layer in log.layer_list if layer._edge_uses]
-    assert edge_layers
-    for layer in edge_layers:
-        loc_labels = set(layer.parent_arg_positions["args"].values()) | set(
-            layer.parent_arg_positions["kwargs"].values()
-        )
-        edge_labels = {
-            log._raw_to_final_layer_labels.get(edge.parent_label, edge.parent_label)
-            for edge in layer._edge_uses
-        }
-        assert edge_labels == loc_labels
-        assert all(
-            log._raw_to_final_layer_labels.get(edge.child_label, edge.child_label)
-            == layer.layer_label
-            for edge in layer._edge_uses
-        )
-        assert all(edge.child_func_call_id == layer.func_call_id for edge in layer._edge_uses)
-
-
-@pytest.mark.smoke
+# Kept: the stack's templates-by-default change rewrote these assertions after slice 3 measured
+# this test.
 def test_non_intervention_ready_capture_leaves_templates_empty_and_edges_persisted() -> None:
-    """Default capture avoids templates but keeps graph edge provenance."""
+    """Default capture records argument templates and keeps graph edge provenance.
+
+    The name predates templates-by-default; it is kept so ledgers that cite it stay valid.
+    """
 
     class TinyModel(torch.nn.Module):
         """Simple model for non-ready gating."""
@@ -318,9 +276,11 @@ def test_non_intervention_ready_capture_leaves_templates_empty_and_edges_persist
 
     log = tl.trace(TinyModel(), torch.randn(2, 3))
 
-    assert all(layer.args_template is None for layer in log.layer_list)
-    assert all(layer.kwargs_template is None for layer in log.layer_list)
-    edge_layers = [layer for layer in log.layer_list if layer._edge_uses]
+    assert log.is_replayable is False
+    compute_layers = [layer for layer in log._layer_list if layer.func is not None]
+    assert compute_layers
+    assert all(layer.call.args_template is not None for layer in compute_layers)
+    edge_layers = [layer for layer in log._layer_list if layer._edge_uses]
     assert edge_layers
     for layer in edge_layers:
         assert {edge.parent_label for edge in layer._edge_uses} == set(layer.parents)

@@ -1,5 +1,4 @@
 """Whole-graph geometric receptive-field solver.
-
 The engine deliberately contains no operation-family registrations.  It interprets the
 local geometry emitted by :mod:`torchlens.receptive_field._rules` and composes that geometry
 over the captured DAG using exact rational arithmetic.
@@ -17,12 +16,15 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from ..backends import TORCH_BACKEND_NAME
-from ..capture.arg_positions import (
+from .._capture.arg_positions import (
     VARIADIC_TENSOR_ARG_FUNCS,
     _normalize_func_name,
     _schema_arg_is_parent_candidate,
 )
+from .._record_type import record_type
+from .._utils._display_bounded import short_dataclass_repr
+from ..backends import TORCH_BACKEND_NAME
+from ._engine_causal import apply_causal, local_result
 from ._engine_descriptor import _descriptor
 from ._engine_geometry import (
     _Affine,
@@ -37,11 +39,10 @@ from ._engine_geometry import (
     _InputState,
     _join_axis_kinds,
     _Mapped,
-    _RuleApplication,
     _select_full_axes,
     _unique_notes,
-    _WindowMapping,
 )
+from ._engine_revision import _graph_revision, _operation_is_live
 from ._errors import ReceptiveFieldConfigurationError, ReceptiveFieldUnavailableError
 from ._rules import _RF_RULES, ReceptiveFieldRuleContext, _rf_rules_epoch, _RuleResult
 from ._types import (
@@ -50,9 +51,18 @@ from ._types import (
 )
 
 if TYPE_CHECKING:
-    from ..data_classes.op import Op
-    from ..data_classes.trace import Trace
+    from .._data_classes.op import Op
+    from .._data_classes.trace import Trace
 
+
+_TAINT_BY_KIND: Mapping[str, ReceptiveFieldStatus] = MappingProxyType(
+    {
+        "data_dependent": ReceptiveFieldStatus.DATA_DEPENDENT,
+        "unknown": ReceptiveFieldStatus.UNKNOWN,
+        "unsupported": ReceptiveFieldStatus.UNSUPPORTED,
+    }
+)
+"""Local rule kinds that taint a branch instead of mapping it, with their status."""
 
 _TAINT_ORDER = {
     ReceptiveFieldStatus.UNKNOWN: 0,
@@ -67,6 +77,8 @@ _SOURCE_SOLUTION_CACHE_SIZE = 8
 class _ReceptiveFieldSolution:
     """Immutable whole-trace geometric solution and its cache identity."""
 
+    __repr__ = short_dataclass_repr
+
     registry_epoch: int
     graph_revision: tuple[object, ...]
     descriptors: Mapping[tuple[str, str], ReceptiveField]
@@ -77,6 +89,8 @@ class _ReceptiveFieldSolution:
 @dataclass(frozen=True)
 class _BranchState:
     """Geometry state plus whether ancestry reaches only through a control edge."""
+
+    __repr__ = short_dataclass_repr
 
     state: _InputState
     geometry_neutral: bool
@@ -97,7 +111,7 @@ class _SchemaOperandSlots:
 # in the bounded FIFO companion below so an unrecognized func name (loaded
 # traces, custom ops, non-aten labels) neither grows this dict without bound
 # NOR re-enters the C++ operator registry on every edge of every solve
-# (~12x slower than a cached read, measured grind-p3).
+# (~12x slower than a cached read, as measured).
 _SCHEMA_OPERAND_SLOTS_CACHE: dict[str, _SchemaOperandSlots] = {}
 _SCHEMA_OPERAND_MISS_NAMES: dict[str, None] = {}
 _SCHEMA_OPERAND_MISS_NAMES_MAX_ENTRIES = 1024
@@ -128,12 +142,10 @@ def _is_input_seed(op: Op) -> bool:
 
 def solve(trace: Trace) -> _ReceptiveFieldSolution:
     """Solve geometric receptive fields for every operation and reachable model input.
-
     Parameters
     ----------
     trace:
         Captured TorchLens trace.
-
     Returns
     -------
     _ReceptiveFieldSolution
@@ -159,14 +171,12 @@ def solve(trace: Trace) -> _ReceptiveFieldSolution:
 
 def solve_from(trace: Trace, source: Op) -> _ReceptiveFieldSolution:
     """Solve geometric receptive fields seeded at one captured source operation.
-
     Parameters
     ----------
     trace:
         Captured TorchLens trace.
     source:
         Operation whose output grid is the receptive-field source.
-
     Returns
     -------
     _ReceptiveFieldSolution
@@ -258,7 +268,7 @@ def _solve_uncached(
         Newly computed immutable solution.
     """
 
-    operations = tuple(op for op in trace.layer_list if _operation_is_live(op))
+    operations = tuple(op for op in trace._layer_list if _operation_is_live(op))
     by_reference = {
         reference: op
         for op in operations
@@ -268,10 +278,7 @@ def _solve_uncached(
 
     for op in _topological_operations(operations, by_reference):
         if seed_predicate(op):
-            seed = _seed_input(op)
-            states_by_op[op.label] = {
-                seed.io_role: _BranchState(state=seed, geometry_neutral=False)
-            }
+            _seed_input_state(states_by_op, op)
             continue
 
         parents = tuple(by_reference[label] for label in op.parents if label in by_reference)
@@ -300,24 +307,10 @@ def _solve_uncached(
             for role, role_states in branches.items()
         }
 
-    return _materialize_solution(operations, states_by_op, epoch, graph_revision)
-
-
-def _materialize_solution(
-    operations: Sequence[Op],
-    states_by_op: Mapping[str, Mapping[str, _BranchState]],
-    epoch: int,
-    graph_revision: tuple[object, ...],
-) -> _ReceptiveFieldSolution:
-    """Publish tensor-grid descriptors after all graph states have propagated."""
-
     descriptors: dict[tuple[str, str], ReceptiveField] = {}
     per_op: dict[str, Mapping[str, ReceptiveField]] = {}
     flattened_states: dict[tuple[str, str], _InputState] = {}
     for op in operations:
-        # Region/control records have graph edges but no tensor grid. Keep their
-        # states in the traversal so uncertainty propagates across data edges,
-        # without publishing a fictitious scalar descriptor for the boundary.
         if op.shape is None:
             continue
         op_branches = states_by_op.get(op.label, {})
@@ -343,6 +336,26 @@ def _materialize_solution(
     )
 
 
+def _seed_input_state(states_by_op: dict[str, dict[str, _BranchState]], op: Op) -> None:
+    """Seed identity geometry for a model-input operation, unless it has no units.
+
+    A zero-length axis leaves the input with no units, so it has no influence
+    geometry: it seeds nothing and no descriptor names it.
+
+    Parameters
+    ----------
+    states_by_op:
+        Branch states by operation label; updated in place.
+    op:
+        Captured model-input operation.
+    """
+
+    if op.shape is not None and 0 in op.shape:
+        return
+    seed = _seed_input(op)
+    states_by_op[op.label] = {seed.io_role: _BranchState(state=seed, geometry_neutral=False)}
+
+
 def _seed_input(op: Op) -> _InputState:
     """Create identity geometry for a model-input operation.
 
@@ -359,10 +372,12 @@ def _seed_input(op: Op) -> _InputState:
 
     if op.shape is None:
         raise ReceptiveFieldUnavailableError(
-            f"Operation {op.label!r} has no tensor output grid to seed receptive geometry."
+            f"{op.label}: no tensor output grid",
+            code="rf_tensor_grid_unavailable",
+            remedy="select a tensor-valued graph endpoint",
         )
     shape = tuple(op.shape)
-    role = op.io_role or op.label
+    role = op.graph.io_role or op.label
     identity = _Mapped(_Affine(Fraction(1), Fraction(0)), _Affine(Fraction(1), Fraction(0)))
     return _InputState(
         input_op_label=op.label,
@@ -512,6 +527,20 @@ def _rule_result_uncached(op: Op) -> tuple[_RuleResult, str]:
         return ReceptiveFieldRuleContext(op).passthrough(), "graph_identity"
     name = _normalize_func_name(op.func_name)
     rule = _RF_RULES.get(name)
+    if rule is None:
+        # Some preview backends capture a generic implementation-call name as func_name that
+        # loses the actual operation identity -- tinygrad reconstructs its graph from the UOp
+        # DAG, so an elementwise binary op (add, mul, ...) carries its Python lambda wrapper's
+        # own name ("<lambda>") as func_name, with the real semantic category only on the op
+        # type. Fall back to it before reporting unsupported, so RF rules keyed by canonical
+        # op name (e.g. "add") still dispatch for those ops; this only ever widens dispatch
+        # (torch/mlx/tf/jax/paddle already resolve on the first, unchanged lookup).
+        fallback_name = _normalize_func_name(str(record_type(op, "") or ""))
+        if fallback_name != name:
+            fallback_rule = _RF_RULES.get(fallback_name)
+            if fallback_rule is not None:
+                rule = fallback_rule
+                name = fallback_name
     context = ReceptiveFieldRuleContext(op)
     if rule is None:
         return context.unsupported(f"{op.label}: no receptive-field rule for {name}"), name
@@ -546,19 +575,16 @@ def _apply_rule(
         Child-coordinate branch state.
     """
 
-    notes = state.notes + ((f"{op.label}: {result.note}",) if result.note else ())
-    if result.kind in {"data_dependent", "unknown", "unsupported"}:
-        status = {
-            "data_dependent": ReceptiveFieldStatus.DATA_DEPENDENT,
-            "unknown": ReceptiveFieldStatus.UNKNOWN,
-            "unsupported": ReceptiveFieldStatus.UNSUPPORTED,
-        }[result.kind]
-        return replace(state, axes=None, taint=status, notes=notes, rule=rule_name)
+    result, notes = local_result(op, parent, state, result)
+    if result.kind in _TAINT_BY_KIND:
+        return replace(
+            state, axes=None, taint=_TAINT_BY_KIND[result.kind], notes=notes, rule=rule_name
+        )
 
     if state.taint is not None:
         if (
-            parent.shape is not None
-            and result.kind == "full"
+            result.kind == "full"
+            and parent.shape is not None
             and _select_full_axes(result.values.get("axes"), parent, op)
             == set(range(len(parent.shape)))
         ):
@@ -580,26 +606,16 @@ def _apply_rule(
 
     if state.axes is None:
         return replace(state, notes=notes, rule=rule_name)
-    application = _RuleApplication(result, rule_name, notes)
-    handler = {
-        "window": _apply_window,
-        "window_edges": _apply_window_edges,
-        "full": _apply_full,
-        "axis_map": _apply_axis_map,
-    }.get(result.kind)
-    if handler is not None:
-        return handler(op, parent, state, application)
-    return _apply_unmapped_rule(op, parent, state, application)
-
-
-def _apply_unmapped_rule(
-    op: Op, parent: Op, state: _InputState, application: _RuleApplication
-) -> _InputState:
-    """Apply degradation or passthrough when no explicit coordinate map is registered."""
-
-    result, rule_name, notes = application.result, application.name, application.notes
-    if state.axes is None:
-        return replace(state, notes=notes, rule=rule_name)
+    if result.kind == "window":
+        return _apply_window(op, parent, state, result, rule_name, notes)
+    if result.kind == "window_edges":
+        return _apply_window_edges(op, parent, state, result, rule_name, notes)
+    if result.kind == "full":
+        return _apply_full(op, parent, state, result, rule_name, notes)
+    if result.kind == "axis_map":
+        return _apply_axis_map(op, parent, state, result, rule_name, notes)
+    if result.kind == "causal_window":
+        return apply_causal(op, parent, state, result, rule_name, notes, _apply_full)
     if result.kind == "dissolve":
         axes = tuple(
             replace(
@@ -621,20 +637,21 @@ def _apply_unmapped_rule(
             for axis in state.axes
         )
         return replace(state, axes=axes, notes=notes + (degradation,), rule=rule_name)
-    return _apply_passthrough(op, parent, state, application)
+    return _apply_passthrough(op, parent, state, result, rule_name, notes)
 
 
 def _apply_passthrough(
     op: Op,
     parent: Op,
     state: _InputState,
-    application: _RuleApplication,
+    result: _RuleResult,
+    rule_name: str,
+    notes: tuple[str, ...],
     *,
     parent_to_child: Mapping[int, int] | None = None,
 ) -> _InputState:
     """Compose identity or broadcast geometry using an explicit axis correspondence."""
 
-    result, rule_name, notes = application.result, application.name, application.notes
     assert state.axes is not None
     child_rank = len(op.shape)
     if parent_to_child is None:
@@ -712,8 +729,13 @@ def _passthrough_axis_map(op: Op, parent: Op, result: _RuleResult) -> Mapping[in
         Explicit parent-to-child correspondence, or ``None`` when ambiguous.
     """
 
-    parent_rank = len(parent.shape)
-    child_rank = len(op.shape)
+    # ``shape`` is legitimately ``None`` for a non-tensor-valued op (e.g. a
+    # JAX while/cond decision pseudo-op whose captured output is not a plain
+    # tensor) that is merely a pass-through ancestor on the walk to a real
+    # geometric target; treat it as the op.py-documented shapeless default
+    # (``()``, rank 0) instead of crashing on ``len(None)``.
+    parent_rank = len(parent.shape) if parent.shape is not None else 0
+    child_rank = len(op.shape) if op.shape is not None else 0
     raw_axis_maps = result.values.get("parent_to_child_axes")
     if isinstance(raw_axis_maps, Mapping):
         parent_references = (parent.label, parent.layer_label, parent._layer_label_raw)
@@ -800,7 +822,7 @@ def _concatenation_starts_by_position(op: Op, raw_axis: int) -> tuple[int, ...]:
     -------
     tuple[int, ...]
         Slice start at each ``op.parents`` position, truncated to the shorter of
-        ``op.parents`` and ``op.input_shapes`` exactly as the per-parent scan was.
+        ``op.parents`` and the operand shapes exactly as the per-parent scan was.
     """
 
     scope = _active_geometry_memo()
@@ -812,7 +834,7 @@ def _concatenation_starts_by_position(op: Op, raw_axis: int) -> tuple[int, ...]:
             return cached[1]
     positions: list[int] = []
     offset = 0
-    for _label, shape in zip(op.parents, op.input_shapes, strict=False):
+    for shape in ReceptiveFieldRuleContext(op)._parent_shapes[: len(op.parents)]:
         positions.append(offset)
         if shape is None:
             continue
@@ -830,11 +852,12 @@ def _apply_window(
     op: Op,
     parent: Op,
     state: _InputState,
-    application: _RuleApplication,
+    result: _RuleResult,
+    rule_name: str,
+    notes: tuple[str, ...],
 ) -> _InputState:
     """Compose a standard kernel/stride/padding/dilation local recurrence."""
 
-    result = application.result
     kernels = _as_tuple(result.values["kernel"])
     rank = len(kernels)
     strides = _as_tuple(result.values.get("stride", 1), rank)
@@ -854,11 +877,10 @@ def _apply_window(
         op,
         parent,
         state,
-        _WindowMapping(
-            local_maps,
-            channel_dependency=str(result.values.get("channel_dependency", "full_exact")),
-        ),
-        application,
+        local_maps,
+        rule_name,
+        notes,
+        channel_dependency=str(result.values.get("channel_dependency", "full_exact")),
     )
 
 
@@ -866,11 +888,12 @@ def _apply_window_edges(
     op: Op,
     parent: Op,
     state: _InputState,
-    application: _RuleApplication,
+    result: _RuleResult,
+    rule_name: str,
+    notes: tuple[str, ...],
 ) -> _InputState:
     """Compose raw registered two-edge maps."""
 
-    result, rule_name, notes = application.result, application.name, application.notes
     raw_edges = result.values.get("per_axis_edges")
     if not isinstance(raw_edges, Sequence) or isinstance(raw_edges, (str, bytes)):
         return replace(
@@ -904,11 +927,10 @@ def _apply_window_edges(
         op,
         parent,
         state,
-        _WindowMapping(
-            tuple(maps),
-            preserve_non_window_axes=bool(result.values.get("preserve_non_window_axes", False)),
-        ),
-        application,
+        tuple(maps),
+        rule_name,
+        notes,
+        preserve_non_window_axes=bool(result.values.get("preserve_non_window_axes", False)),
     )
 
 
@@ -916,19 +938,24 @@ def _compose_window_maps(
     op: Op,
     parent: Op,
     state: _InputState,
-    window: _WindowMapping,
-    application: _RuleApplication,
+    local_maps: tuple[_Mapped, ...],
+    rule_name: str,
+    notes: tuple[str, ...],
+    *,
+    preserve_non_window_axes: bool = False,
+    channel_dependency: str = "full_exact",
 ) -> _InputState:
     """Compose window maps and derive axis roles from their registered semantics."""
 
-    local_maps = window.maps
-    preserve_non_window_axes = window.preserve_non_window_axes
-    channel_dependency = window.channel_dependency
-    rule_name, notes = application.name, application.notes
     assert state.axes is not None
     spatial_rank = len(local_maps)
-    parent_rank = len(parent.shape)
-    child_rank = len(op.shape)
+    # ``shape`` is legitimately ``None`` for a non-tensor-valued op (e.g. a
+    # JAX while/cond decision pseudo-op whose captured output is not a plain
+    # tensor) that is merely a pass-through ancestor on the walk to a real
+    # geometric target; treat it as the op.py-documented shapeless default
+    # (``()``, rank 0) instead of crashing on ``len(None)``.
+    parent_rank = len(parent.shape) if parent.shape is not None else 0
+    child_rank = len(op.shape) if op.shape is not None else 0
     if spatial_rank == 0 or parent_rank < spatial_rank or child_rank < spatial_rank:
         return replace(
             state,
@@ -1000,16 +1027,22 @@ def _apply_full(
     op: Op,
     parent: Op,
     state: _InputState,
-    application: _RuleApplication,
+    result: _RuleResult,
+    rule_name: str,
+    notes: tuple[str, ...],
 ) -> _InputState:
     """Apply whole-extent dependence on selected parent axes."""
 
-    result, rule_name, notes = application.result, application.name, application.notes
     assert state.axes is not None
     selected = _select_full_axes(result.values.get("axes"), parent, op)
     exact = bool(result.values.get("exact", True))
-    parent_rank = len(parent.shape)
-    child_rank = len(op.shape)
+    # ``shape`` is legitimately ``None`` for a non-tensor-valued op (e.g. a
+    # JAX while/cond decision pseudo-op whose captured output is not a plain
+    # tensor) that is merely a pass-through ancestor on the walk to a real
+    # geometric target; treat it as the op.py-documented shapeless default
+    # (``()``, rank 0) instead of crashing on ``len(None)``.
+    parent_rank = len(parent.shape) if parent.shape is not None else 0
+    child_rank = len(op.shape) if op.shape is not None else 0
     surviving = result.values.get("surviving_parent_axes")
     parent_to_child: Mapping[int, int] | None = None
     if isinstance(surviving, Sequence) and not isinstance(surviving, (str, bytes)):
@@ -1024,7 +1057,9 @@ def _apply_full(
         op,
         parent,
         state,
-        application,
+        result,
+        rule_name,
+        notes,
         parent_to_child=parent_to_child,
     )
     if passthrough.axes is None and selected == set(range(parent_rank)):
@@ -1076,11 +1111,12 @@ def _apply_axis_map(
     op: Op,
     parent: Op,
     state: _InputState,
-    application: _RuleApplication,
+    result: _RuleResult,
+    rule_name: str,
+    notes: tuple[str, ...],
 ) -> _InputState:
     """Apply an exact registered output-to-parent axis remapping."""
 
-    result, rule_name, notes = application.result, application.name, application.notes
     raw_mapping = result.values.get("out_to_parent_axis", {})
     if not isinstance(raw_mapping, Mapping):
         return replace(
@@ -1127,11 +1163,11 @@ def _apply_axis_map(
                 # ``parent = step * out + start``; composing it here is what
                 # keeps the descriptor's window offsets in the CURRENT frame
                 # (the historical rank-changing path dropped the slice offset
-                # under an exact claim; disputed-r2 b6/R20-2).
+                # under an exact claim).
                 step, start = int(edge[0]), int(edge[1])
                 # A strided slice keeps only every ``step``-th parent index:
                 # the true support has holes, so the axis must disclose
-                # ``sparse_possible`` (round-3 b6-fable R20-1).
+                # ``sparse_possible``.
                 local = _Mapped(
                     _Affine(Fraction(step), Fraction(start)),
                     _Affine(Fraction(step), Fraction(start)),
@@ -1207,19 +1243,17 @@ def _compute_schema_operand_slots(canonical: str) -> _SchemaOperandSlots | None:
         overload_names = list(overloads_method())
     except Exception:
         return None
-    schemas = tuple(
-        schema
-        for overload_name in overload_names
-        if (schema := getattr(getattr(packet, overload_name, None), "_schema", None)) is not None
-    )
-    if not schemas:
-        return None
     operand_positions: set[int] = set()
     operand_names: set[str] = set()
     seen_positions: set[int] = set()
     seen_names: set[str] = set()
     int_list_positions: set[int] = set()
-    for schema in schemas:
+    found_schema = False
+    for overload_name in overload_names:
+        schema = getattr(getattr(packet, overload_name, None), "_schema", None)
+        if schema is None:
+            continue
+        found_schema = True
         for index, schema_arg in enumerate(getattr(schema, "arguments", ()) or ()):
             arg_name = getattr(schema_arg, "name", None)
             seen_positions.add(index)
@@ -1234,6 +1268,8 @@ def _compute_schema_operand_slots(canonical: str) -> _SchemaOperandSlots | None:
                 operand_positions.add(index)
                 if isinstance(arg_name, str):
                     operand_names.add(arg_name)
+    if not found_schema:
+        return None
     return _SchemaOperandSlots(
         operand_positions=frozenset(operand_positions),
         operand_names=frozenset(operand_names),
@@ -1243,13 +1279,16 @@ def _compute_schema_operand_slots(canonical: str) -> _SchemaOperandSlots | None:
     )
 
 
-def _cached_schema_operand_slots(canonical: str) -> _SchemaOperandSlots | None:
-    """Resolve operand slots once, with bounded negative caching for missing packets."""
+def _schema_edge_is_metadata_only(func_name: str, arg_kind: str, arg_path: object) -> bool:
+    """Return whether an edge is schema-proven shape/control metadata, failing closed."""
 
+    if _normalize_func_name(func_name) in VARIADIC_TENSOR_ARG_FUNCS:
+        return False
+    canonical = func_name.strip("_")
     slots = _SCHEMA_OPERAND_SLOTS_CACHE.get(canonical)
     if slots is None:
         if canonical in _SCHEMA_OPERAND_MISS_NAMES:
-            return None
+            return False
         computed_slots = _compute_schema_operand_slots(canonical)
         if computed_slots is None:
             # Bounded negative cache: torch does not memoize a FAILED
@@ -1258,33 +1297,24 @@ def _cached_schema_operand_slots(canonical: str) -> _SchemaOperandSlots | None:
             while len(_SCHEMA_OPERAND_MISS_NAMES) >= _SCHEMA_OPERAND_MISS_NAMES_MAX_ENTRIES:
                 _SCHEMA_OPERAND_MISS_NAMES.pop(next(iter(_SCHEMA_OPERAND_MISS_NAMES)))
             _SCHEMA_OPERAND_MISS_NAMES[canonical] = None
-            return None
+            return False
         _SCHEMA_OPERAND_SLOTS_CACHE[canonical] = computed_slots
         slots = computed_slots
-    return slots
-
-
-def _schema_edge_is_metadata_only(func_name: str, arg_kind: str, arg_path: object) -> bool:
-    """Return whether an edge is schema-proven shape/control metadata, failing closed."""
-
-    if _normalize_func_name(func_name) in VARIADIC_TENSOR_ARG_FUNCS:
-        return False
-    slots = _cached_schema_operand_slots(func_name.strip("_"))
-    if slots is None:
-        return False
     if not isinstance(arg_path, tuple) or not arg_path:
         return False
     top = arg_path[0]
     if arg_kind == "keyword" and isinstance(top, str):
         normalized = _normalize_func_name(top)
-        return not any(
-            _normalize_func_name(name) == normalized for name in slots.operand_names
-        ) and any(_normalize_func_name(name) == normalized for name in slots.seen_names)
+        if any(_normalize_func_name(name) == normalized for name in slots.operand_names):
+            return False
+        return any(_normalize_func_name(name) == normalized for name in slots.seen_names)
     if arg_kind != "positional" or not isinstance(top, int):
         return False
-    return top not in slots.operand_positions and (
-        top in slots.seen_positions or any(position <= top for position in slots.int_list_positions)
-    )
+    if top in slots.operand_positions:
+        return False
+    if top in slots.seen_positions:
+        return True
+    return any(position <= top for position in slots.int_list_positions)
 
 
 def _edge_record_parent_label(record: object) -> str | None:
@@ -1366,11 +1396,7 @@ def _edge_is_geometry_neutral(
     edge_kinds = tuple(getattr(record, "edge_use", None) for record in records)
     if all(kind == "control" for kind in edge_kinds):
         return True
-    if (
-        parent.shape is None
-        or tuple(parent.shape)
-        or getattr(op.source_trace, "backend", None) != TORCH_BACKEND_NAME
-    ):
+    if parent.shape != () or op.source_trace._provenance_backend != TORCH_BACKEND_NAME:
         return False
     for record, edge_kind in zip(records, edge_kinds):
         if edge_kind == "control":
@@ -1564,82 +1590,6 @@ def _topological_operations(
     seen = {op.label for op in result}
     result.extend(op for op in operations if op.label not in seen)
     return tuple(result)
-
-
-def _snapshot_value(value: object) -> str:
-    """Return a mutation-proof, type-tagged token for one recorded argument value."""
-
-    try:
-        return f"{type(value).__name__}:{value!r}"
-    except Exception:
-        # Best-effort fallback: identity keeps the token stable for the same
-        # object and still invalidates when the object is replaced outright.
-        return f"{type(value).__name__}:@{id(value):x}"
-
-
-def _snapshot_mapping(mapping: object) -> object:
-    """Return an order-insensitive by-value token for one recorded mapping field."""
-
-    if isinstance(mapping, Mapping):
-        return tuple(sorted((str(key), _snapshot_value(value)) for key, value in mapping.items()))
-    return _snapshot_value(mapping)
-
-
-def _geometry_args_snapshot(op: Op) -> tuple[object, ...]:
-    """Snapshot the recorded operation arguments that RF rules consume, by value.
-
-    Geometry rules read kernel/stride/padding/dilation/output-size/etc. from
-    ``op.func_config`` (``RuleContext.cfg``) with fallbacks into the captured
-    non-tensor arguments (``RuleContext.arg``). The staleness fingerprint must
-    capture BOTH surfaces by value: holding live references would compare a
-    mutated dict against itself and never invalidate, so an in-place geometry
-    change that preserves shape and topology would keep serving stale frozen
-    descriptors from the trace-level solution cache while per-unit ``.at()``
-    queries recompute fresh from the live values -- the two public RF paths
-    would disagree.
-    """
-
-    return (
-        _snapshot_mapping(getattr(op, "func_config", None)),
-        tuple(_snapshot_value(value) for value in getattr(op, "non_tensor_pos_args", ()) or ()),
-        _snapshot_mapping(getattr(op, "non_tensor_kwargs", None)),
-    )
-
-
-def _edge_uses_snapshot(op: Op) -> tuple[str, ...]:
-    """Snapshot semantic edge records consumed by control-branch classification."""
-
-    return tuple(_snapshot_value(record) for record in getattr(op, "edge_uses", ()) or ())
-
-
-def _graph_revision(trace: Trace) -> tuple[object, ...]:
-    """Build a stable structural fingerprint that invalidates cache after graph edits.
-
-    Includes topology (parents/children), shape, role, function identity, and a
-    by-value snapshot of the geometry arguments RF rules read, so an argument
-    change with unchanged shape+topology still bumps the revision.
-    """
-
-    return tuple(
-        (
-            op.label,
-            tuple(op.parents),
-            tuple(op.children),
-            None if op.shape is None else tuple(op.shape),
-            op.io_role,
-            op.func_name,
-            _geometry_args_snapshot(op),
-            _edge_uses_snapshot(op),
-        )
-        for op in trace.layer_list
-        if _operation_is_live(op)
-    )
-
-
-def _operation_is_live(op: Op) -> bool:
-    """Return whether an operation has not been cleared by trace removal."""
-
-    return isinstance(getattr(op, "label", None), str)
 
 
 __all__: list[str] = []

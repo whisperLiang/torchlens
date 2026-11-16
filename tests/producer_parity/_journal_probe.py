@@ -67,15 +67,15 @@ def grab_journal_events(monkeypatch: Any, producer: str) -> list[Any]:
     """
 
     assert producer in ("legacy", "decomposed"), producer
-    postprocess_module = importlib.import_module("torchlens.postprocess")
-    materialize_module = importlib.import_module("torchlens.postprocess._materialize")
+    postprocess_module = importlib.import_module("torchlens._postprocess")
+    materialize_module = importlib.import_module("torchlens._postprocess._materialize")
     original = materialize_module.materialize_from_events
     grabbed: list[Any] = []
 
-    def observing(trace: Any, events: Any) -> None:
+    def observing(trace: Any, events: Any, *rest: Any) -> None:
         if not grabbed:
             grabbed.extend(events.op_events)
-        original(trace, events)
+        original(trace, events, *rest)
 
     monkeypatch.setattr(postprocess_module, "materialize_from_events", observing)
     monkeypatch.setattr(materialize_module, "materialize_from_events", observing)

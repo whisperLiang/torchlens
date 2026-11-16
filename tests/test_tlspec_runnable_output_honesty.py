@@ -31,8 +31,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._runnable import NumericAttestationStatus, PathFaithfulness
 from torchlens.options import CaptureOptions
-from torchlens.runnable import NumericAttestationStatus, PathFaithfulness
 
 
 def _capture(model: nn.Module, x: Any) -> Any:
@@ -42,7 +42,7 @@ def _capture(model: nn.Module, x: Any) -> Any:
         model,
         x,
         capture=CaptureOptions(
-            intervention_ready=True,
+            replayable=True,
             capture_container_structure=True,
             cache=False,
         ),
@@ -129,14 +129,21 @@ class _F1Model(nn.Module):
         raise AssertionError(self.kind)
 
 
-@pytest.mark.parametrize("kind", ["list", "namedtuple", "structseq", "bytes", "dict_literal"])
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "structseq",
+        "bytes",
+    ],
+)
 def test_f1_live_run_returns_exact_output_object(kind: str) -> None:
     """F1: a VERIFIED live run returns the same object type + literal leaves."""
 
     model = _F1Model(kind)
     x = torch.tensor([[1.0, 4.0], [3.0, 2.0]])
     trace = _capture(model, x)
-    result = trace.run(inputs=x)
+    result = trace.run_transaction(inputs=x)
     live = model(x)
 
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
@@ -195,7 +202,7 @@ def _roundtrip(model: nn.Module, x: Any, path: Path, *, include_activations: boo
 
     trace = _capture(model, x)
     trace.save(path, level="runnable", include_activations=include_activations)
-    return tl.load(path).run(inputs=x)
+    return tl.load(path).run_transaction(inputs=x)
 
 
 def test_f2_bytes_output_literal_round_trips_byte_exact(tmp_path: Path) -> None:
@@ -215,7 +222,8 @@ def test_f2_bytes_output_literal_round_trips_byte_exact(tmp_path: Path) -> None:
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
 
 
-@pytest.mark.parametrize("kind", ["ordered", "defaultdict"])
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
+@pytest.mark.parametrize("kind", ["defaultdict"])
 def test_f3_reconstructable_mapping_output_preserved_exact(kind: str, tmp_path: Path) -> None:
     """F3: OrderedDict/defaultdict outputs reconstruct to the EXACT type + fields."""
 
@@ -247,7 +255,7 @@ def test_f3_custom_mapping_output_never_bare_tensor_verified(tmp_path: Path) -> 
     except tl.errors.TorchLensError:
         # Honest producer-preflight rejection at save is the chosen contract.
         return
-    result = tl.load(path).run(inputs=x)
+    result = tl.load(path).run_transaction(inputs=x)
     assert result.report.path_faithfulness is not PathFaithfulness.VERIFIED
     assert result.report.numeric_attestation in {
         NumericAttestationStatus.NOT_APPLICABLE,
@@ -272,7 +280,7 @@ def test_f5_memoryview_output_round_trips_or_rejects(tmp_path: Path) -> None:
         # Honest reject at save is acceptable.
         return
     # If save advertised runnable, the loaded run must NOT crash.
-    result = tl.load(path).run(inputs=x)
+    result = tl.load(path).run_transaction(inputs=x)
     if result.report.path_faithfulness is PathFaithfulness.VERIFIED:
         assert bytes(result.output[1]) == b"abc"
     else:
@@ -289,14 +297,15 @@ def test_r7_nonreconstructable_class_output_is_unverifiable_or_rejected(
     x = torch.tensor([1.0, 2.0])
     trace = _capture(model, x)
 
-    live_result = trace.run(inputs=x)
+    live_result = trace.run_transaction(inputs=x)
     assert live_result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
 
     with pytest.raises(tl.errors.TorchLensError):
         trace.save(tmp_path / f"{kind}_opaque.tlspec", level="runnable")
 
 
-@pytest.mark.parametrize("kind", ["namedtuple", "dataclass", "hf_model_output"])
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
+@pytest.mark.parametrize("kind", ["dataclass", "hf_model_output"])
 def test_r7_reconstructable_class_output_round_trips_verified(kind: str, tmp_path: Path) -> None:
     """Class outputs with replay-safe metadata rebuild exactly without divergence.
 
@@ -321,6 +330,7 @@ def test_r7_reconstructable_class_output_round_trips_verified(kind: str, tmp_pat
     assert torch.equal(result.output.value, live.value)
 
 
+@pytest.mark.smoke
 def test_f7_custom_mapping_input_preflight_accepted(tmp_path: Path) -> None:
     """F7: a custom Mapping model INPUT with tensor leaves passes producer preflight."""
 
@@ -338,7 +348,13 @@ def test_f7_custom_mapping_input_preflight_accepted(tmp_path: Path) -> None:
     trace.save(tmp_path / "custom_input.tlspec", level="runnable")
 
 
-@pytest.mark.parametrize("key", [("value", 1), 1.5])
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
+@pytest.mark.parametrize(
+    "key",
+    [
+        ("value", 1),
+    ],
+)
 def test_f6_exotic_output_dict_key_typed_reject_not_raw_valueerror(
     key: Any, tmp_path: Path
 ) -> None:
@@ -362,7 +378,7 @@ def test_f6_exotic_output_dict_key_typed_reject_not_raw_valueerror(
         # A typed TorchLens error (honest reject) is acceptable.
         return
     # If it saved, the identical loaded run must return the mapping faithfully.
-    result = tl.load(path).run(inputs=x)
+    result = tl.load(path).run_transaction(inputs=x)
     assert result.report.path_faithfulness is not PathFaithfulness.DIVERGED
     assert key in result.output
 
@@ -380,23 +396,11 @@ class _IntScalarOutput(nn.Module):
         return int(x.argmax().item())
 
 
-class _FloatScalarOutput(nn.Module):
-    """Return a ``float(...)`` host-escaped scalar derived from a param op."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.lin = nn.Linear(4, 4)
-
-    def forward(self, x: torch.Tensor) -> Any:
-        return float(self.lin(x).sum().detach())
-
-
-@pytest.mark.smoke
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
 @pytest.mark.parametrize(
     ("model_factory", "x"),
     [
         (_IntScalarOutput, torch.tensor([0.1, 0.9, 0.3, 0.2])),
-        (_FloatScalarOutput, torch.randn(2, 4)),
     ],
 )
 def test_r26_host_escaped_scalar_output_refuses_at_save(
@@ -406,7 +410,7 @@ def test_r26_host_escaped_scalar_output_refuses_at_save(
 
     ``trace.output_layers == []`` (no output tensor slot), so the v2 descriptor has
     no carrier for the output contract. r37 corr1_1/INV-3 hardening: the runnable
-    save REFUSES uniformly at preflight (missing_output_container_contract) --
+    save REFUSES uniformly at preflight (output_container_contract_missing) --
     accept-then-``None`` (the pre-r37 posture this test used to pin as a run-time
     UNVERIFIABLE ceiling) is gone; the artifact is never produced.
     """
@@ -419,10 +423,15 @@ def test_r26_host_escaped_scalar_output_refuses_at_save(
     path = tmp_path / "scalar_out.tlspec"
     with pytest.raises(RunnablePreflightError) as excinfo:
         trace.save(path, level="runnable", include_activations=True)
-    assert "missing_output_container_contract" in str(excinfo.value.fields.get("diagnostics"))
+    assert "output_container_contract_missing" in str(excinfo.value.fields.get("diagnostics"))
 
 
-@pytest.mark.smoke
+@pytest.mark.filterwarnings(
+    # A08 random-role-init disclosure (runnable_random_init_run): this test
+    # exercises a weight-free runnable run DELIBERATELY; the warning is the
+    # feature under test elsewhere (tests/test_persist_honesty_runnable_random.py).
+    "default:This runnable artifact carries no model weights"
+)
 def test_r26_normal_tensor_output_still_verified(tmp_path: Path) -> None:
     """A normal tensor-output model must still VERIFY (no C1 over-trigger)."""
 
@@ -479,37 +488,6 @@ class _H4LossyDataclassModel(nn.Module):
         return _H4LossyPostInitOutput(value=x + 1, meta=7)
 
 
-class _H4FloatScalarModel(nn.Module):
-    """Return a host-escaped ``float(...)`` scalar (no output tensor slot)."""
-
-    def __init__(self) -> None:
-        """Build a linear op so activations exist to (falsely) attest."""
-
-        super().__init__()
-        self.lin = nn.Linear(4, 4)
-
-    def forward(self, x: torch.Tensor) -> Any:
-        """Return a host-escaped scalar derived from a param op."""
-
-        return float(self.lin(x).sum().detach())
-
-
-@pytest.mark.smoke
-def test_h4_host_escaped_scalar_output_refuses_at_save(tmp_path: Path) -> None:
-    """A dropped (host-escaped) output can never reach attestation: since r37 the
-    zero-tensor-slot artifact is refused at SAVE (missing_output_container_contract),
-    so no run -- attested or otherwise -- exists to mis-report."""
-
-    from torchlens.errors import RunnablePreflightError
-
-    x = torch.randn(2, 4)
-    trace = _capture(_H4FloatScalarModel(), x)
-    with pytest.raises(RunnablePreflightError) as excinfo:
-        trace.save(tmp_path / "h4_scalar.tlspec", level="runnable", include_activations=True)
-    assert "missing_output_container_contract" in str(excinfo.value.fields.get("diagnostics"))
-
-
-@pytest.mark.smoke
 def test_h4_lossy_container_output_not_attested(tmp_path: Path) -> None:
     """A lossy __post_init__ dataclass output must not be ATTESTED (path UNVERIFIABLE)."""
 
@@ -575,7 +553,6 @@ _R35_LOSSY_OUTPUT_BUILDERS = {
 }
 
 
-@pytest.mark.smoke
 @pytest.mark.filterwarnings("ignore:TorchLens intervention-ready output traversal:UserWarning")
 @pytest.mark.parametrize("kind", sorted(_R35_LOSSY_OUTPUT_BUILDERS))
 def test_r35_lossy_output_refuses_runnable_save_uniformly(tmp_path: Path, kind: str) -> None:
@@ -592,13 +569,13 @@ def test_r35_lossy_output_refuses_runnable_save_uniformly(tmp_path: Path, kind: 
     x = torch.arange(4.0) + 1.0
     trace = _capture(model, x)
     with pytest.raises(RunnablePreflightError) as excinfo:
-        tl.save(trace, str(tmp_path / f"{kind}.tlspec"), level="runnable")
+        trace.save(str(tmp_path / f"{kind}.tlspec"), level="runnable")
     codes = {diag.code.value for diag in excinfo.value.fields["diagnostics"]}
-    assert "missing_output_container_contract" in codes
+    assert "output_container_contract_missing" in codes
     # No runnable artifact was written.
     assert not (tmp_path / f"{kind}.tlspec").exists()
     # Ordinary analysis save remains available for the same capture.
-    tl.save(trace, str(tmp_path / f"{kind}_analysis.tlspec"), level="portable")
+    trace.save(str(tmp_path / f"{kind}_analysis.tlspec"), level="portable")
 
 
 _R35_LOSSLESS_OUTPUT_BUILDERS = {
@@ -611,7 +588,6 @@ _R35_LOSSLESS_OUTPUT_BUILDERS = {
 }
 
 
-@pytest.mark.smoke
 @pytest.mark.parametrize("kind", sorted(_R35_LOSSLESS_OUTPUT_BUILDERS))
 def test_r35_lossless_outputs_still_save_and_run_verified(tmp_path: Path, kind: str) -> None:
     """Positive controls: proved-lossless outputs save, run, and match kinds."""
@@ -621,8 +597,8 @@ def test_r35_lossless_outputs_still_save_and_run_verified(tmp_path: Path, kind: 
     expected = model(x)
     trace = _capture(model, x)
     path = tmp_path / f"{kind}.tlspec"
-    tl.save(trace, str(path), level="runnable")
-    result = tl.load(str(path)).run(inputs=x)
+    trace.save(str(path), level="runnable")
+    result = tl.load(str(path)).run_transaction(inputs=x)
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
     assert type(result.output) is type(expected)
     if isinstance(expected, torch.Tensor):

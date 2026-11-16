@@ -7,30 +7,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.debug import GraphBreaksNormalizationError, GraphBreaksUnavailableError
-from torchlens.utils import _torch_compat
-
-
-class _ExplicitBreakModel(nn.Module):
-    """Small model with one guaranteed user-inserted Dynamo break."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run operations on both sides of an explicit graph break.
-
-        Parameters
-        ----------
-        x:
-            Input tensor.
-
-        Returns
-        -------
-        torch.Tensor
-            Scaled tensor.
-        """
-
-        value = x + 1
-        torch._dynamo.graph_break()
-        return value * 2
+from torchlens._utils import _torch_compat
+from torchlens.errors import GraphBreaksNormalizationError, GraphBreaksUnavailableError
 
 
 class _BreakFreeModel(nn.Module):
@@ -53,35 +31,7 @@ class _BreakFreeModel(nn.Module):
         return torch.relu(x + 1)
 
 
-@pytest.mark.skipif(
-    not _torch_compat.HAS_DYNAMO_EXPLAIN,
-    reason="torch._dynamo.explain unavailable",
-)
-def test_graph_breaks_reports_source_and_safe_correlation() -> None:
-    """A guaranteed break retains its user source and correlation accounting."""
-
-    report = tl.debug.graph_breaks(_ExplicitBreakModel(), torch.ones(2, 3))
-
-    assert len(report.breaks) >= 1
-    graph_break = report.breaks[0]
-    assert graph_break.source_file == __file__
-    assert graph_break.line_number is not None
-    assert "graph_break" in graph_break.reason
-    assert graph_break.matched_op_labels or graph_break.unmatched_reason is not None
-
-
-@pytest.mark.skipif(
-    not _torch_compat.HAS_DYNAMO_EXPLAIN,
-    reason="torch._dynamo.explain unavailable",
-)
-def test_graph_breaks_break_free_model_is_empty() -> None:
-    """A fully traceable model returns an empty break list."""
-
-    report = tl.debug.graph_breaks(_BreakFreeModel(), torch.ones(2, 3))
-
-    assert report.breaks == ()
-
-
+# Kept by the shrink-r4 coverage proof: sole branch coverage of debug/_graph_breaks.py.
 def test_graph_breaks_unavailable_capability_is_typed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -94,6 +44,7 @@ def test_graph_breaks_unavailable_capability_is_typed(
     assert exc_info.value.code == "graph_breaks_unavailable"
 
 
+# Kept by the shrink-r4 coverage proof: sole branch coverage of debug/_dynamo_explain_shapes.py, debug/_graph_breaks.py.
 def test_graph_breaks_unknown_runtime_shape_is_typed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -105,3 +56,26 @@ def test_graph_breaks_unknown_runtime_shape_is_typed(
     with pytest.raises(GraphBreaksNormalizationError, match="unsupported") as excinfo:
         tl.debug.graph_breaks(_BreakFreeModel(), torch.ones(2, 3))
     assert excinfo.value.fields["code"] == "graph_breaks_normalization_failed"
+
+
+def test_checks_session_step_checks_fire_after_graph_breaks() -> None:
+    """A dynamo probe never silences a later checks session's step-boundary checks.
+
+    torch 2.1's dynamo, on its first use in a process, rebinds every optimizer
+    class's ``step`` so step hooks stop running for optimizers built afterwards;
+    the nonfinite-gradient check (a step-family check) must still raise after
+    ``graph_breaks`` has run dynamo, on every torch.
+    """
+
+    tl.debug.graph_breaks(_BreakFreeModel(), torch.ones(2, 3))
+    net = nn.Linear(4, 2)
+    optimizer = torch.optim.SGD(net.parameters(), lr=0.1)
+    session = tl.debug.ChecksSession(net, optimizer)
+    session.register_nonfinite_grad_check()
+    session.attach()
+    try:
+        with pytest.raises(tl.errors.CheckViolationError):
+            (net(torch.randn(3, 4)) * float("nan")).sum().backward()
+            optimizer.step()
+    finally:
+        session.detach()

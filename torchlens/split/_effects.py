@@ -9,11 +9,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ..intervention.types import CapturedArgTemplate, LiteralTensor
+from ..intervention._types import CapturedArgTemplate, LiteralTensor
 from .graph import ReplayValueRef, SplitTraceGraph, SplitTraceNode
 
 if TYPE_CHECKING:
-    from ..utils.alias_footprint import TensorByteFootprint
+    from .._utils.alias_footprint import TensorByteFootprint
 
 
 @dataclass(frozen=True)
@@ -333,7 +333,7 @@ def _source_alias_conflict(
 ) -> tuple[str, str, str] | None:
     """Check current written sources against other logical sources, failing closed."""
     from .._state import pause_logging
-    from ..utils.alias_footprint import tensor_byte_footprint, touched_bytes_relation
+    from .._utils.alias_footprint import tensor_byte_footprint, touched_bytes_relation
 
     if not writes:
         return None
@@ -400,6 +400,7 @@ def _guard_effect_sources(
                 split_point=runtime.request.boundary,
                 reason="partition_effect_order_unproven",
             ),
+            code=SplitUnsupportedError.code,
         )
         error._partition_diagnostic = {
             "partition": plan.split_id,

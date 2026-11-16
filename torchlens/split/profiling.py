@@ -18,7 +18,14 @@ from .planner import _validate_partition_effects
 
 @dataclass(frozen=True)
 class LatencyStats:
-    """Synchronized wall times in milliseconds, excluding warmup."""
+    """Synchronized wall times in milliseconds, excluding warmup.
+
+    Examples
+    --------
+    >>> latency = tl.split.LatencyStats(1.0, 1.2, (0.8, 1.0, 1.2))
+    >>> latency.median_ms, len(latency.samples_ms)
+    (1.0, 3)
+    """
 
     median_ms: float
     p95_ms: float
@@ -27,7 +34,15 @@ class LatencyStats:
 
 @dataclass(frozen=True)
 class SplitProfile:
-    """Observed phase costs; unavailable measurements are explicitly unknown."""
+    """Observed phase costs; unavailable measurements are explicitly unknown.
+
+    Examples
+    --------
+    >>> latency = tl.split.LatencyStats(1.0, 1.2, (0.8, 1.0, 1.2))
+    >>> profile = tl.split.SplitProfile(latency, latency, None, None, 2.0, 24, None, ())
+    >>> profile.boundary_bytes, profile.prefix_backward is None
+    (24, True)
+    """
 
     prefix_forward: LatencyStats
     suffix_forward: LatencyStats
@@ -72,10 +87,14 @@ class _ProfileOptions:
                     split_point=runtime.request.boundary,
                     reason="profiling_unsupported",
                 ),
+                code=SplitUnsupportedError.code,
             )
         _validate_partition_effects(runtime.trace_graph, runtime.request)
         if self.training and not runtime.request.trainable:
-            raise SplitUnsupportedError("Backward profiling requires SplitFeatures(training=True).")
+            raise SplitUnsupportedError(
+                "Backward profiling requires SplitFeatures(training=True).",
+                code=SplitUnsupportedError.code,
+            )
 
 
 def _stats(samples: list[float]) -> LatencyStats:
@@ -252,7 +271,7 @@ def profile_split(runtime: Any, inputs: Any, options: _ProfileOptions) -> SplitP
         Peak memory remains unknown: allocator high-water marks are process-wide
         and this API deliberately does not reset the caller's allocator counters.
     """
-    from ..utils.rng import log_current_rng_states, set_rng_from_saved_states
+    from .._utils.rng import log_current_rng_states, set_rng_from_saved_states
 
     options.validate(runtime)
     rng = log_current_rng_states()

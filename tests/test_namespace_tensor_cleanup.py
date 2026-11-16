@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 import torch
 
-from torchlens.backends.torch import model_prep
+from torchlens.backends.torch import _session_cleanup, model_prep
 
 
 @pytest.mark.parametrize("leaf", [None, 1, "text", len, lambda: None, object, types])
@@ -61,7 +61,7 @@ def test_known_namespace_leaves_skip_hostile_shim_checks(monkeypatch: pytest.Mon
     tensor = torch.ones(2)
     namespace.tensor = tensor
     checked: list[Any] = []
-    original = model_prep._is_isinstance_hostile_deprecation_shim
+    original = _session_cleanup._is_isinstance_hostile_deprecation_shim
 
     def observe(value: Any) -> bool:
         """Record which values enter the original guarded classification path."""
@@ -69,7 +69,7 @@ def test_known_namespace_leaves_skip_hostile_shim_checks(monkeypatch: pytest.Mon
         checked.append(value)
         return original(value)
 
-    monkeypatch.setattr(model_prep, "_is_isinstance_hostile_deprecation_shim", observe)
+    monkeypatch.setattr(_session_cleanup, "_is_isinstance_hostile_deprecation_shim", observe)
     visited: list[torch.Tensor] = []
     model_prep._clear_session_tensor_metadata(namespace, set(), visit=visited.append)
     assert {id(value) for value in checked} == {id(namespace), id(tensor)}

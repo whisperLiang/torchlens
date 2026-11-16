@@ -1,75 +1,60 @@
 # .github/ — CI/CD Configuration
 
 The workflow FILES are the authority; this inventory summarizes them. If they
-disagree, the YAML wins — update this doc in the same change.
+disagree, the YAML wins — update this doc in the same change. `test-tiers.json`
+(`ci.workflows`, `ci.budget_minutes_per_job`) lists the same four files.
 
-## Workflows (all eight)
+## Workflows (four)
 
 | File | Trigger | What It Does |
 |------|---------|-------------|
-| `workflows/lint.yml` | PR to main + `workflow_call` | ruff `format --check` + `check` (CHECK-ONLY — see below), full-tree `pre-commit run --all-files` parity job, full-tree gitleaks scan, actionlint + cross-file pin-lockstep gates (torch, pydot, graphviz, jsonschema, pip-audit). |
-| `workflows/tests.yml` | PR to main + `workflow_call` | Smoke matrix over exact CPU torch pins (floor 2.1.2 / canonical 2.8.0 / newest-admitted, py 3.10–3.13; the 3.13 row rides the newest-admitted torch) with executed-floor attestations and the render-byte-oracle row; plus var-gated crawler round21 release-proof jobs (`MENAGERIE_RELEASE_RUNNERS`). |
-| `workflows/quality.yml` | PR to main + `workflow_call` | mypy on py3.11 + newest-admitted torch; PR-blocking wheel/sdist manifest tripwires; pip-audit with one reviewed Lightning suppression (Transformers suppressions removed). |
-| `workflows/release.yml` | Manual dispatch | Calls lint/tests/quality via `workflow_call`, then python-semantic-release (pinned) versions, builds reproducible artifacts, publishes to PyPI via OIDC trusted publishing and to GitHub Releases with a minimal-scope App token. Main pushes do not release from a known-red compatibility baseline. |
-| `workflows/nightly.yml` | Cron + `workflow_dispatch` | Real offline Transformers 4/5 compatibility (5 shares RFDETR), perf regression gate, full fast tier, coverage floor (incl. the per-package floor script), capture byte oracle, preview-backend matrix (tf/jax/tinygrad/paddle/mlx), metadata-gates, wheel+sdist double-build reproducibility gate + PEP 561 consumer smoke, platform-canary, shuffle-stress. |
-| `workflows/weekly.yml` | Cron + `workflow_dispatch` | Four jobs: slow/rare extended tiers with executed-floor attestations, mutation-margin, hook-pin-staleness, optimized-verdict-identity. |
-| `workflows/latest-canary.yml` | Cron + `workflow_dispatch` | Smoke tier against latest released torch/torchvision (ecosystem-drift isolation). |
-| `workflows/mutation.yml` | Cron (Sun) + `workflow_dispatch` | Rotating per-arm mutation-campaign shard (1-of-4 arm shards weekly; any family on dispatch) in the canonical pinned CPU env; fails on any SURVIVOR/ERROR/TIMEOUT; archives per-mutant verdicts. |
+| `workflows/pr.yml` | PR to main, push to `ci/**`, dispatch, `workflow_call` | Each tier once: `lint` (ruff format/check, the other `pre-commit` hooks over all files, full-tree gitleaks, the ruff hook SHA check, actionlint), `type-check` (mypy), `smoke` (the one pinned environment, python 3.10 + torch 2.13.0, where the byte goldens enforce; R0 PASSED floor; render and surface byte oracles; the shipped torch scorecard `--check`), `checks` (`scripts/checks/run_all.py`), `packaging` (wheel and sdist manifest tripwires), `backend-protocol` (one leg per preview backend: tf, jax, mlx, paddle, tinygrad, each on python 3.11 with its framework at the `FrameworkRequirement.pinned` version; runs the backend's marker suite with its executed-test floor, then `python -m tests.conformance.scorecard --backend B --check`; on a pull request a leg runs only when `scripts/backend_ci_changes.py` finds its backend or the shared backend surface in the diff, and otherwise reports success with its steps skipped). |
+| `workflows/nightly.yml` | Cron + dispatch | `smoke-matrix` (every other supported torch/python row: the torch floors, canonical 2.8, newest admitted on 3.11-3.13, the `numpy2-boundary` row (python 3.11, torch 2.3.1, the latest NumPy 2), the randomized-order row, and the gating `forward` row: python 3.11, torch 2.15.0, no torchvision until a release pairs with 2.15), `tier` (the `not rare and not slow` tier in the 8 single-process `--tier-shard` file shards `test-tiers.json` declares, balanced by `tests/tiers/durations.csv` as `scripts/tier_durations.py shards` prints them), `latest-canary`, coverage floors, capture byte oracle, preview backends (every leg unconditionally, newest framework in the declared range, plus the networked ecosystem roster run with a weights cache, its scorecard uploaded as `ecosystem-scorecard-<backend>`), metadata gates, wheel double-build reproducibility and PEP 561 smoke, the `extended` packaging install sets (`packaging-extended-sets`/`packaging-extended-install`, mirroring pr.yml's packaging install legs), platform canary, HF band legs, LIT, bridges, peer recipes, Brain-Score, TransformerLens oracle, netron and Model Explorer vendor contracts, pip-audit, then `attest`. |
+| `workflows/weekly.yml` | Weekly cron, monthly cron, dispatch | Slow and rare tiers, mutation margins, the rotating per-arm mutation campaign, hook-pin staleness, optimized-verdict identity, netron latest drift; the large-graph suite only from the monthly cron or dispatch with `large_graphs`; then `attest`. |
+| `workflows/release.yml` | PR to main, push of a `v*` tag, dispatch | Builds the reproducible wheel and sdist on every PR as a dry run, after `scripts/check_release_major.py` refuses an unapproved major version (every PR and tag). On a tag only: re-runs `pr.yml`, refuses a tag that disagrees with `pyproject.toml` and `torchlens/_vocab/_package_version.py` or is not on main, publishes to PyPI by trusted publishing and creates the GitHub Release. |
+
+Executed-test floors: every leg that runs tests writes its junit and a
+`legs.floor` line (`<junit> <floor> [skip fraction] [--min-passed N]
+[--passed-ids FILE]`) into `$RUNNER_TEMP/junit`; a `tier:smoke` floor is half
+the smoke count in `tests/tiers/collection.json`. Each workflow checks all of
+them with one `scripts/check_ci_executed_tests.py --legs DIR` call (pr: at the
+end of the smoke job and of each `backend-protocol` leg; nightly and weekly: the
+`attest` job). `tests/test_backend_framework_pins.py` holds the preview legs'
+install lines, markers and floors in lockstep with the protocol shells, the
+pyproject extras and each other.
 
 ## CI must NEVER auto-commit (locked)
 
-Lint is a pure gate: it checks and fails; it never rewrites files, commits, or
-pushes. An earlier design ran `ruff format` + `ruff check --fix` in CI and
-pushed the fixes to main — that push raced the Release workflow (both trigger
-on push to main) and cascaded release runs (the runaway-release incident
-class). Do not reintroduce any workflow that commits or pushes, except the
-release job's own semantic-release commit, which is guarded by `[skip ci]`
-AND a `chore(release):` head-commit condition.
+No workflow commits, pushes, tags or bumps a version. Lint is a pure gate: it
+checks and fails; it never rewrites files.
 
-## Release Pipeline Details
+## Release Pipeline
 
-- python-semantic-release and its FULL transitive stack (plus the `build`
-  backend) install hash-verified, wheels-only from
-  `.github/workflows/release-requirements.txt` (`--require-hashes
-  --only-binary :all:`) — no package code executes at install while the
-  repo-write App token is on disk; conventional commits.
-- Three never-ship-a-major defense layers: commit-msg hook, pre-push hook,
-  custom parser that refuses `LevelBump.MAJOR` (see pyproject
-  `[tool.semantic_release]` and `scripts/`). Major bumps require explicit
-  owner authorization.
-- PyPI: OIDC trusted publishing (no API tokens). GitHub auth: App token minted
-  with `permission-contents: write` only, installed before checkout persists
-  credentials.
-- Artifacts are bit-reproducible (SOURCE_DATE_EPOCH wheel;
-  `scripts/normalize_sdist.py` sdist); the nightly double-build gate attests
-  both. Reproduce-from-tag recipe: pyproject build_command comment.
-- Release-notes body uses the capped `templates/.release_notes.md.j2`
-  (hard 100K-character budget; the uncapped builtin caused the 422-blocks-PyPI
-  incident).
+- A release is the maintainer's act: set the version in `pyproject.toml` and
+  `torchlens/__init__.py`, merge to main, push the `vX.Y.Z` tag on that commit.
+  Nothing in CI computes or bumps a version.
+- The builder (`build` and the setuptools backend) installs hash-verified,
+  wheels-only from `.github/workflows/release-requirements.txt`
+  (`--require-hashes --only-binary :all:`).
+- Artifacts are bit-reproducible (`SOURCE_DATE_EPOCH` from the tag commit;
+  `scripts/normalize_sdist.py`); the nightly double-build gate attests both.
+- PyPI: OIDC trusted publishing (no API tokens). The publish job holds only
+  `contents: write` and `id-token: write`.
 
 ## Pinning & Permissions
 
-- Third-party actions are SHA-pinned. ONE documented exception:
-  `pypa/gh-action-pypi-publish@release/v1` (PyPA's own guidance; rationale in
-  release.yml).
-- Pre-commit hook repos are SHA-pinned — INCLUDING ruff-pre-commit (its old
-  stay-on-tag exception was reversed: it is the one hook with `--fix` write
-  access, so a mutable tag was the wrong exception; the ruff version is
-  lockstep-parsed by `tests/test_packaging_diet.py`).
-- Every workflow declares `permissions: contents: read`; checkout uses
-  `persist-credentials: false` outside the release job.
+- Every job that apt-installs Graphviz runs on `ubuntu-24.04` (Graphviz 2.42), never
+  `ubuntu-latest`: the committed galleries and render goldens are byte-checked against one
+  Graphviz release, and 26.04's Graphviz 14.1 also leaves neato out of the `graphviz`
+  package. `tests/test_packaging_diet.py` enforces it; each install step probes neato.
+- Third-party actions are SHA-pinned, including `pypa/gh-action-pypi-publish`.
+- Pre-commit hook repos are SHA-pinned, including ruff-pre-commit (the one
+  hook with `--fix` write access); the ruff version is lockstep-parsed by
+  `tests/test_packaging_diet.py`.
+- Every workflow declares `permissions: contents: read`; every checkout uses
+  `persist-credentials: false`.
 
 ## Conventions
 
-- Reference rendering jobs use Ubuntu 24.04's Graphviz 2.43 and DejaVu fonts.
-  Run `scripts/check_graphviz.py` after system installation/plugin registration;
-  it exercises dot, both neato entry points, and pinned-coordinate rank rendering.
-- Canonical 2.8 and weekly 2.7 CPU verdict lanes pin torch, torchvision, and
-  torchaudio together. Weekly bridge extras retain all three constraints and
-  the official CPU index. `scripts/check_torch_environment.py` checks exact
-  versions, imports all three binaries, and executes native NMS after installation.
-
-- Conventional commits required: `fix(scope):`, `feat(scope):`, `chore(scope):`
-- `fix:` → patch bump, `feat:` → minor bump; major-bump markers (`feat!:`,
-  `BREAKING CHANGE:`) are BLOCKED by the three defense layers above
-- `chore:`, `docs:`, `ci:`, `test:` → no release
+- Conventional commits: `fix(scope):`, `feat(scope):`, `chore(scope):`,
+  `docs:`, `ci:`, `test:`. Commit types do not drive versions.

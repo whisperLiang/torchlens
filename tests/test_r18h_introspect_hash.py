@@ -8,7 +8,7 @@ Covers the round-18 A1 findings in the introspect/hash group:
   produced deterministic pre-hash collisions.
 * M7/F8 -- ``compute_graph_shape_hash`` / ``compute_raw_event_shape_hash``
   sorted parent indices, making the shape hash blind to operand/edge order
-  (feeds public ``torchlens.hash.trace()`` and the re-trace reproducibility
+  (feeds public ``torchlens.fingerprint.trace()`` and the re-trace reproducibility
   tripwire). Fixed consistent with the operand-order-sensitive refresh graph
   signature (commit 74898ada).
 * M8 -- ``"grad" in name`` substring filter suppressed unrelated attributes such
@@ -24,10 +24,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import torch
+from _record_fakes import FlatNamespace
 from torch import nn
 
-import torchlens.utils.hashing as hashing
-import torchlens.utils.introspection as introspection
+import torchlens._utils.hashing as hashing
+import torchlens._utils.introspection as introspection
 from torchlens import _state
 
 # ---------------------------------------------------------------------------
@@ -117,7 +118,7 @@ def test_m6_is_deterministic() -> None:
 def _mk_layer(label: str, parents: list[str], func: str = "sub") -> SimpleNamespace:
     """Build a minimal layer stand-in for ``compute_graph_shape_hash``."""
 
-    return SimpleNamespace(
+    return FlatNamespace(
         layer_label=label,
         parents=list(parents),
         module=None,
@@ -134,8 +135,8 @@ def _mk_layer(label: str, parents: list[str], func: str = "sub") -> SimpleNamesp
 def _graph(parents_of_c: list[str]) -> SimpleNamespace:
     """Two input layers feeding a noncommutative op with the given parent order."""
 
-    return SimpleNamespace(
-        layer_list=[
+    return FlatNamespace(
+        _layer_list=[
             _mk_layer("a", [], func="input"),
             _mk_layer("b", [], func="input"),
             _mk_layer("c", parents_of_c),
@@ -154,17 +155,17 @@ def test_m7_graph_shape_hash_is_operand_order_sensitive() -> None:
 def _mk_event(label: str, parent_labels: list[str]) -> SimpleNamespace:
     """Build a minimal raw capture event stand-in for the raw-event hash."""
 
-    return SimpleNamespace(
+    return FlatNamespace(
         label_raw=label,
         kind="op",
         layer_type="function",
-        function=SimpleNamespace(func_name="sub", func_qualname="torch.sub"),
-        output=SimpleNamespace(
-            tensor=SimpleNamespace(shape=(2,), dtype="float32"),
+        function=FlatNamespace(func_name="sub", func_qualname="torch.sub"),
+        output=FlatNamespace(
+            tensor=FlatNamespace(shape=(2,), dtype="float32"),
             container_path=None,
             container_spec=None,
         ),
-        parents=[SimpleNamespace(parent_label_raw=p) for p in parent_labels],
+        parents=[FlatNamespace(parent_label_raw=p) for p in parent_labels],
         modules=(),
     )
 
@@ -172,7 +173,7 @@ def _mk_event(label: str, parent_labels: list[str]) -> SimpleNamespace:
 def _events(parents_of_c: list[str]) -> SimpleNamespace:
     """Raw capture-events stand-in with an operand-order-variable op."""
 
-    return SimpleNamespace(
+    return FlatNamespace(
         op_events=[
             _mk_event("a", []),
             _mk_event("b", []),
@@ -286,9 +287,9 @@ def _shape_hash_sorted(trace: SimpleNamespace) -> str:
     import hashlib
     import json
 
-    order_by_label = {layer.layer_label: i for i, layer in enumerate(trace.layer_list)}
+    order_by_label = {layer.layer_label: i for i, layer in enumerate(trace._layer_list)}
     records = []
-    for index, layer in enumerate(trace.layer_list):
+    for index, layer in enumerate(trace._layer_list):
         parent_indices = sorted(order_by_label[p] for p in layer.parents if p in order_by_label)
         records.append(
             {
@@ -301,7 +302,7 @@ def _shape_hash_sorted(trace: SimpleNamespace) -> str:
                 "container_cardinality": None,
                 "is_input": bool(layer.is_input),
                 "is_output": bool(layer.is_output),
-                "is_buffer": bool(layer.is_buffer),
+                "is_buffer": bool(layer.graph.is_buffer),
             }
         )
     payload = json.dumps(records, sort_keys=True, separators=(",", ":"), default=repr)

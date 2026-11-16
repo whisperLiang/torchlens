@@ -1,13 +1,19 @@
-"""Hash-seed-independent metadata pickling for portable bundles (B3R4-R21-2).
+"""Hash-seed-independent metadata pickling for portable bundles.
 
-Split out of ``scrub.py`` under the R43 file-size ratchet: this is the
+Split out of ``scrub.py``: this is the
 byte-determinism seam for ``metadata.pkl``, consumed by the bundle and
 streaming writers, independent of the scrub walk itself.
 """
 
+import enum
 import pickle
 import struct
 from typing import Any
+
+import torch
+
+from .._utils._display_bounded import RecordTuple
+from ._inline_tensor import reduce_inline_tensor
 
 __all__ = ["dump_canonical_metadata"]
 
@@ -21,12 +27,12 @@ def _canonical_member_key(member: Any) -> tuple[int, str, str]:
 
 
 class _CanonicalMetadataPickler(pickle._Pickler):
-    """Pickler that emits exact set/frozenset members in sorted order (B3R4-R21-2).
+    """Pickler that emits exact set/frozenset members in sorted order.
 
     A ``frozenset`` pickles in its hash-table iteration order, which for str
     elements is salted by ``PYTHONHASHSEED`` -- so two processes capturing the
     identical program emitted byte-different ``metadata.pkl`` for identical
-    logical content (the M6 relation views are exact frozensets of labels).
+    logical content (the relation views are exact frozensets of labels).
     Rewriting the reduction as ``cls(sorted_members)`` makes the persisted
     bytes hash-seed independent; ``builtins.set``/``builtins.frozenset`` are
     already on the safe-unpickler's explicit-globals allowlist, so loads
@@ -40,18 +46,44 @@ class _CanonicalMetadataPickler(pickle._Pickler):
     slower Python walk is a save-time-only, determinism-buying cost.
     """
 
+    dispatch = {**pickle._Pickler.dispatch, RecordTuple: pickle._Pickler.dispatch[tuple]}
+
     def reducer_override(self, obj: Any) -> Any:
-        """Return the sorted-members reduction for exact set/frozenset values."""
+        """Return the canonical reduction for set/frozenset, Enum members and plain tensors.
+
+        A plain dense ``torch.Tensor`` is emitted through the TorchLens-owned
+        inline reduction (``_inline_tensor``: raw bytes, dtype, shape,
+        ``requires_grad``, device) instead of torch's default reduction, whose
+        storage leg (``torch.storage._load_from_bytes``) the restricted loader
+        refuses. Every other tensor kind keeps torch's own reduction, which the
+        loader judges.
+        """
 
         cls = type(obj)
+        if cls is torch.Tensor:
+            inline = reduce_inline_tensor(obj)
+            if inline is not None:
+                return inline
+            return NotImplemented
+        if isinstance(obj, enum.Enum):
+            # By VALUE on every interpreter. CPython 3.11.0 through 3.11.3 reduce an
+            # Enum member as ``getattr(cls, name)`` (by name); every other supported
+            # release reduces ``cls(value)``. The by-name form changes the bytes and
+            # reaches ``builtins.getattr`` in the restricted loader, which admits the
+            # Enum CLASS as a global but never ``getattr`` on it, so a save on those
+            # interpreters failed its own dry-run reload. Same shape as
+            # ``Enum.__reduce_ex__`` on 3.10 and 3.11.4+, so the bytes match the
+            # pinned goldens;
+            # ``cls(value)`` also resolves aliases and combined ``Flag`` values.
+            return (cls, (obj._value_,))
         if cls is frozenset or cls is set:
             members_list = list(obj)
             if any(isinstance(member, float) and member != member for member in members_list):
                 # NaN members defeat ``sorted``'s comparison-based order (every
                 # comparison is False), silently leaving hash/iteration order in
                 # the bytes -- the exact instability this pickler exists to
-                # kill. Order them by their IEEE bit pattern instead (b3-sol
-                # hardening note: closed by construction, not by probe).
+                # kill. Order them by their IEEE bit pattern instead (closed
+                # by construction, not by probe).
                 members = sorted(members_list, key=_canonical_member_key)
             else:
                 try:

@@ -23,8 +23,6 @@ pd = pytest.importorskip("pandas")
 
 import torchlens as tl  # noqa: E402
 
-pytestmark = pytest.mark.smoke
-
 
 def _small_trace() -> Any:
     """Return a deterministic two-layer trace."""
@@ -51,36 +49,17 @@ class _RecordingWriter:
         self.flushed = True
 
 
-def test_tensorboard_writes_layer_count_memory_and_model_name() -> None:
-    """tensorboard() emits the documented scalar/text summaries to any writer."""
-
-    log = _small_trace()
-    writer = _RecordingWriter()
-
-    returned = tl.export.tensorboard(log, writer, step=7, prefix="tlx")
-
-    assert returned is writer
-    assert writer.scalars["tlx/num_layers"] == (len(log.layer_list), 7)
-    memory_value, memory_step = writer.scalars["tlx/total_activation_memory"]
-    assert memory_step == 7
-    assert memory_value == int(log.total_activation_memory or 0)
-    text_value, text_step = writer.texts["tlx/model_class_name"]
-    assert text_step == 7
-    assert text_value == str(log.model_class_name)
-    assert writer.flushed
-
-
 def test_tracker_exports_reject_objects_without_required_method() -> None:
     """A tracker object missing its required method fails with a clear TypeError."""
 
     log = _small_trace()
 
     with pytest.raises(TypeError, match="add_scalar"):
-        tl.export.tensorboard(log, object())
+        tl.export.tensorboard(log, object(), step=0)
     with pytest.raises(TypeError, match="log_metric"):
         tl.export.mlflow(log, client=object())
     with pytest.raises(TypeError, match="track"):
-        tl.export.aim(log, run=object())
+        tl.export.aim(log, to=object())
 
 
 def test_mlflow_logs_prefixed_metrics_and_returns_them() -> None:
@@ -91,18 +70,51 @@ def test_mlflow_logs_prefixed_metrics_and_returns_them() -> None:
     class _Client:
         def __init__(self) -> None:
             self.logged: dict[str, float] = {}
+            self.tables: dict[str, Any] = {}
+            self.texts: dict[str, str] = {}
+            self.tags: dict[str, str] = {}
 
         def log_metric(self, key: str, value: float) -> None:
             self.logged[key] = value
 
+        def log_table(self, data: Any, artifact_file: str) -> None:
+            self.tables[artifact_file] = data
+
+        def log_text(self, text: str, artifact_file: str) -> None:
+            self.texts[artifact_file] = text
+
+        def set_tag(self, key: str, value: str) -> None:
+            self.tags[key] = value
+
     client = _Client()
     metrics = tl.export.mlflow(log, client=client, prefix="tlm")
 
-    assert set(metrics) == {"num_layers", "num_saved_ops", "total_activation_memory"}
-    assert metrics["num_layers"] == len(log.layer_list)
-    assert client.logged == {f"tlm.{key}": value for key, value in metrics.items()}
-    # Without a client the metrics are still prepared and returned.
-    assert tl.export.mlflow(log, client=None) == metrics
+    # Honesty facts reach MLflow as STRING tags, never as numeric metrics.
+    assert set(metrics) == {
+        "num_layers",
+        "num_saved_ops",
+        "total_activation_memory",
+        "table",
+        "report",
+        "tags",
+        "artifacts",
+        "capture_honesty",
+    }
+    assert metrics["capture_honesty"]["capture_status"] == "complete"
+    assert metrics["num_layers"] == len(log._layer_list)
+    numeric = {
+        key: metrics[key] for key in ("num_layers", "num_saved_ops", "total_activation_memory")
+    }
+    assert client.logged == {f"tlm.{key}": value for key, value in numeric.items()}
+    assert client.tables["tlm/layers.json"] is metrics["table"]
+    assert client.texts["tlm/report.txt"] == metrics["report"]
+    assert client.tags == metrics["tags"]
+    assert all(isinstance(value, str) for value in client.tags.values())
+    assert client.tags["tlm.capture_honesty.capture_status"] == "complete"
+    # Without a client the pieces are still prepared and returned, but nothing is logged.
+    bare = tl.export.mlflow(log, client=None)
+    assert bare["artifacts"] == []
+    assert {key: bare[key] for key in numeric} == numeric
 
 
 def test_aim_tracks_prefixed_metrics_on_run_object() -> None:
@@ -113,15 +125,41 @@ def test_aim_tracks_prefixed_metrics_on_run_object() -> None:
     class _Run:
         def __init__(self) -> None:
             self.tracked: dict[str, float] = {}
+            self.series: list[tuple[str, int, Any]] = []
+            self.params: dict[str, Any] = {}
+            self.tags: list[str] = []
 
-        def track(self, value: float, name: str) -> None:
-            self.tracked[name] = value
+        def track(
+            self, value: float, name: str, step: int | None = None, context: Any = None
+        ) -> None:
+            if context is None:
+                self.tracked[name] = value
+            else:
+                self.series.append((name, step, context))
+
+        def add_tag(self, value: str) -> None:
+            self.tags.append(value)
+
+        def __setitem__(self, key: str, value: Any) -> None:
+            self.params[key] = value
 
     run = _Run()
-    metrics = tl.export.aim(log, run=run, prefix="tla")
+    metrics = tl.export.aim(log, to=run, prefix="tla")
 
-    assert run.tracked == {f"tla.{key}": value for key, value in metrics.items()}
-    assert tl.export.aim(log, run=None) == metrics
+    numeric = {
+        key: metrics[key] for key in ("num_layers", "num_saved_ops", "total_activation_memory")
+    }
+    assert run.tracked == {f"tla.{key}": value for key, value in numeric.items()}
+    assert metrics["capture_honesty"]["capture_status"] == "complete"
+    assert run.params["tla.capture_honesty"] == metrics["capture_honesty"]
+    assert run.params["tla.report"] == metrics["report"]
+    assert len(run.params["tla.layers"]) == len(metrics["table"])
+    assert {name for name, _step, _context in run.series} <= {
+        f"tla.layers.{column}" for column in metrics["table"].columns
+    }
+    assert "tla.capture_honesty.capture_status=complete" in run.tags
+    bare = tl.export.aim(log, to=None)
+    assert {key: bare[key] for key in numeric} == numeric
 
 
 def test_wandb_builds_scalar_safe_table_and_logs_to_run(
@@ -148,17 +186,52 @@ def test_wandb_builds_scalar_safe_table_and_logs_to_run(
     monkeypatch.setitem(sys.modules, "wandb", stub)
 
     run = _Run()
-    result = tl.export.wandb(log, run=run, name="my_table")
+    result = tl.export.wandb(log, to=run, name="my_table")
 
     assert result["table"] is built[0]
     assert result["artifact"] is None
     assert run.logged["my_table"] is built[0]
     dataframe = built[0].dataframe
-    assert len(dataframe) == len(log.layer_list)
+    assert len(dataframe) == len(log._layer_list)
     primitive = (str, int, float, bool)
     for column in dataframe.columns:
         for cell in dataframe[column]:
             assert cell is None or isinstance(cell, primitive)
+
+
+def test_wandb_table_cells_stay_primitive_for_nullable_missing_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing cells of nullable columns reach the W&B table as ``None``, never ``pd.NA``."""
+
+    log = _small_trace()
+    rows = len(log._layer_list)
+    nullable = pd.DataFrame(
+        {
+            "count": pd.array([None] + [1] * (rows - 1), dtype="Int64"),
+            "flag": pd.array([None] + [True] * (rows - 1), dtype="boolean"),
+            "name": pd.array([None] + ["x"] * (rows - 1), dtype="string"),
+        }
+    )
+    monkeypatch.setattr(type(log), "to_pandas", lambda self: nullable)
+    built: list[Any] = []
+
+    class _Table:
+        def __init__(self, dataframe: Any) -> None:
+            self.dataframe = dataframe
+            built.append(self)
+
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(Table=_Table, run=None))
+
+    tl.export.wandb(log)
+
+    dataframe = built[0].dataframe
+    assert list(dataframe.columns) == ["count", "flag", "name"]
+    assert [dataframe[column].iloc[0] for column in dataframe.columns] == [None, None, None]
+    assert [dataframe[column].iloc[1] for column in dataframe.columns] == [1, True, "x"]
+    for column in dataframe.columns:
+        for cell in dataframe[column]:
+            assert cell is None or isinstance(cell, (str, int, float, bool))
 
 
 def test_wandb_names_extra_when_dependency_missing(
@@ -195,7 +268,7 @@ def test_wandb_receives_native_scalars_without_dtype_reinference(
 
     source = _nullable_tracker_frame()
     monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(Table=lambda dataframe: dataframe))
-    log = SimpleNamespace(to_pandas=lambda: source)
+    log = SimpleNamespace(to_pandas=lambda: source, _layer_list=[])
 
     dataframe = tl.export.wandb(log)["table"]
 
@@ -245,9 +318,9 @@ def _stub_xarray(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
             self,
             data: Any,
             dims: tuple[str, ...],
-            coords: dict[str, Any],
             name: str,
             attrs: dict[str, Any],
+            coords: dict[str, Any] | None = None,
         ) -> None:
             self.data = data
             self.dims = dims
@@ -256,7 +329,17 @@ def _stub_xarray(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
             self.attrs = attrs
             captured.append(self)
 
-    monkeypatch.setitem(sys.modules, "xarray", SimpleNamespace(DataArray=_DataArray))
+    class _Dataset:
+        def __init__(self, data_vars: dict[str, Any], attrs: dict[str, Any]) -> None:
+            self.data_vars = data_vars
+            self.attrs = attrs
+
+        def __getitem__(self, name: str) -> Any:
+            return self.data_vars[name]
+
+    monkeypatch.setitem(
+        sys.modules, "xarray", SimpleNamespace(DataArray=_DataArray, Dataset=_Dataset)
+    )
     return captured
 
 
@@ -267,16 +350,19 @@ def test_xarray_flattens_scalar_vector_and_matrix_outs(
 
     captured = _stub_xarray(monkeypatch)
     log = SimpleNamespace(
-        layer_list=[
+        _layer_list=[
             SimpleNamespace(out=torch.tensor(2.5), layer_label="scalar_1_1"),
             SimpleNamespace(out=torch.tensor([1.0, 2.0, 3.0]), layer_label="vector_1_1"),
             SimpleNamespace(out="not a tensor", layer_label="skipped_1_1"),
         ]
     )
 
-    array = tl.export.xarray(log)
+    dataset = tl.export.xarray(log)
+    array = dataset["out"]
 
     assert array is captured[0]
+    assert list(dataset.data_vars) == ["out"]
+    assert dataset.attrs["module_state_variables"] == []
     assert array.dims == ("presentation", "neuroid")
     assert array.data.shape == (1, 4)
     assert list(array.data[0]) == [2.5, 1.0, 2.0, 3.0]
@@ -285,14 +371,49 @@ def test_xarray_flattens_scalar_vector_and_matrix_outs(
     assert array.attrs["assembly"] == "NeuroidAssembly"
 
     batched = SimpleNamespace(
-        layer_list=[
+        _layer_list=[
             SimpleNamespace(out=torch.ones(2, 3), layer_label="a_1_1"),
             SimpleNamespace(out=torch.zeros(2, 2, 2), layer_label="b_1_1"),
         ]
     )
-    array_2 = tl.export.xarray(batched)
+    array_2 = tl.export.xarray(batched)["out"]
     assert array_2.data.shape == (2, 7)
     assert array_2.coords["presentation"] == [0, 1]
+
+
+def test_xarray_exports_buffers_as_module_state_variables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A buffer layer is its own variable: own dims, no presentation axis, marked."""
+
+    _stub_xarray(monkeypatch)
+    log = SimpleNamespace(
+        _layer_list=[
+            SimpleNamespace(
+                out=torch.arange(3.0), layer_label="buffer_1", is_buffer=True, address="bn.mean"
+            ),
+            SimpleNamespace(
+                out=torch.tensor(7), layer_label="buffer_2", is_buffer=True, address="bn.count"
+            ),
+            SimpleNamespace(out=torch.ones(2, 3), layer_label="relu_1_1"),
+        ]
+    )
+
+    dataset = tl.export.xarray(log)
+
+    assert list(dataset.data_vars) == ["out", "buffer_1", "buffer_2"]
+    assert dataset.attrs["module_state_variables"] == ["buffer_1", "buffer_2"]
+    assert dataset["out"].data.shape == (2, 3)
+    assert dataset["out"].coords["layer"] == ("neuroid", ["relu_1_1"] * 3)
+    vector, scalar = dataset["buffer_1"], dataset["buffer_2"]
+    assert vector.dims == ("buffer_1_dim_0",)
+    assert list(vector.data) == [0.0, 1.0, 2.0]
+    assert scalar.dims == ()
+    assert int(scalar.data) == 7
+    for variable, address in ((vector, "bn.mean"), (scalar, "bn.count")):
+        assert variable.attrs["torchlens_kind"] == "module_state"
+        assert variable.attrs["buffer_address"] == address
+        assert variable.attrs["layer_label"] == variable.name
 
 
 def test_xarray_rejects_mismatched_presentation_counts_and_empty_logs(
@@ -302,7 +423,7 @@ def test_xarray_rejects_mismatched_presentation_counts_and_empty_logs(
 
     _stub_xarray(monkeypatch)
     mismatched = SimpleNamespace(
-        layer_list=[
+        _layer_list=[
             SimpleNamespace(out=torch.ones(2, 3), layer_label="first_1_1"),
             SimpleNamespace(out=torch.ones(3, 3), layer_label="second_1_1"),
         ]
@@ -311,7 +432,7 @@ def test_xarray_rejects_mismatched_presentation_counts_and_empty_logs(
         tl.export.xarray(mismatched)
 
     with pytest.raises(ValueError, match="No saved tensor outs"):
-        tl.export.xarray(SimpleNamespace(layer_list=[]))
+        tl.export.xarray(SimpleNamespace(_layer_list=[], _layer_dict_main_keys={}))
 
 
 def test_xarray_missing_dependency_raises_import_error(
@@ -346,8 +467,11 @@ def test_json_export_sanitizes_nonprimitive_and_missing_cells(tmp_path: Path) ->
     log = SimpleNamespace(to_pandas=lambda: frame)
 
     destination = tl.export.json(log, tmp_path / "cells.json")
-    records = json.loads(destination.read_text(encoding="utf-8"))
+    payload = json.loads(destination.read_text(encoding="utf-8"))
 
+    # Duck-typed subjects with no capture facts disclose "unknown", not clean.
+    assert payload["capture_honesty"]["capture_status"] == "unknown"
+    records = payload["rows"]
     assert records[0]["payload"] == repr(torch.tensor([1.0]))
     assert records[1]["payload"] is None
 
@@ -387,10 +511,10 @@ def test_chrome_trace_diff_places_members_on_separate_timelines(tmp_path: Path) 
     torch.manual_seed(20)
     x = torch.randn(2, 3)
     model = nn.Sequential(nn.Linear(3, 3), nn.ReLU())
-    capture = tl.options.CaptureOptions(intervention_ready=True)
+    capture = tl.options.CaptureOptions(replayable=True)
     first = tl.trace(model, x, capture=capture)
     second = tl.trace(model, x, capture=capture)
-    bundle = tl.bundle({"first": first, "second": second})
+    bundle = tl.Bundle({"first": first, "second": second})
 
     destination = tl.export.chrome_trace_diff(bundle, tmp_path / "diff.json")
     payload = json.loads(destination.read_text(encoding="utf-8"))

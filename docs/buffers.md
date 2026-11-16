@@ -46,9 +46,9 @@ class Cell(nn.Module):
 for each reassignment that is read or returned. `num_overwrites == 2`, and
 `final_value` is the second written state.
 
-In graph rendering, `show_buffer_layers="meaningful"` hides BatchNorm running
+In graph rendering, `show_buffers="meaningful"` hides BatchNorm running
 statistics (`running_mean`, `running_var`) and `num_batches_tracked`; use
-`show_buffer_layers="always"` when those bookkeeping buffers should be visible.
+`show_buffers="always"` when those bookkeeping buffers should be visible.
 
 For BatchNorm in training mode, `running_mean`, `running_var`, and
 `num_batches_tracked` are buffer entities. The running-stat versions are emitted
@@ -106,7 +106,7 @@ forward state and downstream readers still validate.
 
 ## Intervention replay
 
-Written-buffer versions THREAD through `do()`/`push_from` replay: when a value
+Written-buffer versions THREAD through `do()` replay: when a value
 edit's cone of effect re-executes a buffer-writing op, the downstream buffer
 version record commits the recomputed post-write state and later consumers
 (including later in-place writes to the same buffer) read the propagated value.
@@ -116,7 +116,7 @@ Editing pass 1 of a `self.b.add_(1.0)` loop captured as `0,1,2,3` to `7` yields
 writing op's captured output. A version that cannot be certified (fused native
 mutators, slice writes whose op output is only the slice) keeps its captured
 value and discloses the gap with `BufferThreadGapWarning`
-(documented-unstable spelling; raises under `strict=True`) — the edit does not
+(experimental name; raises under `strict=True`) — the edit does not
 propagate through that write, and TorchLens says so rather than guessing.
 Replay never mutates capture truth: in-place ops re-execute on defensive
 clones, so captured payloads, copy-on-write fork sources, and the user's edit

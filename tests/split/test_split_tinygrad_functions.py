@@ -81,8 +81,8 @@ def test_tinygrad_function_validation_rejects_tampered_nested_path() -> None:
         backend="tinygrad",
     )
     assert TinygradBackend().validate_trace(trace) is True
-    projection = next(op for op in trace.layer_list if op.layer_type == "gettuple")
-    positions = projection.parent_arg_positions["args"]
+    projection = next(op for op in trace._layer_list if op.type == "gettuple")
+    positions = projection.call.parent_arg_positions["args"]
     position = next(key for key in positions if isinstance(key, tuple))
     positions[(0, 999)] = positions.pop(position)
     assert TinygradBackend().validate_trace(trace) is False

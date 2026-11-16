@@ -11,6 +11,16 @@ The same ResNet-18 execution is shown at each string mode. `none` preserves the 
 `auto` chooses the first schedule point in the readable band, and `max` applies the strongest
 legal condensation.
 
+`auto` then evens that point out, and only ever condenses further. A small module left expanded
+beside boxed siblings is boxed too, when it hides no more ops than the smallest box beside it
+(convnext's stem and stage-2 downsample), so stray raw ops do not sit between boxes. "Beside"
+means a sibling box or a box one level inside a sibling; a box nested deeper (BERT's
+`encoder.layer.0` next to `embeddings`) leaves its neighbours expanded. A run of
+three or more structurally identical, consecutive sibling boxes folds into one segment (convnext's
+nine stage-2 blocks become `stages.2.blocks.0-8 -- 9 blocks`). The evened plan never shows more
+nodes than the schedule point it started from; the ResNet-18, GPT-2 and BERT auto overviews are
+unchanged.
+
 ![Full ResNet-18 graph](../images/collapse/mode-none.svg)
 
 *`collapse="none"`: every operation is visible, including the repeated residual stages that make
@@ -68,12 +78,27 @@ same-class siblings; the stem and head remain at full detail.*
 ## Segment boxes
 
 `collapse="max"` can replace a legal consecutive sibling interval with a dashed segment box.
+Legal means the members ran back to back in execution order and each feeds the next directly:
+a box never groups same-kind siblings that alternate with other siblings, and never hides a
+parent-owned op between its members, so the collapsed graph shows no edge or cycle the traced
+network lacks.
 
 ![Maximum collapse on ResNet-50](../images/collapse/segments.svg)
 
 *The dashed segment boxes in this ResNet-50 maximum-collapse view name an address range and totals.
 They assert adjacency only: a segment is not a real module and never pretends mixed content has one
 module class.*
+
+## Output bundles
+
+A decoder that returns its cache returns one output per cached tensor, and each would otherwise
+draw as its own node. In an overview render (`collapse="auto"`, `"max"` or a level above 0,
+unrolled, without `show_containers`), three or more model outputs that share a container key and
+named role, dtype and shape draw as one node, such as `OUTPUTS: past_key_values.keys` with
+`12 tensors, 1x2x8x8 each`, when one top-level module made all of them and that module is drawn as
+one box. When the module is expanded, its outputs come from several drawn nodes and every output
+is drawn on its own again. A named single output such as `logits` or `last_hidden_state` is never
+bundled, and `collapse="none"` never bundles. The bundle counts as one node in the readable band.
 
 ## What `(xN)` and `+N more` promise
 
@@ -94,46 +119,72 @@ or total that the hidden content does not support.*
 
 ## The compute ceiling
 
-Smart-collapse selection is measured superlinear (~n^1.75) in op count, so it carries a
-preflight compute ceiling: `COLLAPSE_OPTIMIZER_MAX_OPS` (2,000 ops). On a trace above the
-ceiling the optimizer **declines disclosed** instead of burning CPU-hours:
+Smart-collapse admission is now gated on the RENDERED UNIVERSE, not raw op count
+(collapse): the gate variable is `U` — the full plan's rendered node count after
+`module=` focus, `depth=`, and rolled reductions — tiered by a measured
+`(U, W)` work estimator (`0.0095 * U**1.43 * W**1.02` ms, W = widest rendered sibling
+group). `COLLAPSE_OPTIMIZER_MAX_OPS` (2000) survives as the defensive constant: the
+quality planner is admitted when `U <= 2000` AND the predicted cost fits the budget.
 
-- `draw(collapse="auto"|"max"|t)` emits a `TorchLensWarning` naming the op count and the
-  ceiling, then renders the graph **uncollapsed** — every mode above the ceiling produces the
-  same full graph.
-- `Trace.collapse_plan(mode=...)` refuses typed: `InvalidArgumentError` with
-  `code="collapse_plan_unavailable"` and a `collapse_ops_ceiling` reason.
-- `Trace.collapse_schedule()` degrades to its single full-graph step (`t=0.0` only).
+- Over-budget requests **degrade to a deterministic compact fallback plan**
+  (significance-greedy boxes plus standard fold discovery), disclosed with the coded
+  `collapse_budget_fallback` warning and `OptimizerResult.planner="linear_fallback"` —
+  never an uncollapsed wall.
+- Only PATHOLOGICAL inputs (raw ops above 20x the constant) still decline outright:
+  `draw` warns (`collapse_pathological_skip`) and renders a bounded top-level
+  module overview plus an expansion manifest (uncollapsed only when
+  the root has no child module), a forward drawing's `Drawing.collapse_plan` refuses typed
+  (`collapse_plan_unavailable`, reason `collapse_ops_ceiling`), and its `Drawing.collapse_schedule`
+  degrades to a single full-graph step.
+- Over-ceiling residuals (experimental): when the served
+  overview is still above the readable band -- a floor-fallback plan, or the
+  pathological top-level overview -- `draw` writes `<outpath>.expansion.json` beside
+  the picture (schema `torchlens_expansion_manifest_v1`: one entry per collapsed unit
+  with a stable `expansion_id` and the `draw()` keywords that open it) and warns
+  `collapse_expansion_manifest` with its path.
+- A generous wall-clock watchdog (off in CI and under `TORCHLENS_DETERMINISTIC`;
+  `TORCHLENS_COLLAPSE_WATCHDOG=0` disables) may abandon the quality planner mid-run to
+  the same fallback; every firing is disclosed as an estimator bug
+  (`collapse_watchdog_fallback`, with U, W, predicted, and actual).
 
-The remedy is to shrink the rendered graph before collapsing: focus with `module=`, bound the
-depth with `vis_call_depth`, or render the rolled graph. The ceiling is a compute guard on the
-selection optimizer, not a correctness limit — the trace itself is complete.
+Context reductions are therefore real remedies for the first time: focusing with
+`module=`, bounding `depth=`, or rendering rolled genuinely re-admits the
+quality planner. The gate is a compute guard, not a correctness limit — the trace
+itself is complete.
 
-## `collapse_plan()` diagnostics
+The decline is disclosed, never silent. To get a collapsed view of a very large trace, reduce
+the rendered graph first with `module=` focus, `depth=`, or rolled mode; `fold_repeats`
+and `show_containers` styling are unaffected.
 
-`Trace.collapse_plan(mode=...)` exposes the renderer-faithful plan for one requested mode.
-`Trace.collapse_schedule()` exposes its ordered float steps, targets, visible counts, and collapsed
-module addresses. Use these diagnostics to inspect a rendering decision rather than inferring it
-from pixels.
+## `Drawing.collapse_plan` diagnostics
+
+The `Drawing` a forward `trace.draw(...)` returns carries the diagnostics for the picture it
+rendered. `Drawing.collapse_plan` is the renderer-faithful plan the drawing was built from: its
+mode is the draw call's `collapse=` (`"auto"`, `"max"`, or a float level) and its context is the
+render request the draw resolved, so rolled or unrolled, `module=` focus, `depth=`, and theme all
+follow the draw call. `Drawing.collapse_schedule` exposes the ordered float steps, targets, visible
+counts, and collapsed module addresses under that same context. Use these diagnostics to inspect a
+rendering decision rather than inferring it from pixels.
+
+```python
+import torch
+from torch import nn
+
+import torchlens as tl
+
+model = nn.Sequential(nn.Linear(4, 4), nn.ReLU()).eval()
+trace = tl.trace(model, torch.randn(2, 4))
+drawing = trace.draw(collapse="auto", file_format="dot")
+plan = drawing.collapse_plan
+schedule = drawing.collapse_schedule
+level_plan = trace.draw(collapse=0.5, file_format="dot").collapse_plan
+```
+
+Both properties refuse typed (`collapse_plan_unavailable`) for a backward or combined graph, an
+animation, or once the source trace has been released; `collapse_plan` also refuses for a drawing
+made with `collapse="none"`, which has no plan. To compare modes, make one draw call per mode.
 
 ![Collapse plan and schedule diagnostics](../images/collapse/diagnostics.svg)
 
 *This image is generated from the same ResNet-18 trace as the ladder. It shows real `auto` and
 `max` plans followed by every schedule step; visible counts are monotone as `t` increases.*
-
-## The compute ceiling
-
-Smart collapse has a preflight compute ceiling: `COLLAPSE_OPTIMIZER_MAX_OPS` (2000 ops,
-importable from `torchlens.visualization.collapse_optimizer`). The frontier selection is
-measured superlinear (~n^1.75) in op count, so on a trace above the ceiling the optimizer
-**declines** instead of silently dominating the render:
-
-- `draw(collapse="auto"|"max")` warns with a `TorchLensWarning` naming the op count and the
-  ceiling, then renders the graph uncollapsed.
-- `Trace.collapse_plan(mode=...)` refuses typed with `InvalidArgumentError`
-  (`code="collapse_plan_unavailable"`, reason `collapse_ops_ceiling`).
-- `Trace.collapse_schedule()` degrades to its single full-graph step (`t=0.0` only).
-
-The decline is disclosed, never silent. To get a collapsed view of a very large trace, reduce
-the rendered graph first with `module=` focus, `vis_call_depth`, or rolled mode; `fold_repeats`
-and `show_containers` styling are unaffected.

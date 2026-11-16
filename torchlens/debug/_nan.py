@@ -7,18 +7,38 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from ..constants import RAW_LABEL_SUFFIX
+from .. import errors as _public_errors
+from .._capture._nonfinite_prefix import canonical_public_label
+from .._data_classes._nonfinite import nonfinite_coverage
+from .._data_classes._trace_missing_attrs import is_live_trace
+from .._debug_report import FoundReport, Report, at_source
+from .._io.payload_codec import get_payload_codec
+from .._utils._deferred_warnings import (
+    DeferredWarnings,
+    defer_warning_category,
+    flush_deferred_warnings,
+)
 from ..errors import CaptureError
+from ..options import CaptureOptions
 
 if TYPE_CHECKING:
-    from torchlens.data_classes.op import Op
-    from torchlens.data_classes.trace import Trace
+    from torchlens._data_classes.op import Op
+    from torchlens._data_classes.trace import Trace
 
-from ._common import _ordered_ops, _source_line
+from ._capture_override import _with_capture_fields
+from ._common import (
+    _module_address,
+    _nonfinite_kind,
+    _nonfinite_kind_of,
+    _ordered_ops,
+    _runs_on_torch,
+    _source_line,
+    _unsaved_ancestors,
+)
 
 
 @dataclass(frozen=True)
-class BisectNanResult:
+class BisectNanReport(FoundReport):
     """Result returned by :func:`bisect_nan`.
 
     Parameters
@@ -35,6 +55,14 @@ class BisectNanResult:
         ``"nan"``, ``"inf"``, ``"nan+inf"``, or ``"none"``.
     message:
         Actionable human-readable result summary.
+
+    Examples
+    --------
+    >>> bad = nn.Sequential(nn.Linear(3, 3), nn.ReLU())
+    >>> _ = bad[0].weight.data.fill_(float("nan"))
+    >>> report = tl.debug.bisect_nan(tl.trace(bad, torch.ones(1, 3)))
+    >>> isinstance(report, BisectNanReport), report.found, report.kind
+    (True, True, 'nan')
     """
 
     found: bool
@@ -44,9 +72,35 @@ class BisectNanResult:
     kind: str
     message: str
 
+    @property
+    def first_bad_thing(self) -> Any:
+        """Project this result into the shared first-bad-thing vocabulary."""
+
+        from ._first_bad import FirstBadThing  # deferred: cycle debug
+
+        return FirstBadThing(
+            found=self.found,
+            tool="bisect_nan",
+            kind=self.kind,
+            label=self.label,
+            label_status="final" if self.label else "none",
+            source_line=self.source_line,
+            coverage="complete" if "no saved activation" not in self.message else "partial",
+            detection_basis="saved_activations",
+            message=self.message,
+        )
+
+    def _report_findings(self) -> list[str]:
+        """One-line findings for the card: the summary, then the op and its line."""
+
+        findings = [self.message] if self.message else []
+        if self.found and self.label is not None:
+            findings.append(f"first {self.kind}: {self.label}{at_source(self.source_line)}")
+        return findings
+
 
 @dataclass(frozen=True)
-class FindNanResult:
+class FindNanReport(FoundReport):
     """Structured first-non-finite diagnostic returned by ``find_nan``.
 
     Parameters
@@ -79,6 +133,16 @@ class FindNanResult:
         actual birth operation and therefore prevent a stronger claim.
     message:
         Human-readable diagnostic summary.
+
+    Examples
+    --------
+    >>> bad = nn.Sequential(nn.Linear(3, 3), nn.ReLU())
+    >>> _ = bad[0].weight.data.fill_(float("nan"))
+    >>> report = tl.debug.find_nan(bad, torch.ones(1, 3))
+    >>> isinstance(report, FindNanReport), report.found, report.kind
+    (True, True, 'nan')
+    >>> report.bad_tensors
+    ('output',)
     """
 
     found: bool
@@ -94,9 +158,59 @@ class FindNanResult:
     scope: str
     uncertainty_zone: tuple[str, ...]
     message: str
+    label_status: str = "final"
+
+    def _report_subject(self) -> str:
+        """What this report examined (the card's subject)."""
+
+        return str(self.scope)
+
+    def _report_findings(self) -> list[str]:
+        """One-line findings for the card: the op, its line, its module."""
+
+        if not self.found:
+            return [self.message] if self.message else []
+        func = f" ({self.func_name})" if self.func_name else ""
+        findings = [f"first {self.kind}: {self.label}{func}{at_source(self.source_line)}"]
+        if self.module_address:
+            findings.append(f"module: {self.module_address}")
+        if self.shape is not None or self.dtype is not None:
+            shape = "x".join(str(size) for size in self.shape) if self.shape else "scalar"
+            findings.append(f"output: {shape} {self.dtype or ''}".rstrip())
+        if self.uncertainty_zone:
+            findings.append(
+                f"uncertainty zone (unsaved ancestors): {', '.join(self.uncertainty_zone)}"
+            )
+        return findings
+
+    @property
+    def first_bad_thing(self) -> Any:
+        """Project this result into the shared first-bad-thing vocabulary."""
+
+        from ._first_bad import FirstBadThing  # deferred: cycle debug
+
+        return FirstBadThing(
+            found=self.found,
+            tool="find_nan",
+            kind=self.kind,
+            label=self.label,
+            label_status=self.label_status if self.found else "none",
+            module=self.module_address,
+            source_line=self.source_line,
+            coverage=(
+                "found_first_among_checked"
+                if self.found and self.uncertainty_zone
+                else ("complete" if self.found else "none")
+            ),
+            uncertainty_zone=self.uncertainty_zone,
+            detection_basis=("saved_activations" if "saved" in self.scope else "live_capture"),
+            message=self.message,
+        )
 
     def __repr__(self) -> str:
         """Return a compact notebook-oriented diagnostic representation.
+
+        ``print(report)`` shows the multi-line card instead (:meth:`card`).
 
         Returns
         -------
@@ -105,77 +219,25 @@ class FindNanResult:
         """
 
         if not self.found:
-            return f"FindNanResult(found=False, scope={self.scope!r})"
+            return f"FindNanReport(found=False, scope={self.scope!r})"
         return (
-            "FindNanResult("
+            "FindNanReport("
             f"found=True, kind={self.kind!r}, label={self.label!r}, "
             f"source_line={self.source_line!r}, scope={self.scope!r})"
         )
 
 
-def _nonfinite_kind(tensor: torch.Tensor) -> str:
-    """Classify non-finite values in a tensor.
-
-    Parameters
-    ----------
-    tensor:
-        Tensor to inspect.
-
-    Returns
-    -------
-    str
-        ``"nan"``, ``"inf"``, ``"nan+inf"``, or ``"none"``.
-    """
-
-    if not torch.is_floating_point(tensor) and not torch.is_complex(tensor):
-        return "none"
-    has_nan = bool(torch.isnan(tensor).any().item())
-    has_inf = bool(torch.isinf(tensor).any().item())
-    if has_nan and has_inf:
-        return "nan+inf"
-    if has_nan:
-        return "nan"
-    if has_inf:
-        return "inf"
-    return "none"
-
-
-def _op_by_any_label(trace: Trace) -> dict[str, Op]:
-    """Build a lookup of final and raw labels to trace ops.
-
-    Parameters
-    ----------
-    trace:
-        Trace whose graph labels should be indexed.
-
-    Returns
-    -------
-    dict[str, Op]
-        Label lookup for parent traversal.
-    """
-
-    lookup: dict[str, Op] = {}
-    for op in _ordered_ops(trace):
-        for label in (
-            getattr(op, "label", None),
-            getattr(op, "layer_label", None),
-            getattr(op, "_label_raw", None),
-        ):
-            if isinstance(label, str):
-                lookup[label] = op
-    return lookup
-
-
 def _op_label(op: Op) -> str:
-    """Return the best available public label for an op.
+    """Return the canonical public label for an op.
 
-    Completed traces expose a finalized public ``layer_label`` / ``label``. A
-    live partial capture (``find_nan``) has no finalized graph yet, only the
-    internal ``_label_raw`` (for example ``"log_1_4_raw"``). The trailing
-    ``RAW_LABEL_SUFFIX`` is an internal namespace marker and must not leak to
-    users, so it is stripped to a public-namespace label (``"log_1_4"``). The
-    live label is capture-ordered and may differ from the finalized label a
-    completed ``trace.find_nan()`` assigns.
+    Routes through the ONE resolver convention (observe item 1): the step-8
+    final LOOKUP spelling -- bare ``layer_label`` for single-pass layers,
+    pass-qualified ``label`` for multi-pass layers (an unqualified spelling on
+    a recurrent block would name every pass at once). A record with no
+    finalized label renders ``"unknown"``; a raw spelling is NEVER stripped
+    into a public one, because the raw-to-final ordinal offset is not a
+    constant and stripping fabricates a name that may belong to a different
+    op.
 
     Parameters
     ----------
@@ -185,81 +247,11 @@ def _op_label(op: Op) -> str:
     Returns
     -------
     str
-        Finalized public label for completed traces, otherwise the live label
-        with its internal raw-namespace suffix stripped.
+        Canonical public label, or ``"unknown"`` when none exists.
     """
 
-    for attribute in ("layer_label", "label"):
-        value = getattr(op, attribute, None)
-        if isinstance(value, str) and value:
-            return value
-    raw = getattr(op, "_label_raw", None)
-    if isinstance(raw, str) and raw:
-        return raw.removesuffix(RAW_LABEL_SUFFIX)
-    return "unknown"
-
-
-def _module_address(op: Op) -> str | None:
-    """Return the containing module address recorded for an op.
-
-    Parameters
-    ----------
-    op:
-        Operation whose module metadata should be read.
-
-    Returns
-    -------
-    str | None
-        Atomic module address or the innermost containing module address.
-    """
-
-    atomic_address = getattr(op, "atomic_module_address", None)
-    if isinstance(atomic_address, str):
-        return atomic_address
-    module = getattr(op, "module", None)
-    if isinstance(module, tuple) and module and isinstance(module[0], str):
-        return module[0]
-    if isinstance(module, str):
-        return module
-    return None
-
-
-def _unsaved_ancestors(trace: Trace, op: Op) -> tuple[str, ...]:
-    """Return unsaved computational ancestors of an op in execution order.
-
-    Parameters
-    ----------
-    trace:
-        Trace containing ``op``.
-    op:
-        First saved non-finite op.
-
-    Returns
-    -------
-    tuple[str, ...]
-        Labels of ancestor ops that do not retain output payloads.
-    """
-
-    by_label = _op_by_any_label(trace)
-    pending = list(getattr(op, "parents", ()) or ())
-    visited: set[str] = set()
-    unsaved: set[str] = set()
-    while pending:
-        parent_label = pending.pop()
-        if parent_label in visited:
-            continue
-        visited.add(parent_label)
-        parent = by_label.get(parent_label)
-        if parent is None:
-            continue
-        pending.extend(getattr(parent, "parents", ()) or ())
-        if not bool(getattr(parent, "is_input", False)) and not bool(
-            getattr(parent, "has_saved_activation", False)
-        ):
-            unsaved.add(_op_label(parent))
-    return tuple(
-        _op_label(candidate) for candidate in _ordered_ops(trace) if _op_label(candidate) in unsaved
-    )
+    label = canonical_public_label(op)
+    return label if label else "unknown"
 
 
 def _result_from_op(
@@ -269,7 +261,7 @@ def _result_from_op(
     source_line: str | None = None,
     scope: str = "first non-finite tensor",
     uncertainty_zone: tuple[str, ...] = (),
-) -> FindNanResult:
+) -> FindNanReport:
     """Build a public diagnostic result from an offending op.
 
     Parameters
@@ -287,7 +279,7 @@ def _result_from_op(
 
     Returns
     -------
-    FindNanResult
+    FindNanReport
         Structured public diagnostic.
     """
 
@@ -297,7 +289,7 @@ def _result_from_op(
     message = f"{prefix} is {kind} at {label}."
     if uncertainty_zone:
         message += " Unsaved upstream uncertainty zone: " + ", ".join(uncertainty_zone) + "."
-    return FindNanResult(
+    return FindNanReport(
         found=True,
         op=op,
         label=label,
@@ -314,7 +306,7 @@ def _result_from_op(
     )
 
 
-def _no_finding_result(*, scope: str, uncertainty_zone: tuple[str, ...] = ()) -> FindNanResult:
+def _no_finding_result(*, scope: str, uncertainty_zone: tuple[str, ...] = ()) -> FindNanReport:
     """Build a no-finding diagnostic result.
 
     Parameters
@@ -326,14 +318,14 @@ def _no_finding_result(*, scope: str, uncertainty_zone: tuple[str, ...] = ()) ->
 
     Returns
     -------
-    FindNanResult
+    FindNanReport
         No-finding diagnostic.
     """
 
     message = f"No NaN/Inf found in {scope}."
     if uncertainty_zone:
         message += " Unsaved upstream uncertainty zone: " + ", ".join(uncertainty_zone) + "."
-    return FindNanResult(
+    return FindNanReport(
         False,
         None,
         None,
@@ -350,7 +342,7 @@ def _no_finding_result(*, scope: str, uncertainty_zone: tuple[str, ...] = ()) ->
     )
 
 
-def find_nan(model: Any, x: Any, **trace_kwargs: Any) -> FindNanResult:
+def find_nan(model: Any, inputs: Any, **trace_kwargs: Any) -> FindNanReport:
     """Run a memory-light live capture and return its first NaN or Inf finding.
 
     The capture stops at the first non-finite op output, rather than retaining
@@ -359,75 +351,136 @@ def find_nan(model: Any, x: Any, **trace_kwargs: Any) -> FindNanResult:
     Parameters
     ----------
     model:
-        PyTorch model to execute.
-    x:
+        Model to execute, on any capture backend.
+    inputs:
         Positional model input accepted by :func:`torchlens.trace`.
     **trace_kwargs:
-        Additional :func:`torchlens.trace` keyword arguments. ``raise_on_nan``
-        is always enabled by this diagnostic.
+        Additional :func:`torchlens.trace` keyword arguments. Torch runs with
+        ``on_nonfinite="raise"``; other backends scan a full capture's outputs.
 
     Returns
     -------
-    FindNanResult
+    FindNanReport
         First live non-finite output, or a clean result.
+
+    Examples
+    --------
+    >>> bad = nn.Sequential(nn.Linear(3, 3), nn.ReLU())
+    >>> _ = bad[0].weight.data.fill_(float("nan"))
+    >>> report = find_nan(bad, torch.ones(1, 3))
+    >>> report.found, report.kind
+    (True, 'nan')
+    >>> find_nan(model, x).found
+    False
     """
 
-    from ..options import CaptureOptions
-    from ..user_funcs import trace
+    from .._user_public_impls import trace
 
+    if not _runs_on_torch(model, inputs, trace_kwargs):  # no live stop: scan a full capture
+        return find_nan_in_trace(trace(model, inputs, **trace_kwargs))
     capture = trace_kwargs.pop("capture", None)
-    trace_kwargs.pop("raise_on_nan", None)
     if capture is not None:
-        explicit_values = {
-            field_name: value
-            for field_name, value in capture.as_dict().items()
-            if capture.is_field_explicit(field_name)
-        }
-        trace_kwargs["capture"] = CaptureOptions(**explicit_values, raise_on_nan=True)
+        trace_kwargs["capture"] = _with_capture_fields(capture, on_nonfinite="raise")
     else:
-        trace_kwargs["capture"] = CaptureOptions(raise_on_nan=True)
+        trace_kwargs["capture"] = CaptureOptions(on_nonfinite="raise")
+    # The stop IS a CaptureError by design; its CaptureAttemptFailedWarning points at an
+    # error the user never receives. Park it, drop it when the stop becomes a report,
+    # re-emit it on every path that re-raises.
+    deferred: DeferredWarnings = []
     try:
-        trace(model, x, **trace_kwargs)
+        with defer_warning_category(_public_errors.CaptureAttemptFailedWarning, deferred):
+            trace(model, inputs, **trace_kwargs)
     except CaptureError as exc:
-        fields = exc.fields
-        if "op" not in fields or "layer" not in fields:
+        try:
+            report = _report_from_nonfinite_stop(exc)
+        except BaseException:
+            flush_deferred_warnings(deferred)
             raise
-        partial = getattr(exc, "partial_log", None)
-        raw_layers = getattr(partial, "raw_layers", ())
-        op = next(
-            (
-                entry
-                for entry in reversed(raw_layers)
-                if getattr(entry, "_label_raw", None) == fields["layer"]
-            ),
-            None,
-        )
-        if op is None:
-            shape = fields["shape"]
-            if not isinstance(shape, tuple) or not all(
-                isinstance(dimension, int) for dimension in shape
-            ):
-                raise ValueError("CaptureError non-finite payload has an invalid shape field.")
-            return FindNanResult(
-                True,
-                None,
-                # Strip the internal raw-namespace suffix; expose a public label.
-                str(fields["layer"]).removesuffix(RAW_LABEL_SUFFIX),
-                None,
-                str(fields["op"]),
-                str(fields["dtype"]),
-                tuple(int(dimension) for dimension in shape),
-                ("output",),
-                _exception_source_line(exc),
-                "nan",
-                "first non-finite tensor",
-                (),
-                str(exc),
-            )
-        op_out = getattr(op, "out", None)
+        if report is None:  # not a non-finite stop: the failure is the user's to see
+            flush_deferred_warnings(deferred)
+            raise
+        return report
+    except BaseException:
+        flush_deferred_warnings(deferred)
+        raise
+    flush_deferred_warnings(deferred)
+    return _no_finding_result(scope="live operation outputs")
+
+
+def _report_from_nonfinite_stop(exc: CaptureError) -> FindNanReport | None:
+    """Turn the live ``on_nonfinite="raise"`` stop into a :class:`FindNanReport`.
+
+    Returns ``None`` when ``exc`` carries no non-finite payload (an unrelated
+    capture failure the caller re-raises).
+    """
+
+    fields = exc.fields
+    if "op" not in fields or "layer" not in fields:
+        return None
+    partial = getattr(exc, "partial_trace", None)
+    partial_trace = getattr(partial, "trace", None)
+    finalized = bool(
+        partial_trace is not None
+        and partial_trace.__dict__.get("_nonfinite_prefix_finalized", False)
+    )
+    # Fields carry the FINAL label (or None + status) and the raw-named identity.
+    raw_layer_field = fields.get("layer")
+    label: str | None = raw_layer_field if isinstance(raw_layer_field, str) else None
+    label_status = str(fields.get("layer_status", "final" if label is not None else "unavailable"))
+    op = None
+    if finalized and label is not None and partial_trace is not None:
+        try:
+            op = partial_trace[label]
+        except Exception:  # noqa: BLE001 - the structured fallback below still answers.
+            op = None
+    if op is not None:
+        try:
+            op_out = op.out
+        except ValueError:
+            op_out = None
         kind = _nonfinite_kind(op_out) if isinstance(op_out, torch.Tensor) else "nan"
         return _result_from_op(op, kind=kind, source_line=_exception_source_line(exc))
-    return _no_finding_result(scope="live operation outputs")
+    return _structured_stop_report(exc, partial, label, label_status)
+
+
+def _structured_stop_report(
+    exc: CaptureError, partial: Any, label: str | None, label_status: str
+) -> FindNanReport:
+    """Build the non-finite report from the stop's payload fields alone.
+
+    Used when the partial trace has no finalized op for the stopping label;
+    raises ``ValueError`` when the payload's ``shape`` is not a tuple of ints.
+    """
+
+    fields = exc.fields
+    raw_label = fields.get("layer_raw", fields.get("layer"))
+    raw_op = next(
+        (
+            entry
+            for entry in reversed(getattr(partial, "raw_layers", ()))
+            if getattr(entry, "_label_raw", None) == raw_label
+        ),
+        None,
+    )
+    shape = fields["shape"]
+    if not isinstance(shape, tuple) or not all(isinstance(dimension, int) for dimension in shape):
+        raise ValueError("CaptureError non-finite payload has an invalid shape field.")
+    return FindNanReport(
+        True,
+        raw_op,
+        label,
+        _module_address(raw_op) if raw_op is not None else None,
+        str(fields["op"]),
+        str(fields["dtype"]),
+        tuple(int(dimension) for dimension in shape),
+        ("output",),
+        _exception_source_line(exc),
+        "nan",
+        "first non-finite tensor",
+        (),
+        str(exc),
+        label_status,
+    )
 
 
 def _exception_source_line(exc: CaptureError) -> str | None:
@@ -449,7 +502,7 @@ def _exception_source_line(exc: CaptureError) -> str | None:
     return f"{exc.file_path}:{exc.line_no}"
 
 
-def find_nan_in_trace(trace: Trace) -> FindNanResult:
+def find_nan_in_trace(trace: Trace) -> FindNanReport:
     """Find the first NaN or Inf among saved trace outputs.
 
     Parameters
@@ -459,12 +512,13 @@ def find_nan_in_trace(trace: Trace) -> FindNanResult:
 
     Returns
     -------
-    FindNanResult
+    FindNanReport
         First saved non-finite output. Selectively saved traces explicitly
         report unsaved ancestor ops as an uncertainty zone.
     """
 
     any_unsaved = False
+    codec = get_payload_codec(str(trace._provenance_backend))
     for op in _ordered_ops(trace):
         if bool(getattr(op, "is_input", False)):
             continue
@@ -476,14 +530,11 @@ def find_nan_in_trace(trace: Trace) -> FindNanResult:
         except ValueError:
             any_unsaved = True
             continue
-        if isinstance(out, torch.Tensor):
-            kind = _nonfinite_kind(out)
-            if kind != "none":
-                uncertainty_zone = _unsaved_ancestors(trace, op)
-                scope = "first among saved tensors" if any_unsaved else "first non-finite tensor"
-                return _result_from_op(
-                    op, kind=kind, scope=scope, uncertainty_zone=uncertainty_zone
-                )
+        kind = _nonfinite_kind_of(out, codec)
+        if kind != "none":
+            uncertainty_zone = _unsaved_ancestors(trace, op, _op_label)
+            scope = "first among saved tensors" if any_unsaved else "first non-finite tensor"
+            return _result_from_op(op, kind=kind, scope=scope, uncertainty_zone=uncertainty_zone)
     return _no_finding_result(
         scope="saved tensors",
         uncertainty_zone=tuple(
@@ -497,7 +548,7 @@ def find_nan_in_trace(trace: Trace) -> FindNanResult:
     )
 
 
-def bisect_nan(trace: Trace) -> BisectNanResult:
+def bisect_nan(trace: Trace) -> BisectNanReport:
     """Locate the first saved op whose output contains NaN or Inf.
 
     Parameters
@@ -507,9 +558,19 @@ def bisect_nan(trace: Trace) -> BisectNanResult:
 
     Returns
     -------
-    BisectNanResult
+    BisectNanReport
         Clear result object instead of raising when no non-finite saved
         activation is found.
+
+    Examples
+    --------
+    >>> bad = nn.Sequential(nn.Linear(3, 3), nn.ReLU())
+    >>> _ = bad[0].weight.data.fill_(float("nan"))
+    >>> report = bisect_nan(tl.trace(bad, torch.ones(1, 3)))
+    >>> report.found, report.kind
+    (True, 'nan')
+    >>> bisect_nan(tl.trace(model, x)).found
+    False
     """
 
     unsaved_compute_ops = 0
@@ -525,13 +586,11 @@ def bisect_nan(trace: Trace) -> BisectNanResult:
         except ValueError:
             unsaved_compute_ops += 1
             continue
-        if not isinstance(out, torch.Tensor):
-            continue
-        kind = _nonfinite_kind(out)
+        kind = _nonfinite_kind_of(out, get_payload_codec(str(trace._provenance_backend)))
         if kind != "none":
-            label = str(getattr(op, "layer_label", ""))
+            label = _op_label(op)
             source_line = _source_line(op)
-            return BisectNanResult(
+            return BisectNanReport(
                 found=True,
                 op=op,
                 label=label,
@@ -541,7 +600,7 @@ def bisect_nan(trace: Trace) -> BisectNanResult:
             )
 
     if unsaved_compute_ops:
-        return BisectNanResult(
+        return BisectNanReport(
             found=False,
             op=None,
             label=None,
@@ -553,11 +612,228 @@ def bisect_nan(trace: Trace) -> BisectNanResult:
                 "a wider predicate, or no selective save."
             ),
         )
-    return BisectNanResult(
+    return BisectNanReport(
         found=False,
         op=None,
         label=None,
         source_line=None,
         kind="none",
         message="No NaN/Inf found in saved activations.",
+    )
+
+
+_DETECT_ANOMALY_RECIPE = """\
+# torch.autograd.detect_anomaly: the AUTHORITY for backward-born NaNs and
+# arbitrary custom-autograd exceptions (cases outside this report's scope).
+# It re-executes nothing here -- run it yourself, deliberately:
+import torch
+with torch.autograd.set_detect_anomaly(True):
+    loss = model(x).sum()
+    loss.backward()   # raises AT the backward op that produced the NaN,
+                      # with the forward op that created it in the traceback
+# Cost: measured 1.17x median paired ratio on one CPU cell (resnet18 batch 4,
+# train, fwd+bwd, 4 threads) -- one model, one shape, one device class; a
+# regression seed until reproduced through the production overhead harness."""
+
+
+@dataclass(frozen=True)
+class NonfiniteReport(Report):
+    """One-call NaN forensics report.
+
+    The pitch is STRUCTURAL: the default capture names the ORIGIN op (not
+    where a NaN would surface in backward) with module address and
+    file:line, at zero added cost on the capture you already ran. Clean
+    results are scoped to CHECKED values only; the report defers by name
+    INSIDE its own output -- the ``detect_anomaly`` recipe is printed
+    verbatim for the cases this report does not cover (backward-born NaNs,
+    custom-autograd exceptions).
+
+    Examples
+    --------
+    >>> bad = nn.Sequential(nn.Linear(3, 3), nn.ReLU())
+    >>> _ = bad[0].weight.data.fill_(float("nan"))
+    >>> report = tl.debug.nonfinite_origin(bad, torch.ones(1, 3))
+    >>> isinstance(report, NonfiniteReport), report.has_nonfinite
+    (True, True)
+    >>> report.phase
+    'forward'
+    """
+
+    has_nonfinite: bool
+    phase: str
+    kind: str
+    origin_label: str | None
+    module_address: str | None
+    source_line: str | None
+    tensor_role: str | None
+    nonfinite_labels: tuple[str, ...]
+    coverage_basis: str
+    num_checked_ops: int
+    num_unchecked_ops: int
+    num_unexamined_ops: int
+    capture_status: str
+    cost_tier: str
+    amp_disclosure: str | None
+    scope_note: str
+    uncertainty_zone: tuple[str, ...]
+    defer_recipe: str = _DETECT_ANOMALY_RECIPE
+
+    def _report_subject(self) -> str:
+        """What this report examined (the card's subject)."""
+
+        return f"{self.phase} pass"
+
+    def _report_status(self) -> str:
+        """The verdict token on the card's lead line."""
+
+        return "found" if self.has_nonfinite else "not_found"
+
+    def _report_coverage(self) -> str | None:
+        """What this report did and did not examine."""
+
+        return (
+            f"{self.num_checked_ops} checked, {self.num_unchecked_ops} unchecked, "
+            f"{self.num_unexamined_ops} unexamined (basis: {self.coverage_basis})"
+        )
+
+    def _report_findings(self) -> list[str]:
+        """One-line findings for the card, most severe first."""
+
+        findings = []
+        if self.origin_label is not None:
+            findings.append(
+                f"origin: {self.origin_label} ({self.kind}){at_source(self.source_line)}"
+            )
+        findings.extend(f"non-finite: {label}" for label in self.nonfinite_labels)
+        if self.scope_note:
+            findings.append(self.scope_note)
+        return findings
+
+    def summary(self) -> str:
+        """Return the human-readable report text."""
+
+        lines = [f"NaN forensics ({self.phase}; {self.cost_tier})"]
+        if self.has_nonfinite:
+            lines.append(
+                f"  origin: {self.origin_label} ({self.kind}) at "
+                f"{self.source_line or '<source unavailable>'}"
+                + (f", module {self.module_address}" if self.module_address else "")
+            )
+            if self.uncertainty_zone:
+                lines.append(
+                    f"  uncertainty zone (unsaved ancestors): {list(self.uncertainty_zone)}"
+                )
+        else:
+            lines.append(f"  no non-finite value among CHECKED outputs ({self.scope_note})")
+        lines.append(
+            f"  coverage: basis={self.coverage_basis}, checked={self.num_checked_ops}, "
+            f"unchecked={self.num_unchecked_ops}, unexamined={self.num_unexamined_ops}"
+        )
+        lines.append(f"  capture outcome: {self.capture_status}")
+        if self.amp_disclosure:
+            lines.append(f"  AMP: {self.amp_disclosure}")
+        lines.append("  not covered here -> torch's authority, verbatim:")
+        lines.extend("    " + line for line in self.defer_recipe.splitlines())
+        return "\n".join(lines)
+
+
+def nonfinite_origin(subject: Any, inputs: Any = None, **trace_kwargs: Any) -> NonfiniteReport:
+    """One-call NaN forensics (torchnative 6.5; placeholder spelling).
+
+    Consumes an EXISTING trace's queryable nonfinite record first (free);
+    given a model + input instead, runs the memory-light live tripwire
+    (:func:`find_nan`, PartialTrace at first bad output). NEVER auto-runs
+    anomaly mode -- a second execution can mutate state and follow another
+    stochastic path; the ``detect_anomaly`` recipe is printed verbatim
+    inside the report for the cases this door does not cover.
+
+    Parameters
+    ----------
+    subject:
+        A completed ``Trace`` (post-hoc, free) or a model (live tripwire).
+    inputs:
+        Model input, required for the live form.
+    **trace_kwargs:
+        Extra ``tl.trace`` options for the live form.
+
+    Returns
+    -------
+    NonfiniteReport
+        Structured findings, coverage disclosure, capture outcome, cost
+        tier, AMP disclosure, and the deferred-authority recipe.
+
+    Examples
+    --------
+    >>> bad = nn.Sequential(nn.Linear(3, 3), nn.ReLU())
+    >>> _ = bad[0].weight.data.fill_(float("nan"))
+    >>> report = nonfinite_origin(bad, torch.ones(1, 3))
+    >>> report.has_nonfinite, report.kind
+    (True, 'nan')
+    >>> nonfinite_origin(tl.trace(model, x)).has_nonfinite
+    False
+    """
+
+    if is_live_trace(subject) or hasattr(subject, "ops"):
+        trace = subject
+        finding = find_nan_in_trace(trace)
+        cost_tier = "free (post-hoc on the capture you already ran)"
+    else:
+        finding = find_nan(subject, inputs, **trace_kwargs)
+        # The tripwire's evidence lives on the finding itself; there is no
+        # completed trace to read a memoized nonfinite record from.
+        trace = None
+        cost_tier = "diagnostic (one memory-light tripwire forward)"
+
+    coverage = nonfinite_coverage(trace) if trace is not None else None
+    nonfinite_labels: tuple[str, ...] = ()
+    if trace is not None:
+        try:
+            nonfinite_labels = tuple(str(label) for label in trace.nonfinite_ops)
+        except (CaptureError, RuntimeError, TypeError, AttributeError):
+            # A typed nonfinite-record refusal (structure_only, dropped
+            # payloads) degrades the LIST only; the finding itself stands.
+            nonfinite_labels = ()
+    outcome = getattr(trace, "outcome", None)
+    capture_status = str(getattr(outcome, "status", None) or "unknown").lower()
+
+    amp_disclosure: str | None = None
+    if trace is not None:
+        layers = trace._layer_list if is_live_trace(trace) else ()
+        low_precision = {str(getattr(op, "dtype", "")) for op in layers} & {
+            "torch.float16",
+            "torch.bfloat16",
+        }
+        if low_precision:
+            amp_disclosure = (
+                f"low-precision outputs present ({', '.join(sorted(low_precision))}); "
+                "under AMP+GradScaler, scaled gradients can overflow where "
+                "forward values look finite -- gradient-side claims need an "
+                "armed backward capture, and clean results here cover the "
+                "FORWARD checked values only"
+            )
+
+    return NonfiniteReport(
+        has_nonfinite=bool(finding.found),
+        phase="forward",
+        kind=str(finding.kind),
+        origin_label=finding.label,
+        module_address=getattr(finding, "module_address", None),
+        source_line=finding.source_line,
+        tensor_role=(
+            ", ".join(getattr(finding, "bad_tensors", ()) or ()) or None if finding.found else None
+        ),
+        nonfinite_labels=nonfinite_labels,
+        coverage_basis=(
+            str(getattr(coverage, "basis", "unavailable"))
+            if coverage is not None
+            else "live_tripwire_first_bad_output"
+        ),
+        num_checked_ops=int(getattr(coverage, "checked", 0) or 0),
+        num_unchecked_ops=int(getattr(coverage, "unchecked", 0) or 0),
+        num_unexamined_ops=int(getattr(coverage, "unexamined", 0) or 0),
+        capture_status=capture_status,
+        cost_tier=cost_tier,
+        amp_disclosure=amp_disclosure,
+        scope_note=str(getattr(finding, "scope", "checked saved outputs")),
+        uncertainty_zone=tuple(getattr(finding, "uncertainty_zone", ()) or ()),
     )

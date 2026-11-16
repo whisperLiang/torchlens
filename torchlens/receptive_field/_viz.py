@@ -8,15 +8,21 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 from PIL import Image, ImageDraw
 
-from ..visualization.node_spec import NodeSpec, NodeSpecFn
-from ..viz.node_plots import render_heatmap
+from .._plots import node_plots
+from .._utils._numpy_bridge import tensor_to_numpy
+from .._utils._record_group_table import record_member
+from .._vocab.node_spec import NodeSpec, NodeSpecFn
+from ..errors import InvalidArgumentError
+from ..preprocessing._card import declared_from_record
+from ..preprocessing._declared_transform import geometry_from_declared
 from ._errors import (
     AmbiguousInputError,
     ReceptiveFieldConfigurationError,
     ReceptiveFieldError,
 )
+from ._path import resolve_graph_point
 from ._types import (
-    GradientReceptiveField,
+    GradReceptiveField,
     ReceptiveField,
     ReceptiveFieldBox,
     ReceptiveFieldDirection,
@@ -24,7 +30,10 @@ from ._types import (
 )
 
 if TYPE_CHECKING:
-    from ..data_classes.op import Op
+    from .._data_classes.layer import Layer
+    from .._data_classes.module import Module, ModuleCall
+    from .._data_classes.op import Op
+    from ..preprocessing._records import DeclaredPreprocessing
     from ._types import ReceptiveFieldView
 
 
@@ -36,13 +45,13 @@ def show(
     view: ReceptiveFieldView,
     unit: Sequence[int] | None = None,
     *,
-    input: Any | None = None,
+    input_op: Any | None = None,
     direction: ReceptiveFieldDirection = ReceptiveFieldDirection.RECEPTIVE,
     target: Any | None = None,
     image: Image.Image | None = None,
-    gradient: bool = False,
+    grad: bool = False,
     retain_graph: bool = False,
-    slice: tuple[int, int] | None = None,
+    plane: tuple[int, int] | None = None,
     box_color: str = "#FF3B30",
     alpha: float = 0.6,
     cmap: str = "magma",
@@ -54,24 +63,24 @@ def show(
     view:
         Receptive-field view for the target operation.
     unit:
-        Complete output-element index, required when ``gradient`` is true.
-    input:
+        Complete output-element index, required when ``grad`` is true.
+    input_op:
         Input operation handle or exact IO role.
     image:
         Optional base image overriding the captured raw stimulus.
-    gradient:
+    grad:
         Whether to alpha-blend the empirical gradient magnitude.
     retain_graph:
         Whether the empirical gradient probe retains autograd buffers, so a
         later backward over the same captured graph stays possible.
-    slice:
+    plane:
         Required ``(input_axis, index)`` plane selection for three spatial axes.
     box_color:
         RGB/CSS color for the geometric-box outline.
     alpha:
         Gradient heatmap opacity in ``[0, 1]``.
     cmap:
-        Colormap passed to :func:`torchlens.viz.render_heatmap`.
+        Colormap passed to :func:`torchlens.viz.heatmap`.
 
     Returns
     -------
@@ -88,21 +97,19 @@ def show(
 
     if not 0.0 <= alpha <= 1.0:
         raise ReceptiveFieldConfigurationError("alpha must be between 0 and 1.")
-    selected = target if direction is ReceptiveFieldDirection.PROJECTIVE else input
+    selected = target if direction is ReceptiveFieldDirection.PROJECTIVE else input_op
     descriptor = _select_descriptor(view, selected)
-    if gradient and unit is None:
-        raise ReceptiveFieldError("gradient=True requires an explicit complete output unit.")
+    if grad and unit is None:
+        raise ReceptiveFieldError("grad=True requires an explicit complete output unit.")
     box = None if unit is None else _view_box(view, unit, descriptor, selected, direction)
     gradient_result = (
-        _view_gradient(view, unit, selected, direction, retain_graph=retain_graph)
-        if gradient
-        else None
+        _view_gradient(view, unit, selected, direction, retain_graph=retain_graph) if grad else None
     )
     spatial_axes = _spatial_axes(descriptor, gradient_result)
-    rendered_axes = _rendered_axes(spatial_axes, slice)
+    rendered_axes = _rendered_axes(spatial_axes, plane)
     base = _base_image(view, descriptor, image, rendered_axes)
     if gradient_result is not None:
-        heatmap = _gradient_image(gradient_result, rendered_axes, slice, base.size, cmap)
+        heatmap = _gradient_image(gradient_result, rendered_axes, plane, base.size, cmap)
         base = _blend_heatmap(base, heatmap, alpha=alpha)
     if box is not None and box.status in {
         ReceptiveFieldStatus.EXACT,
@@ -154,21 +161,21 @@ def _blend_heatmap(
     footer_width = max(blended.width, int(text_box[2] - text_box[0]) + 8)
     artifact = Image.new("RGB", (footer_width, blended.height + footer_height), "white")
     artifact.paste(blended, (0, 0))
-    ImageDraw.Draw(artifact).text((4, blended.height + 3), disclosure, fill="#111827")
+    ImageDraw.Draw(artifact).text((4, blended.height + 3), disclosure, fill="#1A1A1A")
     artifact.info["torchlens_disclosure"] = disclosure
     return artifact
 
 
 def node_spec(
-    op: Op,
+    op: Op | Layer | ModuleCall | Module,
     *,
     unit: Sequence[int] | None = None,
-    input: Any | None = None,
+    input_op: Any | None = None,
     direction: ReceptiveFieldDirection | str = ReceptiveFieldDirection.RECEPTIVE,
     target: Any | None = None,
     cone: bool = True,
     overlay: bool = True,
-    gradient: bool = False,
+    grad: bool = False,
     dim_others: bool = True,
     box_color: str = "#FF3B30",
     alpha: float = 0.6,
@@ -179,7 +186,9 @@ def node_spec(
     Parameters
     ----------
     op:
-        Target operation whose receptive-field ancestry is shown.
+        Target whose receptive-field ancestry is shown: an ``Op``, or a single-pass
+        ``Layer``, single-call ``ModuleCall`` or single-call ``Module`` resolved to its
+        output operation on the trace that owns it.
     unit, input, cone, overlay, gradient, dim_others, box_color, alpha, cmap:
         Draw-time RF options. ``unit`` is forwarded only when an input-node
         overlay is requested.
@@ -193,11 +202,24 @@ def node_spec(
     ------
     AmbiguousInputError
         If more than one model input reaches ``op`` and ``input`` is omitted.
+    ReceptiveFieldError
+        If ``op`` is not one of the accepted handles (a bare label string carries no trace
+        to resolve against), or a layer or module has several passes or calls.
+    MultiOutputModuleError
+        If a module call has zero or several output operations.
+
+    Examples
+    --------
+    >>> trace = tl.trace(model, x)
+    >>> style = node_spec(trace["conv2d_2_3"])
+    >>> callable(style)
+    True
     """
 
-    _ = overlay, gradient, box_color, alpha, cmap
+    _ = overlay, grad, box_color, alpha, cmap
+    op = _node_spec_target(op)
     resolved_direction = ReceptiveFieldDirection(direction)
-    selected = target if resolved_direction is ReceptiveFieldDirection.PROJECTIVE else input
+    selected = target if resolved_direction is ReceptiveFieldDirection.PROJECTIVE else input_op
     descriptor = _descriptor_for_op(op, selected, resolved_direction)
     trace = op.source_trace
     cone_labels = (
@@ -208,6 +230,14 @@ def node_spec(
         else frozenset()
     )
 
+    return _cone_node_spec_fn(trace, cone_labels, descriptor.io_role, dim_others)
+
+
+def _cone_node_spec_fn(
+    trace: Any, cone_labels: frozenset[str], io_role: str, dim_others: bool
+) -> NodeSpecFn:
+    """Build the draw callback that highlights ``cone_labels`` and dims the rest."""
+
     def node_spec_fn(layer: Any, spec: NodeSpec) -> NodeSpec | None:
         """Style one rendered layer according to on-demand cone membership."""
 
@@ -216,12 +246,23 @@ def node_spec(
         if not in_cone:
             if not dim_others:
                 return None
-            return spec.replace(fillcolor=_DIM_FILL, fontcolor="#667085", tooltip=spec.tooltip)
-        node_descriptor = _descriptor_for_labels(trace, labels, descriptor.io_role)
+            return spec.replace(fillcolor=_DIM_FILL, fontcolor="#707070", tooltip=spec.tooltip)
+        node_descriptor = _descriptor_for_labels(trace, labels, io_role)
         tooltip = _tooltip(node_descriptor) if node_descriptor is not None else "RF ancestor cone"
         return spec.replace(fillcolor=_CONE_FILL, color="#D97706", penwidth=2.0, tooltip=tooltip)
 
     return node_spec_fn
+
+
+def _node_spec_target(handle: object) -> Op:
+    """Resolve a ``node_spec`` target handle to one operation on the trace that owns it.
+
+    Op, Layer, ModuleCall and Module handles carry their trace and resolve the way the
+    other receptive-field entry points resolve them; anything else, a bare label string
+    included, has no trace and reaches the resolver's typed refusal.
+    """
+
+    return resolve_graph_point(getattr(handle, "_source_trace", None), handle)
 
 
 def _select_descriptor(view: ReceptiveFieldView, selected: Any | None) -> ReceptiveField:
@@ -234,7 +275,7 @@ def _select_descriptor(view: ReceptiveFieldView, selected: Any | None) -> Recept
                 "Select one reachable input; available IO roles: " + ", ".join(per_input)
             )
         return next(iter(per_input.values()))
-    role = selected if isinstance(selected, str) else getattr(selected, "io_role", None)
+    role = selected if isinstance(selected, str) else record_member(selected, "io_role", None)
     if role not in per_input:
         raise ReceptiveFieldError(f"Input {role!r} is not reachable from this target.")
     return per_input[cast(str, role)]
@@ -250,22 +291,22 @@ def _view_box(
     """Project a complete output unit to ``at()`` windowed coordinates."""
 
     if descriptor.axes is None:
-        raise ReceptiveFieldError("Per-unit geometry is unavailable; use .gradient() instead.")
+        raise ReceptiveFieldError("Per-unit geometry is unavailable; use .probe_grad() instead.")
     windowed_axes = tuple(axis.output_axis for axis in descriptor.axes if axis.kind == "windowed")
     if any(axis is None for axis in windowed_axes):
-        raise ReceptiveFieldError("The derived layout is ambiguous; use .gradient() instead.")
+        raise ReceptiveFieldError("The derived layout is ambiguous; use .probe_grad() instead.")
     # ``at()`` consumes windowed coordinates in ascending output-axis order.
     coordinates = tuple(
         unit[cast(int, axis)] for axis in sorted(cast("tuple[int, ...]", windowed_axes))
     )
     try:
         if direction is ReceptiveFieldDirection.RECEPTIVE:
-            return cast(ReceptiveFieldBox, view.at(coordinates, input=selected))
+            return cast(ReceptiveFieldBox, view.at(coordinates, input_op=selected))
         if direction is ReceptiveFieldDirection.PROJECTIVE:
             return cast(
                 ReceptiveFieldBox, view.at(coordinates, direction=direction, target=selected)
             )
-        return cast(ReceptiveFieldBox, view.at(coordinates, direction=direction, input=selected))
+        return cast(ReceptiveFieldBox, view.at(coordinates, direction=direction, input_op=selected))
     except TypeError as exc:
         raise ReceptiveFieldError(
             "ReceptiveFieldView.at() must support the complete-unit show() contract."
@@ -279,25 +320,25 @@ def _view_gradient(
     direction: ReceptiveFieldDirection,
     *,
     retain_graph: bool = False,
-) -> GradientReceptiveField:
+) -> GradReceptiveField:
     """Obtain and disambiguate one empirical gradient result."""
 
     assert unit is not None
     if direction is ReceptiveFieldDirection.RECEPTIVE:
-        result = view.gradient(tuple(unit), input=selected, retain_graph=retain_graph)
+        result = view.probe_grad(tuple(unit), input_op=selected, retain_graph=retain_graph)
     else:
-        result = view.gradient(
+        result = view.probe_grad(
             tuple(unit), direction=direction, target=selected, retain_graph=retain_graph
         )
     if isinstance(result, Mapping):
         if len(result) != 1:
             raise AmbiguousInputError("Select one reachable input before rendering a gradient.")
         return next(iter(result.values()))
-    return cast(GradientReceptiveField, result)
+    return cast(GradReceptiveField, result)
 
 
 def _spatial_axes(
-    descriptor: ReceptiveField, gradient: GradientReceptiveField | None
+    descriptor: ReceptiveField, gradient: GradReceptiveField | None
 ) -> tuple[int, ...]:
     """Return layout-derived spatial axes, falling back to a gradient mask only."""
 
@@ -325,7 +366,7 @@ def _rendered_axes(
     if rank == 3:
         if slice_spec is None:
             raise ReceptiveFieldError(
-                "3-D receptive-field visualization requires slice=(axis, index)."
+                "3-D receptive-field visualization requires plane=(axis, index)."
             )
         axis, _ = slice_spec
         if axis not in spatial_axes:
@@ -351,11 +392,10 @@ def _base_image(
     if trace is not None:
         from ..repgeom import _matching_pil_image_batch
 
-        batch = _matching_pil_image_batch(
-            getattr(trace, "raw_input", None), descriptor.input_shape[0]
-        )
-        if batch:
-            return batch[0].convert("RGB")
+        batch = _matching_pil_image_batch(getattr(trace, "input", None), descriptor.input_shape[0])
+        photo = _aligned_photo(trace, batch[0], descriptor, rendered_axes) if batch else None
+        if photo is not None:
+            return photo
         try:
             input_op = trace[descriptor.input_op_label]
             tensor = input_op.out
@@ -370,6 +410,70 @@ def _base_image(
     return Image.new("RGB", (width, height), "white")
 
 
+def _aligned_photo(
+    trace: Any, photo: Image.Image, descriptor: ReceptiveField, axes: tuple[int, ...]
+) -> Image.Image | None:
+    """Return the captured photo in model-input pixel space, or ``None`` when none exists.
+
+    The box is drawn in model-input coordinates scaled to the base image, so a photo is a
+    usable base only at the input's spatial size. In order: the photo as captured when it
+    already has that size; the photo after replaying the trace's declared resize and center
+    crop (geometry only); else the preprocessed input tensor itself, de-normalized with the
+    same declaration, which is the photo exactly as the model saw it. ``None`` (the caller
+    keeps the plain tensor rendering) when none of these is a 3-channel image of that size.
+    """
+
+    if len(axes) != 2:
+        return None
+    size = (int(descriptor.input_shape[axes[1]]), int(descriptor.input_shape[axes[0]]))
+    rgb = photo.convert("RGB")
+    if rgb.size == size:
+        return rgb
+    record = getattr(getattr(trace, "provenance", None), "input_preprocessor", None)
+    declared = declared_from_record(record)
+    geometry = None if declared is None else geometry_from_declared(declared)
+    replayed = None if geometry is None else geometry(rgb)
+    if isinstance(replayed, Image.Image) and replayed.size == size:
+        return replayed.convert("RGB")
+    try:
+        tensor = trace[descriptor.input_op_label].out
+    except (KeyError, AttributeError):
+        return None
+    if not isinstance(tensor, torch.Tensor):
+        return None
+    seen = _tensor_rgb_image(tensor, declared, axes)
+    return seen if seen is not None and seen.size == size else None
+
+
+def _tensor_rgb_image(
+    tensor: torch.Tensor, declared: DeclaredPreprocessing | None, axes: tuple[int, ...]
+) -> Image.Image | None:
+    """Render the first image of a preprocessed ``(batch, 3, height, width)`` tensor as RGB.
+
+    Undoes the declared per-channel normalization (``mean`` and ``std``) when there is one;
+    otherwise scales each channel to its own range. ``None`` for any other tensor layout.
+    """
+
+    if tensor.ndim != 4 or int(tensor.shape[1]) != 3 or axes != (2, 3):
+        return None
+    data = tensor[0].detach().float().cpu()
+    mean = None if declared is None else declared.mean
+    std = None if declared is None else declared.std
+    if (
+        isinstance(mean, (list, tuple))
+        and isinstance(std, (list, tuple))
+        and len(mean) == len(std) == 3
+    ):
+        data = data * torch.tensor([float(s) for s in std]).view(3, 1, 1)
+        data = data + torch.tensor([float(m) for m in mean]).view(3, 1, 1)
+    else:
+        low = data.amin(dim=(1, 2), keepdim=True)
+        high = data.amax(dim=(1, 2), keepdim=True)
+        data = (data - low) / (high - low).clamp_min(1e-12)
+    array = (data.clamp(0.0, 1.0) * 255.0).round().to(torch.uint8).permute(1, 2, 0).numpy()
+    return Image.fromarray(array, mode="RGB")
+
+
 def _tensor_image(
     tensor: torch.Tensor, descriptor: ReceptiveField, axes: tuple[int, ...]
 ) -> Image.Image:
@@ -381,15 +485,15 @@ def _tensor_image(
         data = data.mean(dim=axis)
     if data.ndim == 1:
         data = data.unsqueeze(0)
-    return render_heatmap(
-        data.numpy(),
+    return node_plots.heatmap(
+        tensor_to_numpy(data),
         width=max(1, int(descriptor.input_shape[axes[-1]])),
         height=32 if len(axes) == 1 else max(1, int(descriptor.input_shape[axes[0]])),
     )
 
 
 def _gradient_image(
-    result: GradientReceptiveField,
+    result: GradReceptiveField,
     axes: tuple[int, ...],
     slice_spec: tuple[int, int] | None,
     size: tuple[int, int],
@@ -412,7 +516,7 @@ def _gradient_image(
         data = data.mean(dim=axis)
     if data.ndim == 1:
         data = data.unsqueeze(0)
-    return render_heatmap(data.numpy(), width=size[0], height=size[1], cmap=cmap)
+    return node_plots.heatmap(tensor_to_numpy(data), width=size[0], height=size[1], cmap=cmap)
 
 
 def _draw_box(
@@ -487,7 +591,7 @@ def _descriptor_for_op(
         view = op.projective_field
         return _select_descriptor(view, selected)
 
-    from ._engine import lookup
+    from ._engine import lookup  # deferred: cycle receptive_field
 
     descriptors = lookup(op.source_trace, op)
     if selected is None:
@@ -496,7 +600,7 @@ def _descriptor_for_op(
                 "Select one reachable input; available IO roles: " + ", ".join(descriptors)
             )
         return next(iter(descriptors.values()))
-    role = selected if isinstance(selected, str) else getattr(selected, "io_role", None)
+    role = selected if isinstance(selected, str) else record_member(selected, "io_role", None)
     if role not in descriptors:
         raise ReceptiveFieldError(f"Input {role!r} is not reachable from this target.")
     return descriptors[cast(str, role)]
@@ -505,7 +609,7 @@ def _descriptor_for_op(
 def _projective_cone(op: Op, target_label: str) -> frozenset[str]:
     """Return the source-to-target path slice for a projective graph cone."""
 
-    from ._path import between_labels
+    from ._path import between_labels  # deferred: cycle receptive_field
 
     return between_labels(op.source_trace, op, target_label)
 
@@ -516,10 +620,10 @@ def _ancestor_cone(op: Op, io_role: str) -> frozenset[str]:
     trace = op.source_trace
     by_reference = {
         reference: item
-        for item in trace.layer_list
+        for item in trace._layer_list
         for reference in (item.label, item.layer_label, item._layer_label_raw)
     }
-    input_op = next((item for item in trace.layer_list if item.io_role == io_role), None)
+    input_op = next((item for item in trace._layer_list if item.graph.io_role == io_role), None)
     if input_op is None:
         return frozenset()
     labels: set[str] = set()
@@ -540,7 +644,12 @@ def _rendered_labels(layer: Any) -> frozenset[str]:
 
     values = set(getattr(layer, "op_labels", ()))
     for name in ("label", "layer_label", "_layer_label_raw"):
-        value = getattr(layer, name, None)
+        try:
+            value = getattr(layer, name, None)
+        except InvalidArgumentError:
+            # A multi-pass Layer refuses its single-pass fields; its ops are
+            # already represented through ``op_labels``.
+            continue
         if isinstance(value, str):
             values.add(value)
     return frozenset(values)
@@ -549,7 +658,7 @@ def _rendered_labels(layer: Any) -> frozenset[str]:
 def _descriptor_for_labels(trace: Any, labels: frozenset[str], role: str) -> ReceptiveField | None:
     """Find a selected-role descriptor for a rendered layer's represented operation."""
 
-    from ._engine import lookup
+    from ._engine import lookup  # deferred: cycle receptive_field
 
     for label in labels:
         descriptors = lookup(trace, label)

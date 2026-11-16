@@ -1,0 +1,157 @@
+"""F12 pins: N16 view-aware source families and the N10 budget resolver.
+
+Covers the memo's composition-test rows 5 (the resolver lands the band,
+discloses the dial by name, deterministic) and 11 (the view x source
+pairing four-cell matrix), plus the zero-coverage refusal in the F12 row
+gate.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+import torch
+from torch import nn
+
+import torchlens as tl
+from torchlens._visualization import lenses
+from torchlens._visualization.lenses import _resolve as resolve_module
+
+
+@pytest.fixture(scope="module")
+def mlp_log() -> Any:
+    """Small MLP trace shared by the family cells."""
+
+    class Toy(nn.Module):
+        """Two-linear toy."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.fc1 = nn.Linear(8, 8)
+            self.fc2 = nn.Linear(8, 4)
+
+        def forward(self, x: Any) -> Any:
+            return self.fc2(torch.relu(self.fc1(x)))
+
+    log = tl.trace(Toy(), torch.randn(2, 8))
+    yield log
+    log.cleanup()
+
+
+def test_unknown_family_and_view_refuse_typed() -> None:
+    """Closed-vocabulary refusals carry stable codes."""
+
+    with pytest.raises(Exception) as excinfo:
+        lenses.resolve_source_family("watts", "rolled")
+    assert excinfo.value.fields["code"] == "view_source_family_unknown"
+    with pytest.raises(Exception) as excinfo:
+        lenses.resolve_source_family("time", "sideways")
+    assert excinfo.value.fields["code"] == "view_roll_mode_invalid"
+
+
+def test_speed_resolves_summed_member_on_rolled(mlp_log: Any) -> None:
+    """Rolled speed binds total_func_duration WITH the aggregation line."""
+
+    resolution = lenses.resolve_lens(mlp_log, "speed", {"rolled": True})
+    assert resolution.source is not None
+    assert resolution.source.member == "total_func_duration"
+    assert any("total across passes" in line for line in resolution.disclosure)
+
+
+@pytest.mark.parametrize(
+    ("summed_member", "expected_code"),
+    [
+        pytest.param(
+            "nonexistent_member_total_zzz",
+            "view_headline_evidence_missing",
+            id="zero_coverage_refuses_typed",
+        ),
+        pytest.param(
+            "total_func_duration",
+            "view_source_zero_coverage",
+            id="one_view_zero_coverage_names_the_zero_coverage_code",
+        ),
+    ],
+)
+def test_zero_coverage_refuses_typed(
+    mlp_log: Any, monkeypatch: Any, summed_member: str, expected_code: str
+) -> None:
+    """ROW GATE: zero resolved coverage refuses; never a populated legend
+    over an unencoded graph.
+
+    When both view members are unencoded the refusal is the headline gap.
+    When only the view-resolved member is unencoded (the other view has
+    evidence), the refusal is the ADVERTISED-SCALE code, not the headline gap.
+    """
+
+    from torchlens._visualization.lenses import _families
+
+    broken = dict(_families.SOURCE_FAMILIES)
+    broken["time"] = _families.SourceFamily(
+        name="time",
+        per_pass_member="nonexistent_member_zzz",
+        summed_member=summed_member,
+        unit_wording="",
+        capture_remedy="re-capture with a plain tl.trace forward",
+    )
+    monkeypatch.setattr(_families, "SOURCE_FAMILIES", broken)
+    with pytest.raises(Exception) as excinfo:
+        lenses.resolve_lens(mlp_log, "speed")
+    assert excinfo.value.fields["code"] == expected_code
+    assert "re-capture" in str(excinfo.value)
+
+
+def test_explicit_color_by_wins_over_family(mlp_log: Any) -> None:
+    """Defaults-not-overrides: the user's channel beats the family binding."""
+
+    resolution = lenses.resolve_lens(mlp_log, "speed", {"color_by": "activation_memory"})
+    assert resolution.draw_kwargs["color_by"] == "activation_memory"
+
+
+def test_source_coverage_counts_op_population(mlp_log: Any) -> None:
+    """Coverage counts the op population, encoded and total."""
+
+    coverage = lenses.source_coverage(mlp_log, "func_duration")
+    assert coverage.total == len(mlp_log._layer_list)
+    assert coverage.encoded == coverage.total
+    assert coverage.fraction == 1.0
+
+
+# ---------------------------------------------------------------------------
+# N10 budget resolver.
+# ---------------------------------------------------------------------------
+
+
+def test_above_ceiling_fallback_warns_coded(mlp_log: Any, monkeypatch: Any) -> None:
+    """Above the optimizer ceiling with no in-band depth: estimate served, coded."""
+
+    import warnings as warnings_module
+
+    from torchlens._visualization import _render_names, collapse_optimizer
+
+    # A tiny trace over a lowered ceiling: no call depth reaches the 100-220
+    # band, so the nearest-depth estimate is served with the coded warning.
+    # The lens budget reads the ceiling from its leaf home; lower it in both.
+    monkeypatch.setattr(_render_names, "COLLAPSE_OPTIMIZER_MAX_OPS", 1)
+    monkeypatch.setattr(collapse_optimizer, "COLLAPSE_OPTIMIZER_MAX_OPS", 1)
+    with warnings_module.catch_warnings(record=True) as caught:
+        warnings_module.simplefilter("always")
+        budget = lenses.resolve_budget(mlp_log)
+    codes = [getattr(w.message, "fields", {}).get("code") for w in caught]
+    assert "view_budget_above_ceiling_fallback" in codes
+    assert not budget.in_band
+    assert "depth" in budget.dial
+    assert any("estimate" in line for line in budget.disclosure)
+
+
+def test_legend_dependence_gate_mechanism(mlp_log: Any, monkeypatch: Any) -> None:
+    """A gate-ruled legend-DEPENDENT lens refuses explicit suppression."""
+
+    monkeypatch.setattr(resolve_module, "LEGEND_DEPENDENT_LENSES", {"speed"})
+    with pytest.raises(Exception) as excinfo:
+        lenses.resolve_lens(mlp_log, "speed", {"show_legend": False})
+    assert excinfo.value.fields["code"] == "view_legend_suppression_refused"
+    # Honored silently on a legend-optional lens (documented explicit value).
+    resolution = lenses.resolve_lens(mlp_log, "overview", {"show_legend": False})
+    assert resolution.draw_kwargs["show_legend"] is False

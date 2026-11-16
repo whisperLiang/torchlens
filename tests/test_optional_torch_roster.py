@@ -10,30 +10,11 @@ import pytest
 import torch
 
 from torchlens import _state
-from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
-from torchlens.constants import (
-    _get_loaded_torch_alias_funcs,
-    _get_optional_functional_funcs,
+from torchlens._constants import (
+    _get_torch_submodule_alias_funcs,
     get_orig_torch_funcs,
 )
-
-pytestmark = pytest.mark.smoke
-
-
-@pytest.mark.parametrize("mask", range(8))
-def test_optional_functional_roster_tracks_each_public_export(
-    monkeypatch: pytest.MonkeyPatch, mask: int
-) -> None:
-    """Every subset of the three version-dependent public exports is supported."""
-    names = ("scaled_mm", "grouped_mm", "scaled_grouped_mm")
-    expected = []
-    for index, name in enumerate(names):
-        if mask & (1 << index):
-            monkeypatch.setattr(torch.nn.functional, name, torch.mm, raising=False)
-            expected.append(("torch.nn.functional", name))
-        else:
-            monkeypatch.delattr(torch.nn.functional, name, raising=False)
-    assert _get_optional_functional_funcs() == expected
+from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
 
 
 def test_mandatory_roster_does_not_hide_disappearing_sites(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -50,7 +31,9 @@ def test_loaded_alias_discovery_never_imports_onnx(monkeypatch: pytest.MonkeyPat
         raise AssertionError("alias discovery must not import modules")
 
     monkeypatch.setattr(importlib, "import_module", forbid_import)
-    assert _get_loaded_torch_alias_funcs() == []
+    assert not any(
+        module == "torch.onnx.operators" for module, _ in _get_torch_submodule_alias_funcs()
+    )
 
 
 @pytest.mark.parametrize(

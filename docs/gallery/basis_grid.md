@@ -1,0 +1,34 @@
+# The basis grid
+
+Each row is one Reproduction Gallery entry; each column is one of the six verbs on a trace.
+A filled cell means the entry's script uses that verb. The grid shows that the entries are
+compositions of the same few verbs; it does not show that every future method is one, and it
+says nothing about the scientific validity of a method.
+
+
+All six entries have landed (see the [Reproduction Gallery](index.md)); their verb cells
+come from each script's declared verbs, and their last two cells from its marked regions
+and runs. The line count is the script's load-bearing TorchLens lines beside its
+plain-hooks reimplementation; the original repositories' lengths were not counted.
+
+| Entry | capture | select | read | do | compare | validate | Load-bearing lines against the original repo | Rerun on |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1. Causal tracing, with a wrong-site control (Meng et al. 2022) | used | used | used | used | used |  | 37 TorchLens, 30 plain hooks | GPT-2 small |
+| 2. CNN receptive and projective fields, used as an intervention site | used | used | used | used | used |  | 218 TorchLens, 37 plain hooks | ResNet-18 |
+| 3. Neuro feature extraction to per-layer RDMs, with an order-error control | used | used | used |  | used |  | 226 TorchLens, 56 plain hooks | ResNet-18, ViT-B/16 |
+| 4. Jacobian lens, also on an architecture its reference repo cannot run | used |  | used |  |  |  | 41 TorchLens, 33 plain autograd | GPT-2 small, Mamba-130m |
+| 5. IOI circuit by edge attribution (Wang et al. 2023) | used |  | used |  |  |  | 55 TorchLens, 19 plain (scoring, not a reimplementation) | GPT-2 small |
+| 6. Bundles plus a two-model harness | used | used | used | used | used |  | 40 TorchLens, 41 plain hooks | GPT-2 small, ResNet-18, DistilGPT2 |
+
+## The verbs
+
+| Verb | On a trace |
+| --- | --- |
+| capture | `trace = tl.trace(model, x)` |
+| select | `tl.module(...)`, `tl.func(...)`, `tl.in_module(...)`, receptive-field regions, combined with `&` and `\|` |
+| read | `trace["layer3"].out`, `tl.extract`, `tl.extract_dataset` |
+| do | `trace.fork().do(site, edit, model=model, inputs=x)`, or `tl.when(site, edit).bind(model)` live |
+| compare | two traces or a bundle of runs, site by site |
+| validate | `tl.validate(model, x)`: the replay check of the recording against the real forward |
+
+Every entry starts from the same capture as the [running examples](../field-guide/running_examples.md).

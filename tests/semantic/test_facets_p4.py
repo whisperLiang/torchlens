@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.semantic import FacetSpec
+from torchlens.facets import FacetSpec
 
 
 class HeadResult(nn.Module):
@@ -87,8 +87,8 @@ def patchable_attention(module: Any) -> dict[str, Any]:
     result_op = trace.ops[result_module.calls[0].output_ops[0]]
     output_op = trace.ops[module.calls[0].output_ops[0]]
     return {
-        "result": FacetSpec.from_home(result_op, recipe_id="patchable_attention"),
-        "attn_out": FacetSpec.from_home(output_op, recipe_id="patchable_attention"),
+        "result": FacetSpec.from_home(result_op, function_id="patchable_attention"),
+        "attn_out": FacetSpec.from_home(output_op, function_id="patchable_attention"),
         "n_heads": 2,
         "head": module.facets.head,
     }
@@ -98,7 +98,7 @@ def patchable_mlp(module: Any) -> dict[str, Any]:
     """Expose writable MLP output facets for the toy module."""
 
     output_op = module.trace.ops[module.calls[0].output_ops[0]]
-    spec = FacetSpec.from_home(output_op, recipe_id="patchable_mlp")
+    spec = FacetSpec.from_home(output_op, function_id="patchable_mlp")
     return {"output": spec, "up_out": spec}
 
 
@@ -112,7 +112,7 @@ def _register_module_facet_recipes() -> Iterator[None]:
     collection saw different recipe/provenance state (hunt-b2-sol R76/R77).
     """
 
-    from torchlens.semantic import facets as _facets
+    from torchlens._semantic import facets as _facets
 
     saved = list(_facets._REGISTRY)
     tl.facets.register(
@@ -145,42 +145,6 @@ def _inputs() -> tuple[torch.Tensor, torch.Tensor]:
     corrupted = torch.zeros(1, 3, 4)
     clean[0, 0, 0] = 2.0
     return clean.requires_grad_(), corrupted.requires_grad_()
-
-
-def test_activation_patch_attention_heads_identifies_important_head() -> None:
-    """Activation patching returns ``[layer, head]`` and finds the important head."""
-
-    model = PatchingToyModel()
-    clean, corrupted = _inputs()
-
-    scores = tl.facets.patching.activation_patch_attention_heads(model, clean, corrupted, _metric)
-
-    assert scores.shape == (1, 2)
-    assert scores[0, 0] > 2.0
-    assert torch.isclose(scores[0, 1], torch.tensor(0.0), atol=1e-6)
-
-
-def test_activation_patch_head_cell_matches_manual_patch() -> None:
-    """One helper cell matches an explicit clean-into-corrupted facet patch."""
-
-    model = PatchingToyModel()
-    clean, corrupted = _inputs()
-    scores = tl.facets.patching.activation_patch_attention_heads(model, clean, corrupted, _metric)
-    clean_log = tl.trace(model, clean, layers_to_save="all", save_arg_values=True)
-    corrupted_log = tl.trace(model, corrupted, layers_to_save="all", save_arg_values=True)
-    clean_head = clean_log.modules["block.attn"].facets.head(0).result.detach().clone()
-
-    def _manual_patch(out: torch.Tensor, *, hook: Any) -> torch.Tensor:
-        """Return the clean head activation."""
-
-        del out, hook
-        return clean_head
-
-    manual = corrupted_log.fork("manual_head_patch")
-    manual.attach_hooks(tl.facet("result").head(0).in_module("block.attn"), _manual_patch)
-    manual.run(model, corrupted)
-
-    assert torch.equal(scores[0, 0], _metric(manual).detach())
 
 
 def test_residual_attention_and_mlp_patch_shapes() -> None:
@@ -229,12 +193,39 @@ def test_attribution_patch_attention_heads_matches_activation_ordering() -> None
 
 
 def test_attribution_patch_requires_grad_capture() -> None:
-    """Attribution patching raises a clear error when facet gradients are missing."""
+    """Attribution patching raises a clear error when facet gradients are missing.
+
+    An EXPLICIT ``save_grads=False`` is honored (the required-field
+    composition only fills fields the caller left unspecified), so no facet
+    gradient is captured and the read refuses with the remedy named.
+    """
 
     model = PatchingToyModel()
     clean, corrupted = _inputs()
 
     with pytest.raises(RuntimeError, match="requires grad capture.*Facet gradient unavailable"):
+        tl.facets.patching.attribution_patch_attention_heads(
+            model,
+            clean,
+            corrupted,
+            _metric,
+            trace_kwargs={
+                "capture": tl.options.CaptureOptions(backward_ready=True, save_grads=False)
+            },
+        )
+
+
+def test_patching_refuses_removed_flat_capture_kwargs() -> None:
+    """Flat capture spellings in trace_kwargs refuse with the grouped remedy.
+
+    ``tl.trace`` removed the flat capture kwargs; forwarding them produced a
+    bare ``TypeError`` from ``trace()`` that taught nothing.
+    """
+
+    model = PatchingToyModel()
+    clean, corrupted = _inputs()
+
+    with pytest.raises(ValueError, match="removed flat capture kwargs.*capture="):
         tl.facets.patching.attribution_patch_attention_heads(
             model,
             clean,

@@ -42,17 +42,21 @@ def main() -> None:
     torch.manual_seed(2)
     model = TinyMLP().eval()
     x = torch.randn(2, 8)
-    log = tl.trace(model, x, intervention_ready=True)
+    log = tl.trace(model, x)
 
     table = log.find_sites(tl.func("relu"))
     exact_label = table.labels()[0]
     exact_site = tl.label(exact_label)
 
     edited = log.fork("exact_site")
-    edited.do(exact_site, tl.scale(0.0), confirm_mutation=True)
+    edited.do(
+        exact_site,
+        tl.scale(0.0),
+        intervention=tl.options.InterventionOptions(),
+    )
 
     assert edited.last_run_records()[-1].site_label == exact_label
-    assert not torch.allclose(log.layer_list[-1].out, edited.layer_list[-1].out)
+    assert not torch.allclose(log.output_ops[-1].out, edited.output_ops[-1].out)
 
 
 if __name__ == "__main__":

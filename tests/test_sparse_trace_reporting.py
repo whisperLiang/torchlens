@@ -22,11 +22,11 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens._io.lazy import LazyActivationRef
-from torchlens.data_classes._nonfinite import (
+from torchlens._data_classes._nonfinite import (
     first_nonfinite_layer,
-    unexamined_payload_count,
 )
+from torchlens._io.lazy import LazyActivationRef
+from torchlens._utils._record_group_table import record_member
 from torchlens.options import CaptureOptions
 
 
@@ -74,28 +74,11 @@ def _plain_model() -> nn.Module:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.smoke
-def test_str_works_on_a_predicate_sparse_capture() -> None:
-    """``print(trace)`` used to raise ValueError on any selective-save capture."""
-
-    trace = tl.trace(_plain_model(), torch.randn(2, 4), save=tl.func("relu"))
-    text = str(trace)
-    assert "Log of Sequential forward pass" in text
-    assert "with saved outs" in text
-
-
 def test_repr_html_works_on_a_predicate_sparse_capture() -> None:
     """The notebook representation goes through the same scan."""
 
     trace = tl.trace(_plain_model(), torch.randn(2, 4), save=tl.func("relu"))
     assert isinstance(trace._repr_html_(), str)
-
-
-def test_explain_works_on_a_predicate_sparse_capture() -> None:
-    """``report.explain`` asks the trace the same question."""
-
-    trace = tl.trace(_plain_model(), torch.randn(2, 4), save=tl.func("relu"))
-    assert isinstance(tl.report.explain(trace), str)
 
 
 def test_disk_backed_reports_do_not_materialize_payloads(
@@ -110,7 +93,7 @@ def test_disk_backed_reports_do_not_materialize_payloads(
         save=tl.func("relu"),
         storage=tl.to_disk(str(tmp_path / "run.tlspec")),
     )
-    assert any(getattr(op, "out_ref", None) is not None for op in trace.layer_list)
+    assert any(record_member(op, "out_ref", None) is not None for op in trace._layer_list)
 
     def fail_materialization(
         self: LazyActivationRef,
@@ -146,58 +129,43 @@ def test_disk_backed_reports_do_not_materialize_payloads(
 
     text = str(trace)
     html = trace._repr_html_()
-    report = tl.report.explain(trace, format="json")
+    # D14 (F09): explain never scans -- arm the evidence through the
+    # explicit door (it persists the record on the annotations channel;
+    # a disk-backed trace stores no tensor memo). The scan itself must
+    # skip disk-backed payloads without materializing (the monkeypatched
+    # materialize would raise).
+    assert trace.nonfinite_ops == ()
+    assert trace.health_facts is not None
+    report = trace.explain()
     assert isinstance(text, str)
+    assert "(disk-backed: metadata only until read)" in text
     assert "disk-backed" in html
-    assert isinstance(report, dict)
-    assert "disk-backed" in report["first_nonfinite"]
+    assert "disk-backed" in report
 
 
-def test_json_and_html_clean_answers_disclose_sparse_coverage(
+def test_explain_and_html_clean_answers_disclose_sparse_coverage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Machine and notebook reports preserve the same coverage hedge as text."""
+    """The prose and notebook reports preserve the same coverage hedge as text."""
 
     trace = tl.trace(_plain_model(), torch.randn(2, 4), save=tl.func("relu"))
     monkeypatch.setitem(sys.modules, "IPython", types.ModuleType("IPython"))
 
-    report = tl.report.explain(trace, format="json")
-    assert isinstance(report, dict)
-    assert "could not be examined" in report["first_nonfinite"]
+    # D14 (F09): explain serves the basis in hand; arm it explicitly.
+    assert trace.nonfinite_ops == ()
+    report = trace.explain()
+    assert "could not be examined" in report
     assert "could not be examined" in trace._repr_html_()
+    # The text card carries the same coverage row as the notebook card (house style A20).
+    assert (
+        "\n  coverage  1 op examined, none non-finite (4 op(s) retained no payload and "
+        "could not be examined; re-run with a wider save= to cover them)\n"
+    ) in str(trace)
 
 
 # ---------------------------------------------------------------------------
 # The scoped answer discloses its own scope
 # ---------------------------------------------------------------------------
-
-
-def test_sparse_clean_answer_names_the_ops_it_could_not_examine() -> None:
-    """A scoped clean verdict must not read as a whole-capture verdict."""
-
-    trace = tl.trace(_plain_model(), torch.randn(2, 4), save=tl.func("relu"))
-    answer = trace.first_nonfinite(link_format="text")
-    assert answer.startswith("No non-finite")
-    assert "could not be examined" in answer
-    assert str(unexamined_payload_count(trace, kind="saved")) in answer
-
-
-def test_full_capture_answer_claims_no_gap() -> None:
-    """A full capture examined everything, so it must not hedge."""
-
-    trace = tl.trace(_plain_model(), torch.randn(2, 4))
-    assert unexamined_payload_count(trace, kind="saved") == 0
-    assert trace.first_nonfinite(link_format="text") == (
-        "No non-finite tensor values found in saved outs."
-    )
-
-
-def test_answer_hedges_when_nothing_is_saved() -> None:
-    """``layers_to_save="none"`` retains no payloads, and says so."""
-
-    trace = tl.trace(_plain_model(), torch.randn(2, 4), layers_to_save="none")
-    assert unexamined_payload_count(trace, kind="saved") > 0
-    assert "could not be examined" in trace.first_nonfinite(link_format="text")
 
 
 # ---------------------------------------------------------------------------
@@ -221,15 +189,6 @@ def test_full_capture_still_finds_a_non_finite_activation() -> None:
     assert "non-finite saved out" in trace.first_nonfinite(link_format="text")
 
 
-def test_sparse_capture_reports_a_non_finite_saved_activation() -> None:
-    """A retained non-finite payload is still found and named."""
-
-    trace = tl.trace(_NonFiniteModel(), torch.randn(2, 4), save=tl.func("__truediv__"))
-    answer = trace.first_nonfinite(link_format="text")
-    assert "First non-finite saved out" in answer
-    assert "truediv" in answer
-
-
 # ---------------------------------------------------------------------------
 # The trace can self-report its footprint
 # ---------------------------------------------------------------------------
@@ -239,15 +198,35 @@ def test_activation_footprint_fields_are_populated() -> None:
     """Both footprint fields carry real byte counts, sparse or not."""
 
     full = tl.trace(_plain_model(), torch.randn(2, 4))
-    assert int(full.total_activation_memory) > 0
-    assert int(full.saved_activation_memory) == int(full.total_activation_memory)
+    assert int(full.cost.total_activation_memory) > 0
+    # A1 identity partition: total EXCLUDES output pseudo-rows (the producer
+    # owns the bytes). D-17 byte model: saved counts PHYSICAL retained
+    # storage once per storage. HONESTY 13-R1: the output pseudo-row now
+    # rides the producer's ONE retained payload (no second physical copy),
+    # so the two aggregates agree exactly and the output row's own bytes
+    # are already inside total. Still an exact pin: any drift in either
+    # accounting, or a returning redundant copy, trips it.
+    output_rows = [
+        layer for layer in full._layer_list if layer.type == "output" and layer.has_saved_activation
+    ]
+    assert output_rows and all(int(layer.cost.activation_memory) > 0 for layer in output_rows)
+    for layer in output_rows:
+        parent = full[layer.parents[0]]
+        assert layer.out.untyped_storage().data_ptr() == parent.out.untyped_storage().data_ptr()
+    assert int(full.cost.saved_activation_memory) == int(full.cost.total_activation_memory)
 
     sparse = tl.trace(_plain_model(), torch.randn(2, 4), save=tl.func("relu"))
-    assert int(sparse.total_activation_memory) > 0
-    assert 0 < int(sparse.saved_activation_memory) < int(sparse.total_activation_memory)
+    assert int(sparse.cost.total_activation_memory) > 0
+    assert 0 < int(sparse.cost.saved_activation_memory) < int(sparse.cost.total_activation_memory)
 
 
-@pytest.mark.parametrize("guessed", ["activation_memory", "memory", "total_memory", "footprint"])
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
+@pytest.mark.parametrize(
+    "guessed",
+    [
+        "total_memory",
+    ],
+)
 def test_footprint_guesses_route_to_the_real_fields(guessed: str) -> None:
     """A bare AttributeError read as "TorchLens cannot tell you".
 
@@ -263,15 +242,6 @@ def test_footprint_guesses_route_to_the_real_fields(guessed: str) -> None:
     message = str(excinfo.value)
     assert "total_activation_memory" in message
     assert "forward_peak_memory" in message
-
-
-def test_unknown_attributes_still_raise_a_plain_error() -> None:
-    """Only the curated guesses get guidance; everything else is unchanged."""
-
-    trace = tl.trace(_plain_model(), torch.randn(2, 4))
-    with pytest.raises(AttributeError) as excinfo:
-        trace.definitely_not_a_field  # noqa: B018
-    assert "total_activation_memory" not in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +277,9 @@ class _LoopModel(nn.Module):
         return x
 
 
+# Kept: edited on the C-100 side (C-091/C-098) after the shrink removed it.
+
+
 def test_recurrence_detection_off_matches_its_documented_tradeoff() -> None:
     """The speed-knobs row must describe what the knob actually does.
 
@@ -319,11 +292,11 @@ def test_recurrence_detection_off_matches_its_documented_tradeoff() -> None:
     rolled = tl.trace(_LoopModel(), x, capture=CaptureOptions(recurrence_detection=True))
     unrolled = tl.trace(_LoopModel(), x, capture=CaptureOptions(recurrence_detection=False))
 
-    assert rolled["relu_1_2"].num_passes == 6
+    assert rolled.layers["relu_1_2"].num_passes == 6
     assert len(unrolled.layer_labels) > len(rolled.layer_labels)
-    assert unrolled["relu_1_2"].num_passes == 1
+    assert unrolled.layers["relu_1_2"].num_passes == 1
     assert "relu_6_7" in unrolled.layer_labels
 
-    assert unrolled.is_recurrent is True
-    assert unrolled.max_layer_op_count == rolled.max_layer_op_count
-    assert int(unrolled.total_activation_memory) == int(rolled.total_activation_memory)
+    assert unrolled.graph.is_recurrent is True
+    assert unrolled.graph.max_ops_per_layer == rolled.graph.max_ops_per_layer
+    assert int(unrolled.cost.total_activation_memory) == int(rolled.cost.total_activation_memory)

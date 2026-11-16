@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +13,10 @@ from torch import nn
 pd = pytest.importorskip("pandas")
 
 import torchlens as tl  # noqa: E402
-from torchlens import load, save, trace as trace_fn  # noqa: E402
+from torchlens import load, trace as trace_fn  # noqa: E402
+from torchlens._data_classes.trace import Trace  # noqa: E402
 from torchlens._io import BlobRef  # noqa: E402
-from torchlens.data_classes.trace import Trace  # noqa: E402
-from torchlens.io import rehydrate_nested  # noqa: E402
-
-PYARROW_AVAILABLE = importlib.util.find_spec("pyarrow") is not None
+from torchlens.io import materialize_nested  # noqa: E402
 
 
 class _IntegrationConvModel(nn.Module):
@@ -84,7 +81,7 @@ def _saved_layers(trace: Trace) -> list[Any]:
         Saved layer-pass entries in log order.
     """
 
-    return [layer for layer in trace.layer_list if layer.has_saved_activation]
+    return [layer for layer in trace._layer_list if layer.has_saved_activation]
 
 
 def _first_saved_layer(trace: Trace) -> Any:
@@ -101,7 +98,7 @@ def _first_saved_layer(trace: Trace) -> Any:
         First saved layer-pass entry.
     """
 
-    return next(layer for layer in trace.layer_list if layer.has_saved_activation)
+    return next(layer for layer in trace._layer_list if layer.has_saved_activation)
 
 
 def _contains_blob_ref(value: Any) -> bool:
@@ -131,47 +128,6 @@ def _contains_blob_ref(value: Any) -> bool:
     return False
 
 
-def test_streaming_lazy_materialize_and_parquet_round_trip(tmp_path: Path) -> None:
-    """Streaming save should compose with lazy load, materialize, and parquet export."""
-
-    if not PYARROW_AVAILABLE:
-        pytest.skip("pyarrow is required for parquet round-trip coverage")
-
-    bundle_path = tmp_path / "streamed_bundle.tl"
-    model, inputs = _build_conv_inputs()
-
-    streamed_log = trace_fn(
-        model,
-        inputs,
-        layers_to_save="all",
-        save_outs_to=bundle_path,
-        random_seed=0,
-    )
-    assert (bundle_path / "manifest.json").exists()
-    assert (bundle_path / "metadata.pkl").exists()
-    assert sorted((bundle_path / "blobs").glob("*.safetensors"))
-
-    lazy_log = load(bundle_path, lazy=True)
-    saved_layers = _saved_layers(lazy_log)
-    assert saved_layers
-
-    for layer in saved_layers[:3]:
-        tensor = layer.materialize_out()
-        assert isinstance(tensor, torch.Tensor)
-        assert layer.out_ref is not None
-
-    parquet_path = tmp_path / "streamed_layers.parquet"
-    tl.export.parquet(lazy_log, parquet_path)
-    parquet_df = pd.read_parquet(parquet_path)
-    exported_df = lazy_log.to_pandas()
-
-    assert len(streamed_log.layer_list) == len(lazy_log.layer_list)
-    assert len(parquet_df) == len(exported_df)
-    assert parquet_df["layer_label"].tolist() == exported_df["layer_label"].tolist()
-    assert parquet_df["layer_type"].tolist() == exported_df["layer_type"].tolist()
-    assert parquet_df["pass_index"].tolist() == exported_df["pass_index"].tolist()
-
-
 def test_post_hoc_save_lazy_rehydrate_nested_and_resave(tmp_path: Path) -> None:
     """Post-hoc bundle save should support lazy nested rehydration and resave."""
 
@@ -181,26 +137,25 @@ def test_post_hoc_save_lazy_rehydrate_nested_and_resave(tmp_path: Path) -> None:
     live_log = trace_fn(
         model,
         inputs,
-        layers_to_save="all",
-        save_arg_values=True,
-        random_seed=0,
+        capture=tl.options.CaptureOptions(save_args=True, seed=0),
+        save="all",
     )
 
-    save(live_log, source_path, include_saved_args=True)
+    live_log.save(source_path, include_saved_args=True)
     lazy_log = load(source_path, lazy=True, materialize_nested=False)
 
     nested_blob_layer = next(
         layer
-        for layer in lazy_log.layer_list
-        if layer.saved_args is not None and _contains_blob_ref(layer.saved_args)
+        for layer in lazy_log._layer_list
+        if layer.call.saved_args is not None and _contains_blob_ref(layer.call.saved_args)
     )
-    assert nested_blob_layer.out_ref is not None
-    assert _contains_blob_ref(nested_blob_layer.saved_args)
+    assert nested_blob_layer._out_ref is not None
+    assert _contains_blob_ref(nested_blob_layer.call.saved_args)
 
-    rehydrate_nested(lazy_log)
+    materialize_nested(lazy_log)
 
-    assert not _contains_blob_ref(nested_blob_layer.saved_args)
-    save(lazy_log, resaved_path, include_saved_args=True)
+    assert not _contains_blob_ref(nested_blob_layer.call.saved_args)
+    lazy_log.save(resaved_path, include_saved_args=True)
     restored = load(resaved_path, lazy=False)
 
     live_layer = _first_saved_layer(live_log)
@@ -208,63 +163,13 @@ def test_post_hoc_save_lazy_rehydrate_nested_and_resave(tmp_path: Path) -> None:
     assert isinstance(live_layer.out, torch.Tensor)
     assert isinstance(restored_layer.out, torch.Tensor)
     assert torch.equal(restored_layer.out, live_layer.out)
-    assert restored.model_class_name == live_log.model_class_name
-    assert len(restored.layer_list) == len(live_log.layer_list)
+    assert restored.source.class_name == live_log.source.class_name
+    assert len(restored._layer_list) == len(live_log._layer_list)
     assert any(
-        layer.saved_args is not None
-        and any(isinstance(arg, torch.Tensor) for arg in layer.saved_args)
-        for layer in restored.layer_list
+        layer.call.saved_args is not None
+        and any(isinstance(arg, torch.Tensor) for arg in layer.call.saved_args)
+        for layer in restored._layer_list
     )
-
-
-def test_streaming_keep_outs_in_memory_false_materializes_from_refs(
-    tmp_path: Path,
-) -> None:
-    """Streaming eviction mode should leave only refs until materialization."""
-
-    bundle_path = tmp_path / "stream_evict.tl"
-    model, inputs = _build_conv_inputs()
-    streamed_log = trace_fn(
-        model,
-        inputs,
-        layers_to_save="all",
-        save_outs_to=bundle_path,
-        keep_outs_in_memory=False,
-        random_seed=0,
-    )
-    eager_log = load(bundle_path, lazy=False)
-
-    streamed_layer = _first_saved_layer(streamed_log)
-    eager_layer = _first_saved_layer(eager_log)
-
-    assert streamed_layer.out is None
-    assert streamed_layer.out_ref is not None
-    tensor = streamed_layer.materialize_out()
-
-    assert isinstance(tensor, torch.Tensor)
-    assert isinstance(eager_layer.out, torch.Tensor)
-    assert torch.equal(tensor, eager_layer.out)
-
-
-def test_streaming_keep_outs_in_memory_true_keeps_tensor_and_ref(tmp_path: Path) -> None:
-    """Streaming keep-in-memory mode should retain both tensors and lazy refs."""
-
-    bundle_path = tmp_path / "stream_keep.tl"
-    model, inputs = _build_conv_inputs()
-    streamed_log = trace_fn(
-        model,
-        inputs,
-        layers_to_save="all",
-        save_outs_to=bundle_path,
-        keep_outs_in_memory=True,
-        random_seed=0,
-    )
-
-    saved_layers = _saved_layers(streamed_log)
-    assert saved_layers
-    for layer in saved_layers:
-        assert isinstance(layer.out, torch.Tensor)
-        assert layer.out_ref is not None
 
 
 @pytest.mark.rare

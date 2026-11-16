@@ -4,18 +4,26 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from ._accessor_base import SuperAccessor
+from ._accessor_base import SharedNamesMixin, SuperAccessor, member_lookup
 from ._base import Super, _TensorBearing
 
 if TYPE_CHECKING:
-    from ...data_classes.aten_op import AtenOp
-    from ...data_classes.layer import Layer
-    from ...data_classes.op import Op
+    from ..._data_classes.aten_op import AtenOp
+    from ..._data_classes.layer import Layer
+    from ..._data_classes.op import Op
     from .._topology.topology import SupergraphNode
 
 
 class SuperOp(Super["Op"], _TensorBearing):
-    """View of a single site across all bundle members."""
+    """View of a single site across all bundle members.
+
+    Examples
+    --------
+    >>> bundle = tl.Bundle({"a": tl.trace(model, x), "b": tl.trace(model, torch.randn(1, 3, 8, 8))})
+    >>> site = bundle.at(tl.func("relu"))
+    >>> isinstance(site, SuperOp), sorted(site.members)
+    (True, ['a', 'b'])
+    """
 
     def __init__(
         self,
@@ -24,7 +32,7 @@ class SuperOp(Super["Op"], _TensorBearing):
         bundle_trace_names: list[str] | None = None,
         *,
         members: dict[str, Any] | None = None,
-        query: Any | None = None,
+        selector: Any | None = None,
     ) -> None:
         """Initialize a node view.
 
@@ -38,7 +46,7 @@ class SuperOp(Super["Op"], _TensorBearing):
             Optional legacy trace-name order.
         members:
             Dict keyed by bundle member name.
-        query:
+        selector:
             Original site query.
         """
 
@@ -60,7 +68,7 @@ class SuperOp(Super["Op"], _TensorBearing):
         super().__init__(
             label,
             cast(dict[str, "Op"], resolved_members),
-            query=query,
+            selector=selector,
             bundle_member_names=bundle_member_names,
         )
 
@@ -81,7 +89,16 @@ class SuperLayer(SuperOp):
 
 
 class SuperAtenOp(Super["AtenOp"]):
-    """Positional, coverage-qualified alignment of one ATen slot across members."""
+    """Positional, coverage-qualified alignment of one ATen slot across members.
+
+    Examples
+    --------
+    >>> trace = tl.trace(model, x, capture=tl.options.CaptureOptions(aten_ops=True))
+    >>> row = list(trace["relu_1_2"].aten_ops)[0]
+    >>> slot = SuperAtenOp(label="slot_0", decomposition_slot=0, members={"a": row}, bundle_member_names=["a"])
+    >>> slot.decomposition_slot, sorted(slot.members)
+    (0, ['a'])
+    """
 
     def __init__(
         self,
@@ -113,7 +130,7 @@ class SuperAtenOp(Super["AtenOp"]):
         super().__init__(
             label,
             resolved_members,
-            query=decomposition_slot,
+            selector=decomposition_slot,
             bundle_member_names=resolved_names,
         )
         self.decomposition_slot = decomposition_slot
@@ -166,8 +183,10 @@ class SuperAtenOp(Super["AtenOp"]):
         )
 
 
-class SuperOpAccessor(SuperAccessor["Op", SuperOp]):
+class SuperOpAccessor(SharedNamesMixin, SuperAccessor["Op", SuperOp]):
     """Dict-like Bundle accessor returning SuperOp objects."""
+
+    _names_kind = "ops"
 
     def __init__(self, bundle: Any) -> None:
         """Initialize an op accessor for ``bundle``.
@@ -195,19 +214,14 @@ class SuperOpAccessor(SuperAccessor["Op", SuperOp]):
         Op | None
             Matching Op, or ``None`` when unresolved.
         """
-        try:
-            resolved = trace.layers[label]
-        except (KeyError, ValueError):
-            return None
-        if type(resolved).__name__ == "Op":
-            return cast("Op", resolved)
-        if type(resolved).__name__ == "Layer" and len(resolved.ops) == 1:
-            return cast("Op", resolved.ops[0])
-        return None
+        resolved = member_lookup(trace.ops, label)
+        return cast("Op", resolved) if type(resolved).__name__ == "Op" else None
 
 
-class SuperLayerAccessor(SuperAccessor["Layer", SuperLayer]):
+class SuperLayerAccessor(SharedNamesMixin, SuperAccessor["Layer", SuperLayer]):
     """Dict-like Bundle accessor returning SuperLayer objects."""
+
+    _names_kind = "layers"
 
     def __init__(self, bundle: Any) -> None:
         """Initialize a layer accessor for ``bundle``.
@@ -235,10 +249,7 @@ class SuperLayerAccessor(SuperAccessor["Layer", SuperLayer]):
         Layer | None
             Matching Layer, or ``None`` when unresolved.
         """
-        try:
-            resolved = trace.layers[label]
-        except (KeyError, ValueError):
-            return None
+        resolved = member_lookup(trace.layers, label)
         return cast("Layer", resolved) if type(resolved).__name__ == "Layer" else None
 
 

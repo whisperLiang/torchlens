@@ -1,6 +1,6 @@
 """The mechanical BELT: protocol-invisible stale-reference coverage.
 
-Stage-2 safety net, part 2 (tri-lab verdict). A small class of wrapped torch
+Stage-2 safety net, part 2 (design-review verdict). A small class of wrapped torch
 functions is invisible to EVERY ``TorchFunctionMode`` — their C
 implementations never enter the override-protocol dispatch (measured: zero
 callbacks), so a stale pre-wrap reference to one of them produces NO signal
@@ -9,6 +9,14 @@ escape detector off the op would silently vanish from the trace. The rescue
 re-run cannot fix what nothing detects, so these functions keep the targeted
 stale-reference patching (module-level attributes, the measured reachable
 holder class) after the broad crawler's deletion.
+
+The same module-global sweep also patches stale references to every OTHER
+wrapped torch callable (``from torch import bmm`` /
+``from torch.nn.functional import linear`` bound before the first wrap). Those
+are mode-visible, but only ``tl.trace`` re-runs under the rescue net; the
+validation capture and every other mode-free capture would otherwise drop the
+op from the graph. Patching at wrap time keeps the capture mode-free (the
+rescue mode de-fuses fast paths) and is reversed at ``unwrap_torch()``.
 
 The belt membership is DERIVED MECHANICALLY per build, never hand-listed:
 
@@ -34,6 +42,7 @@ torch.frombuffer, torch.Tensor.as_subclass, torch.Tensor._make_subclass}``
 
 from __future__ import annotations
 
+import atexit
 import os
 import sys
 import tempfile
@@ -50,6 +59,7 @@ import torch
 from torch.overrides import TorchFunctionMode, get_overridable_functions, get_testing_overrides
 
 from ... import _state
+from ..._constants import get_orig_torch_funcs
 
 __all__ = [
     "BeltReport",
@@ -97,8 +107,10 @@ class _ProbeSubTensor(torch.Tensor):
 def _from_file_args() -> tuple[tuple[Any, ...], dict[str, Any]]:
     """Build args/kwargs for the ``torch.from_file`` probe, backed by a temp file.
 
-    The caller removes the temporary path after the probe call. ``shared=False``
-    means the returned tensor does not require the pathname to remain present.
+    The caller removes the temporary path after the probe call, once the
+    returned tensor is released (``_run_probe``): its storage maps the file,
+    and Windows refuses to delete a mapped file. ``shared=False`` means the
+    returned tensor does not require the pathname to remain present.
     """
 
     array = np.array([0.25, 0.5], dtype=np.float32)
@@ -134,7 +146,7 @@ PROBE_RECIPES: dict[tuple[str, str], Callable[[], tuple[tuple[Any, ...], dict[st
     # Exact sibling of ``as_subclass``: builds a subclass VIEW from raw
     # storage below the override protocol, so a stale pre-wrap
     # ``_make_subclass`` reference loses the op with zero signal. Without a
-    # recipe the pair sat disclosed-but-unprobed forever (b6-fable carried).
+    # recipe the pair would sit disclosed-but-unprobed forever.
     ("torch.Tensor", "_make_subclass"): lambda: (
         (_ProbeSubTensor, torch.tensor([0.25, 0.5])),
         {},
@@ -153,14 +165,14 @@ def _probe_rng_bracket() -> Iterator[None]:
     (``manual_seed`` already has a recipe that would call ``manual_seed(7)``;
     it is merely dead on current builds) would silently clobber the user's
     global seed. The bracket makes probe evaluation RNG-neutral by
-    construction (b8-fable R56 latent-reseed hardening).
+    construction.
     """
 
-    # Route through the W11-F1-guarded snapshot pair: gating on
-    # ``torch.cuda.is_available()`` alone re-created the visible-but-unusable
+    # Route through the guarded snapshot pair: gating on
+    # ``torch.cuda.is_available()`` alone would re-create the visible-but-unusable
     # CUDA abort on pure-CPU captures (the snapshot never touches CUDA until
     # the process has actually initialized it, and latches on a failed read).
-    from ...utils.rng import log_current_rng_states, set_rng_from_saved_states
+    from ..._utils.rng import log_current_rng_states, set_rng_from_saved_states
 
     saved_states = log_current_rng_states(torch_only=True)
     try:
@@ -185,7 +197,7 @@ class BeltReport:
     not be measured, so it is neither belt-patched nor proven mode-visible.
     A stale pre-wrap reference to it would lose ops with zero signal while
     the capture still reports ``capture_verified=True``. Consumers
-    (``torchlens.utils.doctor()`` and ``torchlens.compat.report()``) surface
+    (``torchlens.report.doctor()``) surface
     these rows; the details make the failure actionable per build.
     """
 
@@ -232,10 +244,84 @@ def _resolve_namespace(namespace_name: str) -> Any | None:
     return obj
 
 
+_deferred_probe_paths: list[str] = []
+"""Probe temp files whose removal the OS refused; retried later and at exit."""
+
+_deferred_cleanup_registered = False
+
+
+def _retry_deferred_probe_files() -> None:
+    """Retry removing probe temp files whose first removal the OS refused."""
+
+    pending = list(_deferred_probe_paths)
+    _deferred_probe_paths.clear()
+    for path in pending:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            _deferred_probe_paths.append(path)
+
+
+def _remove_probe_file(path: str) -> None:
+    """Remove a probe temp file; defer removal when the OS refuses it.
+
+    Windows refuses to delete a file while any handle or mapping still holds
+    it (``PermissionError``), and a scanner or indexer can hold
+    one briefly even after the probe released its own. The probe's
+    classification is already settled when this runs, so a refused removal
+    (any ``OSError`` other than a missing file) never changes the belt report
+    or fails the capture: the path is queued and retried on the next removal
+    and once more at interpreter exit.
+    """
+
+    global _deferred_cleanup_registered
+    _retry_deferred_probe_files()
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        _deferred_probe_paths.append(path)
+        if not _deferred_cleanup_registered:
+            atexit.register(_retry_deferred_probe_files)
+            _deferred_cleanup_registered = True
+
+
+def _run_probe(
+    namespace_name: str,
+    func_name: str,
+    recipe: Callable[[], tuple[tuple[Any, ...], dict[str, Any]]],
+    original: Any,
+) -> tuple[int, bool]:
+    """Call one candidate under the counting mode; return (mode calls, touches tensor).
+
+    The probe result is reduced to these two facts INSIDE this frame, so the
+    returned tensor (for ``from_file``, a tensor whose storage maps the temp
+    file) is released before the temp file is removed. Removing a file that a
+    live mapping still holds raises ``PermissionError`` on Windows.
+    """
+
+    mode = _CountingMode()
+    cleanup_path: str | None = None
+    try:
+        with _state.pause_logging(), _probe_rng_bracket():
+            args, kwargs = recipe()
+            if (namespace_name, func_name) == ("torch", "from_file"):
+                cleanup_path = str(args[0])
+            with mode:
+                result = original(*args, **kwargs)
+            touches_tensor = _touches_tensor(result, original)
+            del result
+    finally:
+        if cleanup_path is not None:
+            _remove_probe_file(cleanup_path)
+    return mode.calls, touches_tensor
+
+
 def _derive() -> tuple[BeltReport, dict[int, Any]]:
     """Measure the protocol-invisible wrapped set on the running build."""
-
-    from ...constants import get_orig_torch_funcs
 
     inventory = get_orig_torch_funcs(include_torchvision=False)
     statically_visible: set[int] = set()
@@ -266,29 +352,16 @@ def _derive() -> tuple[BeltReport, dict[int, Any]]:
         if recipe is None:
             unprobed_candidates.append((namespace_name, func_name))
             continue
-        mode = _CountingMode()
-        cleanup_path: str | None = None
         try:
-            with _state.pause_logging(), _probe_rng_bracket():
-                args, kwargs = recipe()
-                if (namespace_name, func_name) == ("torch", "from_file"):
-                    cleanup_path = str(args[0])
-                with mode:
-                    result = original(*args, **kwargs)
+            mode_calls, touches_tensor = _run_probe(namespace_name, func_name, recipe, original)
         except Exception as exc:
             probe_failures.append((namespace_name, func_name))
             probe_failure_details.append((namespace_name, func_name, repr(exc)))
             continue
-        finally:
-            if cleanup_path is not None:
-                try:
-                    os.unlink(cleanup_path)
-                except FileNotFoundError:
-                    pass
-        if mode.calls:
+        if mode_calls:
             probed_visible.append((namespace_name, func_name))
             continue
-        if not _touches_tensor(result, original):
+        if not touches_tensor:
             continue
         members.append((namespace_name, func_name))
         wrapper = _state._orig_to_decorated.get(id(original))
@@ -331,8 +404,8 @@ def belt_report() -> BeltReport | None:
     the dead generation are reversed and the belt re-derives.
 
     From a NON-OWNER thread while a capture is live (``doctor()`` /
-    ``compat.report()`` polled during a long forward), the cached report is
-    served READ-ONLY (r8 R54 belt pair): deriving would evaluate probe
+    ``report.doctor()`` polled during a long forward), the cached report is
+    served READ-ONLY: deriving would evaluate probe
     originals under the global-RNG snapshot/restore bracket, and the restore
     would REWIND any draws the capture made in between -- silently repeating
     its dropout/noise stream -- while the stale-generation reversal would
@@ -396,8 +469,33 @@ def _evict_live_id(entry_id: int) -> Callable[[Any], None]:
     return _evict
 
 
+def _wrapped_callable_replacement(value: Any, member_map: dict[int, Any] | None) -> Any | None:
+    """Return the live wrapper when ``value`` is a pristine wrapped torch callable.
+
+    A belt member (protocol-invisible) answers from ``member_map``; every other
+    wrapped callable from the epoch ledgers. The reverse registry check guards
+    against a recycled ``id``: the entry counts only when the wrapper still maps
+    back to this exact object. Classes are never replaced (a module-global
+    ``Tensor`` must stay a type).
+    """
+
+    if member_map and (member := member_map.get(id(value))) is not None:
+        return member
+    # ``issubclass(type(value), ...)`` reads the real type slot; ``isinstance``
+    # falls back to ``value.__class__``, which a module-global stub whose
+    # ``__getattribute__`` always raises turns into an aborted wrap (shap
+    # without matplotlib binds ``shap.plots`` to such an object).
+    if issubclass(type(value), type) or not callable(value):
+        return None
+    decorated_to_orig, orig_to_decorated = _state.wrap_epoch_ledgers()
+    wrapper = orig_to_decorated.get(id(value))
+    if wrapper is None or decorated_to_orig.get(id(wrapper)) is not value:
+        return None
+    return wrapper
+
+
 def sweep_stale_belt_references() -> int:
-    """Patch stale module-level references to belt members, with a ledger.
+    """Patch stale module-level references to wrapped torch callables, with a ledger.
 
     Scans each live module identity ONCE per wrapper epoch (new imports are
     picked up on the next sweep). Only module ``__dict__`` slots are
@@ -411,15 +509,14 @@ def sweep_stale_belt_references() -> int:
         Number of slots patched by this sweep.
     """
 
-    # grind-r5 b3 R02 (opus+sol corroborated LOW, 2 rounds): NO length
-    # watermark. ``len(sys.modules)`` equality is not identity -- a same-length
-    # mutation (del one key + insert another) skipped the sweep and left a
+    # NO length watermark. ``len(sys.modules)`` equality is not identity -- a same-length
+    # mutation (del one key + insert another) would skip the sweep and leave a
     # protocol-invisible stale ``from_numpy``/``frombuffer``/``as_subclass``
     # reference unpatched, exactly the zero-signal class the belt exists to
     # close. The per-module memo below already makes every sweep O(modules)
     # dict lookups with O(new modules) real work.
     report = belt_report()
-    if report is None or _member_map is None or not _member_map:
+    if report is None:
         return 0
     # O(new-modules) pre-filter: every id in ``_swept_ids_live`` is a module
     # this epoch's loop already scanned AND that is provably still the same
@@ -458,7 +555,7 @@ def sweep_stale_belt_references() -> int:
         except TypeError:
             continue
         for attr_name, attr_val in list(module_dict.items()):
-            replacement = _member_map.get(id(attr_val))
+            replacement = _wrapped_callable_replacement(attr_val, _member_map)
             if replacement is None:
                 continue
             try:

@@ -1,0 +1,324 @@
+"""The layer map: one declared stratum per package/module.
+
+The ten-layer model. A module's layer resolves
+module attribute first (``__tl_layer__`` in the module), then the most
+specific row here. ``FACADE`` is a ROLE, not a layer: thin, lazy,
+logic-free modules whose deferred upward imports are the one legal upward
+door (Rule F). The assurance plane (tests/) never appears here.
+
+This table is CONTRACT DATA (org rule 11): the layer lint
+(tests/test_arch_spine_layer_lint.py) derives the eager-upward inversion
+baseline from it, and a placement-table coverage sweep audits it. Spellings are DOCUMENTED-UNSTABLE pending
+the naming sprint; the SEPARATIONS are the decision.
+"""
+
+from __future__ import annotations
+
+__tl_layer__ = "L0"
+
+#: Layer rank used by the lint: lower may never eagerly import higher.
+LAYER_ORDER: dict[str, int] = {
+    "L0": 0,
+    "L1": 1,
+    "L2": 2,
+    "L3": 3,
+    "L4": 4,
+    "L5": 5,
+    "L6": 6,
+    "L7": 7,
+    "L8": 8,
+    "L9": 9,
+}
+
+#: Roles outside the numeric stack: FACADE modules take Rule F (deferred
+#: upward imports legal); their EAGER imports are judged at the layer of
+#: their most specific numbered ancestor row, or exempt when none applies.
+LAYER_ROLES = frozenset({"FACADE"})
+
+#: Most-specific-prefix layer map, keyed by dotted module path relative to
+#: ``torchlens`` ('' = the package root). Module-granular rows encode the
+#: per-module censuses the memo ruled (the _io four-way split, the fastlog
+#: dispositions); package rows carry the rest.
+PACKAGE_LAYERS: dict[str, str] = {
+    # -- FACADE-role modules (Rule F) ------------------------------------
+    "": "FACADE",
+    "types": "FACADE",
+    "io": "FACADE",
+    "_user_funcs": "FACADE",
+    "experimental": "FACADE",
+    # quickstart is a FACADE-role package: its verbs sit over the
+    # capture engine, the inference search, and the renderer, with upward
+    # imports deferred per Rule F; its interior modules declare their own
+    # __tl_layer__ (plan/grammar L2, resolver/gate L3).
+    "_quickstart": "FACADE",
+    # Facade-role modules by function: the public-surface walker and the
+    # trace-entry guard split out of _user_funcs both reach the whole package.
+    "_surface": "FACADE",
+    "_user_funcs_guards": "FACADE",
+    # -- L0 BASIS ---------------------------------------------------------
+    "_errors": "L0",
+    "_events": "L0",
+    "errors": "L0",
+    "_vocab": "L0",
+    "_literals": "L0",
+    "_constants": "L0",
+    "_quantities": "L0",
+    # Pure numeric spellings depend only on the standard library, including
+    # the quantity display vocabulary used by the other strata.
+    "_utils._display_numbers": "L0",
+    "_architecture": "L0",
+    "_deprecations": "L0",
+    # The options validators, the receipt and the process state flags are basis
+    # vocabulary: every layer reads them and they read nothing above the basis.
+    "_options_validation": "L0",
+    "_option_receipt": "L1",  # reads _utils display and memory helpers at import
+    "_state": "L0",
+    "_deploy_env": "L0",
+    "_episode_spec": "L1",  # reads _utils display and memory helpers at import
+    "_memory_probes": "L1",  # reads _utils display and memory helpers at import
+    "_mutate_warnings": "L0",
+    "_plain_attr_fidelity": "L0",
+    "_record_type": "L0",
+    "_storage_bindings": "L0",
+    # -- L1 PRODUCT -------------------------------------------------------
+    "_data_classes": "L1",
+    "_trace_core": "L1",
+    "schemas": "L1",
+    "appliances": "L1",
+    "_registry": "L1",
+    "fingerprint": "L1",
+    "_io": "L1",
+    "_io.format_errors": "L0",
+    "_io.bundle": "L3",
+    "_io._save_gates": "L3",
+    "_io.scrub": "L3",
+    "_io.tlspec": "L3",
+    "_io.rehydrate": "L3",
+    # The source-bundle resolver split out of rehydrate (size cap) sits at its tier.
+    "_io._rehydrate_source_bundle": "L3",
+    "_io.lazy": "L3",
+    "_io.runnable": "L3",
+    "_io.runnable_load": "L3",
+    # The runnable binder sits with bundle and the state binders it is installed by.
+    "_io._format3_runnable_bind": "L3",
+    "_io.accessor_rebuild": "L3",
+    "_io.forgery_validation": "L3",
+    # the AUD-CODE 3.0 load validators split out of forgery_validation
+    # (R43 size cap) sit at ITS tier; the module imports its shared refusal/
+    # census helpers back from it eagerly.
+    "_io._load_validators": "L3",
+    # The tlspec identity and backend-field builders split out of tlspec
+    # (file cap) sit at its tier.
+    "_io._tlspec_identity": "L3",
+    # -- L2 ENGINE ----------------------------------------------------------
+    "_capture": "L2",
+    # The PREPARE stage resolves intervention, autoroute and selective-save
+    # requests, so it sits at their tier inside the L2 engine package.
+    "_capture.prepare": "L4",
+    "_capture.run_entry": "L4",
+    # The capture-door intervention glue builds on prepare.resolve, so it
+    # sits at the PREPARE tier with its only two importers.
+    "_capture_intervention": "L4",
+    "backends": "L2",
+    "_ir": "L2",
+    "recording": "L2",
+    "recording._types": "L1",
+    "recording._recover": "L3",
+    "recording._cleanup": "L3",
+    "observers": "L2",
+    "_kernel_telemetry": "L2",
+    "_options_removed": "L0",
+    "_save_budget": "L2",
+    "_distributed": "L2",
+    "_model_wrappers": "L2",
+    "_robustness": "L2",
+    "_input_coerce": "L2",
+    "_input_walk": "L2",
+    "_chunking": "L4",
+    "_chunked_capture_helpers": "L4",
+    "_capture_state_helpers": "L2",
+    "_capture_fingerprint": "L2",
+    "_call_fingerprint": "L2",
+    "_capture_attr_observer": "L2",
+    "_capture_honesty": "L2",
+    "_robustness_offenses": "L2",
+    "_trace_selector_helpers": "L2",
+    # Capture-side snapshot helpers consumed by the engine; validation reads them.
+    "_validation_argument_references": "L2",
+    "_validation_state_snapshot": "L2",
+    "_validation_status": "L0",
+    "_utils": "L1",
+    # options reads _utils.facade (removed-member refusals) and the
+    # _utils.tensor_utils save-mode vocabulary at import, so it sits beside
+    # _utils; _extract_refusals reads options.
+    "options": "L1",
+    "_extract_refusals": "L1",
+    # -- L3 SETTLE ----------------------------------------------------------
+    "_postprocess": "L3",
+    "_data_substrate": "L3",
+    "validation": "L3",
+    "_merged": "L3",
+    "_partial": "L3",
+    "distributed": "L3",
+    "compat": "L3",
+    "_captured_run": "L3",
+    "_fast_run": "L3",
+    "_fast_live_plans": "L3",
+    "_fast_live_steer": "L3",
+    "_fast_live_until": "L3",
+    "_fast_sparse_state": "L3",
+    "_runnable_until": "L3",
+    "differential": "L3",
+    "_runnable": "L3",
+    "_transport": "L3",
+    "_source_links": "L3",
+    "_training_validation": "L3",
+    # The body of the public verbs (FACADE by role; the module declares it).
+    "_user_public_impls": "FACADE",
+    "_user_public_graph_impls": "FACADE",
+    # -- L4 ALGEBRA -----------------------------------------------------------
+    "intervention": "L4",
+    "bundle": "L4",
+    "_selection": "L4",
+    "_trace_slice": "L4",
+    "facets": "L4",
+    "_autoroute": "L4",
+    "transforms": "L4",
+    # -- L5 READS ------------------------------------------------------------
+    "stats": "L5",
+    "_observability": "L5",
+    "receptive_field": "L5",
+    "attribution": "L5",
+    "repgeom": "L5",
+    "repgeom._trace_views": "L6",
+    "repgeom._node_visuals": "L6",
+    "dataset_extraction": "L5",
+    "_extraction": "L5",
+    "debug": "L5",
+    # Pixel plotting helpers shared by the reads packages (no internal imports).
+    "_plots": "L5",
+    "_extraction_provenance": "L5",
+    "_observe": "L5",
+    "_snoop": "L5",
+    "features": "L5",
+    "inventory": "L6",
+    "preprocessing": "L5",
+    # -- L6 APPLIANCES ---------------------------------------------------------
+    "_semantic": "L6",
+    "neuro": "L6",
+    "experiment": "L6",
+    "mechinterp": "L6",
+    "transformer": "L6",
+    # -- L7 PRESENT --------------------------------------------------------------
+    "_visualization": "L7",
+    "viz": "L7",
+    "report": "L7",
+    "export": "L7",
+    "export._trackers": "L8",
+    "export._graphs": "L8",
+    # -- L8 BRIDGES ----------------------------------------------------------------
+    "bridge": "L8",
+    "callbacks": "L8",
+    "trackers": "L8",
+    "_ecosystem": "L8",
+    "agent": "FACADE",  # the agent inspection surface; a facade over every layer
+    # -- L9 RECIPES -------------------------------------------------------------------
+    "examples": "L9",
+    "conformance": "L9",
+}
+
+#: Packages licensed to touch torch privates: direct ``torch._*`` use or
+#: consumption of the sanctioned torch-compat chokepoint
+#: (``torchlens/_utils/_torch_compat.py``). The license is a PER-MODULE
+#: contract orthogonal to layer; this count is printed by the
+#: lint and may only SHRINK -- a new package touching torch privates
+#: without a row here is RED. Target: burn down toward engine- and
+#: persistence-adjacent packages only (measured census 2026-08-27).
+TORCH_PRIVATE_LICENSED_PACKAGES: frozenset[str] = frozenset(
+    {
+        # Split capture state and generated replay consume the same compat
+        # accessors as eager capture; no private capability probe is duplicated.
+        "split",
+        # one-backward reads: attribution/onebackward gates on the
+        # HAS_GRADIENT_EDGE / HAS_NODE_PREHOOK capability flags, which live
+        # at the ONE sanctioned probe chokepoint (_utils/_torch_compat); the
+        # package holds no direct torch._ touches of its own.
+        "attribution",
+        # L8 floor fix: receptive_field's multi-axis any() reduction routes
+        # through tensor_any_over_dims() at the ONE sanctioned probe
+        # chokepoint (_utils/_torch_compat); the package holds no direct
+        # torch._ touches of its own.
+        "receptive_field",
+        # Kineto join + memory-parity oracle: observability consumes the
+        # HAS_KINETO_INMEMORY_EVENTS / HAS_KINETO_EVENT_SCOPE /
+        # HAS_MEMORY_PROFILE capability flags and their accessors, all living
+        # at the ONE sanctioned probe chokepoint (_utils/_torch_compat); the
+        # package holds no direct torch._ touches of its own.
+        "_observability",
+        "backends",
+        "_capture",
+        "compat",
+        "_constants",
+        "_data_classes",
+        "debug",
+        "_distributed",
+        "errors",
+        "recording",
+        "intervention",
+        "_ir",
+        "_io",
+        "_merged",
+        "_postprocess",
+        "_runnable",
+        "_utils",
+        "validation",
+        "_capture_state_helpers",
+        "_robustness",
+        "_training_validation",
+        "_fast_run",
+        # integ-F relocation: the trace-entry refusal guards moved out of
+        # _user_funcs (file cap) keep their one is_dynamo_compiled_callable()
+        # read at the ONE sanctioned probe chokepoint (_utils/_torch_compat);
+        # the module holds no direct torch._ touches of its own.
+        "_user_funcs_guards",
+        # floor2 fix (2026-10-01): the runnable-save CPU float8 path
+        # consumes get_cpu_float8_deterministic_fill_support() at the ONE
+        # sanctioned probe chokepoint (_utils/_torch_compat); the module
+        # holds no direct torch._ touches of its own.
+        "_user_public_impls",
+        # L8 fix (2026-10-01): the FLOPs report's model-door capture holds
+        # the fused MHA/TransformerEncoderLayer fast path off through
+        # force_mha_slow_path() / HAS_MHA_FASTPATH_SWITCH at the ONE
+        # sanctioned probe chokepoint (_utils/_torch_compat); the package
+        # holds no direct torch._ touches of its own.
+        "report",
+    }
+)
+
+
+def layer_for_module(dotted: str) -> str | None:
+    """Resolve one torchlens-relative module path to its declared layer.
+
+    Module ``__tl_layer__`` attributes take precedence at runtime; this
+    function is the static-table half used by AST lints (which also read
+    the attribute from source).
+
+    Parameters
+    ----------
+    dotted:
+        Module path relative to ``torchlens`` (e.g. ``"recording._recover"``).
+
+    Returns
+    -------
+    str | None
+        The most specific declared layer or role, or ``None`` when no row
+        covers the module (a lint finding, not a default).
+    """
+
+    probe = dotted
+    while True:
+        if probe in PACKAGE_LAYERS:
+            return PACKAGE_LAYERS[probe]
+        if "." not in probe:
+            return PACKAGE_LAYERS.get("")
+        probe = probe.rsplit(".", 1)[0]

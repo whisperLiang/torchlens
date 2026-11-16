@@ -1,14 +1,14 @@
-# Merged Trace Contract (`merged-directory` artifacts, rung C1)
+# Merged Trace Contract (`merged-directory` artifacts)
 
 This document is the **frozen specification** for cross-rank merged traces
 produced by `tl.merge_ranks()` and persisted as `merged-directory` artifacts.
-It plays the same role for `torchlens.merged` that
+It plays the same role for `torchlens._merged` that
 `runnable_tlspec_contract.md` plays for runnable artifacts: the enum and
 finding-kind tables below are release-gated against the code by
 ordered-list-equality tests (`tests/test_merged_engine.py::TestContractLockstep`).
 Editing either side without the other turns the gate red.
 
-## 1. Scope (rung C1)
+## 1. Scope
 
 `tl.merge_ranks([trace_or_path, ...])` merges N rank-local captures of one
 SPMD program at their **explicit in-forward `torch.distributed` python
@@ -17,27 +17,27 @@ collectives** on symmetric-issue (`coll`) channels.
 Refused typed in this release, with `fields["code"] = "merge_scope_unsupported"`:
 
 - point-to-point boundaries (`send`/`recv`, any `p2p/...` channel) — pipeline
-  pairing is rung C3;
+  pairing is out of scope;
 - boundaries carrying DTensor dual geometry — sharded-topology capture stays
-  refused until rung C2's capture-fidelity census is green (relaxation follows
+  refused until the capture-fidelity census is green (relaxation follows
   fidelity, never the other way around);
-- functional-collective boundaries (the documented-unstable
-  `functional_collective_boundary_v0` payload recorded by the C2 recording
-  slice) — C1 joins the frozen `collective_boundary_v1` payload only; funcol
-  boundary joining is rung-C2 merged-side scope behind its own authorizing
+- functional-collective boundaries (the experimental
+  `functional_collective_boundary_v0` payload recorded by the recording
+  slice) — merging joins the frozen `collective_boundary_v1` payload only; funcol
+  boundary joining is later merged-side scope behind its own authorizing
   ruling. Refusing the member core typed is strictly fail-closed: the
   pre-recording alternative was a merge with the funcol traffic invisibly
   absent.
 
 Merged replay does not exist (`merge_run_unsupported`); merged runnable
 export, merged `validate()`, receptive/projective fields, and intervention
-chaining are refused typed. Backward/gradient merging is fork F1 (deferred).
+chaining are refused typed. Backward/gradient merging is deferred.
 
 Member cores must carry a mergeable settled capture outcome: a member whose
 settled outcome is FAILED, ABORTED_NONFINITE, or UNKNOWN refuses typed at
 input resolution (`merge_input_invalid`, reason
 `member_outcome_not_mergeable`) for live traces and path-loaded bundles
-alike. HALTED (and legacy UNATTESTED) members merge and are DISCLOSED —
+alike. STOPPED (and legacy UNATTESTED) members merge and are DISCLOSED —
 `MergedTrace.member_outcomes` maps each rank to its settled status string and
 `summary()` carries the non-complete disclosure ahead of the witness-coverage
 line, so the presenter never claims `attested_complete` silently over a
@@ -69,11 +69,11 @@ merge_scope_unsupported
 group_lifetime_evidence_conflict
 merge_conflict
 merged_schema_invalid
-merged_descriptor_tamper
+merged_descriptor_invalid
 merge_run_unsupported
 merged_selector_unsupported
 merged_surface_unsupported
-merged_member_released
+merged_member_unavailable
 ```
 
 ### 3.2 Merge finding kinds
@@ -106,7 +106,7 @@ conflicted
 
 `merged.stored_alignment` is frozen at merge time in the descriptor;
 `merged.alignment` is the EFFECTIVE value — stored, lowered to `partial` by a
-non-empty `load_degradations` ledger. An unparseable rank core can never
+non-empty `degradations` ledger. An unparseable rank core can never
 support an effective `aligned`. Every presentation of `aligned` carries the
 witness-coverage line.
 
@@ -148,12 +148,12 @@ interchangeable refuse.
 - Join identity: `(membership_digest, lifetime_ordinal, channel, seq_delta)`.
   `membership_digest` = SHA-256 over sorted global ranks;
   `lifetime_ordinal` = the TorchLens-owned ever-created group generation
-  (see the C0 lifecycle ledger). `ordinal_source` is diagnostic, never keyed.
+  (see the lifecycle ledger). `ordinal_source` is diagnostic, never keyed.
 - **Seq counters are absolute from arm time and rank-local.** Ranks align as
   seq DELTAS from each rank's first recorded key per `(group_uid, channel)`;
   absolute bases are never compared (arming histories legitimately differ).
 - **PRE-JOIN membership-lineage audit** (`torchlens.distributed.
-  audit_membership_lineages`) runs BEFORE any joining or gap derivation, at
+  verify_membership_lineages`) runs BEFORE any joining or gap derivation, at
   merge time and again at load rederivation. A conflicted membership refuses
   STRUCTURALLY: no uid of it joins and no unmatched key of it becomes a
   presence gap. The named remedy is `torchlens.distributed.arm()` at process
@@ -168,6 +168,10 @@ interchangeable refuse.
   selective nulling of a value refuses at parse (`merged_schema_invalid`)
   instead of silently deleting a cross-check finding; a uniformly-absent
   core remains the honest capability-absent shape and stays finding-free.
+  The journal's `boundaries` container itself must be a list (or tuple) of
+  boundary records: an int/bool/mapping/string container refuses
+  `merged_schema_invalid` at merge entry, live and loaded cores alike, with
+  the container named.
 - Presence expectations and gaps derive from the group memberships recorded
   INSIDE the surviving rank cores' boundary records. A declared
   `expected_ranks` input can only WIDEN expectations, never narrow them.
@@ -187,11 +191,11 @@ Semantic authority is this versioned public-contract table, not CI probes
 | `scatter` | member *i*'s destination equals root's contribution list slice *i* | definitional data movement |
 | `all_to_all` | rank *j*'s destination *i* equals rank *i*'s contribution *j* | definitional data movement |
 | `reduce`, `reduce_scatter`, `reduce_scatter_tensor` | none | no cross-rank identity property exists |
-| `all_to_all_single` | none in C1 | whole-tensor digests cannot witness intra-tensor slice reciprocity |
+| `all_to_all_single` | none | whole-tensor digests cannot witness intra-tensor slice reciprocity |
 | `barrier`, object collectives | none | no digestable tensor payload |
 
 `distributed_witness="payload"` remains a typed construction refusal in this
-release: the C1 artifact story ships digest witnesses only; payload witnesses
+release: the artifact story ships digest witnesses only; payload witnesses
 are tensor-valued and require their own blob family (deferred; a future rung
 must define it as a schema change here).
 
@@ -229,13 +233,13 @@ At every load:
 
 1. **Integrity.** Descriptor bytes vs the root-manifest SHA-256; each member's
    canonical tree hash vs BOTH recorded copies. Mismatch = typed
-   `merged_descriptor_tamper` refusal. Tamper is never a gap.
+   `merged_descriptor_invalid` refusal. Tamper is never a gap.
 2. **Independent rederivation.** The same `derive_merge` function reruns over
    the parsable rank cores' boundary records alone; when every member parses,
    canonical-JSON EXACT equality with the descriptor cache is required — any
    inequality is tamper.
 3. **Environment degradations.** A member that no longer parses on this
-   runtime enters `load_degradations`; the rederivation covers the parsable
+   runtime enters `degradations`; the rederivation covers the parsable
    subset, the STORED verdicts stay visible as stored, and the effective
    alignment is capped at `partial`. Exact-equality is not evaluable in this
    case and is not claimed.
@@ -263,7 +267,7 @@ members is byte-identical across runs; the determinism test pins this.
   enums exactly (ordered) — `TestContractLockstep`.
 - The `_distributed.py` refusal suggestion strings must reference
   `tl.merge_ranks` truthfully (dense explicit-collective captures merge;
-  DTensor/TP/PP capture stays refused pending C2/C3).
+  DTensor/TP/PP capture stays refused).
 
 ## 8. Lifetime and release
 
@@ -272,18 +276,18 @@ is reachable. Dropping the presenter releases those handles; like ordinary
 `Trace` objects, member traces can contain cycles and may require Python's cyclic
 collector before memory is reclaimed.
 
-`MergedTrace.release()` is the explicit counterpart of `Trace.cleanup()` for the
+`MergedTrace.cleanup()` is the explicit counterpart of `Trace.cleanup()` for the
 presenter: it drops every rank-core handle so member traces (and their retained
 activations) can be reclaimed without waiting for the presenter itself to become
 unreachable. After `release()`:
 
 - The derivation record stays readable: `alignment` / `value_status` (stored and
   effective), `rank_ids`, `expected_ranks`, `joins`, `gaps`, `findings`,
-  `report`, `load_degradations`, `summary()`, `to_pandas()`, and
+  `report`, `degradations`, `summary()`, `to_pandas()`, and
   `happens_before()` all keep working.
 - Every surface that must resolve a member trace — `ranks`, `__getitem__` (all
   spellings), `super_op()`, `join_ops()`, and `save()` — refuses typed with
-  `fields["code"] = "merged_member_released"`. A released presenter never
+  `fields["code"] = "merged_member_unavailable"`. A released presenter never
   presents as a zero-member merge and never leaks a bare `KeyError`.
 - `release()` is idempotent.
 

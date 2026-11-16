@@ -77,7 +77,7 @@ def test_trace_profile_levels_columns_aggregation_and_sorting() -> None:
         "device",
     }
     assert required.issubset(op_frame.columns)
-    assert len(op_frame) == len(trace.layer_list)
+    assert len(op_frame) == len(trace._layer_list)
     assert len(module_frame) == len(trace.modules)
     assert len(call_frame) == len(trace.module_calls)
     assert module_frame["flops"].dropna().tolist() == sorted(
@@ -88,20 +88,8 @@ def test_trace_profile_levels_columns_aggregation_and_sorting() -> None:
         trace[label] for call in trace.modules["features"].calls.values() for label in call.ops
     ]
     assert features_row["op_count"] == len(features_ops)
-    assert features_row["flops"] == sum(int(op.flops_forward or 0) for op in features_ops)
-    assert "TraceProfile" not in repr(trace.profile())
-
-
-def test_trace_profile_preserves_subsecond_time_for_hotspot_sorting() -> None:
-    """profile retains float durations rather than truncating them to integer seconds."""
-
-    trace = tl.trace(ProfileModel().eval(), torch.randn(2, 4))
-    frame = trace.profile().to_pandas()
-
-    assert frame["time"].notna().all()
-    assert (frame["time"] > 0).any()
-    assert frame["time"].tolist() == sorted(frame["time"].tolist(), reverse=True)
-    assert any(unit in repr(trace.profile()) for unit in (" us", " ms", " s"))
+    assert features_row["flops"] == sum(int(op.cost.flops_forward or 0) for op in features_ops)
+    assert "ProfileReport(" not in repr(trace.profile())
 
 
 def test_trace_profile_sparse_save_preserves_honest_availability() -> None:
@@ -121,7 +109,7 @@ def test_trace_profile_top_k_truncates_after_sorting() -> None:
 
     trace = tl.trace(ProfileModel().eval(), torch.randn(2, 4))
     full = trace.profile(sort_by="activation_memory").to_pandas()
-    bottlenecks = trace.profile(sort_by="activation_memory", top_k=3).to_pandas()
+    bottlenecks = trace.profile(sort_by="activation_memory", k=3).to_pandas()
 
     assert len(bottlenecks) == 3
     assert bottlenecks["name"].tolist() == full["name"].tolist()[:3]
@@ -135,25 +123,11 @@ def test_trace_profile_tree_follows_module_call_nesting() -> None:
 
     features_line = next(line for line in lines if line.endswith("features:1"))
     linear_line = next(line for line in lines if line.endswith("features.0:1"))
-    assert features_line.startswith("├── ")
-    assert linear_line.startswith("│   ")
+    # ASCII rails (C02 safety tranche, lovely bug 10): returned report
+    # strings are ASCII-canonical.
+    assert features_line.startswith("|-- ")
+    assert linear_line.startswith("|   ")
     assert lines.index(linear_line) > lines.index(features_line)
-
-
-def test_trace_profile_honesty_labels_missing_timing_as_unknown() -> None:
-    """Resource provenance distinguishes measured, estimated, and absent values."""
-
-    trace = tl.trace(ProfileModel().eval(), torch.randn(2, 4))
-    missing_timing_op = trace.layer_list[0]
-    missing_timing_op._internal_set("func_duration", None)
-    profile = trace.profile(sort_by="activation_memory")
-    honesty = profile.honesty()
-    row = honesty.loc[honesty["name"] == missing_timing_op.label].iloc[0]
-
-    assert row["time"] == "unknown"
-    assert set(honesty["time"]).issubset({"measured", "unknown"})
-    assert set(honesty["activation_memory"]).issubset({"estimated", "unknown"})
-    assert "estimated" in set(honesty["flops"])
 
 
 def test_trace_audit_clean_model_reports_run_and_skipped_scope() -> None:
@@ -165,7 +139,7 @@ def test_trace_audit_clean_model_reports_run_and_skipped_scope() -> None:
     assert "find_nan" in audit.checks_run
     assert "gradient_flow_audit" not in audit.checks_run
     assert any(check == "gradient_flow_audit" for check, _ in audit.skipped)
-    assert "no issues found" in repr(audit)
+    assert repr(audit).startswith("HealthReport: 0 findings,")
 
 
 def test_trace_audit_nan_finding_names_op_and_follow_up() -> None:

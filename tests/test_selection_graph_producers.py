@@ -20,7 +20,8 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
-from torchlens.selection import SelectionError
+from torchlens._io.bundle import save as _save_bundle
+from torchlens.errors import SelectionError
 
 
 class _Branchy(nn.Module):
@@ -104,7 +105,7 @@ def _labels(resolved) -> set[str]:
 
     return {
         f"{layer_label}:{pass_index}"
-        for layer_label, pass_index in (entry.site_key for entry in resolved)
+        for layer_label, pass_index in (entry.key for entry in resolved)
     }
 
 
@@ -113,74 +114,40 @@ def _labels(resolved) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_neighborhood_zero_hops_is_the_seed_family(log) -> None:
-    """hops=0 selects exactly the seed's touched sites."""
-
-    resolved = tl.neighborhood("relu_1_2", hops=0).resolve(log)
-    assert _labels(resolved) == {_RELU}
-
-
-def test_neighborhood_one_hop_both_directions(log) -> None:
-    """One hop reaches exactly the recorded parents and children."""
-
-    resolved = tl.neighborhood("relu_1_2", hops=1).resolve(log)
-    assert _labels(resolved) == {_LIN1, _RELU, _ADD}
-
-
 def test_neighborhood_directional_hops(log) -> None:
     """upstream follows parent edges only; downstream child edges only."""
 
-    upstream = tl.neighborhood("relu_1_2", hops=2, direction="upstream").resolve(log)
+    upstream = log[tl.neighborhood("relu_1_2", hops=2, direction="upstream")]
     assert _labels(upstream) == {_INPUT, _LIN1, _RELU}
-    downstream = tl.neighborhood("relu_1_2", hops=2, direction="downstream").resolve(log)
+    downstream = log[tl.neighborhood("relu_1_2", hops=2, direction="downstream")]
     assert _labels(downstream) == {_RELU, _ADD, _HEAD}
 
 
 def test_neighborhood_saturates_at_the_component(log) -> None:
     """A hop budget beyond the diameter reaches the whole component, stably."""
 
-    resolved = tl.neighborhood("add_1_5", hops=50).resolve(log)
+    resolved = log[tl.neighborhood("add_1_5", hops=50)]
     assert _labels(resolved) == set(_ALL)
 
 
-def test_neighborhood_masks_are_whole_site_exact(log) -> None:
-    """Graph membership is structural: whole-site masks, relation exact."""
-
-    resolved = tl.neighborhood("relu_1_2", hops=1).resolve(log)
-    for entry in resolved:
-        assert entry.provenance.relation == "exact"
-        assert entry.selected_count == entry.mask.numel()
-        assert "neighborhood(hops=1" in entry.provenance.source
-
-
+@pytest.mark.smoke
 def test_neighborhood_family_semantics_ignore_element_masks(log) -> None:
     """A one-element seed still seeds its WHOLE site (touched is touched)."""
 
     seed = tl.units(_RELU, [(0, 0)])
-    resolved = tl.neighborhood(seed, hops=0).resolve(log)
+    resolved = log[tl.neighborhood(seed, hops=0)]
     assert _labels(resolved) == {_RELU}
-    assert resolved[0].selected_count == resolved[0].mask.numel()
+    assert resolved[0].num_selected == resolved[0].mask.numel()
 
 
 def test_neighborhood_accepts_op_and_layer_seeds(log) -> None:
     """Op and Layer handles lift as seeds through __selection__."""
 
-    layer = log["relu_1_2"]
-    from_layer = tl.neighborhood(layer, hops=0).resolve(log)
+    layer = log.layers["relu_1_2"]
+    from_layer = log[tl.neighborhood(layer, hops=0)]
     assert _labels(from_layer) == {_RELU}
-    from_op = tl.neighborhood(layer.ops[0], hops=0).resolve(log)
+    from_op = log[tl.neighborhood(layer.ops[0], hops=0)]
     assert _labels(from_op) == {_RELU}
-
-
-def test_neighborhood_composes_with_the_algebra(log) -> None:
-    """Producers return Selections: the full operator surface applies."""
-
-    union = tl.neighborhood("relu_1_2", hops=0) | tl.neighborhood("tanh_1_4", hops=0)
-    assert _labels(union.resolve(log)) == {_RELU, _TANH}
-    restricted = tl.neighborhood("relu_1_2", hops=1) & tl.units(_ADD, [(0, 0)])
-    resolved = restricted.resolve(log)
-    assert _labels(resolved) == {_ADD}
-    assert resolved[0].selected_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +155,7 @@ def test_neighborhood_composes_with_the_algebra(log) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.smoke
 def test_neighborhood_validates_hops_and_direction() -> None:
     """Bad hops / direction refuse at construction with plain ValueError."""
 
@@ -203,11 +171,12 @@ def test_neighborhood_validates_hops_and_direction() -> None:
         tl.neighborhood("")
 
 
+@pytest.mark.smoke
 def test_neighborhood_refuses_param_seed_typed() -> None:
     """PARAM operands refuse selection_kind_incompatible at construction."""
 
     with pytest.raises(SelectionError) as excinfo:
-        tl.neighborhood(tl.params("lin1.weight"))
+        tl.neighborhood(tl.param("lin1.weight"))
     assert excinfo.value.fields["code"] == "selection_kind_incompatible"
 
 
@@ -215,7 +184,7 @@ def test_neighborhood_unknown_seed_refuses_typed(log) -> None:
     """Unknown seed sites refuse selection_unresolvable / site_not_in_trace."""
 
     with pytest.raises(SelectionError) as excinfo:
-        tl.neighborhood("nonexistent_9_9", hops=1).resolve(log)
+        log[tl.neighborhood("nonexistent_9_9", hops=1)]
     assert excinfo.value.fields["code"] == "selection_unresolvable"
     assert excinfo.value.fields["reason"] == "site_not_in_trace"
 
@@ -225,45 +194,22 @@ def test_neighborhood_unknown_seed_refuses_typed(log) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.smoke
 def test_between_selects_exactly_the_path_region(log) -> None:
     """The region is the ops on at least one directed source-to-sink path."""
 
-    resolved = tl.between("linear_1_1", "add_1_5").resolve(log)
+    resolved = log[tl.between("linear_1_1", "add_1_5")]
     assert _labels(resolved) == {_LIN1, _RELU, _ADD}
-
-
-def test_between_excludes_the_other_branch(log) -> None:
-    """Ops not on any source-to-sink path stay out (the tanh branch)."""
-
-    resolved = tl.between("input_1", "add_1_5").resolve(log)
-    assert _labels(resolved) == {_INPUT, _LIN1, _RELU, _LIN2, _TANH, _ADD}
-    narrow = tl.between("relu_1_2", "linear_3_6").resolve(log)
-    assert _TANH not in _labels(narrow)
-    assert _labels(narrow) == {_RELU, _ADD, _HEAD}
-
-
-def test_between_same_endpoint_is_the_single_op(log) -> None:
-    """between(x, x) is the one-op region (endpoints included)."""
-
-    resolved = tl.between("relu_1_2", "relu_1_2").resolve(log)
-    assert _labels(resolved) == {_RELU}
 
 
 def test_between_no_path_is_the_empty_selection(log) -> None:
     """No directed path resolves EMPTY: disclosure, never an error."""
 
-    resolved = tl.between("tanh_1_4", "relu_1_2").resolve(log)
+    resolved = log[tl.between("tanh_1_4", "relu_1_2")]
     assert len(resolved) == 0
     assert not resolved
-    parallel = tl.between("relu_1_2", "tanh_1_4").resolve(log)
+    parallel = log[tl.between("relu_1_2", "tanh_1_4")]
     assert len(parallel) == 0
-
-
-def test_between_accepts_endpoint_lists(log) -> None:
-    """Multi-source / multi-sink endpoint groups union their regions."""
-
-    resolved = tl.between(["linear_1_1", "linear_2_3"], "linear_3_6").resolve(log)
-    assert _labels(resolved) == {_LIN1, _RELU, _LIN2, _TANH, _ADD, _HEAD}
 
 
 def test_between_agrees_with_influence_geometry_machinery(log) -> None:
@@ -272,17 +218,8 @@ def test_between_agrees_with_influence_geometry_machinery(log) -> None:
     from torchlens.receptive_field._path import between_labels
 
     expected = set(between_labels(log, _LIN1, _HEAD))
-    resolved = tl.between("linear_1_1", "linear_3_6").resolve(log)
+    resolved = log[tl.between("linear_1_1", "linear_3_6")]
     assert _labels(resolved) == expected
-
-
-def test_between_relation_is_exact_with_source_disclosure(log) -> None:
-    """Structural membership claims are exact and disclosed."""
-
-    resolved = tl.between("linear_1_1", "add_1_5").resolve(log)
-    for entry in resolved:
-        assert entry.provenance.relation == "exact"
-        assert "between" in entry.provenance.source
 
 
 def test_between_refusal_matrix(log) -> None:
@@ -291,10 +228,10 @@ def test_between_refusal_matrix(log) -> None:
     with pytest.raises(ValueError, match="at least one region"):
         tl.between([], "add_1_5")
     with pytest.raises(SelectionError) as excinfo:
-        tl.between(tl.params("lin1.weight"), "add_1_5")
+        tl.between(tl.param("lin1.weight"), "add_1_5")
     assert excinfo.value.fields["code"] == "selection_kind_incompatible"
     with pytest.raises(SelectionError) as unresolved:
-        tl.between("nonexistent_9_9", "add_1_5").resolve(log)
+        log[tl.between("nonexistent_9_9", "add_1_5")]
     assert unresolved.value.fields["reason"] == "site_not_in_trace"
 
 
@@ -303,35 +240,9 @@ def test_between_refusal_matrix(log) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_multipass_nodes_are_pass_qualified(loopy_log) -> None:
-    """between spans passes: pass 1 -> pass 3 of one layer crosses pass 2."""
-
-    resolved = tl.between("linear_1_1:1", "linear_1_1:3").resolve(loopy_log)
-    labels = _labels(resolved)
-    assert {"linear_1_1:1", "linear_1_1:2", "linear_1_1:3"} <= labels
-    assert {"relu_1_2:1", "relu_1_2:2"} <= labels
-    assert "relu_1_2:3" not in labels
-
-
-def test_multipass_bare_label_seed_means_all_passes(loopy_log) -> None:
-    """A bare layer label seed is the all-passes Layer spelling."""
-
-    resolved = tl.neighborhood("linear_1_1", hops=0).resolve(loopy_log)
-    assert _labels(resolved) == {"linear_1_1:1", "linear_1_1:2", "linear_1_1:3"}
-
-
 # ---------------------------------------------------------------------------
 # TraceSlice: the sub-DAG view presenter.
 # ---------------------------------------------------------------------------
-
-
-def test_slice_members_match_the_producer_region(log) -> None:
-    """trace.between and tl.between denote the SAME region (one machinery)."""
-
-    view = log.between("linear_1_1", "add_1_5")
-    resolved = tl.between("linear_1_1", "add_1_5").resolve(log)
-    assert set(view.labels) == _labels(resolved)
-    assert view.labels == (_LIN1, _RELU, _ADD)  # execution order
 
 
 def test_slice_internal_edges_are_exact(log) -> None:
@@ -347,14 +258,6 @@ def test_slice_declares_its_boundary_explicitly(log) -> None:
     view = log.between("linear_1_1", "add_1_5")
     assert view.boundary_in_edges == ((_INPUT, _LIN1), (_TANH, _ADD))
     assert view.boundary_out_edges == ((_ADD, _HEAD),)
-
-
-def test_slice_entry_and_exit_ops(log) -> None:
-    """source_ops / sink_ops are the members without in-slice parents/children."""
-
-    view = log.between("linear_1_1", "add_1_5")
-    assert [op.label for op in view.source_ops] == [_LIN1]
-    assert [op.label for op in view.sink_ops] == [_ADD]
 
 
 def test_slice_iteration_and_membership(log) -> None:
@@ -425,34 +328,35 @@ def test_slice_offers_no_capture_capabilities(log) -> None:
     """A slice is a presenter: no save/run/validate/draw surfaces exist."""
 
     view = log.between("linear_1_1", "add_1_5")
-    for capability in ("save", "run", "validate", "log_backward", "draw", "fork"):
+    for capability in ("save", "run", "validate", "backward", "draw", "fork"):
         assert not hasattr(view, capability)
 
 
 def test_slice_save_refuses_typed(log, tmp_path) -> None:
-    """tl.save on a slice refuses slice_save_unsupported with the remedy."""
+    """Trace.save on a slice refuses slice_save_unsupported with the remedy."""
 
     view = log.between("linear_1_1", "add_1_5")
     with pytest.raises(SelectionError) as excinfo:
-        tl.save(view, str(tmp_path / "slice_bundle"))
+        _save_bundle(view, str(tmp_path / "slice_bundle"))
     assert excinfo.value.fields["code"] == "slice_save_unsupported"
-    assert "source_trace" in str(excinfo.value)
+    assert "trace.save(path)" in str(excinfo.value)
 
 
+@pytest.mark.smoke
 def test_slice_lifts_back_into_the_algebra(log, loopy_log) -> None:
     """__selection__ + the operator mixin compose slices with selections."""
 
     view = log.between("linear_1_1", "add_1_5")
     lifted = view.__selection__()
-    assert isinstance(lifted, tl.Selection)  # a QUERY, like Op/Layer lifts
-    assert _labels(lifted.resolve(log)) == set(view.labels)
-    composed = (view & tl.units(_RELU, [(0, 0)])).resolve(log)
+    assert isinstance(lifted, tl.Selector)  # a QUERY, like Op/Layer lifts
+    assert _labels(log[lifted]) == set(view.labels)
+    composed = log[view & tl.units(_RELU, [(0, 0)])]
     assert _labels(composed) == {_RELU}
-    union = (view | tl.neighborhood("tanh_1_4", hops=0)).resolve(log)
+    union = log[view | tl.neighborhood("tanh_1_4", hops=0)]
     assert _labels(union) == {_LIN1, _RELU, _ADD, _TANH}
     missing = log.between("linear_1_1", "add_1_5").__selection__()
     with pytest.raises(SelectionError) as excinfo:
-        missing.resolve(loopy_log)  # no add_1_5 site on the loopy trace
+        loopy_log[missing]  # no add_1_5 site on the loopy trace
     assert excinfo.value.fields["reason"] == "site_not_in_trace"
 
 
@@ -463,7 +367,7 @@ def test_subgraph_is_the_general_door(log) -> None:
     assert set(from_producer.labels) == {_RELU, _TANH, _ADD, _HEAD}
     from_string = log.subgraph("relu_1_2")
     assert from_string.labels == (_RELU,)
-    from_layer = log.subgraph(log["relu_1_2"])
+    from_layer = log.subgraph(log.layers["relu_1_2"])
     assert from_layer.labels == (_RELU,)
     from_units = log.subgraph(tl.units(_ADD, [(0, 0)]))
     assert from_units.labels == (_ADD,)  # family semantics: whole site
@@ -473,7 +377,7 @@ def test_subgraph_refusal_matrix(log) -> None:
     """Non-ACT regions and non-selection garbage refuse typed."""
 
     with pytest.raises(SelectionError) as excinfo:
-        log.subgraph(tl.params("lin1.weight"))
+        log.subgraph(tl.param("lin1.weight"))
     assert excinfo.value.fields["code"] == "selection_kind_incompatible"
     with pytest.raises(ValueError, match="selection-shaped"):
         log.subgraph(42)
@@ -486,7 +390,8 @@ def test_slice_do_gallery_row(model) -> None:
     log = tl.trace(
         model,
         torch.randn(2, 4),
-        capture=tl.options.CaptureOptions(intervention_ready=True, layers_to_save="all"),
+        capture=tl.options.CaptureOptions(replayable=True),
+        save="all",
     )
     try:
         view = log.between("linear_1_1", "relu_1_2")

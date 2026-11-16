@@ -8,8 +8,6 @@ from dag_helpers import smallest_transfer_partitions
 
 from torchlens.split import prepare_graph
 
-pytestmark = pytest.mark.smoke
-
 
 class _ChannelsFirstLayerNorm(torch.nn.LayerNorm):
     """Normalize NCHW channels through ConvNeXt's NHWC permutation pattern."""

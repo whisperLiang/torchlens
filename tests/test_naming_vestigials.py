@@ -25,13 +25,9 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-import pytest
-
-pytestmark = pytest.mark.smoke
-
 _TESTS_DIR = Path(__file__).resolve().parent
 
-#: Matches the sprint/round token vocabulary measured by the r7 b10 audit.
+#: Matches the round-token vocabulary measured by the r7 b10 audit.
 _ROUND_TOKEN = re.compile(r"_(r\d+|round\d+|b\d+|p\d+|phase\d+|cert\d+|fw\d+)(?=_|$)")
 
 #: No-growth ceiling, measured 2026-08-16 at the fixwave-7 tip with this
@@ -60,7 +56,7 @@ _KNOWN_STEM_COLLISIONS = frozenset(
 
 
 def _iter_test_files() -> list[Path]:
-    """Return every test module under tests/ (menagerie surface included)."""
+    """Return every test module under tests/."""
 
     return sorted(_TESTS_DIR.rglob("test_*.py"))
 

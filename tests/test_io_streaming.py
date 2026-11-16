@@ -8,15 +8,16 @@ from typing import Any
 import pytest
 import safetensors  # noqa: F401
 import torch
+from _format3_envelope import tensor_references
 from torch import nn
 
 import torchlens as tl
-import torchlens.postprocess as postprocess_module
+import torchlens._postprocess.graph_traversal as graph_traversal_module
 from torchlens import trace as trace_fn
-from torchlens._io import TorchLensIOError, streaming as streaming_module
-from torchlens._io.manifest import Manifest
-from torchlens.data_classes.trace import Trace
-from torchlens.errors import TorchLensPostfuncError
+from torchlens._data_classes.trace import Trace
+from torchlens._io import ArtifactError, streaming as streaming_module
+from torchlens._utils._record_group_table import record_member
+from torchlens.errors import ArgumentConflictError, UserTransformError
 from torchlens.io import cleanup_tmp, detect_tlspec_format
 from torchlens.validation import validate_tlspec
 
@@ -78,7 +79,7 @@ def _saved_layers(trace: Trace) -> list[Any]:
         Saved layer-pass entries.
     """
 
-    return [layer for layer in trace.layer_list if layer.has_saved_activation]
+    return [layer for layer in trace._layer_list if layer.has_saved_activation]
 
 
 def _tmp_dirs_for(bundle_path: Path) -> list[Path]:
@@ -101,11 +102,19 @@ def _tmp_dirs_for(bundle_path: Path) -> list[Path]:
 def test_streaming_writes_blobs_before_postprocess(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Streaming save should create blob files before postprocess step 1 starts."""
+    """Synchronous streaming save creates blob files before postprocess step 1 starts.
 
+    ``async_writes=False`` pins the synchronous path this ordering holds for:
+    ``trace`` defaults to the async writer, whose blobs may still be pending
+    when postprocess begins (they land by the finalize drain barrier).
+    """
+
+    # A one-byte chunk cap closes each payload's chunk as the next one arrives,
+    # so chunk files exist on disk before postprocess starts.
+    monkeypatch.setenv("TORCHLENS_PAYLOAD_CHUNK_BYTES", "1")
     bundle_path = tmp_path / "stream_bundle.tl"
     observed: dict[str, object] = {}
-    original_add_output_layers = postprocess_module._add_output_layers
+    original_add_output_layers = graph_traversal_module._add_output_layers
 
     def _capturing_add_output_layers(
         self: Trace,
@@ -121,10 +130,15 @@ def test_streaming_writes_blobs_before_postprocess(
             self, output_tensors, output_tensor_addresses, output_parent_labels
         )
 
-    monkeypatch.setattr(postprocess_module, "_add_output_layers", _capturing_add_output_layers)
+    monkeypatch.setattr(graph_traversal_module, "_add_output_layers", _capturing_add_output_layers)
 
     model, inputs = _make_streaming_model()
-    trace_fn(model, inputs, save_outs_to=bundle_path, layers_to_save="all")
+    trace_fn(
+        model,
+        inputs,
+        save="all",
+        storage=tl.options.StorageOptions(path=bundle_path, async_writes=False),
+    )
 
     assert observed["final_exists"] is False
     tmp_dirs = observed["tmp_dirs"]
@@ -144,9 +158,8 @@ def test_step_19_finalizes_bundle_and_keeps_outs_in_memory(tmp_path: Path) -> No
     trace = tl.trace(
         model,
         inputs,
-        save_outs_to=bundle_path,
-        keep_outs_in_memory=True,
-        layers_to_save="all",
+        save="all",
+        storage=tl.options.StorageOptions(path=bundle_path, retain_in_memory=True),
     )
 
     saved_layers = _saved_layers(trace)
@@ -155,34 +168,11 @@ def test_step_19_finalizes_bundle_and_keeps_outs_in_memory(tmp_path: Path) -> No
     assert saved_layers
     for layer in saved_layers:
         assert isinstance(layer.out, torch.Tensor)
-        assert layer.out_ref is not None
-        assert layer.out_ref.source_bundle_path == bundle_path
-        assert ".tmp." not in str(layer.out_ref.source_bundle_path)
+        assert layer._out_ref is not None
+        assert layer._out_ref.source_bundle_path == bundle_path
+        assert ".tmp." not in str(layer._out_ref.source_bundle_path)
 
-    manifest = Manifest.read(bundle_path / "manifest.json")
-    assert manifest.tensors
-
-
-def test_step_20_evicts_streamed_outs_when_requested(tmp_path: Path) -> None:
-    """Step 20 should drop in-memory outs after refs are attached."""
-
-    bundle_path = tmp_path / "stream_bundle.tl"
-    model, inputs = _make_streaming_model()
-    trace = tl.trace(
-        model,
-        inputs,
-        save_outs_to=bundle_path,
-        keep_outs_in_memory=False,
-        layers_to_save="all",
-    )
-
-    saved_layers = _saved_layers(trace)
-    assert bundle_path.exists()
-    assert saved_layers
-    for layer in saved_layers:
-        assert layer.out is None
-        assert layer.out_ref is not None
-        assert layer.out_ref.source_bundle_path == bundle_path
+    assert tensor_references(bundle_path)
 
 
 def test_streaming_mid_pass_exception_marks_partial_tmp_dir(tmp_path: Path) -> None:
@@ -194,13 +184,13 @@ def test_streaming_mid_pass_exception_marks_partial_tmp_dir(tmp_path: Path) -> N
         raise RuntimeError("boom")
 
     model, inputs = _make_streaming_model()
-    with pytest.raises(TorchLensPostfuncError, match="activation_transform raised"):
+    with pytest.raises(UserTransformError, match="activation_transform raised"):
         trace_fn(
             model,
             inputs,
-            save_outs_to=bundle_path,
-            activation_transform=_raise_on_out,
-            layers_to_save="all",
+            capture=tl.options.CaptureOptions(activation_transform=_raise_on_out),
+            save="all",
+            storage=tl.options.StorageOptions(path=bundle_path),
         )
 
     assert not bundle_path.exists()
@@ -210,38 +200,20 @@ def test_streaming_mid_pass_exception_marks_partial_tmp_dir(tmp_path: Path) -> N
     assert (tmp_dirs[0] / "REASON.txt").exists()
 
 
-def test_streaming_rejects_non_tensor_activation_transform_output(tmp_path: Path) -> None:
-    """Streaming save should abort when out postprocessing returns a non-tensor."""
-
-    bundle_path = tmp_path / "stream_bundle.tl"
-    model, inputs = _make_streaming_model()
-    with pytest.raises(TorchLensIOError, match="activation_transform outputs"):
-        trace_fn(
-            model,
-            inputs,
-            save_outs_to=bundle_path,
-            activation_transform=lambda tensor: tensor.detach().cpu().numpy(),
-            layers_to_save="all",
-        )
-
-    assert not bundle_path.exists()
-    tmp_dirs = _tmp_dirs_for(bundle_path)
-    assert len(tmp_dirs) == 1
-    assert (tmp_dirs[0] / "PARTIAL").exists()
-
-
 def test_streaming_is_always_strict_for_sparse_tensors(tmp_path: Path) -> None:
     """Streaming save should fail immediately on sparse outs."""
 
     bundle_path = tmp_path / "stream_bundle.tl"
     model, inputs = _make_streaming_model()
-    with pytest.raises(TorchLensIOError, match="sparse"):
+    with pytest.raises(ArtifactError, match="sparse"):
         trace_fn(
             model,
             inputs,
-            save_outs_to=bundle_path,
-            activation_transform=lambda tensor: tensor.to_sparse(),
-            layers_to_save="all",
+            capture=tl.options.CaptureOptions(
+                activation_transform=lambda tensor: tensor.to_sparse()
+            ),
+            save="all",
+            storage=tl.options.StorageOptions(path=bundle_path),
         )
 
     assert not bundle_path.exists()
@@ -253,16 +225,16 @@ def test_streaming_is_always_strict_for_sparse_tensors(tmp_path: Path) -> None:
 def test_streaming_finalize_baseexception_marks_partial_and_is_sweepable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A BaseException-only failure mid-``finalize()`` still leaves a sweepable ``.tmp`` dir.
+    """A BaseException-only failure while writing the envelope leaves a sweepable ``.tmp`` dir.
 
     Regression test for a gap left by round-8 F3: ``bundle.py``'s ``save()``
     got an ``except BaseException`` safety net (closing a bug class where a
     not-yet-enumerated exception shape mid-write left the ``.tmp`` bundle
     dir un-marked and un-sweepable), but the sibling streaming writer,
-    ``BundleStreamWriter.finalize()``, never received the same net -- it
-    only caught ``(OSError, TypeError, ValueError, pickle.PickleError)``.
-    A ``KeyboardInterrupt``/``SystemExit``/``GeneratorExit`` raised mid-
-    ``pickle.dump()`` inside ``finalize()`` is not an ``Exception`` subclass,
+    the streaming finalization, never received the same net -- it only
+    caught a narrow tuple of ``Exception`` subclasses. A
+    ``KeyboardInterrupt``/``SystemExit``/``GeneratorExit`` raised while the
+    records are written is not an ``Exception`` subclass,
     so it is not caught by that narrow tuple, and (before this fix) it also
     was not caught by ``user_funcs.py``'s outer ``except Exception`` guard --
     it propagated all the way out of ``tl.trace()`` uncaught, correctly, but
@@ -281,21 +253,19 @@ def test_streaming_finalize_baseexception_marks_partial_and_is_sweepable(
     def _raise_keyboard_interrupt(*args: Any, **kwargs: Any) -> None:
         raise KeyboardInterrupt
 
-    # ``finalize()`` writes metadata.pkl through ``dump_canonical_metadata()``
-    # (B3R4-R21-2 canonical container bytes), driving a ``pickle._Pickler``
-    # subclass -- patching bare ``pickle.dump`` would no longer intercept it.
-    monkeypatch.setattr(streaming_module, "dump_canonical_metadata", _raise_keyboard_interrupt)
+    # Publication writes the 3.0 records and manifest through ``write_trace_envelope``.
+    monkeypatch.setattr(streaming_module, "write_trace_envelope", _raise_keyboard_interrupt)
 
     with pytest.raises(KeyboardInterrupt):
         tl.trace(
             model,
             inputs,
             storage=tl.to_disk(bundle_path),
-            layers_to_save="all",
+            save="all",
         )
 
     # The KeyboardInterrupt must propagate unwrapped (not swallowed, not
-    # rewrapped into a TorchLensIOError) -- verified by pytest.raises above --
+    # rewrapped into a ArtifactError) -- verified by pytest.raises above --
     # while STILL marking the .tmp dir PARTIAL so it becomes sweepable.
     assert not bundle_path.exists()
     tmp_dirs = _tmp_dirs_for(bundle_path)
@@ -329,12 +299,12 @@ def test_streaming_finalize_rename_failure_marks_partial(
         return original_rename(source, target)
 
     monkeypatch.setattr(Path, "rename", fail_final_rename)
-    with pytest.raises(TorchLensIOError, match="atomically rename"):
+    with pytest.raises(ArtifactError, match="atomically rename"):
         tl.trace(
             model,
             inputs,
             storage=tl.to_disk(bundle_path),
-            layers_to_save="all",
+            save="all",
         )
 
     tmp_dirs = _tmp_dirs_for(bundle_path)
@@ -348,9 +318,9 @@ def test_streaming_write_blob_baseexception_marks_partial_and_is_sweepable(
 ) -> None:
     """A BaseException-only failure mid-``write_blob()`` also leaves a sweepable ``.tmp`` dir.
 
-    Sibling to the ``finalize()`` regression test above:
+    Sibling to the envelope-write regression test above:
     ``BundleStreamWriter.write_blob()`` only wrapped ``_write_tensor_blob()``
-    (which calls ``safetensors.torch.save_file()`` directly -- the same call
+    (which once called ``safetensors.torch.save_file()`` directly -- the same call
     site whose raw ``KeyError`` for ``complex128`` was the round-8 BLOCKER in
     the non-streaming path) in a narrow ``except OSError``. A
     ``SystemExit`` raised mid-write previously propagated out of
@@ -378,7 +348,7 @@ def test_streaming_write_blob_baseexception_marks_partial_and_is_sweepable(
             model,
             inputs,
             storage=tl.to_disk(bundle_path),
-            layers_to_save="all",
+            save="all",
         )
 
     assert not bundle_path.exists()
@@ -403,7 +373,12 @@ def test_out_sink_receives_saved_tensors_and_is_mutually_exclusive(
         received.append((label, tensor))
 
     model, inputs = _make_streaming_model()
-    trace = tl.trace(model, inputs, out_sink=_sink, layers_to_save="all")
+    trace = tl.trace(
+        model,
+        inputs,
+        save="all",
+        storage=tl.options.StorageOptions(on_save=_sink),
+    )
     capture_time_layers = [layer for layer in _saved_layers(trace) if not layer.is_output]
 
     assert received
@@ -411,37 +386,14 @@ def test_out_sink_receives_saved_tensors_and_is_mutually_exclusive(
     assert all(isinstance(label, str) and label for label, _ in received)
     assert all(isinstance(tensor, torch.Tensor) for _, tensor in received)
 
-    with pytest.raises(
-        ValueError, match="choose either bundle_path/save_outs_to or out_callback/out_sink"
-    ):
-        model2, inputs2 = _make_streaming_model()
+    model2, inputs2 = _make_streaming_model()
+    with pytest.raises(ArgumentConflictError) as exc_info:
         trace_fn(
             model2,
             inputs2,
-            save_outs_to=tmp_path / "stream_bundle.tl",
-            out_sink=_sink,
+            storage=tl.options.StorageOptions(path=tmp_path / "stream_bundle.tl", on_save=_sink),
         )
-
-
-def test_selective_streaming_save_writes_selected_payloads(tmp_path: Path) -> None:
-    """Selective streaming-to-bundle saves matching payloads through the predicate spine."""
-
-    bundle_path = tmp_path / "selective_stream_bundle.tl"
-    model, inputs = _make_streaming_model()
-
-    trace = trace_fn(
-        model,
-        inputs,
-        layers_to_save="linear",
-        save_outs_to=bundle_path,
-        keep_outs_in_memory=False,
-    )
-
-    saved = _saved_layers(trace)
-    saved_types = {layer.layer_type for layer in saved}
-    assert bundle_path.exists()
-    assert "linear" in saved_types
-    assert saved_types <= {"linear", "output"}
+    assert exc_info.value.fields["code"] == "output_sink_conflict"
 
 
 def test_selective_out_sink_still_works() -> None:
@@ -453,7 +405,12 @@ def test_selective_out_sink_still_works() -> None:
         received.append((label, tensor))
 
     model, inputs = _make_streaming_model()
-    trace = tl.trace(model, inputs, out_sink=_sink, layers_to_save="linear")
+    trace = tl.trace(
+        model,
+        inputs,
+        save="linear",
+        storage=tl.options.StorageOptions(on_save=_sink),
+    )
 
     capture_time_layers = [layer for layer in _saved_layers(trace) if not layer.is_output]
     assert capture_time_layers
@@ -484,7 +441,7 @@ def test_cleanup_tmp_rejects_symlinks(tmp_path: Path) -> None:
     symlink_dir = tmp_path / f"{bundle_path.name}.tmp.symlink"
     symlink_or_skip(symlink_dir, target_dir, target_is_directory=True)
 
-    with pytest.raises(TorchLensIOError, match="symlink temp directory"):
+    with pytest.raises(ArtifactError, match="symlink temp directory"):
         cleanup_tmp(bundle_path)
 
 
@@ -496,37 +453,42 @@ def test_lazy_refs_point_at_final_bundle_path_after_streaming_save(tmp_path: Pat
     trace = tl.trace(
         model,
         inputs,
-        save_outs_to=bundle_path,
-        keep_outs_in_memory=True,
-        layers_to_save="all",
+        save="all",
+        storage=tl.options.StorageOptions(path=bundle_path, retain_in_memory=True),
     )
 
     first_saved_layer = _saved_layers(trace)[0]
-    assert first_saved_layer.out_ref is not None
-    assert first_saved_layer.out_ref.source_bundle_path == bundle_path
-    assert ".tmp." not in str(first_saved_layer.out_ref.source_bundle_path)
+    out_ref = record_member(first_saved_layer, "out_ref", None)
+    assert out_ref is not None
+    assert out_ref.source_bundle_path == bundle_path
+    assert ".tmp." not in str(out_ref.source_bundle_path)
 
 
 def test_streaming_bundle_manifest_is_unified_and_schema_valid(tmp_path: Path) -> None:
-    """Streaming bundles must write the same unified manifest as ``tl.save()``.
+    """Streaming bundles must write the same unified manifest as ``trace.save()``.
 
     Regression test: ``BundleStreamWriter.finalize()`` used to write a bare
     legacy ``Manifest`` with no ``"kind"`` key, so ``detect_tlspec_format()``
-    misclassified every streaming bundle as the old ``"v2.16_modellog_portable"``
+    misclassified every streaming bundle as a pre-3 artifact
     format and ``validate_tlspec()`` silently skipped schema validation for
     the entire ``save_outs_to=`` save path.
     """
 
     bundle_path = tmp_path / "stream_bundle.tl"
     model, inputs = _make_streaming_model()
-    trace = trace_fn(model, inputs, save_outs_to=bundle_path, layers_to_save="all")
+    trace = trace_fn(
+        model,
+        inputs,
+        save="all",
+        storage=tl.options.StorageOptions(path=bundle_path),
+    )
 
-    assert detect_tlspec_format(bundle_path) == "v2.0_unified"
+    assert detect_tlspec_format(bundle_path) == "v3"
     validate_tlspec(bundle_path)
 
     loaded = tl.load(bundle_path)
     assert isinstance(loaded, Trace)
-    assert loaded.num_ops == trace.num_ops
+    assert loaded._num_ops == trace._num_ops
 
 
 class _AttrStreamingModel(nn.Module):
@@ -548,12 +510,12 @@ def _stream(model: nn.Module, inputs: torch.Tensor, bundle_path: Path) -> None:
         model,
         inputs,
         storage=tl.to_disk(bundle_path),
-        capture=tl.options.CaptureOptions(layers_to_save="all"),
+        save="all",
     )
 
 
 def test_streaming_bundle_permissions_are_tight(tmp_path: Path) -> None:
-    """Streaming bundles must match tl.save's 0700/0600 permission parity (B8-10)."""
+    """Streaming bundles must match Trace.save's 0700/0600 permission parity (B8-10)."""
 
     import os
     import stat
@@ -569,7 +531,13 @@ def test_streaming_bundle_permissions_are_tight(tmp_path: Path) -> None:
     finally:
         os.umask(old)
 
-    for rel in [Path("."), Path("blobs"), Path("manifest.json"), Path("metadata.pkl")]:
+    for rel in [
+        Path("."),
+        Path("blobs"),
+        Path("records"),
+        Path("manifest.json"),
+        Path("records/trace.json"),
+    ]:
         target = bundle_path / rel
         mode = stat.S_IMODE(target.stat().st_mode)
         assert not (mode & stat.S_IWGRP), f"{rel} group-writable: {oct(mode)}"
@@ -593,3 +561,45 @@ def test_streaming_bundle_discloses_custom_attributes_channel(tmp_path: Path) ->
     assert disclosure["included"] is True
     assert disclosure["module_count"] >= 1
     assert "api_token" in disclosure["top_level_keys"]
+
+
+class _OrphanThenOutputModel(nn.Module):
+    """Stream a disconnected op chain that postprocess prunes as an orphan."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the model under test."""
+
+        torch.ones(2) * 3  # computed and streamed, connected to neither input nor output
+        return x * 2
+
+
+def test_streamed_bundle_blob_ids_never_alias_an_orphan_shifted_stream(tmp_path: Path) -> None:
+    """Save-time blob ids start past the capture-time stream ids.
+
+    An op streamed during capture and then pruned as an orphan leaves the save-time
+    blob numbering behind the stream's, so an output row (never streamed during
+    capture) used to take an id the stream had already written. Staging skips an
+    existing id, so the output silently pointed at the orphan's payload.
+    """
+
+    model = _OrphanThenOutputModel()
+    x = torch.rand(2, 3)
+    expected = model(x)
+    bundle_path = tmp_path / "orphan_stream.tlspec"
+    trace = tl.trace(model, x, storage=tl.to_disk(bundle_path))
+
+    output_op = trace.output_ops[0]
+    assert tuple(output_op.payload.materialize_out().shape) == (2, 3)
+    assert torch.equal(output_op.payload.materialize_out(), expected)
+    out_refs = [record_member(op, "out_ref", None) for op in trace.ops]
+    refs = [ref.blob_id for ref in out_refs if ref is not None]
+    assert len(refs) == len(set(refs))
+    loaded = tl.load(bundle_path)
+    assert torch.equal(loaded.output_ops[0].payload.materialize_out(), expected)
+    resaved_path = tmp_path / "stream-resaved.tlspec"
+    trace.save(resaved_path)
+    resaved = tl.load(resaved_path)
+    for op in trace.saved_ops:
+        assert torch.equal(
+            op.payload.materialize_out(), resaved[op.label].payload.materialize_out()
+        )

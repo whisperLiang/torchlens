@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import pytest
 import torch
+from _format3_envelope import mutate_runnable_descriptor
 from torch import nn
 
 import torchlens as tl
@@ -21,24 +22,22 @@ from torchlens._io.runnable import (
     build_sparse_run_descriptor,
     preflight_sparse_run_descriptor,
 )
-from torchlens.errors import ReattachError
-from torchlens.intervention.types import FunctionRegistryKey
-from torchlens.options import CaptureOptions
-from torchlens.runnable import (
+from torchlens._runnable import (
     ReadinessStatus,
     ResolverStatus,
     RunnableErrorCode,
     SparseRunDescriptor,
 )
-from torchlens.utils._torch_compat import (
-    _RUNNABLE_TORCH_ALIASES,
-    _torch_minor_version,
-    resolve_runnable_torch_alias,
-)
+from torchlens._utils._runnable_alias_resolver import resolve_runnable_torch_alias
+from torchlens._utils._runnable_torch_aliases import _RUNNABLE_TORCH_ALIASES
+from torchlens._utils._torch_symbols import getattr_allowlisted
+from torchlens.errors import ReattachError
+from torchlens.intervention._types import FunctionRegistryKey
+from torchlens.options import CaptureOptions
 
 
 def _restamp_runtime_fingerprints(run: dict) -> None:
-    """Re-derive every call's ``runtime_fingerprint`` from the (edited) manifest.
+    """Re-derive every call's ``runtime_fingerprint`` from the (edited) descriptor.
 
     Parse now re-derives and enforces the per-call fingerprint, so a fixture
     that edits a signature-relevant fact (e.g. the callable registry key) must
@@ -115,7 +114,7 @@ def _descriptor() -> SparseRunDescriptor:
         ResolverModel(),
         torch.ones(1, 3),
         capture=CaptureOptions(
-            intervention_ready=True,
+            replayable=True,
             capture_container_structure=True,
             cache=False,
         ),
@@ -173,7 +172,6 @@ def _codes(descriptor: SparseRunDescriptor) -> set[RunnableErrorCode]:
     return {diagnostic.code for diagnostic in report.diagnostics}
 
 
-@pytest.mark.smoke
 def test_locked_ladder_exact_alias_reverse_and_decorated_rungs() -> None:
     """Resolve representative keys through every locked ladder rung."""
 
@@ -223,53 +221,10 @@ def test_cross_version_alias_fixture_and_bounds() -> None:
         assert namespace == fixture["target_namespace"]
         assert qualname == fixture["target_qualname"]
         assert provenance
-        assert runnable_load._getattr_allowlisted(namespace, qualname) is not None
+        assert getattr_allowlisted(namespace, qualname) is not None
 
     assert resolve_runnable_torch_alias("Tensor.add", "2.0.1") is None
     assert resolve_runnable_torch_alias("Tensor.add", "2.13.0") is None
-
-
-@pytest.mark.parametrize("version", ["2.8.0", "2.13.0", "2.14.0", "2.15.0"])
-@pytest.mark.parametrize(
-    ("source", "namespace", "qualname"),
-    [
-        ("torch._C._nn.linear", "torch.nn.functional", "linear"),
-        ("torch._C._linalg.linalg_cholesky", "torch.linalg", "cholesky"),
-    ],
-)
-def test_reviewed_stock_aliases_preserve_public_identity_through_torch215(
-    version: str, source: str, namespace: str, qualname: str
-) -> None:
-    """The audited linear and linalg builtins normalize only within reviewed bounds."""
-
-    alias = resolve_runnable_torch_alias(source, version)
-    assert alias is not None
-    assert alias[:2] == (namespace, qualname)
-    assert resolve_runnable_torch_alias(source, "2.16.0") is None
-    assert resolve_runnable_torch_alias(source, "2.0.0") is None
-
-
-def test_variable_functions_aliases_cover_running_torch_minor() -> None:
-    """Lock VariableFunctionsClass aliases open across the running torch minor."""
-
-    running_minor = _torch_minor_version(torch.__version__)
-    assert running_minor is not None
-    aliases = tuple(
-        alias for alias in _RUNNABLE_TORCH_ALIASES if "_VariableFunctionsClass" in alias.source
-    )
-    assert aliases
-    assert all(
-        alias.recorded_min_version <= running_minor
-        and (alias.recorded_max_version is None or running_minor <= alias.recorded_max_version)
-        for alias in aliases
-    )
-    assert resolve_runnable_torch_alias(
-        "torch._VariableFunctionsClass.relu", torch.__version__
-    ) == (
-        "torch",
-        "relu",
-        "private_to_public:torch._VariableFunctionsClass->torch",
-    )
 
 
 def test_resolver_namespace_table_and_exact_binding_monotonicity() -> None:
@@ -312,7 +267,6 @@ def test_resolver_namespace_table_and_exact_binding_monotonicity() -> None:
     assert record.provenance.startswith("exact_getattr:")
 
 
-@pytest.mark.smoke
 def test_attachment_is_all_or_none_and_resolution_runs_under_pause_logging(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -355,7 +309,6 @@ def test_attachment_is_all_or_none_and_resolution_runs_under_pause_logging(
     assert attachments is None
 
 
-@pytest.mark.smoke
 def test_safe_load_survives_unresolved_key_and_run_fails_once_with_full_report(
     tmp_path: Path,
 ) -> None:
@@ -365,31 +318,32 @@ def test_safe_load_survives_unresolved_key_and_run_fails_once_with_full_report(
         ResolverModel(),
         torch.ones(1, 3),
         capture=CaptureOptions(
-            intervention_ready=True,
+            replayable=True,
             capture_container_structure=True,
             cache=False,
         ),
     )
     path = tmp_path / "unresolved.tlspec"
     source.save(path, level="runnable")
-    manifest_path = path / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["run"]["callable_registry"][0]["key"] = {
-        "namespace": "torch",
-        "qualname": "definitely_absent",
-        "dispatch_kind": "function",
-        "version": 1,
-        "import_path": None,
-    }
-    _restamp_runtime_fingerprints(manifest["run"])
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def edit(descriptor: dict[str, Any]) -> None:
+        descriptor["callable_registry"][0]["key"] = {
+            "namespace": "torch",
+            "qualname": "definitely_absent",
+            "dispatch_kind": "function",
+            "version": 1,
+            "import_path": None,
+        }
+        _restamp_runtime_fingerprints(descriptor)
+
+    mutate_runnable_descriptor(path, edit)
 
     loaded = tl.load(path)
-    assert len(loaded.layer_list) == len(source.layer_list)
+    assert len(loaded._layer_list) == len(source._layer_list)
     assert loaded.readiness.status is ReadinessStatus.UNAVAILABLE
     assert loaded._runnable.callables_by_call_id is None
     with pytest.raises(ReattachError) as captured:
-        loaded.run(torch.ones(1, 3))
+        loaded.run_transaction(inputs=torch.ones(1, 3))
     assert captured.value.fields["readiness"] is loaded.readiness
     assert captured.value.fields["diagnostics"] == loaded.readiness.diagnostics
 
@@ -403,22 +357,21 @@ def test_load_defers_unsupported_callable_schema_to_structured_readiness(
         ResolverModel(),
         torch.ones(1, 3),
         capture=CaptureOptions(
-            intervention_ready=True,
+            replayable=True,
             capture_container_structure=True,
             cache=False,
         ),
     )
     path = tmp_path / "future_ref.tlspec"
     source.save(path, level="runnable")
-    manifest_path = path / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["run"]["callable_ref_schema"] = 2
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    mutate_runnable_descriptor(
+        path, lambda descriptor: descriptor.__setitem__("callable_ref_schema", 2)
+    )
 
     with pytest.raises(ValueError, match="callable_ref_schema"):
         tl.validation.validate_tlspec(path)
     loaded = tl.load(path)
-    assert len(loaded.layer_list) == len(source.layer_list)
+    assert len(loaded._layer_list) == len(source._layer_list)
     assert RunnableErrorCode.UNSUPPORTED_REF_SCHEMA in {
         diagnostic.code for diagnostic in loaded.readiness.diagnostics
     }
@@ -481,6 +434,7 @@ def test_non_torch_backend_returns_structured_unsupported_readiness() -> None:
     }
 
 
+@pytest.mark.smoke
 def test_load_time_failure_taxonomy_and_execution_skeletons(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -570,5 +524,71 @@ def test_load_time_failure_taxonomy_and_execution_skeletons(
     assert RunnableErrorCode.CALLABLE_MOVED_OR_RENAMED in _codes(moved)
     monkeypatch.setattr(runnable_load, "_unwrap_decorated", lambda func: func)
     assert RunnableErrorCode.WRAPPER_SHADOWED in _codes(descriptor)
-    assert RunnableErrorCode.RUNTIME_SIGNATURE_DRIFT.value == "runtime_signature_drift"
-    assert RunnableErrorCode.SEMANTIC_DRIFT.value == "semantic_drift"
+    assert RunnableErrorCode.RUNTIME_SIGNATURE_DRIFT.value == "runtime_signature_mismatch"
+    assert RunnableErrorCode.SEMANTIC_DRIFT.value == "semantic_mismatch"
+
+
+def test_alias_beyond_its_recorded_max_resolves_only_on_a_live_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the measured upper bound an alias holds only while source *is* target in this torch."""
+
+    from torchlens._utils import _runnable_alias_resolver as resolver
+
+    linear_alias = next(a for a in _RUNNABLE_TORCH_ALIASES if a.source == "torch._C._nn.linear")
+    assert linear_alias.recorded_max_version is not None
+    beyond = f"{linear_alias.recorded_max_version[0]}.{linear_alias.recorded_max_version[1] + 1}.0"
+    inside = f"{linear_alias.recorded_max_version[0]}.{linear_alias.recorded_max_version[1]}.0"
+    expected = ("torch.nn.functional", "linear", linear_alias.provenance)
+    # torch 2.15 binds torch.nn.functional.linear straight to torch._C._nn.linear; older
+    # torches wrap it in Python. The probe reads whichever this torch does.
+    live = torch.nn.functional.linear is torch._C._nn.linear
+    beyond_expected = expected if live else None
+    assert resolve_runnable_torch_alias("torch._C._nn.linear", beyond) == beyond_expected
+    assert resolve_runnable_torch_alias("_C._nn.linear", beyond) == beyond_expected
+    assert resolve_runnable_torch_alias("torch._C._nn.linear", "2.99.0") == beyond_expected
+    assert resolve_runnable_torch_alias("torch._C._nn.linear", inside) == expected
+    # cross_entropy is a Python wrapper, not the cross_entropy_loss binding: no identity,
+    # so beyond its bound the alias is refused while inside it still resolves.
+    assert torch.nn.functional.cross_entropy is not torch._C._nn.cross_entropy_loss
+    assert resolve_runnable_torch_alias("torch._C._nn.cross_entropy_loss", "2.99.0") is None
+    assert resolve_runnable_torch_alias("torch._C._nn.cross_entropy_loss", "2.10.0") is not None
+    # The identity probe is the only thing extending the bound, in both directions.
+    monkeypatch.setattr(resolver, "_runtime_alias_identity_holds", lambda *args: False)
+    assert resolve_runnable_torch_alias("torch._C._nn.linear", beyond) is None
+    assert resolve_runnable_torch_alias("torch._C._nn.linear", inside) == expected
+    monkeypatch.setattr(resolver, "_runtime_alias_identity_holds", lambda *args: True)
+    assert resolve_runnable_torch_alias("torch._C._nn.linear", beyond) == expected
+    assert resolve_runnable_torch_alias("torch._C._nn.cross_entropy_loss", "2.99.0") == (
+        "torch.nn.functional",
+        "cross_entropy",
+        next(
+            a for a in _RUNNABLE_TORCH_ALIASES if a.source == "torch._C._nn.cross_entropy_loss"
+        ).provenance,
+    )
+
+
+def test_runtime_alias_identity_probe_reads_the_running_torch() -> None:
+    """The identity probe answers from live objects: same object True, distinct or absent False."""
+
+    from torchlens._utils._runnable_alias_resolver import _runtime_alias_identity_holds
+
+    # Two spellings of one object on every torch: the dtype aliases.
+    assert torch.float is torch.float32
+    assert _runtime_alias_identity_holds("torch.float", "torch", "float32")
+    assert _runtime_alias_identity_holds("float", "torch", "float32")
+    # linear is bound straight to the C function on torch 2.15+, wrapped before; follow this torch.
+    assert _runtime_alias_identity_holds(
+        "torch._C._nn.linear", "torch.nn.functional", "linear"
+    ) == (torch.nn.functional.linear is torch._C._nn.linear)
+    assert not _runtime_alias_identity_holds(
+        "torch._C._nn.cross_entropy_loss", "torch.nn.functional", "cross_entropy"
+    )
+    assert not _runtime_alias_identity_holds(
+        "torch._C._nn.no_such_op", "torch.nn.functional", "linear"
+    )
+    # A spelling-drift row is trivially self-identical; that is no evidence.
+    assert not _runtime_alias_identity_holds("Tensor.add", "torch.Tensor", "add")
+    assert not _runtime_alias_identity_holds(
+        "torch._C._nn.linear", "torch.nn.functional", "no_such"
+    )

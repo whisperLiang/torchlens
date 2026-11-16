@@ -17,8 +17,18 @@ from typing import Any, ClassVar, Protocol
 import numpy as np
 import torch
 
+from .._utils._numpy_bridge import tensor_to_numpy
 from . import JaxPayloadLoadHint, PayloadLoadHints, _json
 from ._artifact_strings import _resolve_portable_device
+from ._numpy_payload_codec import (
+    NumpyPayloadCodec,
+    _dtype_string_is_object_like,
+    _raise_for_unsupported_array_dtype,
+    _unsupported_array_dtype_reason,
+    numpy_to_transport_tensor,
+)
+from ._payload_codec_paddle import _resolve_paddle_place
+from .format_errors import ArtifactError
 from .manifest import _json_ready_codec_metadata_value
 from .tensor_policy import FailReason, Ok, SkipReason, TensorPolicyDecision, is_supported_for_save
 
@@ -116,7 +126,7 @@ class TorchPayloadCodec:
         Past that guard the old body called ``.numpy()`` with NO bfloat16 handling, so had
         it ever been reached it would have raised a raw
         ``TypeError: Got unsupported ScalarType BFloat16`` from deep inside torch -- for a
-        dtype ``tensor_policy._SUPPORTED_DTYPES`` declares SUPPORTED (r6 M5). Rather than
+        dtype ``tensor_policy._SUPPORTED_DTYPES`` declares SUPPORTED. Rather than
         invent untested transport semantics for a path that cannot run, the method stays
         (the ``PayloadCodec`` protocol requires it) and fails CLOSED naming the real
         routing. bfloat16 payloads round-trip through ``_write_tensor_blob``; that is
@@ -313,7 +323,7 @@ class JaxPayloadCodec:
         try:
             return jax.device_put(value, target_device)
         except (TypeError, ValueError, RuntimeError) as exc:
-            # r6 L6: this used to swallow the failure and ``return value``, handing back an
+            # This used to swallow the failure and ``return value``, handing back an
             # array on the WRONG device while silently dropping the caller's explicit
             # ``map_location``. Every sibling codec raises
             # ``BackendRuntimeCompatibilityError`` when it cannot honor a requested
@@ -475,7 +485,7 @@ class TinygradPayloadCodec:
                 "the installed tinygrad runtime."
             )
 
-        # r54 sec_2: the artifact ``logical_device``/``device_at_save`` string is
+        # the artifact ``logical_device``/``device_at_save`` string is
         # attacker-controlled and was passed straight into ``Tensor(device=...)``,
         # where tinygrad's ``disk:<path>`` backend writes an attacker-named file on
         # a default ``tl.load()``. Route it through the shared closed device
@@ -702,7 +712,7 @@ class PaddlePayloadCodec:
 
         place = _resolve_paddle_place(paddle, map_location)
         if place is None:
-            # r54 sec_2 (sibling unification): the artifact ``logical_device`` is
+            # (sibling unification): the artifact ``logical_device`` is
             # attacker data -- gate it through the shared closed device grammar
             # before it reaches Paddle's place resolver, so no codec can smuggle a
             # path/scheme token (probe D: 0 legit Paddle tokens over-refused).
@@ -711,10 +721,11 @@ class PaddlePayloadCodec:
             )
             place = _resolve_paddle_place(paddle, safe_device)
         try:
+            host = _contiguous_keeping_shape(array)
             if logical_dtype == "paddle.bfloat16":
-                value = paddle.to_tensor(np.ascontiguousarray(array), place=place)
+                value = paddle.to_tensor(host, place=place)
                 return value if str(value.dtype) == logical_dtype else value.view(dtype)
-            return paddle.to_tensor(np.ascontiguousarray(array), dtype=dtype, place=place)
+            return paddle.to_tensor(host, dtype=dtype, place=place)
         except (TypeError, ValueError, RuntimeError) as exc:
             raise BackendRuntimeCompatibilityError(
                 f"Portable Paddle payload could not be materialized: {exc}"
@@ -840,13 +851,11 @@ class TFPayloadCodec:
 
         try:
             with _tf_device_context(tf, map_location):
+                host = _contiguous_keeping_shape(array)
                 if logical_dtype == "tf.bfloat16":
-                    transport = tf.convert_to_tensor(
-                        np.ascontiguousarray(array),
-                        dtype=tf.uint16,
-                    )
+                    transport = tf.convert_to_tensor(host, dtype=tf.uint16)
                     return tf.bitcast(transport, dtype)
-                return tf.convert_to_tensor(np.ascontiguousarray(array), dtype=dtype)
+                return tf.convert_to_tensor(host, dtype=dtype)
         except (TypeError, ValueError, RuntimeError) as exc:
             raise BackendRuntimeCompatibilityError(
                 f"Portable TensorFlow payload could not be materialized: {exc}"
@@ -981,13 +990,17 @@ def register_payload_codec(backend_name: str, codec: PayloadCodec) -> None:
     _CODECS[backend_name] = codec
 
 
-def numpy_to_transport_tensor(array: np.ndarray) -> torch.Tensor:
-    """Convert an encoded NumPy array to the CPU torch transport tensor."""
+def _resolve_materialization_codec(backend_name: str) -> PayloadCodec:
+    """Keep registry failures inside the typed bundle-load boundary."""
 
-    _raise_for_unsupported_array_dtype(array, backend_name="transport")
-    # np.array(copy=True, order="C") already yields a C-contiguous buffer, so
-    # from_numpy's zero-copy wrap is contiguous by construction.
-    return torch.from_numpy(np.array(array, copy=True, order="C"))
+    try:
+        return get_payload_codec(backend_name)
+    except Exception as exc:
+        raise ArtifactError(
+            f"Failed to resolve the payload codec for backend {backend_name!r} during load.",
+            code="bundle_load_failed",
+            remedy="restore the payload runtime or re-save the artifact in a compatible environment",
+        ) from exc
 
 
 def materialize_transport_tensor(
@@ -1035,7 +1048,7 @@ def materialize_transport_tensor(
             return tensor
         return tensor.to(map_location)
 
-    codec = get_payload_codec(logical_backend)
+    codec = _resolve_materialization_codec(logical_backend)
     if codec.codec_name == "none" or codec_name != codec.codec_name:
         raise BackendPayloadUnsupportedError(
             f"Manifest declares unsupported payload codec {codec_name!r} for "
@@ -1124,19 +1137,9 @@ def _restore_jax_scalar_semantics(jax_module: Any, value: Any, entry: Any) -> An
         return value
     if metadata.get("weak_type") is True and getattr(value, "weak_type", False) is not True:
         try:
-            # The public cast always sets weak_type=False and does not accept
-            # this keyword. Use JAX's own semantic cast, which also supplies
-            # version-specific primitive parameters (e.g. sharding).
-            from jax._src.lax.lax import _convert_element_type
-
-            value = _convert_element_type(
-                value,
-                value.dtype,
-                weak_type=True,
-            )
-            if getattr(value, "weak_type", False) is not True:
-                raise ValueError("JAX semantic cast did not restore weak_type=True")
-        except (ImportError, AttributeError, TypeError, ValueError, RuntimeError) as exc:
+            convert = jax_module._src.lax.lax._convert_element_type  # sole weak_type setter
+            value = convert(value, value.dtype, weak_type=True)
+        except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
             raise BackendRuntimeCompatibilityError(
                 "Portable JAX payload could not restore weak_type=True."
             ) from exc
@@ -1155,6 +1158,17 @@ def _restore_jax_scalar_semantics(jax_module: Any, value: Any, entry: Any) -> An
     return value
 
 
+def _contiguous_keeping_shape(array: np.ndarray) -> np.ndarray:
+    """Return a C-contiguous host copy with the array's own shape.
+
+    ``np.ascontiguousarray`` promotes a 0-d array to shape ``(1,)`` by its own
+    contract, so a saved scalar op output came back one-dimensional through the
+    Paddle and TensorFlow materializers.
+    """
+
+    return np.ascontiguousarray(array).reshape(array.shape)
+
+
 def _transport_tensor_to_numpy(tensor: torch.Tensor, entry: Any) -> np.ndarray:
     """Convert a torch transport tensor to host NumPy storage for a codec."""
 
@@ -1162,10 +1176,8 @@ def _transport_tensor_to_numpy(tensor: torch.Tensor, entry: Any) -> np.ndarray:
 
     transport = to_cpu_contiguous(tensor)
     logical_dtype = str(_entry_field(entry, "logical_dtype") or "")
-    if logical_dtype in {"bfloat16", "jax.numpy.bfloat16"}:
-        array = transport.to(torch.float32).numpy()
-    else:
-        array = transport.numpy()
+    bf16 = logical_dtype in {"bfloat16", "jax.numpy.bfloat16"}
+    array = tensor_to_numpy(transport.to(torch.float32) if bf16 else transport)
     if _entry_has_typed_jax_prng_key(entry):
         return array
     logical_shape = _logical_shape_from_metadata(_entry_field(entry, "codec_metadata"))
@@ -1213,7 +1225,7 @@ def _logical_shape_from_metadata(codec_metadata: Any) -> tuple[int, ...] | None:
         return None
     if not all(isinstance(dim, int) and not isinstance(dim, bool) for dim in logical_shape):
         return None
-    # Reject negative dims (R10-8): a forged ``-1`` silently drives a
+    # Reject negative dims: a forged ``-1`` silently drives a
     # ``reshape``-inferred never-declared shape (and two ``-1``s escape as a raw
     # numpy ValueError). Real logical shapes are non-negative, matching the
     # manifest-level dim ceilings in manifest.py.
@@ -1475,29 +1487,19 @@ def _resolve_jax_mesh_devices(
 
 
 def _resolve_jax_device(jax_module: Any, map_location: Any) -> Any | None:
-    """Resolve a JAX device from a user map-location value when possible.
-
-    Parameters
-    ----------
-    jax_module:
-        Imported JAX runtime.
-    map_location:
-        Requested platform or device spelling.
-
-    Returns
-    -------
-    Any | None
-        Matching device, including devices outside JAX's default platform,
-        or ``None`` when the spelling cannot be resolved.
-    """
+    """Resolve a JAX device from a user map-location value when possible."""
 
     if not isinstance(map_location, str):
         return None
     requested = map_location.lower()
+    platform = requested.split(":", 1)[0]
+    platform = {"cuda": "gpu", "rocm": "gpu"}.get(platform, platform)
     try:
+        # devices() lists only the default backend. Explicit CPU placement
+        # must still resolve on GPU hosts, and vice versa.
         devices = list(
-            jax_module.devices(requested)
-            if requested in {"cpu", "gpu", "tpu"}
+            jax_module.devices(platform)
+            if platform in {"cpu", "gpu", "tpu"}
             else jax_module.devices()
         )
     except RuntimeError:
@@ -1505,7 +1507,8 @@ def _resolve_jax_device(jax_module: Any, map_location: Any) -> Any | None:
     for device in devices:
         device_text = str(device).lower()
         platform = str(getattr(device, "platform", "")).lower()
-        if requested in {device_text, platform} or requested in device_text:
+        indexed = f"{platform}:{getattr(device, 'id', '')}"
+        if requested in {device_text, platform, indexed} or requested in device_text:
             return device
     return None
 
@@ -1596,37 +1599,6 @@ def _resolve_paddle_dtype(paddle_module: Any, dtype_name: str) -> Any | None:
         dtype = getattr(paddle_module, candidate_name, None)
         if dtype is not None:
             return dtype
-    return None
-
-
-def _resolve_paddle_place(paddle_module: Any, place_name: Any) -> Any | None:
-    """Resolve a Paddle place object from manifest or map-location text."""
-
-    if place_name is None:
-        return None
-    base_place = getattr(paddle_module, "Place", None)
-    if base_place is not None and isinstance(place_name, base_place):
-        return place_name
-    if not isinstance(place_name, str):
-        return None
-    requested = place_name.lower()
-    if requested in {"", "unknown"}:
-        return None
-    if requested in {"cpu", "place(cpu)"}:
-        return paddle_module.CPUPlace()
-    if requested in {"gpu", "cuda", "place(gpu)", "place(cuda)"}:
-        cuda_place = getattr(paddle_module, "CUDAPlace", None)
-        if cuda_place is not None:
-            return cuda_place(0)
-    for prefix in ("gpu:", "cuda:"):
-        if requested.startswith(prefix):
-            cuda_place = getattr(paddle_module, "CUDAPlace", None)
-            if cuda_place is None:
-                return None
-            try:
-                return cuda_place(int(requested.split(":", maxsplit=1)[1]))
-            except ValueError:
-                return None
     return None
 
 
@@ -1947,34 +1919,5 @@ def _jax_sharding_addressable_device_count(sharding: Any) -> int:
         return 0
 
 
-def _unsupported_array_dtype_reason(array: np.ndarray) -> str | None:
-    """Return an unsupported dtype reason for a host array, if any."""
-
-    if array.dtype.kind in {"O", "S", "U", "V"}:
-        return f"dtype {array.dtype} is not supported by the payload codec"
-    # ``complex128`` (16-byte complex) mirrors the torch-native gap in
-    # ``tensor_policy._SUPPORTED_DTYPES``: the shared transport eventually
-    # reaches ``safetensors.torch.save_file()``, whose dtype-size table has
-    # no entry for ``torch.complex128``, even though a non-torch backend's
-    # ``complex128`` array converts cleanly via ``torch.from_numpy`` and
-    # would otherwise sail straight through this codec-agnostic gate to the
-    # same unwrapped ``KeyError`` (cert round 8 BLOCKER). ``complex64``
-    # (8-byte complex) genuinely round-trips and stays allowed.
-    if array.dtype.kind == "c" and array.dtype.itemsize > 8:
-        return f"dtype {array.dtype} is not supported by the payload codec"
-    return None
-
-
-def _dtype_string_is_object_like(dtype: str) -> bool:
-    """Return whether a dtype string describes object or string data."""
-
-    lowered = dtype.lower()
-    return any(token in lowered for token in ("object", "str", "string", "bytes", "void"))
-
-
-def _raise_for_unsupported_array_dtype(array: np.ndarray, *, backend_name: str) -> None:
-    """Raise ``TypeError`` if ``array`` has a non-transportable dtype."""
-
-    reason = _unsupported_array_dtype_reason(array)
-    if reason is not None:
-        raise TypeError(f"{backend_name} payload {reason}.")
+# NumPy is a value carrier, not an additional model backend.
+_CODECS["numpy"] = NumpyPayloadCodec(EncodedArray, _manifest_fields)

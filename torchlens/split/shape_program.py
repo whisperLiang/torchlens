@@ -10,8 +10,11 @@ from math import prod
 from numbers import Integral
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from torchlens.split.errors import SplitRequestError
+
 from ..backends.registry import TINYGRAD_BACKEND_NAME, TORCH_BACKEND_NAME
-from ..intervention.types import CapturedArgTemplate, LiteralTensor, LiteralValue
+from ..intervention._types import CapturedArgTemplate, LiteralTensor, LiteralValue
+from ._shape_operands import _TORCH_SHAPE_SEMANTICS, ShapeSemantic
 from ._shape_witnesses import _witness_axis_diagnostics, _witness_scaled_axes
 from .batch_probe import BatchProbeResult
 from .errors import SplitBoundaryError, SplitErrorContext, SplitUnsupportedError
@@ -32,22 +35,6 @@ _DIM_ARITHMETIC: dict[str, Callable[[tuple[int, ...]], int]] = {
     "min": min,
     "max": max,
 }
-ShapeSemantic = Literal[
-    "reshape",
-    "repeat",
-    "permute",
-    "squeeze",
-    "unsqueeze",
-    "expand",
-    "concat",
-    "stack",
-    "split",
-    "unbind",
-    "slice",
-    "reduction",
-    "matmul",
-    "factory",
-]
 
 _SHAPE_RULE_VERSION = 4
 _WITNESS_DISAMBIGUATED_SEMANTICS = frozenset(
@@ -65,64 +52,17 @@ _WITNESS_DISAMBIGUATED_SEMANTICS = frozenset(
         "factory",
     }
 )
-_TORCH_SHAPE_SEMANTICS: dict[tuple[str, str], ShapeSemantic] = {
-    ("torch.Tensor", "view"): "reshape",
-    ("torch.Tensor", "reshape"): "reshape",
-    ("torch.Tensor", "flatten"): "reshape",
-    ("torch", "reshape"): "reshape",
-    ("torch", "flatten"): "reshape",
-    ("torch.Tensor", "repeat"): "repeat",
-    ("torch", "tile"): "repeat",
-    ("torch.Tensor", "permute"): "permute",
-    ("torch.Tensor", "transpose"): "permute",
-    ("torch", "transpose"): "permute",
-    ("torch.Tensor", "squeeze"): "squeeze",
-    ("torch", "squeeze"): "squeeze",
-    ("torch.Tensor", "unsqueeze"): "unsqueeze",
-    ("torch", "unsqueeze"): "unsqueeze",
-    ("torch.Tensor", "expand"): "expand",
-    ("torch", "broadcast_to"): "expand",
-    ("torch", "cat"): "concat",
-    ("torch", "concat"): "concat",
-    ("torch", "stack"): "stack",
-    ("torch", "split"): "split",
-    ("torch", "chunk"): "split",
-    ("torch.Tensor", "split"): "split",
-    ("torch.Tensor", "chunk"): "split",
-    ("torch", "unbind"): "unbind",
-    ("torch.Tensor", "unbind"): "unbind",
-    ("torch.Tensor", "__getitem__"): "slice",
-    ("torch.Tensor", "select"): "slice",
-    ("torch.Tensor", "narrow"): "slice",
-    ("torch", "index_select"): "slice",
-    ("torch.Tensor", "index_select"): "slice",
-    ("torch", "sum"): "reduction",
-    ("torch.Tensor", "sum"): "reduction",
-    ("torch", "mean"): "reduction",
-    ("torch.Tensor", "mean"): "reduction",
-    ("torch", "amax"): "reduction",
-    ("torch.Tensor", "amax"): "reduction",
-    ("torch", "amin"): "reduction",
-    ("torch.Tensor", "amin"): "reduction",
-    ("torch", "prod"): "reduction",
-    ("torch.Tensor", "prod"): "reduction",
-    ("torch", "matmul"): "matmul",
-    ("torch.Tensor", "matmul"): "matmul",
-    ("torch", "zeros"): "factory",
-    ("torch", "ones"): "factory",
-    ("torch", "empty"): "factory",
-    ("torch", "full"): "factory",
-    ("torch", "new_zeros"): "factory",
-    ("torch", "new_ones"): "factory",
-    ("torch.Tensor", "new_tensor"): "factory",
-    ("torch.Tensor", "new_zeros"): "factory",
-    ("torch.Tensor", "new_ones"): "factory",
-}
 
 
 @dataclass(frozen=True)
 class DimExpr:
-    """One evaluable symbolic dimension expression."""
+    """One evaluable symbolic dimension expression.
+
+    Examples
+    --------
+    >>> tl.split.DimExpr.symbol('B').evaluate({'B': 8})
+    8
+    """
 
     op: DimOp
     value: int | str | None = None
@@ -145,17 +85,26 @@ class DimExpr:
 
         if self.op == "const":
             if not isinstance(self.value, int):
-                raise ValueError("Constant dimension expression has no integer value.")
+                raise SplitRequestError(
+                    "Constant dimension expression has no integer value.",
+                    code=SplitRequestError.code,
+                )
             return self.value
         if self.op == "symbol":
             try:
                 return int(symbols[str(self.value)])
             except KeyError as exc:
-                raise ValueError(f"Missing shape symbol {self.value!r}.") from exc
+                raise SplitRequestError(
+                    f"Missing shape symbol {self.value!r}.",
+                    code=SplitRequestError.code,
+                ) from exc
         values = tuple(arg.evaluate(symbols) for arg in self.args)
         operation = _DIM_ARITHMETIC.get(self.op)
         if operation is None:
-            raise ValueError(f"Unsupported dimension expression op {self.op!r}.")
+            raise SplitRequestError(
+                f"Unsupported dimension expression op {self.op!r}.",
+                code=SplitRequestError.code,
+            )
         return operation(values)
 
     def as_dict(self) -> dict[str, Any]:
@@ -190,7 +139,14 @@ class DimExpr:
 
 @dataclass(frozen=True)
 class TensorShapeIR:
-    """Symbolic shape assigned to one graph value."""
+    """Symbolic shape assigned to one graph value.
+
+    Examples
+    --------
+    >>> shape = tl.split.TensorShapeIR('v:1', (tl.split.DimExpr.symbol('B'), tl.split.DimExpr.const(3)))
+    >>> shape.evaluate(tl.split.ShapeBinding({'B': 4}, {}))
+    (4, 3)
+    """
 
     value_id: str
     dims: tuple[DimExpr, ...]
@@ -215,7 +171,15 @@ class ShapeConstraintIR:
 
 @dataclass(frozen=True)
 class ShapeRecipe:
-    """Exact captured shape descriptor and its symbolic replacement."""
+    """Exact captured shape descriptor and its symbolic replacement.
+
+    Examples
+    --------
+    >>> recipe = tl.split.ShapeRecipe('v:2', 'reshape', (1, 3),
+    ...     (tl.split.DimExpr.symbol('B'), tl.split.DimExpr.const(3)))
+    >>> recipe.captured, len(recipe.dims)
+    ((1, 3), 2)
+    """
 
     node_id: str
     recipe_id: str
@@ -232,7 +196,14 @@ class ShapeRecipe:
 
 @dataclass(frozen=True)
 class ShapeBinding:
-    """Runtime symbol values for one prefix/suffix execution."""
+    """Runtime symbol values for one prefix/suffix execution.
+
+    Examples
+    --------
+    >>> binding = tl.split.ShapeBinding({'B': 4}, {'args[0]': (4, 3)})
+    >>> binding.symbols['B']
+    4
+    """
 
     symbols: Mapping[str, int]
     input_shapes: Mapping[str, tuple[int, ...]]
@@ -242,7 +213,10 @@ class ShapeBinding:
         """Return the sole batch symbol value."""
 
         if len(self.symbols) != 1:
-            raise ValueError("ShapeBinding.batch_size requires exactly one symbol.")
+            raise SplitRequestError(
+                "ShapeBinding.batch_size requires exactly one symbol.",
+                code=SplitRequestError.code,
+            )
         return int(next(iter(self.symbols.values())))
 
 
@@ -260,6 +234,13 @@ class ShapeProgram:
 
     Cross-batch use is an empirical extrapolation after a B=2 replay probe.
     Shape rules still apply; samples do not prove correctness at arbitrary B.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> program = graph.trace_graph.shape_program
+    >>> program.batch_symbol, program.traced_batch_size
+    ('B', 1)
     """
 
     batch_symbol: str
@@ -300,7 +281,8 @@ class ShapeProgram:
         if len(values) != len(self.input_paths):
             raise SplitBoundaryError(
                 f"Runtime input leaf count {len(values)} does not match shape program "
-                f"input count {len(self.input_paths)}."
+                f"input count {len(self.input_paths)}.",
+                code=SplitBoundaryError.code,
             )
         by_path = dict(zip(self.input_paths, values))
         missing = tuple(path for path in self.input_batch_axes if path not in by_path)
@@ -312,6 +294,7 @@ class ShapeProgram:
                     split_point=split_point,
                     reason="missing batch input path",
                 ),
+                code=SplitBoundaryError.code,
             )
         batch_values: dict[str, int] = {}
         input_shapes: dict[str, tuple[int, ...]] = {}
@@ -321,7 +304,8 @@ class ShapeProgram:
             shape = shape_of(by_path[path])
             if shape is None or tuple(shape) != traced_shape:
                 raise SplitBoundaryError(
-                    f"Runtime non-batch input {path!r} shape changed from {traced_shape} to {shape}."
+                    f"Runtime non-batch input {path!r} shape changed from {traced_shape} to {shape}.",
+                    code=SplitBoundaryError.code,
                 )
             input_shapes[path] = tuple(shape)
         for path, axis in self.input_batch_axes.items():
@@ -344,6 +328,7 @@ class ShapeProgram:
                     split_point=split_point,
                     reason="inconsistent runtime batch",
                 ),
+                code=SplitBoundaryError.code,
             )
         batch_size = next(iter(unique))
         if batch_size < 1:
@@ -354,6 +339,7 @@ class ShapeProgram:
                     split_point=split_point,
                     reason="non-positive runtime batch",
                 ),
+                code=SplitBoundaryError.code,
             )
         return ShapeBinding(
             symbols={self.batch_symbol: batch_size},
@@ -365,7 +351,10 @@ class ShapeProgram:
 
         resolved = int(batch_size)
         if resolved < 1:
-            raise SplitBoundaryError(f"Boundary batch {batch_size} must be a positive integer.")
+            raise SplitBoundaryError(
+                f"Boundary batch {batch_size} must be a positive integer.",
+                code=SplitBoundaryError.code,
+            )
         return ShapeBinding(symbols={self.batch_symbol: resolved}, input_shapes={})
 
     def require_batch_resolvable(
@@ -404,6 +393,7 @@ class ShapeProgram:
                 split_point=split_point,
                 reason="unproven batch shape relation",
             ),
+            code=SplitBoundaryError.code,
         )
 
     def rewrite(self, node_id: str, value: Any, binding: ShapeBinding) -> Any:
@@ -496,6 +486,7 @@ def compile_shape_program(
                 split_point=request.boundary,
                 reason="input path alignment failed",
             ),
+            code=SplitUnsupportedError.code,
         )
     input_by_path = {leaf.path: leaf for leaf in leaves}
     if batch_axes is not None:
@@ -503,7 +494,8 @@ def compile_shape_program(
         if unknown:
             raise SplitUnsupportedError(
                 f"Unknown batch input paths: {unknown!r}; available paths are "
-                f"{tuple(input_by_path)!r}."
+                f"{tuple(input_by_path)!r}.",
+                code=SplitUnsupportedError.code,
             )
         axes = {
             path: _normalize_axis(int(axis), adapter.shape(input_by_path[path].value), path)
@@ -530,7 +522,8 @@ def compile_shape_program(
     traced_batch_values = {traced_shapes[path][axis] for path, axis in axes.items()}
     if len(traced_batch_values) > 1:
         raise SplitUnsupportedError(
-            f"Declared batch inputs disagree during capture: {traced_shapes!r}."
+            f"Declared batch inputs disagree during capture: {traced_shapes!r}.",
+            code=SplitUnsupportedError.code,
         )
     traced_batch_size = (
         int(next(iter(traced_batch_values)))
@@ -661,10 +654,16 @@ def _normalize_axis(axis: int, shape: tuple[int, ...] | None, path: str) -> int:
     """Normalize one declared input axis."""
 
     if shape is None:
-        raise SplitUnsupportedError(f"Batch input {path!r} is not tensor-like.")
+        raise SplitUnsupportedError(
+            f"Batch input {path!r} is not tensor-like.",
+            code=SplitUnsupportedError.code,
+        )
     normalized = axis if axis >= 0 else len(shape) + axis
     if not 0 <= normalized < len(shape):
-        raise SplitUnsupportedError(f"Batch axis {axis} is invalid for {path!r} shape {shape}.")
+        raise SplitUnsupportedError(
+            f"Batch axis {axis} is invalid for {path!r} shape {shape}.",
+            code=SplitUnsupportedError.code,
+        )
     return normalized
 
 
@@ -730,9 +729,10 @@ def _propagate_shapes(
                         inferred.add(0)
                         continue
                     aligned = axis + len(output_shape) - len(parent_shape)
-                    if 0 <= aligned < len(output_shape):
-                        if output_shape[aligned] == parent_shape[axis] or _preserves_batch(op):
-                            inferred.add(aligned)
+                    if 0 <= aligned < len(output_shape) and (
+                        output_shape[aligned] == parent_shape[axis] or _preserves_batch(op)
+                    ):
+                        inferred.add(aligned)
             if (
                 _is_reshape_like(op)
                 and parent_nodes
@@ -1234,22 +1234,28 @@ def _runtime_batch_dimension(
     """Validate one batched input's rank and fixed dimensions, then read its batch."""
 
     if shape is None:
-        raise SplitBoundaryError(f"Batch input {path!r} is not tensor-like.")
+        raise SplitBoundaryError(
+            f"Batch input {path!r} is not tensor-like.",
+            code=SplitBoundaryError.code,
+        )
     normalized_axis = axis if axis >= 0 else len(shape) + axis
     if not 0 <= normalized_axis < len(shape):
         raise SplitBoundaryError(
-            f"Batch axis {axis} is invalid for runtime input {path!r} shape {shape}."
+            f"Batch axis {axis} is invalid for runtime input {path!r} shape {shape}.",
+            code=SplitBoundaryError.code,
         )
     batch_size = int(shape[normalized_axis])
     if len(shape) != len(traced_shape):
         raise SplitBoundaryError(
-            f"Runtime input {path!r} rank changed from {len(traced_shape)} to {len(shape)}."
+            f"Runtime input {path!r} rank changed from {len(traced_shape)} to {len(shape)}.",
+            code=SplitBoundaryError.code,
         )
     for index, (runtime_dim, traced_dim) in enumerate(zip(shape, traced_shape, strict=True)):
         if index != normalized_axis and int(runtime_dim) != int(traced_dim):
             raise SplitBoundaryError(
                 f"Runtime input {path!r} non-batch dimension {index} changed from "
-                f"{traced_dim} to {runtime_dim}."
+                f"{traced_dim} to {runtime_dim}.",
+                code=SplitBoundaryError.code,
             )
     return batch_size
 
@@ -1957,7 +1963,7 @@ def _shape_proof_sources(
     return sources
 
 
-__all__ = [
+__all__ = (
     "DimExpr",
     "InputLeaf",
     "ShapeBinding",
@@ -1968,4 +1974,4 @@ __all__ = [
     "compile_shape_program",
     "flatten_input_leaves",
     "shape_semantic_for_node",
-]
+)

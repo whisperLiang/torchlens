@@ -1,0 +1,181 @@
+"""Five-step facade order: the testable spec, pinned (workstream A10).
+
+Architecture memo 5.4 / neuro memo D15: (1) underscore -> plain
+``AttributeError`` immediately; (2) redirect table -> typed teaching
+``AttributeError``, no dependency check; (3) refusal table -> typed
+``AttributeError``; (4) real active name -> per-name dependency gate naming
+the exact package and install command; (5) otherwise plain
+``AttributeError``. Every typed error subclasses ``AttributeError`` so
+``hasattr`` can never explode, and resolving a facade imports nothing
+foreign to answer a negative (pickle-safety).
+"""
+
+from __future__ import annotations
+
+import contextlib
+import importlib
+import sys
+
+import pytest
+
+import torchlens as tl
+from torchlens._errors import FacadeTeachingError, MissingDependencyError
+from torchlens._utils.facade import DependencyGate, resolve_facade_attr
+
+#: The notebook facade left the root surface (private package); its facade
+#: behaviour is still pinned through the module itself.
+_NOTEBOOK = importlib.import_module("torchlens.report._notebook")
+
+# ---------------------------------------------------------------------------
+# The mechanism, exercised through a synthetic namespace (every step).
+# ---------------------------------------------------------------------------
+
+
+def _resolve(name: str, **overrides: object) -> object:
+    """Resolve ``name`` through a fully populated synthetic facade."""
+
+    tables: dict[str, object] = {
+        "owner": "torchlens._synthetic",
+        "name": name,
+        "module_globals": {},
+        "lazy_attrs": {"real": ("torchlens._utils.facade", "facade_dir")},
+        "redirects": {"moved": "use tl.new_home.moved"},
+        "refusals": {"never": "deliberately unsupported; use other_tool"},
+        "dependencies": {},
+    }
+    tables.update(overrides)
+    return resolve_facade_attr(**tables)  # type: ignore[arg-type]
+
+
+def test_step3_refusal_is_typed_attributeerror() -> None:
+    """Refusal rows raise FacadeTeachingError with the refusal code."""
+
+    with pytest.raises(FacadeTeachingError) as excinfo:
+        _resolve("never")
+    assert excinfo.value.fields["code"] == "facade_refusal"
+    assert isinstance(excinfo.value, AttributeError)
+
+
+def test_step4_broken_resolution_import_stays_hasattr_safe() -> None:
+    """A real row whose module import fails raises the typed error, chained."""
+
+    with pytest.raises(MissingDependencyError) as excinfo:
+        _resolve("real", lazy_attrs={"real": ("torchlens_no_such_module_xyz", None)})
+    assert isinstance(excinfo.value, AttributeError)
+    assert isinstance(excinfo.value.__cause__, ImportError)
+
+
+# ---------------------------------------------------------------------------
+# The live namespaces: root, appliances, integrations.
+# ---------------------------------------------------------------------------
+
+
+def test_root_reachability_rows_resolve() -> None:
+    """tl.bridge / tl.callbacks / tl.neuro resolve; tl.load reads extractions.
+
+    The notebook namespace is private and the extraction reader folded into
+    ``tl.load``: neither is a root name, and the old extraction spelling teaches
+    the new one.
+    """
+
+    assert tl.bridge.__name__ == "torchlens.bridge"
+    assert tl.callbacks.__name__ == "torchlens.callbacks"
+    assert tl.neuro.__name__ == "torchlens.neuro"
+    assert "notebook" not in tl.__all__ and not hasattr(tl, "notebook")
+    assert callable(tl.load) and "load" in tl.__all__
+    assert "load_extraction" not in tl.__all__
+    with pytest.raises(FacadeTeachingError) as excinfo:
+        tl.load_extraction  # noqa: B018 - attribute access IS the assertion.
+    assert "torchlens.load" in str(excinfo.value)
+
+
+def test_root_underscore_rows_are_gone() -> None:
+    """No underscore name is a lazy row (the version is an eager global); private names refuse."""
+
+    assert not any(name.startswith("_") for name in tl._LAZY_ATTRS)
+    assert "__version__" in dir(tl)
+    from torchlens import __version__
+    from torchlens._vocab._package_version import __version__ as released
+
+    assert __version__ == tl.__version__ == released
+    with pytest.raises(AttributeError):
+        tl._trace  # noqa: B018 - attribute access IS the assertion.
+
+
+def test_hasattr_never_explodes_across_namespaces() -> None:
+    """hasattr answers False (never raises) on every facade namespace."""
+
+    for namespace in (tl, tl.neuro, _NOTEBOOK, tl.bridge, tl.callbacks):
+        assert hasattr(namespace, "definitely_not_a_real_name_xyz") is False
+        assert hasattr(namespace, "_ipython_canary_method_should_not_exist_") is False
+
+
+def test_appliance_probes_import_nothing_foreign() -> None:
+    """Probing appliance namespaces never imports the extras' foreign packages.
+
+    Delta-based: other tests in a shared session may legitimately import the
+    foreign packages, so the oracle is that THE PROBES add none of them (the
+    absolute cold-process assertion lives in the cold-import matrix).
+    """
+
+    foreign = ("rsatoolbox", "brainscore_core", "brainscore_vision", "IPython", "jupyter_client")
+    before = {name for name in foreign if name in sys.modules}
+    for name in ("anything", "not_a_neuro_name", "__wrapped__"):
+        assert hasattr(tl.neuro, name) is False
+        assert hasattr(_NOTEBOOK, name) is False
+    # F22: "datasets"/"rdms" are REAL gated neuro names now. Probing them --
+    # and RESOLVING them where the extra is installed -- must still import
+    # none of the foreign packages (the neuro modules import them lazily
+    # inside call bodies, never at module import).
+    for name in ("datasets", "rdms", "activations_extractor", "get_activations_fn"):
+        with contextlib.suppress(AttributeError):
+            getattr(tl.neuro, name)
+    after = {name for name in foreign if name in sys.modules}
+    assert after == before, f"appliance probes imported foreign packages: {after - before}"
+
+
+def test_dir_lists_real_public_names_and_nothing_else() -> None:
+    """dir() stops advertising implementation imports on every facade."""
+
+    for namespace in (tl, tl.neuro, _NOTEBOOK, tl.bridge, tl.callbacks):
+        listed = dir(namespace)
+        assert "importlib" not in listed
+        assert "annotations" not in listed
+        assert "Any" not in listed
+        assert "ModuleType" not in listed
+        assert not any(
+            name.startswith("_") and not (name.startswith("__") and name.endswith("__"))
+            for name in listed
+        ), (namespace.__name__, listed)
+    assert "trace" in dir(tl)
+    assert "lightning" in dir(tl.callbacks)
+    assert "captum" in dir(tl.bridge)
+
+
+def test_bridge_and_callbacks_unknown_names_stay_plain() -> None:
+    """Unknown bridge/callback names raise plain AttributeError (step 5)."""
+
+    with pytest.raises(AttributeError) as excinfo:
+        tl.bridge.not_a_bridge_module  # noqa: B018
+    assert type(excinfo.value) is AttributeError
+    with pytest.raises(AttributeError) as excinfo:
+        tl.callbacks.not_a_callback  # noqa: B018
+    assert type(excinfo.value) is AttributeError
+
+
+def test_step4_missing_dependency_names_package_and_install() -> None:
+    """The per-name gate names the exact package and install command."""
+
+    with pytest.raises(MissingDependencyError) as excinfo:
+        _resolve(
+            "real",
+            dependencies={
+                "real": DependencyGate("not_a_real_pkg_xyz", 'pip install "torchlens[extra]"')
+            },
+        )
+    err = excinfo.value
+    assert err.fields["code"] == "facade_dependency_missing"
+    assert err.fields["dependency"] == "not_a_real_pkg_xyz"
+    assert "not_a_real_pkg_xyz" in str(err)
+    assert 'pip install "torchlens[extra]"' in str(err)
+    assert isinstance(err, AttributeError)

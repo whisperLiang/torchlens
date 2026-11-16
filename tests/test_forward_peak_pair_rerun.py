@@ -1,0 +1,159 @@
+"""forks.13: the forward peak and its reason move together through a rerun.
+
+``log.run`` refreshes a trace in place when the rerun's labels match. The
+refresh must carry the rerun's ``forward_peak_memory_reason`` with its
+``forward_peak_memory``: a CPU-zero first capture (``None`` plus a reason)
+followed by a positive rerun otherwise keeps the stale reason beside the new
+number, and the load-side pair check refuses the saved artifact. The host
+measurement is pinned so both orders are deterministic. The captures opt in
+with ``measure_host_peak_memory=True`` (measure.2), which the rerun inherits.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import torch
+from torch import nn
+
+import torchlens as tl
+from torchlens._capture import peak_memory, trace as capture_trace
+from torchlens._capture.peak_memory import CPU_ZERO_PEAK_REASON
+from torchlens.options import CaptureOptions
+
+pytestmark = pytest.mark.usefixtures("root_edits_in_place")  # D.12: no per-call mutation keyword
+
+#: Stage a sticky hook on the trace without propagating it.
+_STAGE = tl.options.InterventionOptions(engine="set_only")
+
+
+class _LinearRelu(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = nn.Linear(3, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(self.linear(x)) + 1
+
+
+def _measure(monkeypatch: pytest.MonkeyPatch, value: int) -> None:
+    """Pin the host forward peak that every later CPU capture measures."""
+
+    monkeypatch.setattr(peak_memory, "host_forward_peak", lambda *args, **kwargs: value)
+
+
+def _rerun_log(
+    monkeypatch: pytest.MonkeyPatch, first: int, rerun: int
+) -> tuple[tl.Trace, nn.Module]:
+    torch.manual_seed(0)
+    model = _LinearRelu().eval()
+    _measure(monkeypatch, first)
+    log = tl.trace(
+        model,
+        torch.randn(2, 3),
+        capture=CaptureOptions(replayable=True, measure_host_peak_memory=True),
+    )
+    assert (log.cost.forward_peak_memory is None) == (first == 0)
+    _measure(monkeypatch, rerun)
+    log.do({tl.func("relu"): tl.zero_ablate()}, intervention=_STAGE)
+    log = log.run(model, torch.randn(2, 3))
+    return log, model
+
+
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _data_classes/_trace_groups.py, campaign mutant kills.
+def test_append_rerun_after_a_cpu_zero_round_trips(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    log, model = _rerun_log(monkeypatch, first=0, rerun=4096)
+    log.append(torch.randn(1, 3), model=model)
+
+    assert log.cost.forward_peak_memory_reason is None
+    log.save(tmp_path / "append_bundle")
+    loaded = tl.load(tmp_path / "append_bundle")
+    assert loaded.provenance.is_appended is True
+    assert int(loaded.cost.forward_peak_memory) == int(log.cost.forward_peak_memory)
+    assert loaded.cost.forward_peak_memory_reason is None
+
+
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _capture/_forward_helpers.py.
+def test_cuda_bracket_clears_a_stale_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    allocated = iter([100, 200])
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda *args: next(allocated))
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda *args: 0)
+    trace = SimpleNamespace(
+        _cost_forward_peak_memory=None, _cost_forward_peak_memory_reason=CPU_ZERO_PEAK_REASON
+    )
+
+    with capture_trace._forward_peak_memory_bracket(trace, SimpleNamespace(type="cuda")):
+        pass
+
+    assert int(trace._cost_forward_peak_memory) == 200
+    assert trace._cost_forward_peak_memory_reason is None
+    assert trace._provenance_forward_memory_backend == "cuda"
+
+
+def test_bracket_never_writes_onto_the_forward_exception() -> None:
+    """The bracket's cleanup leaves the user's in-flight exception untouched.
+
+    ``contextlib.contextmanager`` re-assigns ``__traceback__`` on the exception it
+    re-raises (Python 3.11+); an exception whose ``__setattr__`` refuses writes was
+    then replaced by that ``AttributeError``. The bracket still records its fields.
+    """
+
+    class _LockedError(Exception):
+        """An exception that refuses every attribute write."""
+
+        __slots__ = ()
+
+        def __setattr__(self, name: str, value: object) -> None:
+            """Refuse the write."""
+
+            raise AttributeError("locked")
+
+    trace = SimpleNamespace(measure_host_peak_memory=False, measure_python_peak_memory=False)
+    bracket = capture_trace._forward_peak_memory_bracket(trace, SimpleNamespace(type="cpu"))
+    with pytest.raises(_LockedError), bracket:
+        raise _LockedError("boom")
+    assert trace._provenance_forward_memory_backend == "cpu"
+
+
+def test_transparent_contextmanager_keeps_contextlib_exit_semantics() -> None:
+    """Suppression, re-raise and clean exit match ``contextlib``; nothing is written."""
+
+    from torchlens.errors._base import transparent_contextmanager
+
+    events: list[str] = []
+
+    class _Locked(Exception):
+        """Exception that refuses every attribute write."""
+
+        def __setattr__(self, name: str, value: object) -> None:
+            """Refuse the write."""
+
+            raise AttributeError("locked")
+
+    @transparent_contextmanager
+    def _bracket(suppress: bool) -> Iterator[str]:
+        """Record entry and exit; optionally swallow ``_Locked``."""
+
+        events.append("enter")
+        try:
+            yield "value"
+        except _Locked:
+            events.append("caught")
+            if not suppress:
+                raise
+        finally:
+            events.append("exit")
+
+    with _bracket(False) as value:
+        assert value == "value"
+    with _bracket(True):
+        raise _Locked("swallowed")
+    with pytest.raises(_Locked), _bracket(False):
+        raise _Locked("passes through")
+    assert events == ["enter", "exit", "enter", "caught", "exit", "enter", "caught", "exit"]

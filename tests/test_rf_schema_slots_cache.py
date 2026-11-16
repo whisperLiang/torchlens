@@ -17,8 +17,6 @@ import pytest
 
 from torchlens.receptive_field import _engine
 
-pytestmark = pytest.mark.smoke
-
 
 def _snapshot():
     return dict(_engine._SCHEMA_OPERAND_SLOTS_CACHE), dict(_engine._SCHEMA_OPERAND_MISS_NAMES)

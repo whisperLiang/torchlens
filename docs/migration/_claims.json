@@ -1,0 +1,1533 @@
+{
+  "schema": "torchlens.migration_claims.v1",
+  "seeded": "2026-08-26",
+  "seeded_by": "maintainers (claims registry seed; claim rows transcribe the approved launch-copy phrasings verbatim)",
+  "wording_states": [
+    "full",
+    "narrowed_scope",
+    "limitation"
+  ],
+  "rendering_rule": "A gated claim degrades to its true narrower sentence before it degrades to a limitation banner, and NEVER renders as marketing while its gate is open.",
+  "floor_lints": [
+    "absolutes-without-claim-id",
+    "comparative-terms-near-peer-name",
+    "bare-multipliers",
+    "empty-strengths-section"
+  ],
+  "tl_side_gates": {
+    "gate-d1-hf-lm-replay-crash": {
+      "statement": "The replay/push engine crashes on HF causal-LM outputs (Cache container-path mis-indexing, intervention/replay.py:669,820,1519; reproduced on distilgpt2/gpt2/Qwen2.5/OPT under transformers 5.14.1). Blocks all LLM replay-economics copy and region advertising.",
+      "status": "closed",
+      "fix_lane": "A05 (FIX-A: replay output-contract fix)",
+      "closed_by": "A05 (FIX-A replay output-contract fix); in the D05 release commit lineage (base 0537becb799d)",
+      "closure_evidence": [
+        "tests/real_model/r0/test_realism_randinit_axes.py::test_container_output_do_lands_through_model_output_container (real distilgpt2 nested cache)"
+      ],
+      "verified_at": "2026-09-02 (D05 release gate: P tier on the release commit and on the venv-installed wheel)"
+    },
+    "gate-fork-run-silent-unedited": {
+      "statement": "A sticky hook staged on a fork followed by fork.run(inputs=x) returns the UNEDITED output with zero warnings. Blocks every 'never silently inert' formulation.",
+      "status": "closed",
+      "fix_lane": "phase 1 (intervention honesty cluster)",
+      "closed_by": "A04 (intervention honesty cluster) + the run/attach contract: fork.run(inputs=...) after a hook do APPLIES the staged spec with fire receipts on last_run (engine live) and settles unverifiable; a staged entry that fires nowhere warns or raises rerun_zero_fire; only a loaded artifact refuses typed (run_staged_spec_unapplied)",
+      "closure_evidence": [
+        "probe 2026-09-02 at 0537becb799d: fork.attach_hooks(zero_ablate relu) then fork.run(inputs=x) raises EngineDispatchError code=run_staged_spec_unapplied naming the staged hook count and the intervened-rerun spelling; no un-intervened result is ever returned",
+        "2026-11-03: the live run(inputs=x) applies the staged spec (tests/test_run_inputs_staged_spec.py::test_live_run_inputs_applies_the_staged_hook_with_receipts_on_the_fork); the refusal stays for loaded artifacts only",
+        "tests/test_interv_honesty_failed_do_cleanup.py::test_staged_hook_stays_sticky_when_a_later_do_fails",
+        "tests/test_intervention_phase7.py::test_rerun_warns_when_value_dependent_sticky_hook_stops_matching"
+      ],
+      "verified_at": "2026-09-02 (D05 release gate)"
+    },
+    "gate-appliance-replaced-false": {
+      "statement": "The semantic appliances never check fire-record replaced=False, so activation_patch_residual_stream can emit publishable-looking flat tables as a SILENT NO-OP on real HF models. Blocks the same 'never silently inert' class.",
+      "status": "closed",
+      "fix_lane": "A01-A03 (semantic slices)",
+      "closed_by": "A03 (semantic RECONSTRUCTION slice): fire ledger refuses never-fired and all-refused (replaced=False) campaigns typed (PatchApplicationError)",
+      "closure_evidence": [
+        "tests/test_sem_recon_patching.py::test_fire_ledger_refuses_all_refused_replacements",
+        "tests/test_sem_recon_patching.py::test_fire_ledger_refuses_never_fired",
+        "tests/test_sem_recon_patching.py::test_all_identical_campaign_disclosed"
+      ],
+      "verified_at": "2026-09-02 (D05 release gate)"
+    },
+    "gate-tier-vocabulary-published": {
+      "statement": "The tier vocabulary (core, open-class, experimental) is attached to every public name in the surface table, stated on a public compatibility page, and enforced by the surface budget test (open-class changes additive-only). Blocks claim-7 full wording.",
+      "status": "open",
+      "fix_lane": "launch freeze (claims gate)",
+      "closed_by": null,
+      "closure_evidence": [],
+      "verified_at": "2026-10-14"
+    }
+  },
+  "cross_cutting_rules": [
+    "Never say \"nobody has X\" where X is a family word (replay, safety checks, blocks). Say the precise thing TL uniquely has: replay ENGINE with cone recompute + divergence check; DERIVED admissibility; per-firing AUDIT; unfired-hook DISCLOSURE; region ALGEBRA. Precision is also better copy.",
+    "Three TL-side gates before the strongest claims ship: (a) the D1 replay/push crash on HF causal LMs (blocks claim-1 LLM copy and region advertising); (b) the staged-sticky-hook fork + run silent-unedited bug (blocks \"never silently inert\"); (c) the appliance replaced=False check (same).",
+    "The exact-vs-approximate frame (edge substitution vs linear attribution patching) is the durable cost story; \"they must pay a full forward\" is not.",
+    "Credit competitors by name for what they own (nnsight generation ergonomics + ~1x; pyvene intervention-as-artifact + trainable interventions; TLens cache kit). The concessions strengthen the switch pitch, not weaken it."
+  ],
+  "claims": [
+    {
+      "id": "claim-1-replay-engine",
+      "competitor": "nnsight; TransformerLens; pyvene; baukit; captum",
+      "version_range": "as verified 2026-08-21 (nnsight feature pages; TLens official API docs; pyvene README/source)",
+      "neutral_fact": "No competitor has a replay ENGINE (a what-if applied to a finished recording, recomputing only the affected downstream cone, divergence-checked, audited). Two near-misses launch copy will be attacked with: TransformerLens start_at_layer/stop_at_layer are official partial-forward parameters against a cached residual stream (manual, layer-granular, no checking, no audit); nnsight tracer.stop() and Skip Execution truncate live runs. Gradient attribution patching approximates all patch variants in ~2 forwards + 1 backward.",
+      "allowed_public_wording": "TorchLens is the only tool with a replay engine: apply a what-if to a finished recording and recompute only the affected downstream cone -- divergence-checked and audited, never silently wrong. Everywhere else the unit of experimentation is a live forward pass: TransformerLens can hand-roll partial forwards from a cached residual stream (start_at_layer, one layer granularity, no checking), and gradient-based attribution patching trades exactness for speed; no other tool re-executes a recording.",
+      "narrowed_scope_wording": "While gate-d1-hf-lm-replay-crash is open: scope the sentence to recorded runs WITHOUT LLM examples, or say \"live-hook reruns\" for LLMs (that route works and is numerically verified).",
+      "limitation_wording": "TorchLens applies what-ifs to recorded runs; engine details in the intervention docs.",
+      "required_credit": "TransformerLens start_at_layer partial forwards; gradient attribution patching's ~2-forward cost.",
+      "evidence_refs": [
+        "PARITY-INTERVENTIONS claim 1",
+        "maintainer review record (private)",
+        "maintainer review record (private)"
+      ],
+      "scenario_ids": [],
+      "tl_side_gates": [
+        "gate-d1-hf-lm-replay-crash"
+      ],
+      "last_verified": "2026-08-21",
+      "owner": "maintainers"
+    },
+    {
+      "id": "claim-2-intervention-as-object",
+      "competitor": "pyvene (primary); nnsight (model.edit nuance)",
+      "version_range": "as verified 2026-08-21 (pyvene README/pyvene_101/interventions.py)",
+      "neutral_fact": "Only pyvene treats interventions as durable objects (dict configs, IntervenableModel.save with Hub push, pyreft built on it). pyvene is NOT modelcard-locked: raw string component paths are an escape hatch -- but they are UNVERIFIED strings (no site keys, no structural verification, no drift refusal). pyvene HAS reads (CollectIntervention), site-scoped collection only. pyvene has no past tense: every intervention executes inside a live forward. nnsight model.edit() is a persistent in-memory binding, not a serializable artifact. TorchLens reads one trained pyreft artifact kind, a single LoreftIntervention directory, with tl.bridge.pyreft.read and applies it as a portable subspace edit (tl.intervention.affine_source under tl.subspace); it trains nothing (added 2026-10-15).",
+      "allowed_public_wording": "Only pyvene treats an intervention as a durable object -- serializable configs, trained interventions you can push to the Hub -- and we respect that. But a pyvene address is either a hand-maintained per-family alias or a bare attribute-path string; there is no structural verification and nothing that notices drift. And pyvene has no past tense: it can collect activations at a site, but there is no recording -- every question costs a live forward, and nothing is captured for audit.",
+      "narrowed_scope_wording": "none needed -- wording rule permanently in force (no gate).",
+      "limitation_wording": "Credit pyvene's artifact story without the contrast sentence.",
+      "required_credit": "pyvene intervention-as-artifact + trainable interventions + Hub culture.",
+      "evidence_refs": [
+        "PARITY-INTERVENTIONS claim 2",
+        "tests/test_bridge_pyreft.py",
+        "maintainer review record (private)"
+      ],
+      "scenario_ids": [],
+      "tl_side_gates": [],
+      "last_verified": "2026-08-21",
+      "owner": "maintainers"
+    },
+    {
+      "id": "claim-3-where-algebra-audit-inert",
+      "competitor": "nnsight; pyvene; TransformerLens; baukit; captum",
+      "version_range": "as verified 2026-08-21",
+      "neutral_fact": "Multi-site region ADDRESSING with derived admissibility: nobody has it (pyvene open P0 #226 asks for it), but single-module block edits exist elsewhere (pyvene SkipIntervention, nnsight Skip Execution, baukit edit_output). nnsight ships scan/validate (FakeTensor shape/type dry-run); TL's uniqueness is SEMANTIC admissibility derived from the captured graph -- say \"derived admissibility\", not \"safety checks\". Audit trails: no competitor produces a per-firing intervention ledger. Silent-inert detection: no competitor counts fires; TL's rerun path reconciles hook_fire_count + unfired_hook_ids. TL-side: the address algebra is REPLAY-ONLY today; live-lane regions are a design item (Build 0c).",
+      "allowed_public_wording": "TorchLens is the only tool where WHERE is an algebra: compose selectors over the captured graph, and admissibility is derived, not asserted -- an edit that cannot apply refuses with a remedy, in types, before your forward runs. Every firing lands in an audit you can read back; hooks that fire nowhere are counted and disclosed, not swallowed. (nnsight's scan/validate dry-runs shapes; nothing anywhere else audits what actually fired.)",
+      "narrowed_scope_wording": "While the two inert-detection gates are open: \"we count fires and disclose unfired hooks\" is true of the rerun path; never \"we can never be silently inert\". Keep region-SURGERY promises off live-run copy until Build 0c ships.",
+      "limitation_wording": "Selector composition and typed refusals described without uniqueness or inertness absolutes.",
+      "required_credit": "nnsight scan/validate pre-run shape checking.",
+      "evidence_refs": [
+        "PARITY-INTERVENTIONS claim 3",
+        "maintainer review record (private)",
+        "maintainer review record (private)",
+        "PROBE-r1b"
+      ],
+      "scenario_ids": [],
+      "tl_side_gates": [
+        "gate-fork-run-silent-unedited",
+        "gate-appliance-replaced-false",
+        "gate-d1-hf-lm-replay-crash"
+      ],
+      "last_verified": "2026-08-21",
+      "owner": "maintainers"
+    },
+    {
+      "id": "claim-4-generation-episode",
+      "competitor": "nnsight (primary); pyvene (intervene_on_prompt nuance)",
+      "version_range": "as verified 2026-08-21 (nnsight Multiple Token Generation docs)",
+      "neutral_fact": "nnsight owns generation ergonomics (tracer.all()/iter[]/.next(), ~1x price). pyvene also intervenes during model.generate. TorchLens composes intervention with HF generation today on all three engines with byte-identical intervened tokens (edit fires at prefill + every decode step); episode capture is priced as a diagnostic: 79 s = ~103x native at N=20 (gpt2-124M, CPU, 8-token prompt), SUPERLINEAR beyond (N=100 -> 657 s = 323x). Cheapest intervened generation is record at ~42x; the ~1x capture-free tier does not exist yet.",
+      "allowed_public_wording": "nnsight has the best generation ergonomics in the field -- one-line tracing of model.generate with per-step intervention -- and at ~1x it owns the price point. TorchLens composes intervention with generation today (same edit, prefill and every decode step, identical tokens across all three capture engines), and adds what nobody else has: generation as a saved, replayable, audited artifact. That evidence tier is priced as a diagnostic: ~103x native at 20 steps (gpt2-124M, CPU), superlinear beyond; capture-lite runs land at ~42x today, and a capture-free runner is roadmap.",
+      "narrowed_scope_wording": "Any 103x citation MUST carry (CPU, gpt2-124M, N=20) and must not imply linearity in N.",
+      "limitation_wording": "Intervened generation composes on all three engines; costs in the benchmark table.",
+      "required_credit": "nnsight generation ergonomics + ~1x live price; pyvene generate-time intervention.",
+      "evidence_refs": [
+        "PARITY-INTERVENTIONS claim 4",
+        "docs/reference/episode_capture.md:42",
+        "PROBE-r1b",
+        "maintainer review record (private)"
+      ],
+      "scenario_ids": [],
+      "tl_side_gates": [],
+      "last_verified": "2026-08-21",
+      "owner": "maintainers"
+    },
+    {
+      "id": "claim-5-tlens-cache-kit",
+      "competitor": "TransformerLens",
+      "version_range": "TLens 3.x mid-pivot to TransformerBridge, as verified 2026-08-21",
+      "neutral_fact": "TLens owns the ActivationCache analysis kit (accumulated_resid/decompose_resid/stack_head_results/logit_attrs, FactoredMatrix/QK/OV) and ecosystem gravity (ARENA, SAELens). TLens 3.x/4.0 is mid-pivot from HookedTransformer (reimplementation, deprecated) to TransformerBridge (wrapping the REAL HF model): the \"we wrap the real model, they reimplement\" differentiator is TIME-LIMITED; the churn (bridge bug cluster incl. #1688 hooks that silently never fire, cite as live bug not permanent property) makes now the cheapest switching window. TLens has its own flags-before-run gates; TL's honest differentiator is typed refusal WITH A REMEDY, never \"no dark hooks\". TLens official zoo is 249 IDs; TLens has no input attribution; TL reads SDPA facets without eager reload (READ-ONLY -- editing still needs a visible/eager site).",
+      "allowed_public_wording": "If your daily driver is the ActivationCache analysis kit -- accumulated_resid, stack_head_results, direct logit attribution -- and the ARENA/SAELens ecosystem around it, TransformerLens is where that kit lives, and we say so. TorchLens is for the moment you step off the paved road: any model (not a registry), verified addresses, attribution built in, and fused-attention internals you can read without reloading the model in eager mode. TransformerLens is itself mid-migration to wrapping real HF models; if you are re-learning an API anyway, compare both.",
+      "narrowed_scope_wording": "none needed -- wording rule permanently in force (no gate).",
+      "limitation_wording": "Credit the TLens kit without the comparison sentence.",
+      "required_credit": "TLens ActivationCache kit + QK/OV + ARENA/SAELens gravity.",
+      "evidence_refs": [
+        "PARITY-INTERVENTIONS claim 5",
+        "maintainer review record (private)"
+      ],
+      "scenario_ids": [],
+      "tl_side_gates": [],
+      "last_verified": "2026-08-21",
+      "owner": "maintainers"
+    },
+    {
+      "id": "claim-6-completeness-dividend",
+      "competitor": "specialist tools (logit-lens, Grad-CAM, activation-patching and Patchscopes implementations)",
+      "version_range": "as executed 2026-10-14",
+      "neutral_fact": "Because TorchLens records the whole executed graph, it can check what specialist tools assume: which layer feeds which, how often a layer fires, which grid an input carries. Each instance below is copy only when an executed test compares it with an independent reference; the rest are pending.",
+      "allowed_public_wording": "\"Because TorchLens records the whole executed graph, it does specialist jobs with checks they cannot run: the default logit lens is validated against the model's own output; Grad-CAM refuses, typed, on a reused layer or an ambiguous grid; a module named by its path resolves at every call site; Patchscopes-style patching across layers and positions matches a hand-written torch patch; and an early-stopped rerun keeps exact values and gradients.\" Only backed instances; no speed claim for early stop.",
+      "narrowed_scope_wording": "Name one backed instance with its test.",
+      "limitation_wording": "TorchLens records the whole executed graph; specialist checks are documented per feature.",
+      "required_credit": "the specialist tools each instance improves on, by name, where the instance is shown",
+      "evidence_refs": [
+        "run 01a13b4a-e636-7e2d-a758-6d26b49e823c (90 passed, 0 skipped, pinned env, 2026-10-14)"
+      ],
+      "scenario_ids": [],
+      "tl_side_gates": [],
+      "instances": [
+        {
+          "instance": "logit lens",
+          "phrase": "logit lens",
+          "status": "backed",
+          "claim": "The default logit lens is validated against the model's own output, not assumed.",
+          "evidence": [
+            "tests/test_vision_logit_lens.py::test_vit_classifier_default_lens_is_validated_and_ends_at_the_logits",
+            "tests/semantic/test_logit_lens.py::test_logit_lens_validates_and_matches_real_logits_layer_norm",
+            "tests/semantic/test_logit_lens.py::test_logit_lens_validates_rms_norm_and_head_bias",
+            "tests/test_sem_recon_logit_lens.py::test_sliced_capture_validates_and_projects"
+          ]
+        },
+        {
+          "instance": "Grad-CAM refusals",
+          "phrase": "reused layer",
+          "status": "backed",
+          "claim": "Grad-CAM refuses, typed, on a layer that fires more than once and on inputs that feed it different grids, because the trace shows both.",
+          "evidence": [
+            "tests/test_rf_attribution_hardening.py::test_grad_cam_rejects_multi_fire_layer_with_typed_error",
+            "tests/test_rf_attribution_hardening.py::test_grad_cam_heterogeneous_double_feed_raises_typed_ambiguity",
+            "tests/test_rf_attribution_hardening.py::test_grad_cam_same_grid_double_feed_is_unambiguous"
+          ]
+        },
+        {
+          "instance": "module-name lookup",
+          "phrase": "call site",
+          "status": "backed",
+          "claim": "A module named by its path resolves at every call site of a shared module, and an alias spelling refuses with one code at every door.",
+          "evidence": [
+            "tests/test_module_alias_doors.py::test_canonical_spelling_fires_at_every_call_site",
+            "tests/test_module_alias_doors.py::test_alias_spelling_refuses_with_one_code_and_message_at_every_door"
+          ]
+        },
+        {
+          "instance": "Patchscopes cross-site patching",
+          "phrase": "Patchscopes",
+          "status": "backed",
+          "claim": "Patching from a source site to a different target layer and position matches a hand-written torch hook patch.",
+          "evidence": [
+            "tests/test_interv_patchscopes.py::test_mapping_matches_plain_torch",
+            "tests/test_interv_patchscopes.py::test_source_site_by_label"
+          ]
+        },
+        {
+          "instance": "early stop on rerun (correctness)",
+          "phrase": "early-stopped rerun",
+          "status": "backed",
+          "claim": "run(until=...) skips everything downstream of the cut; kept values equal the full run and gradients equal a hand-truncated eager model.",
+          "evidence": [
+            "tests/test_fast_until.py::test_resnet18_until_fast_gradients_equal_hand_truncated_eager",
+            "tests/test_run_until_projection_cost.py::test_until_values_match_the_full_run"
+          ]
+        },
+        {
+          "instance": "early stop on rerun (time saved)",
+          "phrase": "saves time",
+          "status": "pending",
+          "claim": "Early stop saves time against a full forward.",
+          "evidence": [],
+          "pending_on": "a quiet-host wall-clock measurement; the last measurement found until= cost more than a full plain forward"
+        },
+        {
+          "instance": "ViT Grad-CAM token grid",
+          "phrase": "token grid",
+          "status": "pending",
+          "claim": "Grad-CAM on a vision transformer derives its token grid from the trace.",
+          "evidence": [],
+          "pending_on": "the feature and an executed test; no test exists"
+        },
+        {
+          "instance": "verified attribution graphs",
+          "phrase": "attribution graph",
+          "status": "pending",
+          "claim": "Verified attribution graphs on any model.",
+          "evidence": [],
+          "pending_on": "the native attribution-graph work and a parity test; not built"
+        },
+        {
+          "instance": "frozen norms checked bit-exact",
+          "phrase": "frozen norm",
+          "status": "pending",
+          "claim": "Frozen norms are checked bit-exact.",
+          "evidence": [],
+          "pending_on": "an executed test against an independent reference; today's bit-exact check compares with TorchLens's own unfrozen run, and the TransformerLens norm-scale oracle needs transformer_lens, absent from the pinned environment"
+        }
+      ],
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "claim-7-tier-compatibility-promise",
+      "competitor": "none (self-claim; a public compatibility promise)",
+      "version_range": "from the launch release",
+      "neutral_fact": "At launch the tier vocabulary is a public compatibility promise: core names are compatibility-guarded; open-class names are additive-only (members may be added, never removed or retyped); experimental names carry no compatibility promise. The stability column exists independently of the tier, and a provisional row makes no stronger promise. Today the frozen root surface table records a product role per public name and new names ship documented-unstable; the open-class and experimental labels are not yet attached to names in code or docs.",
+      "allowed_public_wording": "\"Core names are compatibility-guarded. Open-class names are additive-only: members are added, never removed or retyped. Experimental names carry no compatibility promise.\"",
+      "narrowed_scope_wording": "While gate-tier-vocabulary-published is open: \"Names marked documented-unstable may change before the launch release.\"",
+      "limitation_wording": "Compatibility changes are listed in the changelog.",
+      "required_credit": null,
+      "evidence_refs": [
+        "torchlens/_surface.py (product_role per root name)",
+        "tests/test_arch_spine_surface_table.tsv (frozen root surface table)",
+        "maintainer review record (private)"
+      ],
+      "scenario_ids": [],
+      "tl_side_gates": [
+        "gate-tier-vocabulary-published"
+      ],
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    }
+  ],
+  "lints": [
+    {
+      "id": "perf-no-single-multiplier",
+      "competitor": "none (self-claim; binds all comparative perf copy against any peer)",
+      "neutral_fact": "Measured tl.trace overhead spans 13.78x plain forward (resnet18, CPU, warm) and 14.77x (gpt2_hf, CPU) to ~50-60x warm plus ~3s cold on a small CPU transformer. Fixed per-call overhead dominates small models; no single multiplier characterizes the engine. The metadata-only path saves memory, not time.",
+      "allowed_public_wording": "Quote the benchmarked table row(s), each number carrying (model, device, N/warmup) from its benchmark artifact; when overhead is discussed, note that the metadata-only path saves memory, not time.",
+      "narrowed_scope_wording": "tl.trace overhead measured 13.78x on resnet18 (CPU, warm) and 14.77x on gpt2_hf (CPU); small models pay proportionally more because fixed per-call overhead dominates.",
+      "limitation_wording": "Trace overhead is model- and device-dependent; see the benchmark table. (No multiplier in copy.)",
+      "required_credit": null,
+      "evidence_refs": [
+        "maintainer review record (private)",
+        "docs/_perf_numbers.md",
+        "A01-r2 measurement"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL any sentence publishing a single '<N>x' overhead multiplier as 'the' overhead; FAIL any multiplier not traceable to a benchmark artifact carrying (model, device, N). Also enforces N2: no number without surface/device/model/n and the query that produced it.",
+      "last_verified": "2026-08-20",
+      "owner": "maintainers"
+    },
+    {
+      "id": "perf-fastlog-attribution",
+      "competitor": "none (self-claim)",
+      "neutral_fact": "The 0.83-0.84x-of-plain-forward numbers are FASTLOG halt runs (fastlog_halt_25), measured CPU-only. tl.trace measured 13.78-14.77x (CPU). GPU fastlog-halt measured 4.9-10.4x. Attributing the sub-1x number to tl.trace or to GPU is false.",
+      "allowed_public_wording": "'fastlog with an op-shaped halt (fastlog_halt_25) reached 0.83-0.84x plain forward on CPU' -- engine and device always named alongside the number.",
+      "narrowed_scope_wording": "If engine and device cannot ride with the number, drop the number: 'a capture mode faster than the plain forward exists on CPU via fastlog.'",
+      "limitation_wording": "Sub-forward-cost capture is available in a restricted mode; see the benchmark table.",
+      "required_credit": null,
+      "evidence_refs": [
+        "maintainer review record (private)",
+        "A17-r2 (GPU fastlog-halt 4.9-10.4x)",
+        "docs/_perf_numbers.md"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL any attribution of a sub-1x (0.8x-class) number to tl.trace or to GPU; FAIL any 'faster than the forward pass' copy without engine=fastlog and device=CPU attached. Cross-check with halt-selector-shape.",
+      "last_verified": "2026-08-20",
+      "owner": "maintainers"
+    },
+    {
+      "id": "episode-capture-caveats",
+      "competitor": "none (self-claim)",
+      "neutral_fact": "Episode capture is (1) a semi-private surface, (2) refused by non-torch backends, and (3) its per-step logits depend on save policy. All three limits are load-bearing for any capability claim built on it.",
+      "allowed_public_wording": "Any episode-capture claim carries all three caveats verbatim-in-substance: semi-private surface; non-torch backends refuse; per-step logits depend on save policy.",
+      "narrowed_scope_wording": "Episode capture exists behind a semi-private surface with the above limits; it is not yet a supported public engine.",
+      "limitation_wording": "No episode-capture-based capability claims.",
+      "required_credit": null,
+      "evidence_refs": [
+        "maintainer review record (private)",
+        "A13-r2"
+      ],
+      "tl_side_gates": [
+        "promotion of the episode surface to public API -- until it ships, the caveated wording is the ceiling"
+      ],
+      "lint": "While the promotion gate is open, FAIL any episode-capture claim missing any one of the three caveats.",
+      "last_verified": "2026-08-20",
+      "owner": "maintainers"
+    },
+    {
+      "id": "menagerie-phrasing",
+      "competitor": "none (self-claim about the menagerie catalog)",
+      "neutral_fact": "The menagerie README's own claim is '11,600+ cataloged, ~89% algorithmically verified'. Some summaries compressed this to 'verified entries' -- an overclaim, since corrected.",
+      "allowed_public_wording": "The approved hedge: 'verified on thousands of models across all major architecture families'; the current menagerie counts may be stated (over 6,600 networks in the Model Menagerie, more than 6,300 of them verified with tl.validate; JMT's current Menagerie counts, recorded 2026-11-04 and 2026-11-05).",
+      "narrowed_scope_wording": "none -- the hedge is the ceiling; no percentage paraphrase is approved.",
+      "limitation_wording": "State the menagerie catalog counts with their measurement date; never a verification percentage until the campaign closes (the verification ledger is not in the public checkout, so no percentage is reproducible from the tree).",
+      "required_credit": null,
+      "evidence_refs": [
+        "maintainer review record (private)",
+        "A03-r2 correction"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL any menagerie verification percentage (the retired '~89%' / '11,600+' figures included) and compressions of the class '11,600 verified' / 'verified entries'; catalog counts must carry their measurement date.",
+      "last_verified": "2026-08-20",
+      "owner": "maintainers"
+    },
+    {
+      "id": "macs-unit-suffix",
+      "competitor": "none (self-claim; unit confusion is the most-reported issue class across FLOPs-counter competitors)",
+      "neutral_fact": "total_macs_forward is rendered through _human_flops and prints a FLOPs suffix ('718.9 MFLOPs') at _builder.py:1214-1215 (also 1386, 1401, 1526; README.md:122), with the FLOPs//2 disclosure line adjacent. MAC records must never render with a FLOPs suffix.",
+      "allowed_public_wording": "(post-fix) MAC quantities carry MAC units; FLOPs quantities carry FLOPs units; compute magnitude is stated via the two-term compute record (A07's vocabulary).",
+      "narrowed_scope_wording": "(gate open) Compute magnitudes are quoted from the raw field (total_macs_forward, unit: MACs), never from the rendered string; the rendering defect is named when the rendered output is shown.",
+      "limitation_wording": "No compute-magnitude numbers quoted from rendered summaries until the A07 fix merges.",
+      "required_credit": null,
+      "evidence_refs": [
+        "maintainer review record (private)",
+        "s2a bug 2",
+        "_builder.py:1214-1215,1386,1401,1526",
+        "README.md:122"
+      ],
+      "tl_side_gates": [
+        "A07 merge (two-term compute record) -- while open, wording degrades per D6"
+      ],
+      "lint": "FAIL any rendering, doc, or dossier line where a MAC-derived quantity carries a FLOPs suffix; after the A07 merge, FAIL any quotation of the old mislabeled rendered strings.",
+      "last_verified": "2026-08-20",
+      "owner": "maintainers"
+    },
+    {
+      "id": "timing-uniqueness-scope",
+      "competitor": "DeepSpeed (flops profiler, current release) -- the standing counterexample",
+      "neutral_fact": "'No competitor has timing' is true only within summary tools; DeepSpeed's profiler prints per-module latency. Family absolutes about timing are false unscoped.",
+      "allowed_public_wording": "'Among summary tools, torchlens is the only one with per-module measured timing' -- the summary-tools scope always attached -- plus the required credit.",
+      "narrowed_scope_wording": "Drop uniqueness: 'torchlens reports per-module measured timing.'",
+      "limitation_wording": "No uniqueness claim about timing.",
+      "required_credit": "DeepSpeed's flops profiler prints per-module latency.",
+      "evidence_refs": [
+        "maintainer review record (private)",
+        "A01 row 37",
+        "A18"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL 'no competitor has timing' or any timing family-absolute lacking the summary-tools scope; FAIL the scoped claim when the DeepSpeed credit is absent (credit-required class; never a family absolute -- say the precise thing).",
+      "last_verified": "2026-08-20",
+      "owner": "maintainers"
+    },
+    {
+      "id": "halt-selector-shape",
+      "competitor": "none (self-claim)",
+      "neutral_fact": "halt= exists as a shipped tl.trace kwarg, but inclusive save-then-halt semantics work only for op-shaped selectors on the fastlog engine. Module-shaped selectors are broken: halt=tl.module matches zero sites (silent full forward); tl.in_module halts EXCLUSIVE of the requested site; pluck's stop_after and experimental.stop_after are silently discarded no-ops. The inclusive primitive exists internally, unexposed (_runnable/transaction.py:819-1023).",
+      "allowed_public_wording": "(current) halt= claims split by selector shape: 'op-shaped halt works on fastlog (0.83-0.84x plain forward, CPU); module-shaped halt is broken.'",
+      "narrowed_scope_wording": "Claim only the working half: op-shaped halt on fastlog, with perf-fastlog-attribution's rules on any number.",
+      "limitation_wording": "No early-halt capability claims.",
+      "required_credit": null,
+      "evidence_refs": [
+        "maintainer review record (private)",
+        "s2a bug 6",
+        "_runnable/transaction.py:819-1023"
+      ],
+      "tl_side_gates": [
+        "s2a bug 6 fix (halt/stop_after cleanup) -- while open, module-shaped copy renders only as the limitation wording"
+      ],
+      "lint": "FAIL any unqualified 'halt= works' / 'stop_after works' claim; require the op-shaped/module-shaped split in every halt claim; cross-check engine and device attribution against perf-fastlog-attribution.",
+      "scope_note": "Refinement (2026-08-26, CHECK-T00 fix cycle): the split requirement binds CAPABILITY claims (sentences asserting halt/stop_after WORKS). A DEFECT report (an underclaim) does not fail the lint for lacking the split, though it should still name the selector shape where known.",
+      "last_verified": "2026-08-20 (adjudication); refinement 2026-08-26",
+      "owner": "maintainers"
+    },
+    {
+      "id": "attribution-self-check-scope",
+      "competitor": "none (self-claim; binds all attribution copy)",
+      "neutral_fact": "Of the 8 shipped torchlens attribution method spellings, exactly ONE (integrated_gradients) emits attribution_sum / target_delta / completeness_residual. saliency, input_x_grad, smoothgrad, grad_cam, layer_attribution, layer_conductance and layer_integrated_gradients emit none. Code: torchlens/attribution/_core.py:1001-1013 (sole emit site).",
+      "allowed_public_wording": "'TorchLens's integrated gradients always reports its own completeness check (attribution sum vs target delta, and the residual between them).' Method named, never generalized.",
+      "narrowed_scope_wording": "'our path-integral attribution discloses its convergence residual.'",
+      "limitation_wording": "No self-check claim.",
+      "required_credit": null,
+      "evidence_refs": [
+        "CHECK-P block4 section 5",
+        "torchlens/attribution/_core.py:1001-1013 at f74e4a9e"
+      ],
+      "tl_side_gates": [
+        "none today; re-verify the method list at F06 merge -- if more methods gain the triple, the neutral fact updates by evidence, never silently"
+      ],
+      "lint": "FAIL any UNSCOPED/generalized completeness or self-check phrasing -- 'every result', 'all our methods', or any always-on claim that does not name the method in the same breath (an IG-scoped 'always-on' that names integrated_gradients PASSES); FAIL any attribution self-check claim that does not name integrated_gradients.",
+      "last_verified": "2026-08-26",
+      "owner": "maintainers"
+    },
+    {
+      "id": "attention-picture-scope",
+      "competitor": "none (self-claim; binds all attention-picture copy in both directions)",
+      "neutral_fact": "The per-head pattern FACET is unavailable on every family tested (5 of 5: gpt2, bert, distilbert, Qwen2.5-0.5B, gemma-3-1b -- KeyError). On an EAGER-attention load, tl.trace(save=tl.func('softmax')) captures the per-head pattern bitwise-identically to HF output_attentions (max abs diff 0.000e+00 across all 12 gpt2 layers) and renders end to end through render_heatmap. On the DEFAULT fused sdpa load, 0 softmax ops are captured -- nothing carries the pattern.",
+      "allowed_public_wording": "Any can/cannot-draw-an-attention-pattern claim names BOTH the attention implementation (eager vs fused/sdpa) and the route (facet vs captured op). Note where relevant that requiring eager is the same reconfiguration BertViz and CircuitsVis require.",
+      "narrowed_scope_wording": "On an eager-attention load, TorchLens captures and renders the per-head pattern today; the default fused load waits on A01.",
+      "limitation_wording": "No attention-picture capability or incapability claims.",
+      "required_credit": null,
+      "evidence_refs": [
+        "checks/block3.md refutation row 1",
+        "probe R2b",
+        "probe R8"
+      ],
+      "tl_side_gates": [
+        "A01 merge (pattern facets / fused read) -- the eager-scoped wording is legal NOW; unscoped wording is never legal"
+      ],
+      "lint": "FAIL any claim that TorchLens can or cannot draw an attention pattern that does not name the attention implementation (eager vs fused) and the route (facet vs captured op).",
+      "last_verified": "2026-08-26",
+      "owner": "maintainers"
+    },
+    {
+      "id": "halt-module-selector-named",
+      "competitor": "none (self-claim; extends halt-selector-shape)",
+      "neutral_fact": "The two module-shaped halt selectors behave differently at f74e4a9e: halt=tl.module matches ZERO sites (warning + full 542-op forward on gpt2), while halt=tl.in_module('transformer.h.2') HALTS at 99 of 542 ops, EXCLUSIVE of the requested site.",
+      "allowed_public_wording": "Module-halt claims name WHICH module-shaped selector and its inclusive/exclusive behavior.",
+      "narrowed_scope_wording": "'TorchLens stops early at a module region today (in_module, exclusive of the requested site); inclusive named-module stop is A06.'",
+      "limitation_wording": "No module-halt claims (halt-selector-shape's limitation wording).",
+      "required_credit": null,
+      "evidence_refs": [
+        "checks/block3.md refutation rows 5-6",
+        "probe R3",
+        "halt-selector-shape neutral fact"
+      ],
+      "tl_side_gates": [
+        "A06 merge (halt/stop_after reconciliation) -- while open, selector-named wording is the ceiling"
+      ],
+      "lint": "FAIL any module-halt claim that does not name WHICH module-shaped selector, since tl.module matches zero sites while tl.in_module halts exclusive of the requested site. Cross-check with halt-selector-shape.",
+      "last_verified": "2026-08-26",
+      "owner": "maintainers"
+    },
+    {
+      "id": "public-spelling-disclosure",
+      "competitor": "none (self-claim; binds all capability copy)",
+      "neutral_fact": "Several capability claims rest on spellings absent from tl.__all__ (torchlens.viz.node_plots.render_heatmap, torchlens.viz.causal_trace_heatmap, torchlens.semantic.logit_lens) or on spellings that emit deprecation warnings pointing elsewhere (tl.save_intervention, tl.load_intervention_spec, tl.check_spec_compat -> tl.io.* / tl.validation.*).",
+      "allowed_public_wording": "A capability claim resting on a non-exported or deprecated spelling says so, or uses the public/current spelling.",
+      "narrowed_scope_wording": "Name the module path explicitly and mark it 'not yet public API'.",
+      "limitation_wording": "No capability claim on that surface.",
+      "required_credit": null,
+      "evidence_refs": [
+        "checks/block3.md refutation rows 8, 15"
+      ],
+      "tl_side_gates": [
+        "export/promotion of the named spellings (owners: F07 viz, A03 logit_lens, the io/validation rename owner) -- while open, disclosure wording is mandatory"
+      ],
+      "lint": "FAIL any capability claim whose spelling is absent from tl.__all__ or emits a deprecation warning, unless the claim says so.",
+      "last_verified": "2026-08-26",
+      "owner": "maintainers"
+    },
+    {
+      "id": "provenance-scope-matches-number",
+      "competitor": "none (self-claim; binds every attached provenance query in dossiers and launch copy)",
+      "neutral_fact": "An attached provenance query is only a receipt if executing its stated scope literally reproduces the number it labels.",
+      "allowed_public_wording": "A published number carries a query whose stated scope, executed literally, reproduces that number; any wider or narrower universe's delta is stated separately.",
+      "narrowed_scope_wording": "State the executed scope and the number it actually produces; mark the labelled number's universe explicitly (floor/ceiling).",
+      "limitation_wording": "No attached-query claim for that number.",
+      "required_credit": null,
+      "evidence_refs": [
+        "checks/closings.md RECHECK 1 section 2; RECHECK 2 section 3 (origin instance repaired, kept as the worked example)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL any attached query whose stated scope, executed literally, yields a different number than the one it labels.",
+      "last_verified": "2026-08-26",
+      "owner": "maintainers"
+    },
+    {
+      "id": "flops-name-both-conventions",
+      "competitor": "fvcore; thop; ptflops; calflops; DeepSpeed flops profiler; torch.utils.flop_counter.FlopCounterMode (and Lightning ModelSummary, which reports it)",
+      "neutral_fact": "FLOP counters disagree by convention, not by error. TorchLens counts every executed op (matmul family plus elementwise, normalization, softmax, and attention terms) under a named FMA convention (fma=2 by default); FlopCounterMode and the counters built on it count the matmul family only. On the same GPT-2 (124M, sequence 16, CPU) TorchLens reports 3,974,725,648 forward FLOPs (fma=2) against FlopCounterMode's 3,962,462,208 (eager attention) or 3,953,025,024 (SDPA path); the 12,263,440 gap is the elementwise terms. An earlier 5.21 GFLOPs TorchLens reading set beside 4.0 GFLOPs from FlopCounterMode included a since-fixed double count of the tied lm_head matmul, and showed how an unlabeled comparison misleads.",
+      "allowed_public_wording": "Every cross-tool FLOP number names both conventions: TorchLens counts every executed op under fma=2 (one MAC = 2 FLOPs); <tool> counts <its convention>. tl.report.flops_vs_dispatch runs both on the same model and input.",
+      "narrowed_scope_wording": "Quote one tool's number with its own convention named, without the comparison.",
+      "limitation_wording": "No cross-tool FLOP comparison in copy.",
+      "required_credit": null,
+      "evidence_refs": [
+        "maintainer review record (private)",
+        "tests/test_summary_rebuild_pins.py::test_gpt2_flagship_pins (3,974,725,648 at T=16)",
+        "torchlens/debug/_flops_vs_dispatch.py (side-by-side dispatch-counter comparison)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL any sentence or table that compares a TorchLens FLOP figure with another tool's figure unless both counting conventions are named beside the numbers (which ops each counts and the FMA convention); FAIL any 'more accurate' framing of a convention difference.",
+      "last_verified": "2026-10-11",
+      "owner": "maintainers"
+    },
+    {
+      "id": "torchview-yolov8-retired",
+      "competitor": "torchview",
+      "neutral_fact": "torchview issue #63 (YOLOv8 from Ultralytics) was closed as completed on 2023-01-15; the 'torchview fails on YOLOv8' story is stale. The current contrast is that torchview raises a KeyError on Hugging Face decoders under its default settings.",
+      "allowed_public_wording": "Use the Hugging Face decoder contrast: 'torchview raises a KeyError on Hugging Face decoders under its default settings', with the torchview version named.",
+      "narrowed_scope_wording": "Name the torchview version and the decoder model the contrast was measured on.",
+      "limitation_wording": "No torchview failure claim.",
+      "required_credit": "torchview's graph drawing for module-level structure.",
+      "evidence_refs": [
+        "github.com/mert-kurttutan/torchview/issues/63 (closed 2023-01-15)",
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL any sentence pairing torchview with YOLO or with issue #63.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "torchview[^.]{0,120}\\byolo(?:v?\\d+\\w*)?\\b|\\byolo(?:v?\\d+\\w*)?\\b[^.]{0,120}torchview"
+          },
+          {
+            "forbid": "torchview[^.]{0,80}#\\s?63\\b"
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "tlens-verified-count-context",
+      "competitor": "TransformerLens",
+      "neutral_fact": "TransformerLens publishes '1,205 of 15,670 verified' for its own check over its own model set (Hugging Face checkpoints compared on logits). TorchLens model-zoo numbers count a different check (op-by-op replay and metadata invariants) over a different set (the menagerie catalog and the classics corpus). Side by side without both named, the two read as one scale.",
+      "allowed_public_wording": "Quote either figure with its check and model set named; if both appear together, name both checks and both model sets in the same paragraph.",
+      "narrowed_scope_wording": "Quote the TorchLens figure alone, with its check and model set.",
+      "limitation_wording": "No side-by-side verification counts.",
+      "required_credit": null,
+      "evidence_refs": [
+        "TransformerLens README and model-properties table",
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL '1,205 of 15,670' beside any TorchLens count unless the paragraph names both checks and both model sets.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "\\b1,?205\\b[^.]{0,40}\\b15,?670\\b",
+            "require": [
+              "TransformerLens[^.]*\\bcheck",
+              "TorchLens[^.]*\\b(check|replay)",
+              "model sets?"
+            ]
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "baukit-license-wording",
+      "competitor": "baukit",
+      "neutral_fact": "baukit has no license file; its setup file declares MIT. 'Unlicensed' misstates that.",
+      "allowed_public_wording": "'baukit has no license file (its setup file declares MIT)'; TorchLens takes ideas and vocabulary only.",
+      "narrowed_scope_wording": "'baukit has no license file.'",
+      "limitation_wording": "Credit baukit's ideas without a license statement.",
+      "required_credit": "baukit (David Bau): edit_output and the Trace/TraceDict vocabulary.",
+      "evidence_refs": [
+        "github.com/davidbau/baukit (setup.cfg declares MIT; no LICENSE file)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL any sentence calling baukit unlicensed.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "baukit[^.]{0,80}\\bunlicen[sc]ed\\b|\\bunlicen[sc]ed\\b[^.]{0,80}baukit"
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "deepjuice-dependency-scope",
+      "competitor": "DeepJuice; Net2Brain",
+      "neutral_fact": "DeepJuice lists TorchLens as a dependency; nothing measured shows more. No GPU or speed parity with DeepJuice was measured. The Net2Brain duplicate-RDM finding (ReLU layers yielding duplicate pairs, measured on an August release) must be re-run on Net2Brain's newest release before any copy cites it.",
+      "allowed_public_wording": "'DeepJuice lists TorchLens as a dependency.'",
+      "narrowed_scope_wording": "Name DeepJuice as a downstream project without describing how it uses TorchLens.",
+      "limitation_wording": "No DeepJuice or Net2Brain claims.",
+      "required_credit": null,
+      "evidence_refs": [
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [
+        "re-run of the duplicate-pair check on the newest Net2Brain release (blocks citing the finding)"
+      ],
+      "lint": "FAIL 'DeepJuice uses TorchLens' and its variants; FAIL any GPU or speed parity claim with DeepJuice; FAIL any citation of the Net2Brain duplicate-RDM finding while its gate is open.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "deep\\s?juice\\s+(uses|is built on|builds on|runs on|relies on|is powered by)\\s+torchlens"
+          },
+          {
+            "forbid": "(gpu|speed|performance)[^.]{0,40}\\bparity\\b[^.]{0,60}deep\\s?juice|deep\\s?juice[^.]{0,80}(gpu|speed|performance)[^.]{0,20}\\bparity\\b"
+          },
+          {
+            "forbid": "net2brain[^.]{0,160}\\b(duplicate|identical)\\b[^.]{0,60}\\b(rdms?|pairs?)\\b"
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "rsa-brainscore-destinations",
+      "competitor": "rsatoolbox; Brain-Score",
+      "neutral_fact": "rsatoolbox and Brain-Score are destinations TorchLens feeds: TorchLens exports activations and RDMs to them. TorchLens does not run Brain-Score, and no RSA parity with rsatoolbox is claimed.",
+      "allowed_public_wording": "'TorchLens hands activations and RDMs to rsatoolbox and Brain-Score.'",
+      "narrowed_scope_wording": "Name the export path to each destination without comparing results.",
+      "limitation_wording": "No rsatoolbox or Brain-Score claims.",
+      "required_credit": "rsatoolbox (RSA methods); Brain-Score (benchmarks and leaderboard).",
+      "evidence_refs": [
+        "docs/reference/brain_benchmarking_seam.md",
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL 'TorchLens runs Brain-Score' and any RSA parity claim with rsatoolbox.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "torchlens\\s+(runs|executes|replaces|implements|reimplements)\\s+(the\\s+)?brain-?score"
+          },
+          {
+            "forbid": "\\brsa\\b[^.]{0,30}\\bparity\\b|\\bparity\\b[^.]{0,40}\\brsa\\s?toolbox\\b|\\brsa\\s?toolbox\\b[^.]{0,40}\\bparity\\b",
+            "require": [
+              "\\b(no|never|not)\\s+(a\\s+)?(claim\\s+of\\s+|claims?\\s+)?parity\\b|\\bmake\\s+no\\s+claim\\s+of\\s+parity\\b"
+            ]
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "torchsnooper-not-snoop",
+      "competitor": "torchsnooper; snoop",
+      "neutral_fact": "torchsnooper is unmaintained (last release 0.8, 2019-12-31). snoop is active (0.6.1, 2026-07-18). Measured torchsnooper overhead spanned 32 to 389 times the plain forward, so no single multiplier describes it.",
+      "allowed_public_wording": "'torchsnooper is unmaintained; snoop is active.' Overhead, if quoted, as the measured range with model and session.",
+      "narrowed_scope_wording": "Call torchsnooper unmaintained without numbers.",
+      "limitation_wording": "No torchsnooper or snoop claims.",
+      "required_credit": "snoop's line tracing.",
+      "evidence_refs": [
+        "docs/migration/coming_from_torchsnooper.md",
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL any sentence calling snoop (not torchsnooper) dead or unmaintained; FAIL a single overhead multiplier in a torchsnooper or snoop paragraph.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "\\bsnoop\\b\\s+(is|was|has\\s+been|looks|seems|went)\\s+(now\\s+)?(dead|abandoned|unmaintained|archived|inactive)\\b|\\b(dead|abandoned|unmaintained|archived|inactive)\\s+snoop\\b"
+          },
+          {
+            "context": "torchsnooper|pysnooper|\\bsnoop\\s+(package|library|\\d)",
+            "forbid": "(?<!to )(?<!-)(?<![\\d.])\\b\\d+(?:\\.\\d+)?\\s?(?:x|×|times)\\b(?!\\s*(?:to|-|–)\\s*\\d)"
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "torcheck-no-superiority",
+      "competitor": "torcheck",
+      "neutral_fact": "torcheck (1.0.1, 2021) checks training steps. No executed test yet shows the TorchLens checks registry catching torcheck's own bug fixtures, and step-overhead numbers so far came from busy-machine measurements.",
+      "allowed_public_wording": "Describe the mapping from torcheck's checks to registry rows, without comparison.",
+      "narrowed_scope_wording": "Name torcheck as prior art for training-step checks.",
+      "limitation_wording": "No torcheck claims.",
+      "required_credit": "torcheck's training-step checks.",
+      "evidence_refs": [
+        "docs/reference/checks_kit.md",
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [
+        "an executed test in which the registry catches torcheck's own bug fixtures (blocks superiority copy)",
+        "a quiet-host step-overhead measurement (blocks any overhead rate)"
+      ],
+      "lint": "FAIL any superiority claim over torcheck while its gate is open; FAIL any step-overhead rate in a torcheck paragraph.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "context": "torcheck",
+            "forbid": "\\b(better|superior|outperform\\w*|beats?|stronger|catch(es)? more|more (thorough|complete|reliable|robust))\\b"
+          },
+          {
+            "context": "torcheck",
+            "forbid": "overhead[^.]{0,40}\\d|\\d+(\\.\\d+)?\\s?(x|%|ms)\\b[^.]{0,30}overhead"
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "torchexplorer-breakage-scope",
+      "competitor": "torchexplorer",
+      "neutral_fact": "torchexplorer (1.1.2, 2023-12-30) crashes in two proven classes: in-place models on its default settings (resnet18) and transformer models called with keyword arguments (GPT-2, training step). Nothing shows a blanket failure.",
+      "allowed_public_wording": "Scope any breakage sentence to the two classes: 'torchexplorer crashes on in-place models under its default settings and on transformer models called with keyword arguments.'",
+      "narrowed_scope_wording": "Name one proven class with its model.",
+      "limitation_wording": "No torchexplorer breakage claim.",
+      "required_credit": "torchexplorer's interactive training-time view.",
+      "evidence_refs": [
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL any 'torchexplorer is broken' sentence that does not name both crash-proven classes.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "torch-?explorer[^.]{0,60}\\b(is broken|breaks|fails|crashes|is dead|does ?n[o']t work)\\b|\\b(broken|crash\\w*|fails?)\\b[^.]{0,30}torch-?explorer",
+            "require": [
+              "in-place",
+              "transformer|keyword[- ]argument"
+            ]
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "three-dashboards-retired",
+      "competitor": "TensorBoard; wandb; ClearML",
+      "neutral_fact": "The tracker story is one engine, two first-party sinks, and documented relays with a measured fidelity table. The wandb and ClearML relays were measured breaking the contract in different ways, so 'one emission lands in three dashboards' is false.",
+      "allowed_public_wording": "'One engine, two first-party sinks, documented relays with a measured fidelity table.'",
+      "narrowed_scope_wording": "Name the first-party sinks only.",
+      "limitation_wording": "No multi-dashboard claim.",
+      "required_credit": null,
+      "evidence_refs": [
+        "docs/reference/trackers.md",
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL 'three dashboards' and any 'one emission lands in every dashboard' phrasing.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "\\b(three|3)\\s+dashboards\\b"
+          },
+          {
+            "forbid": "\\bone\\s+(tensorboard\\s+)?emission\\b[^.]{0,80}\\b(three|3|every|all)\\b|\\bsingle\\s+emission\\b[^.]{0,80}\\b(three|3|every|all)\\b"
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "tensorboard-feeds-not-beats",
+      "competitor": "TensorBoard",
+      "neutral_fact": "TorchLens feeds TensorBoard. Graph breakage on current Hugging Face models belongs to the stock torch add_graph path (TorchScript tracing), not to TensorBoard.",
+      "allowed_public_wording": "'TorchLens feeds TensorBoard'; breakage is attributed to 'the stock torch add_graph path'.",
+      "narrowed_scope_wording": "'TorchLens writes TensorBoard event files.'",
+      "limitation_wording": "No TensorBoard comparison.",
+      "required_credit": "TensorBoard as the display.",
+      "evidence_refs": [
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL any 'beats/replaces TensorBoard' sentence; FAIL graph breakage attributed to TensorBoard instead of the stock torch add_graph path.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "\\b(beats?|outperforms?|better than|superior to|replaces?)\\s+tensorboard\\b"
+          },
+          {
+            "forbid": "tensorboard('s)?\\s+(graph\\s+)?(view\\s+|tab\\s+)?(breaks|fails|crashes|is broken|chokes)\\b"
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "activation-watch-scope",
+      "competitor": "TensorBoard; wandb; Neptune",
+      "neutral_fact": "TensorBoard and stock wandb do not watch activations (wandb.watch logs parameters and gradients). Neptune's TorchWatcher did watch activations before the hosted service shut down in March 2026.",
+      "allowed_public_wording": "'TensorBoard and stock wandb do not watch activations; Neptune's TorchWatcher did.'",
+      "narrowed_scope_wording": "Name the tracker and version the statement was measured on.",
+      "limitation_wording": "No activation-watching comparison.",
+      "required_credit": "Neptune's TorchWatcher, by name.",
+      "evidence_refs": [
+        "docs/reference/trackers.md",
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL 'no tracker can watch activations' and its variants; FAIL a TensorBoard or wandb activation-watch sentence that does not credit Neptune's TorchWatcher.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "\\bno\\s+(other\\s+)?(experiment\\s+)?(tracker|logger|dashboard|tool)s?\\s+(can\\s+|could\\s+)?(watch|track|log|record)(e?s)?\\s+activations"
+          },
+          {
+            "forbid": "\\b(nobody|no one|no other tool)\\b[^.]{0,40}\\b(watch|track)\\w*\\s+activations"
+          },
+          {
+            "forbid": "(tensorboard|wandb|weights\\s?&\\s?biases|w&b)[^.]{0,80}\\b(do not|does not|don't|doesn't|cannot|can't|never)\\s+(watch|track|log)\\w*\\s+activations",
+            "require": [
+              "neptune"
+            ]
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "device-time-posture",
+      "competitor": "torch.utils.benchmark; profilers",
+      "neutral_fact": "The CUDA timing join has not run on a GPU, so TorchLens does not yet claim device time. Capture overhead varies by model, device and engine, so no single number describes it. The posture: locate with TorchLens, measure clean with torch's benchmark Timer.",
+      "allowed_public_wording": "'Locate with TorchLens, measure clean with torch's benchmark Timer.'",
+      "narrowed_scope_wording": "Report host-side timing with model, device and engine named.",
+      "limitation_wording": "No timing claim.",
+      "required_credit": "torch.utils.benchmark.Timer for clean measurement.",
+      "evidence_refs": [
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [
+        "an executed GPU run of the CUDA timing join (blocks any device-time claim)"
+      ],
+      "lint": "FAIL any claim that TorchLens measures device or kernel time while the GPU join is unrun; FAIL a single capture-overhead number.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "torchlens[^.]{0,60}\\b(measures?|reports?|reaches|gives?|captures?|records?)\\b[^.]{0,30}\\b(device|gpu|cuda|kernel)[- ](time|timing|duration)s?\\b",
+            "require": [
+              "\\b(not yet|unverified|has not|have not|until|pending|not been run|not run)\\b"
+            ]
+          },
+          {
+            "forbid": "\\bcapture\\s+overhead\\s+(is|of|was)\\s+(about\\s+|around\\s+|roughly\\s+|~)?\\b\\d+(?:\\.\\d+)?\\s?(?:x|×|times)\\b(?!\\s*(?:to|-|–)\\s*\\d)"
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "hidden-states-grain-not-access",
+      "competitor": "Hugging Face transformers (output_hidden_states)",
+      "neutral_fact": "output_hidden_states already gives access to block outputs (13 tensors on GPT-2). TorchLens adds grain (every operation) and uniformity (the same capture on any model), not access.",
+      "allowed_public_wording": "Claim grain and uniformity: 'every operation, the same way on any model'.",
+      "narrowed_scope_wording": "'TorchLens captures at operation grain.'",
+      "limitation_wording": "No output_hidden_states comparison.",
+      "required_credit": "output_hidden_states and output_attentions as the built-in route.",
+      "evidence_refs": [
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL 'TorchLens replaces output_hidden_states' and its variants.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "replac\\w*[^.]{0,40}output_hidden_states|output_hidden_states[^.]{0,40}\\b(obsolete|unnecessary|redundant|replaced)\\b"
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "replay-no-single-multiplier",
+      "competitor": "TransformerLens; nnsight",
+      "neutral_fact": "Record plus intervene measured about 28x to 42x native across three sessions, before the bind tier existed; no single multiplier describes it, and the bind tier is unmeasured. TransformerLens has an official partial forward (start_at_layer/stop_at_layer), so 'nobody else has replay' is false; the precise claim is a replay engine.",
+      "allowed_public_wording": "Quote the measured range with sessions named; claim the replay engine precisely (see claim-1-replay-engine).",
+      "narrowed_scope_wording": "Name the replay engine without cost numbers.",
+      "limitation_wording": "No replay cost claim.",
+      "required_credit": "TransformerLens partial forward.",
+      "evidence_refs": [
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [
+        "a bind-tier cost measurement (blocks any bind-tier cost claim)"
+      ],
+      "lint": "FAIL 'nobody else has replay'; FAIL a single multiplier for record plus intervene; FAIL any bind-tier cost number while its gate is open.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "\\b(nobody|no one|no other (tool|library|package|framework))\\b[^.]{0,30}\\b(else\\s+)?(has|have|offers?|ships?|provides?)\\s+(a\\s+)?replay\\b"
+          },
+          {
+            "forbid": "(record\\w*|captur\\w*)\\s+(plus|and|\\+|then)\\s+interven\\w*[^.]{0,80}?(?<!to )(?<!-)(?<![\\d.])\\b\\d+(?:\\.\\d+)?\\s?(?:x|×|times)\\b(?!\\s*(?:to|-|–)\\s*\\d)"
+          },
+          {
+            "forbid": "bind\\s+tier[^.]{0,80}\\b\\d+(\\.\\d+)?\\s?(x|%|times)\\b"
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "weightsfree-in-seconds",
+      "competitor": "none (self-claim)",
+      "neutral_fact": "Weights-free capture of an 8B-class transformer from its config takes about 8 to 15 seconds on CPU; one op-dense hybrid took over 400 seconds. There is no any-model-in-seconds promise.",
+      "allowed_public_wording": "'in about 15 seconds for 8B-class transformers'",
+      "narrowed_scope_wording": "Quote the measured time with the model class named.",
+      "limitation_wording": "No weights-free timing claim.",
+      "required_credit": null,
+      "evidence_refs": [
+        "docs/reference/weightsfree_capture.md",
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL bare 'in seconds' for weights-free capture.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "context": "weights?[- ]?free|no tensor values|without (loading )?(the )?weights|config-only",
+            "forbid": "\\bin\\s+(a\\s+few\\s+|mere\\s+|just\\s+|only\\s+)?seconds\\b"
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "weightsfree-launch-limits",
+      "competitor": "none (self-claim)",
+      "neutral_fact": "Weights-free capture is cheap, not free. transformers support is per version (see the README compatibility table), not a blanket 4.x claim. from_pretrained(device_map=\"meta\") waits for its offline test row. Weights-free capture builds a graph from a config; it does not run real 7B to 70B weights.",
+      "allowed_public_wording": "Quote the measured time; point to the per-version table; describe graph building from a config.",
+      "narrowed_scope_wording": "Describe weights-free capture without cost or version claims.",
+      "limitation_wording": "No weights-free launch claims.",
+      "required_credit": null,
+      "evidence_refs": [
+        "docs/reference/weightsfree_capture.md",
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [
+        "the device_map=\"meta\" offline test row (blocks advertising that route)"
+      ],
+      "lint": "FAIL 'zero cost'; FAIL a blanket 'works on transformers 4.x'; FAIL advertising device_map=\"meta\" while its row has not run; FAIL conflating weights-free capture with running real 7B to 70B weights.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "context": "weights?[- ]?free|meta[- ]device|no tensor values|config-only|structure-only",
+            "forbid": "\\bzero[- ]cost\\b",
+            "require": [
+              "\\bnever\\W{0,3}zero[- ]cost"
+            ]
+          },
+          {
+            "forbid": "\\bworks\\s+(on|with)\\s+(all\\s+|any\\s+)?transformers\\s+4(\\.x)?\\b"
+          },
+          {
+            "forbid": "device_map\\s*=\\s*['\\\"]?meta\\b",
+            "require": [
+              "\\b(not yet|waits?|waiting|pending|unverified|before its|untested|no test|only after)\\b"
+            ]
+          },
+          {
+            "context": "weights?[- ]?free|no tensor values|config-only",
+            "forbid": "\\b(run|runs|running|execute|executes)\\s+(real\\s+)?\\d{1,3}b(\\s+to\\s+\\d{1,3}b)?[- ]?(class\\s+)?(models?|weights|llms?)\\b"
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "agent-surface-scope",
+      "competitor": "nnsight",
+      "neutral_fact": "nnsight ships an agent surface (agent docs, an MCP server, an agent-evals harness). TorchLens's distinct claim is narrower: a read-only MCP and a structured view over saved artifacts. Agent outputs are budgeted by configuration; nothing guarantees a dump fits in a model's context.",
+      "allowed_public_wording": "'The first interpretability package with a read-only MCP and structured view over saved artifacts', in the same breath as nnsight's agent surface.",
+      "narrowed_scope_wording": "'TorchLens ships a read-only MCP over saved artifacts.'",
+      "limitation_wording": "No agent-surface priority claim.",
+      "required_credit": "nnsight's agent surface, by name.",
+      "evidence_refs": [
+        "docs/for-ai-agents.md",
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL 'first with any agent surface' unless the read-only MCP scope and nnsight are named; FAIL 'the dump fits in context'.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "\\bfirst\\b[^.]{0,60}\\b(with|to (ship|offer|have|provide))\\s+(an?\\s+|any\\s+)?(ai[- ])?(agent|llm|mcp)\\b",
+            "require": [
+              "read-only mcp",
+              "nnsight"
+            ]
+          },
+          {
+            "forbid": "\\b(dump|trace|export|json)\\b[^.]{0,40}\\bfits?\\s+in\\s+(the\\s+|a\\s+|an\\s+|your\\s+)?(model'?s?\\s+|llm'?s?\\s+|agent'?s?\\s+)?context\\b"
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "restricted-execution-milestone",
+      "competitor": "none (self-claim)",
+      "neutral_fact": "Counterfactual and restricted execution have no committed date or release; they ship when their gates pass (after the GPU and scale artifacts land and the schema freezes).",
+      "allowed_public_wording": "'Ships when its gates pass.'",
+      "narrowed_scope_wording": "'Not yet available.'",
+      "limitation_wording": "No restricted-execution claim.",
+      "required_credit": null,
+      "evidence_refs": [
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL 'committed milestone' wording and any dated or versioned promise for restricted or counterfactual execution.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "\\bcommitted\\b[^.]{0,40}\\b(restricted|counterfactual)[- ]execution\\b|\\b(restricted|counterfactual)[- ]execution\\b[^.]{0,40}\\bcommitted\\b"
+          },
+          {
+            "forbid": "\\b(restricted|counterfactual)[- ]execution\\b[^.]{0,80}\\b(ships?|lands?|arrives?|available|coming)\\s+(in|by|on|with)\\s+(q[1-4]|20\\d\\d|v?\\d+\\.\\d+|january|february|march|april|may|june|july|august|september|october|november|december|the next release)\\b"
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "menagerie-figure-collision",
+      "competitor": "none (self-claim about the menagerie catalog; extends menagerie-phrasing)",
+      "neutral_fact": "Current copy states the menagerie as 'over 6,600 networks' in the Model Menagerie, with 'more than 6,300 models' verified with tl.validate (JMT's current Menagerie counts: 6,300 recorded 2026-11-04; 6,600 networks recorded 2026-11-05, when the site showed 6,601); the hedge 'verified on thousands of models across all major architecture families' stays allowed. Older figures collide with them: a 100% or ~89% verification rate, 11,600+ or 11,670 entries, a 9,200-entry catalog, and the retired 2026-08-16 catalog pair (8,533 rows / 3,637 families, '8,500+ across ~3,600 families'), and the retired 2026-11-04 network count ('over 6,400 networks'). Released CHANGELOG sections keep their historical figures and are out of scope.",
+      "allowed_public_wording": "The hedge, or the current counts: 'over 6,600 networks' in the Model Menagerie and 'more than 6,300 models' verified.",
+      "narrowed_scope_wording": "The hedge alone.",
+      "limitation_wording": "No menagerie figures.",
+      "required_credit": null,
+      "evidence_refs": [
+        "README.md (menagerie paragraphs)",
+        "menagerie-phrasing"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL any verification percentage, any 10,000-11,999 figure, or any network, model, row, entry, architecture or family count other than the current pair (6,600 networks, 6,300 verified models), in a menagerie or catalog paragraph of current copy.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "context": "menagerie",
+            "forbid": "\\b\\d{1,3}(\\.\\d+)?\\s?%"
+          },
+          {
+            "context": "menagerie",
+            "forbid": "\\b1[01],\\d{3}\\+?"
+          },
+          {
+            "context": "menagerie",
+            "forbid": "(?<![\\d,])(?!6,[36]00\\b)\\d{1,2},\\d{3}\\+?\\s+(cataloged\\s+|catalog\\s+)?(rows|entries|architectures|models|families|networks)\\b"
+          }
+        ]
+      },
+      "last_verified": "2026-11-05",
+      "owner": "maintainers"
+    },
+    {
+      "id": "verified-capture-scope",
+      "competitor": "none (self-claim; binds all trust phrasing)",
+      "neutral_fact": "Op-by-op replay and metadata-invariant tripwires prove faithfulness for verified captures. Until the real-model gate is green, the claim covers verified captures only, and 'precludes silent wrong answers' stays false.",
+      "allowed_public_wording": "'proven, not assumed, for verified captures'",
+      "narrowed_scope_wording": "'each verified capture is replayed op by op against its own forward pass'",
+      "limitation_wording": "No faithfulness absolute.",
+      "required_credit": null,
+      "evidence_refs": [
+        "README.md",
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [
+        "the real-model gate (blocks unscoped faithfulness absolutes)"
+      ],
+      "lint": "FAIL 'proven, not assumed' unless it is scoped to verified captures in the same phrase; FAIL 'precludes silent wrong answers'.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "proven,?\\s+not\\s+assumed",
+            "require": [
+              "proven,?\\s+not\\s+assumed,?\\s+for\\s+(each\\s+|every\\s+)?verified\\s+captures?"
+            ]
+          },
+          {
+            "forbid": "precludes?\\s+silent\\s+wrong\\s+answers"
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "model-diagnostics-weights-caveat",
+      "competitor": "weightwatcher",
+      "neutral_fact": "TorchLens diagnoses activations and execution; it has no weight-side diagnostics such as weight spectra, which weightwatcher provides.",
+      "allowed_public_wording": "'the model-diagnostics tool' only with the weight-side caveat in the same paragraph.",
+      "narrowed_scope_wording": "'TorchLens diagnoses activations and execution.'",
+      "limitation_wording": "No model-diagnostics framing.",
+      "required_credit": "weightwatcher for weight-side diagnostics.",
+      "evidence_refs": [
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL 'the model-diagnostics tool' without the weight-side caveat.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "\\bthe\\s+model[- ]diagnostics?\\s+tool\\b",
+            "require": [
+              "weight[- ]side|weight spectra|weightwatcher"
+            ]
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "nnsight-matched-uniqueness",
+      "competitor": "nnsight (0.8)",
+      "neutral_fact": "nnsight 0.8 reaches operations inside a forward that have no module (.source), wraps diffusers pipelines with step iteration, and supports quantized models and VLMs. Uniqueness claims on those points are false; TorchLens's distinct claim is the full executed graph with metadata, replay and validation.",
+      "allowed_public_wording": "'TorchLens records the full executed graph of every operation', with nnsight's .source credited where operation access is discussed.",
+      "narrowed_scope_wording": "'TorchLens records every operation.'",
+      "limitation_wording": "No operation-access comparison with nnsight.",
+      "required_credit": "nnsight's .source, DiffusionModel and quantization support.",
+      "evidence_refs": [
+        "nnsight 0.8 release notes",
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL 'only/first/unique' claims about operation access (every operation, not just modules) unless the full graph is named; FAIL uniqueness claims about diffusers, quantization or VLM support.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "\\b(only|unique\\w*|first|no other)\\b[^.]{0,80}\\b(every|each|all)\\s+(operation|op)s?\\b[^.]{0,30}\\bnot\\s+(just\\s+)?modules?\\b",
+            "require": [
+              "\\b(full|whole|complete)\\s+(executed\\s+)?graph\\b"
+            ]
+          },
+          {
+            "forbid": "\\b(only|unique\\w*|first|no other|nobody|no competitor)\\b[^.]{0,80}\\b(diffusers|diffusion pipelines?|quantiz\\w+|vlms?|vision[- ]language)\\b"
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "root-limitations-current",
+      "competitor": "none (self-claim; the root limitations page)",
+      "neutral_fact": "Three root LIMITATIONS.md claims had gone stale against the code: tl.merge_ranks exists (with tl.merge_report); Accelerate single-device dispatch, CPU/disk offload and bitsandbytes rows report pass with disclosures (only maps across several execution devices stay known_broken); and on torch 2.6 and newer a compiled callable runs under the force_eager stance, so its interior is logged.",
+      "allowed_public_wording": "State each limit as tl.report.doctor states it, and scope the compiled-callable gap to torch without set_stance.",
+      "narrowed_scope_wording": "Point to docs/reference/limitations.md and docs/reference/deployment_envelope.md.",
+      "limitation_wording": "No compatibility statement beyond the report itself.",
+      "required_credit": null,
+      "evidence_refs": [
+        "torchlens/compat/_report.py (accelerate and bitsandbytes rows)",
+        "torchlens/__init__.py (merge_ranks, merge_report)",
+        "tests/test_compile_set_stance.py",
+        "docs/reference/deployment_envelope.md"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL 'merge_ranks is not available'; FAIL known_broken for the offload and bitsandbytes rows and a blanket known_broken for device_map dispatch; FAIL an unscoped 'compiled callable is not logged' sentence.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "merge_ranks(\\(\\))?[^.]{0,40}\\bnot\\s+(yet\\s+)?available\\b"
+          },
+          {
+            "forbid": "\\|\\s*(accelerate_cpu_disk_offload|bitsandbytes_8bit_4bit)\\s*\\|\\s*known_broken|\\|\\s*accelerate_device_map_auto\\s*\\|\\s*known_broken\\s+when\\s+detected"
+          },
+          {
+            "forbid": "compiled\\s+callable[^.]{0,80}\\b(not\\s+logged|cannot\\s+be\\s+unwrapped|is\\s+skipped)",
+            "require": [
+              "torch\\s*<?\\s*2\\.6|set_stance|older\\s+torch"
+            ]
+          }
+        ]
+      },
+      "last_verified": "2026-10-14",
+      "owner": "maintainers"
+    },
+    {
+      "id": "artifact-compatibility-window",
+      "competitor": "none (self-claim; the public artifact-compatibility window)",
+      "neutral_fact": "The ruled window is five years for artifacts written by TorchLens 2.38 or later, loading in every later 2.x release, promised only when three prerequisites are green: typed refusal of unknown fields in both directions (in place: torchlens/_io/state_contract.py, tests/test_tlspec_unified.py), a state-capable migration protocol that upgrades older artifacts (not built: no migration tool in the tree, MIGRATIONS.md refuses files saved by torchlens 2.37 and earlier), and a release gate in which an already-published reader loads artifacts written by the current tree (not run: .github/workflows install no older torchlens release; the goldens prove only the current reader on older artifacts). Checked 2026-11-03 against the integration train. Files written by torchlens 2.37 and earlier are outside the window.",
+      "allowed_public_wording": "'The intended compatibility window for artifacts written by TorchLens 2.38 or later is five years; it becomes a promise when its prerequisites are green' (MIGRATIONS.md, Compatibility window), with the three prerequisites and their status in the same section.",
+      "narrowed_scope_wording": "'From 2.38 on, a newer 2.x reader loads older artifacts written by 2.38 or later; anything it cannot read refuses with a typed error.'",
+      "limitation_wording": "No compatibility-window number.",
+      "required_credit": null,
+      "evidence_refs": [
+        "MIGRATIONS.md (Compatibility window)",
+        "torchlens/_io/state_contract.py",
+        "tests/test_tlspec_unified.py::test_unified_manifest_forward_compat_hard_fail_for_newer_bundle",
+        "tests/test_load_refuses_saved_by_2x.py",
+        "https://openxla.org/stablehlo/compatibility (the five-year precedent; checked 2026-08-26)",
+        "maintainer review record (private)"
+      ],
+      "tl_side_gates": [
+        "a state-capable artifact migration protocol (blocks the unconditional five-year promise)",
+        "an older-reader forward-load release gate (blocks the unconditional five-year promise)"
+      ],
+      "lint": "FAIL an unconditional five-year (or any other number of years) loadability promise for artifacts unless the same paragraph names the prerequisites; FAIL the 24-month fallback wording, which was not chosen.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "MIGRATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "\\b(five|5|ten|10|three|3)[- ]years?\\b[^.]{0,120}\\b(artifacts?|\\.tlspec|load(?:able|s|ed)?)\\b|\\b(artifacts?|\\.tlspec)\\b[^.]{0,120}\\b(five|5|ten|10|three|3)[- ]years?\\b",
+            "require": [
+              "prerequisite"
+            ]
+          },
+          {
+            "forbid": "\\b(24|twenty-four)[- ]months?\\b[^.]{0,80}\\b(artifacts?|\\.tlspec|compatib\\w+|load\\w*)\\b|\\b(artifacts?|\\.tlspec|compatib\\w+|load\\w*)\\b[^.]{0,80}\\b(24|twenty-four)[- ]months?\\b"
+          }
+        ]
+      },
+      "last_verified": "2026-11-03",
+      "owner": "maintainers"
+    },
+    {
+      "id": "comparison-landscape-currency",
+      "competitor": "TransformerLens; nnsight; interp-engine; vllm-lens; EasySteer; EasyEdit2; VLM-Lens; pyvene; pyreft; penzai; treescope; SAELens",
+      "neutral_fact": "Status checked 2026-11-03 (GitHub repository and release metadata, plus the pages named): TransformerLens v4.0.0 2026-09-21 and v4.3.0 2026-10-23, TransformerBridge the main model class from 4.0; nnsight 0.8 announced 2026-09-09, v0.8.2 2026-11-02; Neuronpedia interp-engine announced 2026-08-31, independent review 2026-09-02 found a raw-versus-normed MLP wrong-tensor bug; vllm-lens (UKGovernmentBEIS) pushed 2026-10-13; EasySteer v0.29.0 2026-09-10; EasyEdit2 (EMNLP 2025 system demonstration, arXiv:2504.15133) in zjunlp/EasyEdit, no tagged releases, pushed 2026-10-04; VLM-Lens EMNLP 2025 system demonstration, last push 2026-04-25; pyvene last push 2026-03-06 (last release v0.1.8 2025-05-26), pyreft last push 2026-03-05 (idle); penzai archived, last push 2025-06-22; treescope last release v0.1.10 2025-08-08, last push 2026-06-18 (idle); SAELens v6.54.14 2026-11-02. Production monitors use trained probes, SAEs are a discovery instrument (Goodfire probe monitors, 2026-09-09; arXiv:2610.12445, 2026-10-08).",
+      "allowed_public_wording": "The rows of docs/migration/landscape.md, each with its checked date and source; 'idle' means no public push in the eight months before the check, 'archived' is the repository's own flag.",
+      "narrowed_scope_wording": "Name the tool and link its migration page without a status word.",
+      "limitation_wording": "No status claim about another tool.",
+      "required_credit": "nnsight's vLLM, tensor-parallel, quantization and .source support; TransformerLens's TransformerBridge; Neuronpedia's interp-engine; UK AISI's vllm-lens; EasySteer; EasyEdit2 (EMNLP 2025); VLM-Lens (EMNLP 2025).",
+      "evidence_refs": [
+        "https://github.com/TransformerLensOrg/TransformerLens/releases/tag/v4.0.0 (2026-09-21; checked 2026-11-03)",
+        "https://nnsight.net/blog/2026/09/09/nnsight-08/ (2026-09-09; v0.8.2 release 2026-11-02; checked 2026-11-03)",
+        "https://www.neuronpedia.org/blog/interp-engine (2026-08-31; checked 2026-11-03)",
+        "https://gkoreli.com/oss-radar-06-interp-engine (2026-09-02; checked 2026-11-03)",
+        "https://github.com/UKGovernmentBEIS/vllm-lens (pushed 2026-10-13; checked 2026-11-03)",
+        "https://github.com/ZJU-REAL/EasySteer (v0.29.0 2026-09-10; checked 2026-11-03)",
+        "https://arxiv.org/abs/2504.15133 (EasyEdit2; checked 2026-11-03)",
+        "https://github.com/zjunlp/EasyEdit (README_2.md; no tagged releases; pushed 2026-10-04; checked 2026-11-03)",
+        "https://aclanthology.org/2025.emnlp-demos.68/ (VLM-Lens; checked 2026-11-03)",
+        "https://github.com/compling-wat/vlm-lens (pushed 2026-04-25; checked 2026-11-03)",
+        "https://github.com/stanfordnlp/pyvene (pushed 2026-03-06; checked 2026-11-03)",
+        "https://github.com/stanfordnlp/pyreft (pushed 2026-03-05; checked 2026-11-03)",
+        "https://github.com/google-deepmind/penzai (archived; last push 2025-06-22; checked 2026-11-03)",
+        "https://github.com/google-deepmind/treescope (v0.1.10 2025-08-08; pushed 2026-06-18; checked 2026-11-03)",
+        "https://github.com/jbloomAus/SAELens (v6.54.14 2026-11-02; checked 2026-11-03)",
+        "https://www.goodfire.com/blog/probe-monitors-101 (2026-09-09)",
+        "https://arxiv.org/abs/2610.12445 (2026-10-08)",
+        "docs/migration/landscape.md"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL describing TransformerLens 2.x or 3.x, or nnsight 0.7, as the current release; FAIL calling penzai active or treescope, pyvene or pyreft actively developed; FAIL 'SAEs for monitoring' as the recommended production instrument.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "MIGRATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "\\b(transformerlens|tlens)\\s+[23]\\.\\d*x?\\b[^.]{0,40}\\b(is|remains|as)\\s+(the\\s+)?(current|latest|newest)\\b"
+          },
+          {
+            "forbid": "\\bnnsight\\s+0\\.7(\\.\\d+)?\\b[^.]{0,40}\\b(is|remains)\\s+(the\\s+)?(current|latest|newest|stable)\\b"
+          },
+          {
+            "forbid": "\\b(penzai|treescope|pyvene|pyreft)\\b[^.]{0,40}\\b(is|are|remains?)\\s+(actively\\s+(developed|maintained)|under\\s+active\\s+development)\\b"
+          },
+          {
+            "forbid": "\\b(sparse autoencoders?|saes?)\\b[^.]{0,60}\\b(the|a)\\s+(production|recommended)\\s+(monitor\\w*|instrument\\s+for\\s+monitoring)\\b"
+          }
+        ]
+      },
+      "last_verified": "2026-11-03",
+      "owner": "maintainers"
+    },
+    {
+      "id": "attribution-destinations",
+      "competitor": "Captum; inseq",
+      "neutral_fact": "Captum is where TCAV, influence functions and adversarial attacks live; Captum and inseq provide DeepLift and LIME for text. TorchLens ships a gradient and perturbation attribution set in tl.attribution and a TCAV docs recipe with a causal check, and no influence functions, attacks or text DeepLift and LIME (rulings U20.8 and U22.5, 2026-10-11).",
+      "allowed_public_wording": "'For influence functions and adversarial attacks, use Captum; for DeepLift and LIME on text, use Captum or inseq.'",
+      "narrowed_scope_wording": "Name Captum (and inseq for text) as the destination without describing TorchLens's attribution set.",
+      "limitation_wording": "No attribution-breadth claims.",
+      "required_credit": "Captum (TCAV, influence functions, attacks, DeepLift, LIME); inseq (text attribution).",
+      "evidence_refs": [
+        "docs/migration/where_to_go_instead.md",
+        "docs/field-guide/tcav.md"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL a sentence saying TorchLens ships, provides or implements influence functions, adversarial attacks, or DeepLift or LIME for text.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "\\btorchlens\\b[^.]{0,60}\\b(ships|provides|implements|includes|offers|supports|computes)\\b[^.]{0,60}\\b(influence\\s+functions?|adversarial\\s+attacks?)\\b",
+            "require": [
+              "\\b(no|not|never|without)\\b[^.]{0,40}\\b(influence|attacks?)\\b|\\buse\\s+captum\\b"
+            ]
+          },
+          {
+            "forbid": "\\btorchlens\\b[^.]{0,60}\\b(ships|provides|implements|includes|offers|supports|computes)\\b[^.]{0,60}\\b(deep\\s?lift|lime)\\b[^.]{0,40}\\btext\\b",
+            "require": [
+              "\\b(no|not|never|without)\\b[^.]{0,40}\\b(deep\\s?lift|lime)\\b|\\bcaptum\\s+(or|and)\\s+inseq\\b"
+            ]
+          }
+        ]
+      },
+      "last_verified": "2026-11-03",
+      "owner": "maintainers"
+    },
+    {
+      "id": "transformers-5-supported-version",
+      "competitor": "none (self-claim about Hugging Face transformers 5 support)",
+      "neutral_fact": "transformers 5.x is called supported only with the tested version named; until the 5.x leg is green and the BERT and DistilBERT collapse goldens are re-recorded it is a candidate (ruling forks.4, 2026-10-12).",
+      "allowed_public_wording": "'Tested with transformers 5.N' (the version the green leg ran), or 'transformers 5 is a candidate'.",
+      "narrowed_scope_wording": "'transformers 5 is a candidate; the tested band is 4.x.'",
+      "limitation_wording": "No transformers 5 claim.",
+      "required_credit": null,
+      "evidence_refs": [
+        "pyproject.toml (hf extra band)"
+      ],
+      "tl_side_gates": [],
+      "lint": "FAIL 'transformers 5' or 'transformers 5.x' called supported without a named 5.N version.",
+      "check": {
+        "scope": [
+          "README.md",
+          "LIMITATIONS.md",
+          "docs/**/*.md",
+          "CHANGELOG.md#unreleased"
+        ],
+        "rules": [
+          {
+            "forbid": "\\btransformers\\s+(v)?5(\\.x)?\\b(?!\\.\\d)[^.]{0,40}\\bsupport(ed|s)?\\b|\\bsupport\\w*\\s+(for\\s+)?transformers\\s+(v)?5(\\.x)?\\b(?!\\.\\d)"
+          }
+        ]
+      },
+      "last_verified": "2026-11-03",
+      "owner": "maintainers"
+    }
+  ],
+  "check_block_line": "Every check pass over dossiers/boundary copy emits exactly one line: 'CLAIM-LINT: <n_run> run / <n_fail> fail [ids: ...]' (N5).",
+  "gates_last_reviewed": {
+    "date": "2026-09-02",
+    "by": "maintainers (release artifacts)",
+    "rule": "A gate reads closed ONLY when its pin tests are GREEN on the exact release commit AND on the venv-installed wheel (D05 FULL gate); a red pin re-opens the gate and the claim renders in its narrowed_scope_wording again."
+  }
+}

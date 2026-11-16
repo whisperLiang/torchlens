@@ -1,0 +1,455 @@
+"""The Bundle comparison gate: two predicates, operand-scoped, topology-aware.
+
+Split from ``torchlens/bundle/__init__.py`` to keep that file small. The
+defect this module exists to prevent: the
+old ``_RELATIONSHIP_RANK`` lattice collapsed the model axis and the input axis
+into one rank, so an identity relationship was accepted as proof of input
+equality and the reachable input check hashed shape/dtype/device only — the
+gate refused in NONE of four probe legs, on two independent code paths.
+
+The gate now checks, per operand pair and in order: ORDERING TOPOLOGY
+(comparison operands joined by a directed path of ordering relations refuse
+regardless of rank), the MODEL-AXIS floor (a projection of the reported
+``Relationship`` vocabulary onto model evidence only), and SITE LINE-UP.
+Site line-up holds when the pair captured the same input VALUES (proven only
+by positive payload evidence) or, for runs on different or unproven inputs,
+when both captured graphs have the same graph-shape hash, so every site pairs
+with its counterpart one to one. Different inputs are comparable by design
+(clean vs. patched, different prompts, different checkpoints); what the
+input digest still guards is graph divergence: with the same model object
+the model-axis floor passes even when data-dependent control flow took
+different branches, and only same-input pairs may differ by edits alone.
+The persisted digest carrier is the digest slice;
+:func:`_input_value_digest` is that carrier's live derivation.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import weakref
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+import torch
+
+from .._capture_state_helpers import _hash_input_tensor_value
+from ..intervention._types import Relationship
+from ..intervention.errors import BundleComparisonError
+
+if TYPE_CHECKING:
+    from .._data_classes.trace import Trace
+    from ._relations import MemberRelationTable
+
+# MODEL-AXIS projection of the reported ``Relationship`` vocabulary: this
+# table ranks the MODEL axis only; input identity is a
+# separate, value-level predicate (``_input_value_digest``) that no identity
+# relationship ever satisfies, and it feeds the site line-up check only.
+# ``shared_graph_same_input`` and ``shared_graph_diff_input`` carry identical model-axis evidence: their
+# input-axis difference is deliberately invisible here.
+_MODEL_AXIS_RANK: dict[Relationship, int] = {
+    Relationship.UNKNOWN: 0,
+    Relationship.DIFF_MODEL: 0,
+    Relationship.SHARED_ARCHITECTURE: 1,
+    Relationship.SAME_PARAM_SHAPES: 2,
+    Relationship.SHARED_GRAPH_DIFFERENT_INPUT: 3,
+    Relationship.SHARED_GRAPH_SAME_INPUT: 3,
+    Relationship.SAME_MODEL_OBJECT_AT_CAPTURE: 4,
+    Relationship.SAME_OBJECT: 5,
+}
+
+
+@dataclass(frozen=True)
+class _GateRequirement:
+    """Two-predicate requirement one gated Bundle read declares.
+
+    Parameters
+    ----------
+    model_floor_rank:
+        Minimum ``_MODEL_AXIS_RANK`` value every operand pair's derived
+        relationship must reach.
+    model_floor_label:
+        Human-readable name of the floor for refusal messages.
+    comparison_grade:
+        Whether the operation reads per-site values across the pair, so the
+        pair must also pass the ordering-topology check and the SITE LINE-UP
+        check: proven-equal input values, or, when the inputs differ or are
+        unproven, equal graph-shape hashes. An identity relationship
+        (``same_object`` / ``same_model_at_capture``) is never accepted as
+        proof of input equality or of line-up, and the
+        shape-level ``input_signature_hash`` is never consulted
+        (it is value-blind).
+    """
+
+    model_floor_rank: int
+    model_floor_label: str
+    comparison_grade: bool
+
+
+#: Shared-graph, lined-up-sites claim: at.compare (``bundle.at(site).compare()``),
+#: most_changed, diff and the
+#: delta family (compare, rank_changes and the private per-node reads behind
+#: them and the diff picture), which reads
+#: per-node distances from a baseline member and so gates its (baseline,
+#: member) operand pairs with the same two predicates.
+_SHARED_GRAPH_LINED_UP = _GateRequirement(
+    model_floor_rank=_MODEL_AXIS_RANK[Relationship.SHARED_GRAPH_SAME_INPUT],
+    model_floor_label="shared_graph",
+    comparison_grade=True,
+)
+
+_GATE_REQUIREMENTS: dict[str, _GateRequirement] = {
+    "at": _GateRequirement(
+        model_floor_rank=_MODEL_AXIS_RANK[Relationship.SAME_PARAM_SHAPES],
+        model_floor_label="same_param_shapes",
+        comparison_grade=False,
+    ),
+    "at.compare": _SHARED_GRAPH_LINED_UP,
+    "most_changed": _SHARED_GRAPH_LINED_UP,
+    "diff": _SHARED_GRAPH_LINED_UP,
+    "delta_map": _SHARED_GRAPH_LINED_UP,
+    "norm_delta": _SHARED_GRAPH_LINED_UP,
+    "output_delta": _SHARED_GRAPH_LINED_UP,
+    "compare": _SHARED_GRAPH_LINED_UP,
+}
+
+#: PAIR-row kinds that order members in time/causality. Members joined by
+#: a directed path of these rows are NOT comparison operands (the refusal keys
+#: on topology, never on relationship rank). ``alternative_of``
+#: is deliberately absent — counterfactual peers stay comparable. ``fed_by``
+#: (tlspec v10) orders a reader after its source: their inputs differ by design.
+#: ``selected_by`` (tlspec v10) orders a selected call after its decider.
+_ORDERING_RELATION_KINDS: frozenset[str] = frozenset(
+    {"successor_of", "forked_from", "escalates", "fed_by", "selected_by"}
+)
+
+#: Session cache for the live-derived input value digests, keyed weakly by
+#: member Trace (lifetime-safe against id reuse) with the trace's
+#: ``_spec_revision`` folded in so a fork edit invalidates the entry.
+_INPUT_VALUE_DIGEST_CACHE: weakref.WeakKeyDictionary[Any, tuple[Any, str | None]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _input_value_digest(trace: Trace) -> str | None:
+    """Return the live-derived value-level input digest for one member.
+
+    The digest folds every input op's retained payload through
+    :func:`~torchlens._capture_state_helpers._hash_input_tensor_value`
+    (shape + logical dtype + bytes; device- and grad-flag-free). ``None``
+    means UNPROVEN — an input payload is unsaved, non-tensor, unreadable,
+    or the trace records no input ops — and the comparison gate refuses
+    fail-closed rather than guessing. A persisted carrier that survives
+    payload-free artifacts is not available yet; this live derivation is the
+    same digest law.
+
+    Parameters
+    ----------
+    trace:
+        Bundle member to digest.
+
+    Returns
+    -------
+    str | None
+        SHA-256 hex digest, or ``None`` when input identity is unprovable.
+    """
+
+    revision = trace._spec_revision
+    try:
+        cached = _INPUT_VALUE_DIGEST_CACHE.get(trace)
+    except TypeError:
+        cached = None
+    if cached is not None and cached[0] == revision:
+        return cached[1]
+    digest = _derive_input_value_digest(trace)
+    with contextlib.suppress(TypeError):
+        _INPUT_VALUE_DIGEST_CACHE[trace] = (revision, digest)
+    return digest
+
+
+def _derive_input_value_digest(trace: Trace) -> str | None:
+    """Derive the input value digest from retained input-op payloads.
+
+    Returns
+    -------
+    str | None
+        SHA-256 hex digest over the ordered input payloads, or ``None``
+        (unproven) when any input payload is unavailable. Every failure mode
+        maps to ``None`` deliberately: the caller's refusal is the disclosed
+        handling, never a silent pass.
+    """
+
+    try:
+        input_ops = list(trace.input_ops)
+    except Exception:  # noqa: BLE001 - unprovable evidence refuses at the gate
+        return None
+    if not input_ops:
+        return None
+    hasher = hashlib.sha256()
+    hasher.update(f"input_value_digest_v1:{len(input_ops)}".encode())
+    for op in input_ops:
+        if not getattr(op, "has_saved_activation", False):
+            return None
+        try:
+            payload = op.out
+        except Exception:  # noqa: BLE001 - unprovable evidence refuses at the gate
+            return None
+        if not isinstance(payload, torch.Tensor):
+            return None
+        try:
+            hasher.update(_hash_input_tensor_value(payload).encode("utf-8"))
+        except Exception:  # noqa: BLE001 - unprovable evidence refuses at the gate
+            return None
+    return hasher.hexdigest()
+
+
+def ordering_path(relations: MemberRelationTable, start: str, goal: str) -> tuple[str, ...] | None:
+    """Return the ordering-relation kinds along a directed path, if any.
+
+    Walks only:data:`_ORDERING_RELATION_KINDS` rows of the member
+    relation table, from each row's ``from_member`` to its ``to_member``.
+    Sibling members (two rows pointing at one common predecessor) are NOT
+    joined: only a directed path orders two members.
+
+    Parameters
+    ----------
+    relations:
+        The Bundle's member-relation table.
+    start:
+        Candidate origin member name.
+    goal:
+        Candidate destination member name.
+
+    Returns
+    -------
+    tuple[str, ...] | None
+        Row kinds along the first directed path found, or ``None``.
+    """
+
+    adjacency: dict[str, list[tuple[str, str]]] = {}
+    for row in relations:
+        if row.kind in _ORDERING_RELATION_KINDS:
+            adjacency.setdefault(str(row.from_member), []).append((str(row.to_member), row.kind))
+    if not adjacency:
+        return None
+    frontier: list[tuple[str, tuple[str, ...]]] = [(start, ())]
+    seen = {start}
+    while frontier:
+        current, kinds = frontier.pop(0)
+        for neighbor, kind in adjacency.get(current, []):
+            if neighbor == goal:
+                return (*kinds, kind)
+            if neighbor not in seen:
+                seen.add(neighbor)
+                frontier.append((neighbor, (*kinds, kind)))
+    return None
+
+
+def require_comparable(
+    members: Mapping[str, Trace],
+    relations: MemberRelationTable,
+    operation: str,
+    pairs: Sequence[tuple[str, str]] | None,
+    relationship_of: Callable[[Trace, Trace], Relationship],
+) -> None:
+    """Run the two-predicate comparison gate over the operand pairs.
+
+    Per pair, three ordered checks:
+
+    1. TOPOLOGY (comparison-grade operations only): operands joined by a
+       directed path of ordering relations (``successor_of`` /
+       ``forked_from`` / ``escalates`` / ``fed_by``) are not comparison operands,
+       regardless of relationship rank.
+    2. MODEL FLOOR: the derived relationship's model-axis rank must reach
+       the operation's floor.
+    3. SITE LINE-UP (comparison-grade operations only): value-level input
+       equality proven from retained input payloads, or, for a pair on
+       different or unproven inputs, equal graph-shape hashes (see
+       :func:`_require_lined_up`). An identity relationship never satisfies
+       this predicate.
+
+    Parameters
+    ----------
+    members:
+        The Bundle's ordered member mapping.
+    relations:
+        The Bundle's member-relation table.
+    operation:
+        Gated operation name (a ``_GATE_REQUIREMENTS`` key).
+    pairs:
+        Operand pairs the operation actually reads. ``None`` means every
+        i<j member pair (operations whose operand set is the whole bundle).
+        Scoping the gate to the true operand pair is what keeps one foreign
+        member from disabling every gated read in a chain.
+    relationship_of:
+        The Bundle's relationship derivation for one member pair.
+
+    Raises
+    ------
+    BundleComparisonError
+        With ``fields["code"]`` set to ``bundle_gate_ordering_topology``,
+        ``bundle_gate_model_axis_unmet``,
+        ``bundle_gate_input_values_differ``, or
+        ``bundle_gate_input_identity_unproven``.
+    """
+
+    requirement = _GATE_REQUIREMENTS[operation]
+    if pairs is None:
+        names = list(members)
+        pairs = [
+            (left_name, right_name)
+            for index, left_name in enumerate(names)
+            for right_name in names[index + 1 :]
+        ]
+    for left_name, right_name in pairs:
+        left = members[left_name]
+        right = members[right_name]
+        if requirement.comparison_grade:
+            path = ordering_path(relations, left_name, right_name) or ordering_path(
+                relations, right_name, left_name
+            )
+            if path is not None:
+                raise BundleComparisonError(
+                    f"Bundle operation {operation!r} refuses: members "
+                    f"{left_name!r} and {right_name!r} are joined by an "
+                    f"ordering relation ({' -> '.join(path)}). Members "
+                    "joined by an ordering relation are not comparison "
+                    "operands — the refusal keys on topology, not on "
+                    "relationship rank. Remedy: compare peer members "
+                    "(for example alternative_of counterfactuals), or "
+                    "bundle the captures you want to compare without an "
+                    "ordering row between them.",
+                    code="bundle_gate_ordering_topology",
+                    operation=operation,
+                    left_member=left_name,
+                    right_member=right_name,
+                    ordering_path=list(path),
+                )
+        relationship = relationship_of(left, right)
+        if _MODEL_AXIS_RANK[relationship] < requirement.model_floor_rank:
+            raise BundleComparisonError(
+                f"Bundle operation {operation!r} requires model-axis "
+                f"evidence of at least {requirement.model_floor_label!r}; "
+                f"member pair {left_name}/{right_name} derives "
+                f"{relationship.value!r}. Remedy: bundle captures whose "
+                "models share the required structure (see "
+                "Bundle.comparability), or use per-member reads such as "
+                "Bundle.map for cross-model analysis.",
+                code="bundle_gate_model_axis_unmet",
+                operation=operation,
+                left_member=left_name,
+                right_member=right_name,
+                relationship=relationship.value,
+                required_floor=requirement.model_floor_label,
+            )
+        if requirement.comparison_grade and left is not right:
+            _require_lined_up(operation, left_name, left, right_name, right)
+
+
+def _require_lined_up(
+    operation: str,
+    left_name: str,
+    left: Trace,
+    right_name: str,
+    right: Trace,
+) -> None:
+    """Refuse a comparison pair whose sites do not line up one to one.
+
+    Proven-equal input values line a pair up; pairs on different or unproven
+    inputs line up when both graph-shape hashes are equal. Otherwise control
+    flow may have taken another path, which the model-axis floor cannot see
+    for one model object, so the pair refuses with
+    ``bundle_gate_input_values_differ`` (inputs differ) or
+    ``bundle_gate_input_identity_unproven`` (no input payloads). Per-site
+    shapes are checked by the metric (``metric_shape_mismatch``).
+    """
+
+    left_digest = _input_value_digest(left)
+    right_digest = _input_value_digest(right)
+    if left_digest is not None and left_digest == right_digest:
+        return
+    left_graph = left._provenance_fingerprint
+    if left_graph is not None and left_graph == right._provenance_fingerprint:
+        return
+    graph_note = _line_up_note(left_name, left, right_name, right)
+    if left_digest is not None and right_digest is not None:
+        raise BundleComparisonError(
+            f"Bundle operation {operation!r} refuses: member pair "
+            f"{left_name}/{right_name} captured DIFFERENT input values and "
+            f"{graph_note}. Runs on different inputs compare site by site "
+            "only when their graphs have the same structure. Remedy: compare "
+            "runs whose graphs line up (same model structure and the same "
+            "control-flow path), compare a shared site with "
+            "Bundle.at(site), or use per-member reads such as Bundle.map.",
+            code="bundle_gate_input_values_differ",
+            operation=operation,
+            left_member=left_name,
+            right_member=right_name,
+        )
+    unproven = [
+        name
+        for name, digest in ((left_name, left_digest), (right_name, right_digest))
+        if digest is None
+    ]
+    raise BundleComparisonError(
+        f"Bundle operation {operation!r} refuses: member(s) {unproven!r} "
+        "retain no input payloads to prove the pair ran on the same input "
+        "(inputs not saved, or a loaded artifact without input activations), "
+        f"and {graph_note}. An identity relationship or a shape-level input "
+        "hash is never accepted as proof of input equality. Remedy: capture "
+        "with input payloads retained (the default save policy) or save the "
+        "artifact with activations included, or compare runs whose graphs "
+        "line up.",
+        code="bundle_gate_input_identity_unproven",
+        operation=operation,
+        left_member=left_name,
+        right_member=right_name,
+        unproven_members=unproven,
+    )
+
+
+def _line_up_note(left_name: str, left: Trace, right_name: str, right: Trace) -> str:
+    """Explain why a pair's graphs do not line up, for the refusal message.
+
+    Names both input shapes when they differ: inputs of different shapes
+    (prompts with different token counts) usually run different graphs, and
+    the message should say so rather than blame control flow alone.
+    """
+
+    if left._provenance_fingerprint is None or right._provenance_fingerprint is None:
+        return "a graph-shape hash is missing, so line-up cannot be checked"
+    note = (
+        "their captured graphs differ (graph-shape hashes disagree: "
+        "data-dependent control flow or a structural edit), so their sites "
+        "do not line up one to one"
+    )
+    left_shapes = _input_shapes(left)
+    right_shapes = _input_shapes(right)
+    if left_shapes is not None and right_shapes is not None and left_shapes != right_shapes:
+        note += (
+            f"; their inputs also differ in shape ({left_name}: {list(left_shapes)}, "
+            f"{right_name}: {list(right_shapes)}), and inputs of different shapes "
+            "(such as prompts with different token counts) usually run different graphs"
+        )
+    return note
+
+
+def _input_shapes(trace: Trace) -> tuple[tuple[int, ...] | None, ...] | None:
+    """Return the recorded input-op shapes for a refusal message, if readable.
+
+    Shapes come from op metadata, so they survive payload-free artifacts.
+    ``None`` means the trace exposes no input ops; the message then omits
+    the shape note rather than guessing.
+    """
+
+    try:
+        input_ops = list(trace.input_ops)
+    except (KeyError, ValueError):  # the documented lookup failures; a message detail only
+        return None
+    if not input_ops:
+        return None
+    return tuple(
+        tuple(shape) if (shape := getattr(op, "shape", None)) is not None else None
+        for op in input_ops
+    )

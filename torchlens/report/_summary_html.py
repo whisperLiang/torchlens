@@ -1,0 +1,99 @@
+"""Dependency-free summary HTML renderer.
+
+One escaped, self-contained fragment: sticky header, numeric right
+alignment, dark-mode-safe colors via ``prefers-color-scheme``, zero
+JavaScript, zero CDN. Interactivity plumbing for the deferred notebook
+view rides as ``data-*`` attributes (stable row IDs, depth, kind, fold
+and ownership metadata) so later sort/expand needs no schema change.
+
+All values arrive from the typed report (raw ints); malicious content in
+model/module/op names is neutralized by escaping at this one boundary.
+"""
+
+from __future__ import annotations
+
+import html
+
+from ._summary_config import SummaryConfig
+from ._summary_ladder import ResolvedView, ViewRow
+from ._summary_render import CellTotals, SummaryFacts, _cell, cell_totals
+
+_CSS = """
+<style>
+.tl-summary {font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px; line-height: 1.45; color: #1f1f1f;}
+.tl-summary .tl-table {max-width: 100%; overflow-x: auto;}
+.tl-summary table {border-collapse: collapse; width: auto;}
+.tl-summary thead th {position: sticky; top: 0; background: #f4f4f8;
+  text-align: left; white-space: nowrap; padding: 3px 10px; border-bottom: 1px solid #888;}
+.tl-summary td {padding: 1px 10px; white-space: pre;}
+.tl-summary td.num, .tl-summary th.num {text-align: right;}
+.tl-summary td.num {white-space: pre;}
+.tl-summary tr[data-kind="fold"] td {font-weight: 600;}
+.tl-summary tr[data-kind="elision"] td {font-style: italic; opacity: 0.85;}
+.tl-summary tr[data-kind="unexecuted"] td {opacity: 0.6;}
+.tl-summary .tl-footer {margin-top: 6px; border-top: 1px solid #888;
+  padding-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere;}
+.tl-summary .tl-banner {color: #8a2d0b; font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere;}
+.tl-summary .tl-disclosure {opacity: 0.75;}
+@media (max-width: 600px) {
+  .tl-summary thead th {padding: 3px 4px;}
+  .tl-summary td {padding: 1px 4px;}
+}
+@media (prefers-color-scheme: dark) {
+  .tl-summary {color: #e6e6ef;}
+  .tl-summary thead th {background: #2b2b2b; border-bottom-color: #666;}
+  .tl-summary .tl-banner {color: #ffb454;}
+}
+</style>
+"""
+
+
+def _row_html(row: ViewRow, config: SummaryConfig, columns: tuple, totals: CellTotals) -> str:
+    """One escaped <tr> with data-* metadata for the deferred interactivity."""
+
+    cells = []
+    for column in columns:
+        text = html.escape(_cell(row, column, config, totals))
+        css = ' class="num"' if column.align == "right" else ""
+        cells.append(f"<td{css}>{text}</td>")
+    attributes = (
+        f' data-row-id="{html.escape(row.row_id, quote=True)}"'
+        f' data-kind="{html.escape(row.kind, quote=True)}"'
+        f' data-depth="{row.depth}"'
+        f' data-fold-count="{row.fold_count}"'
+        f' data-owned-ops="{len(row.owned_ops)}"'
+    )
+    return f"<tr{attributes}>{''.join(cells)}</tr>"
+
+
+def render_html(  # noqa: PLR0913 - the four presentation slices are distinct render inputs
+    view: ResolvedView,
+    facts: SummaryFacts,
+    config: SummaryConfig,
+    *,
+    visible_rows: tuple[ViewRow, ...] | None = None,
+    footer_lines: tuple[str, ...] = (),
+    banner_lines: tuple[str, ...] = (),
+    header_line: str = "",
+) -> str:
+    """Render the summary as one self-contained escaped HTML fragment."""
+
+    rows = visible_rows if visible_rows is not None else view.rows
+    columns = config.resolved_columns(view.mixed_trainability)
+    totals = cell_totals(facts)
+    numeric_class = ' class="num"'
+    head_cells = "".join(
+        f"<th{numeric_class if column.align == 'right' else ''}>{html.escape(column.header)}</th>"
+        for column in columns
+    )
+    body = "".join(_row_html(row, config, columns, totals) for row in rows)
+    banner = "".join(f'<div class="tl-banner">{html.escape(line)}</div>' for line in banner_lines)
+    footer = "".join(f'<div class="tl-footer">{html.escape(line)}</div>' for line in footer_lines)
+    return (
+        f'{_CSS}<div class="tl-summary">'
+        f"<div><b>{html.escape(header_line)}</b></div>{banner}"
+        f'<div class="tl-disclosure">{html.escape(view.disclosure)}</div>'
+        f'<div class="tl-table" tabindex="0" role="region" aria-label="Model summary table"><table><thead><tr>{head_cells}</tr></thead>'
+        f"<tbody>{body}</tbody></table></div>{footer}</div>"
+    )

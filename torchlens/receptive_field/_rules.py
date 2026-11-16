@@ -9,13 +9,14 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
-from ..capture.arg_positions import _normalize_func_name
+from .._capture.arg_positions import _normalize_func_name
+from .._utils._record_group_table import record_member
 from ._errors import ReceptiveFieldConfigurationError
 
 if TYPE_CHECKING:
-    from ..data_classes.op import Op
+    from .._data_classes.op import Op
 
 
 RuleCallback: TypeAlias = Callable[..., object]
@@ -43,7 +44,18 @@ class _RuleResult:
 
 
 class ReceptiveFieldRule(Protocol):
-    """Protocol implemented by one receptive-field operation rule."""
+    """Protocol implemented by one receptive-field operation rule.
+
+    Examples
+    --------
+    >>> builtin = tl.receptive_field.rules()["conv2d"]
+    >>> def delegating_rule(context):
+    ...     return builtin(context)
+    >>> trace = tl.trace(model, x)
+    >>> op = trace["conv2d_1_1"]
+    >>> delegating_rule(tl.receptive_field.ReceptiveFieldRuleContext(op)) is not None
+    True
+    """
 
     def __call__(self, context: ReceptiveFieldRuleContext) -> _RuleResult:
         """Build the operation's geometry specification.
@@ -60,8 +72,49 @@ class ReceptiveFieldRule(Protocol):
         """
 
 
+def _loaded_parent_shapes(op: Op) -> tuple[Any, ...]:
+    """Parent output shapes, in ``parents`` order, for an op of a loaded trace.
+
+    Raises the original detached-op ``AttributeError`` when the op has no
+    owning loaded trace (a cleaned-up live trace stays an error).
+    """
+
+    ref = op._slot("_source_trace_ref")
+    trace = ref() if ref is not None else None
+    if trace is None or not trace._loaded_from_bundle:
+        raise AttributeError("This Op is detached from its source Trace.")
+    by_label = trace._layer_dict_all_keys
+    return tuple(getattr(by_label.get(label), "shape", None) for label in tuple(op.parents or ()))
+
+
+def operand_shapes(op: Op) -> tuple[Any, ...]:
+    """Input shapes of ``op`` in ``parents`` order, ``None`` where unavailable.
+
+    A live op answers from ``Op.input_shapes``. An op of a loaded trace
+    refuses its live-trace accessors (it is detached by design); its parents'
+    recorded output shapes are the same metadata, read through the loaded
+    trace that owns it. Rules read operand shapes here, never from
+    ``Op.input_shapes`` directly, so a reloaded trace validates.
+    """
+
+    try:
+        return tuple(op.input_shapes)
+    except AttributeError:
+        return _loaded_parent_shapes(op)
+
+
 class ReceptiveFieldRuleContext:
-    """Metadata and result constructors available to receptive-field rules."""
+    """Metadata and result constructors available to receptive-field rules.
+
+    Examples
+    --------
+    >>> trace = tl.trace(model, x)
+    >>> context = ReceptiveFieldRuleContext(trace["conv2d_1_1"])
+    >>> context.in_shapes[0]
+    (1, 3, 8, 8)
+    >>> tl.receptive_field.rules()["conv2d"](context) is not None
+    True
+    """
 
     def __init__(self, op: Op) -> None:
         """Create a context for one captured operation.
@@ -75,10 +128,16 @@ class ReceptiveFieldRuleContext:
         self.op = op
 
     @property
+    def _parent_shapes(self) -> tuple[Any, ...]:
+        """Return input shapes in ``parents`` order, ``None`` where unavailable."""
+
+        return operand_shapes(self.op)
+
+    @property
     def in_shapes(self) -> tuple[tuple[int, ...], ...]:
         """Return captured input shapes, omitting unavailable inputs."""
 
-        return tuple(tuple(shape) for shape in self.op.input_shapes if shape is not None)
+        return tuple(tuple(shape) for shape in self._parent_shapes if shape is not None)
 
     @property
     def out_shape(self) -> tuple[int, ...]:
@@ -103,7 +162,7 @@ class ReceptiveFieldRuleContext:
             is a tuple, preserving per-axis rule call sites.
         """
 
-        value = self.op.func_config.get(key, default)
+        value = self.op.call.config.get(key, default)
         if isinstance(default, tuple) and not isinstance(value, tuple):
             return (value,) * len(default)
         return value
@@ -134,21 +193,21 @@ class ReceptiveFieldRuleContext:
         """
 
         if isinstance(name_or_pos, str):
-            if name_or_pos in self.op.non_tensor_kwargs:
-                return self.op.non_tensor_kwargs[name_or_pos]
+            if name_or_pos in self.op.call.non_tensor_kwargs:
+                return self.op.call.non_tensor_kwargs[name_or_pos]
             try:
-                raw_position = tuple(self.op.arg_names).index(name_or_pos)
+                raw_position = tuple(self.op.call.arg_names).index(name_or_pos)
             except ValueError:
                 return default
-            num_pos_args = int(getattr(self.op, "num_pos_args", 0) or 0)
+            num_pos_args = int(record_member(self.op, "num_pos_args", 0) or 0)
             if raw_position >= num_pos_args:
                 return default
             compacted = self._compacted_positional_index(raw_position, num_pos_args)
             if compacted is None:
                 return default
             name_or_pos = compacted
-        if 0 <= name_or_pos < len(self.op.non_tensor_pos_args):
-            return self.op.non_tensor_pos_args[name_or_pos]
+        if 0 <= name_or_pos < len(self.op.call.non_tensor_pos_args):
+            return self.op.call.non_tensor_pos_args[name_or_pos]
         return default
 
     def _compacted_positional_index(self, raw_position: int, num_pos_args: int) -> int | None:
@@ -169,17 +228,17 @@ class ReceptiveFieldRuleContext:
             reconstructed exactly (the lookup then fails closed).
         """
 
-        dropped = num_pos_args - len(self.op.non_tensor_pos_args)
+        dropped = num_pos_args - len(self.op.call.non_tensor_pos_args)
         if dropped == 0:
             return raw_position
         tensor_positions: set[int] = set()
-        positions = getattr(self.op, "parent_arg_positions", None) or {}
+        positions = record_member(self.op, "parent_arg_positions", None) or {}
         for key in positions.get("args", {}):
             if isinstance(key, int):
                 tensor_positions.add(key)
             elif isinstance(key, tuple) and key and isinstance(key[0], int):
                 tensor_positions.add(key[0])
-        for token in getattr(self.op, "unattributed_tensor_args", ()) or ():
+        for token in record_member(self.op, "unattributed_tensor_args", ()) or ():
             if isinstance(token, str) and token.startswith("arg"):
                 head = token[3:].split(".", 1)[0]
                 if head.isdigit():
@@ -211,7 +270,7 @@ class ReceptiveFieldRuleContext:
         if parent_index < 0 or parent_index >= len(self.op.parents):
             return None
         parent_label = self.op.parents[parent_index]
-        positions = self.op.parent_arg_positions
+        positions = self.op.call.parent_arg_positions
         for position, label in positions.get("args", {}).items():
             if label == parent_label:
                 return f"args:{position}"
@@ -393,6 +452,16 @@ def register_rf_rule(
     ValueError
         If no names are supplied, a name is invalid, or a duplicate is
         registered without ``replace=True``.
+
+    Examples
+    --------
+    >>> builtin = tl.receptive_field.rules()["linear"]
+    >>> @register_rf_rule("linear", replace=True)
+    ... def delegating_rule(context):
+    ...     return builtin(context)
+    >>> tl.receptive_field.rules()["linear"] is delegating_rule
+    True
+    >>> _ = register_rf_rule("linear", replace=True)(builtin)
     """
 
     if not func_names:
@@ -424,7 +493,14 @@ def register_rf_rule(
 
 
 def rules() -> Mapping[str, ReceptiveFieldRule]:
-    """Return an immutable snapshot of the registered receptive-field rules."""
+    """Return an immutable snapshot of the registered receptive-field rules.
+
+    Examples
+    --------
+    >>> registered = rules()
+    >>> ("conv2d" in registered, "linear" in registered)
+    (True, True)
+    """
 
     return MappingProxyType(dict(_RF_RULES))
 

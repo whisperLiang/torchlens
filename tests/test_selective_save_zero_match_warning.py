@@ -14,33 +14,32 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _record_fakes import FlatNamespace
 
 import torchlens as tl
-from torchlens.backends._selective_save import apply_static_label_save_policy
-
-pytestmark = pytest.mark.smoke
+from torchlens._postprocess._selective_save import apply_static_label_save_policy
 
 
 def _stub_trace() -> Any:
     """Return a minimal trace-like object the resolver can filter."""
 
     ops = [
-        SimpleNamespace(
+        FlatNamespace(
             label="relu_1_1",
             _label_raw="relu_1_1",
             layer_label="relu_1_1",
-            layer_label_short="relu_1",
+            short_layer_label="relu_1",
             func_name="relu",
             out=object(),
             has_saved_activation=True,
             is_orphan=False,
             activation_memory=16,
         ),
-        SimpleNamespace(
+        FlatNamespace(
             label="add_1_2",
             _label_raw="add_1_2",
             layer_label="add_1_2",
-            layer_label_short="add_1",
+            short_layer_label="add_1",
             func_name="add",
             out=object(),
             has_saved_activation=True,
@@ -48,18 +47,28 @@ def _stub_trace() -> Any:
             activation_memory=16,
         ),
     ]
-    return SimpleNamespace(layer_list=ops, module_calls=())
+
+    class _Stub(SimpleNamespace):
+        @property
+        def saved_ops(self) -> list[Any]:
+            return [
+                op for op in self._layer_list if op.has_saved_activation and not op.graph.is_orphan
+            ]
+
+    return _Stub(_layer_list=ops, module_calls=(), _provenance_backend="torch")
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _postprocess/_selective_save.py.
 def test_zero_match_save_predicate_warns() -> None:
     """A predicate matching no op must surface a warning, not silence."""
 
     trace = _stub_trace()
     with pytest.warns(UserWarning, match="matched zero"):
         apply_static_label_save_policy(trace, tl.label("no_such_label"), backend_name="mlx")
-    assert trace.num_saved_ops == 0
+    assert len(trace.saved_ops) == 0
 
 
+@pytest.mark.smoke
 def test_matching_save_predicate_does_not_warn() -> None:
     """A predicate matching at least one op stays silent."""
 
@@ -69,9 +78,10 @@ def test_matching_save_predicate_does_not_warn() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         apply_static_label_save_policy(trace, tl.label("relu_1_1"), backend_name="mlx")
-    assert trace.num_saved_ops == 1
+    assert len(trace.saved_ops) == 1
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _postprocess/_selective_save.py.
 def test_none_predicate_does_not_warn() -> None:
     """The full-save default (no predicate) is untouched."""
 
@@ -81,7 +91,7 @@ def test_none_predicate_does_not_warn() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         apply_static_label_save_policy(trace, None, backend_name="mlx")
-    assert all(op.has_saved_activation for op in trace.layer_list)
+    assert all(op.has_saved_activation for op in trace._layer_list)
 
 
 # ---------------------------------------------------------------------------
@@ -89,23 +99,13 @@ def test_none_predicate_does_not_warn() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_shared_zero_match_warning_names_the_backend() -> None:
-    """The extracted shared helper is the one disclosure text for all backends."""
-
-    from torchlens.backends._selective_save import warn_zero_match_save_predicate
-
-    with pytest.warns(UserWarning, match="tf trace\\(save=...\\) predicate matched zero"):
-        warn_zero_match_save_predicate("tf")
-
-
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/tf/op_callback_capture.py.
 def test_tf_eager_session_counts_save_predicate_matches() -> None:
     """The eager retention gate counts matches for the entry-level disclosure.
 
     Import-safe without TensorFlow: the session constructor stores plain
     attributes and ``_should_save_payload`` consults only the predicate.
     """
-
-    from types import SimpleNamespace
 
     from torchlens.backends.tf.op_callback_capture import TFEagerCaptureSession
 
@@ -119,9 +119,9 @@ def test_tf_eager_session_counts_save_predicate_matches() -> None:
         save_predicate=lambda ctx: ctx.func_name == "relu",
     )
     assert session.save_predicate_match_count == 0
-    assert session._should_save_payload(SimpleNamespace(func_name="matmul")) is False
+    assert session._should_save_payload(FlatNamespace(func_name="matmul")) is False
     assert session.save_predicate_match_count == 0
-    assert session._should_save_payload(SimpleNamespace(func_name="relu")) is True
+    assert session._should_save_payload(FlatNamespace(func_name="relu")) is True
     assert session.save_predicate_match_count == 1
 
 

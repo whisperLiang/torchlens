@@ -1,0 +1,801 @@
+"""The tlspec FORMAT CONTRACT: L1 product vocabulary + record-adjacent helpers.
+
+The persistence four-way ruling: the format contract
+and its record-adjacent helpers -- ``TLSPEC_VERSION``, ``FieldPolicy``,
+``BlobRef``, payload load hints, version read, fill-state defaults, container
+coercion -- live at L1 beside ``data_classes/``. These names define the
+portable PRODUCT, so every ``data_classes -> _io`` edge is intra-layer by
+construction. ``torchlens._io``'s package ``__init__`` is a declared
+re-export FACADE over this module; no public spelling changed in the split
+(memo s9 item 3).
+"""
+
+from __future__ import annotations
+
+import copy
+import re
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, NamedTuple
+
+from ._field_policy import FieldPolicy as FieldPolicy
+from .format_errors import (
+    ArtifactError,
+    ArtifactTooNewError,
+    ArtifactTooOldError,
+)
+from .prerelease import validate_prerelease_state
+
+__tl_layer__ = "L1"
+
+# v6 adds persisted ModuleCall forward-pre-hook provenance value objects.
+# v7 adds the persisted capture outcome (`_capture_outcome`, string-only payload).
+# v8 is the coordinated feature-sprint activation: every pre-release-gated
+# family flips to its persisting policy together (Op.graph.site_key, the L6 edge/
+# audit families, L1 grouping + grouping_policy, L8 distributed_scope, L9
+# grad_fn_timing_provenance + checkpoint_invocation_witness, the L7a
+# structure_only marker, the L3 primitive-op profile + kernel telemetry, the
+# Bundle member_relations key, and the episode annotations ledger),
+# with their load-validation rows live on real artifacts.
+# v9 is the completeness-work coordinated schema write: the audit
+# row grammar admits the shipped ACT per-site "source" disclosure, PARAM
+# rows/recipes, and the EVENT (intervention_event_v2) row family with its
+# optional hash-chain extension; the "sidecar" annotations namespace flips
+# from the pre-release registrar to plain persistence with envelope-shape
+# load validation; the "health_facts" and "capture_advisories" annotation
+# families are admitted as reserved keys; and the entry-dark field slots for
+# injection provenance (Op.injection_provenance), source snapshots
+# (Trace.source.snapshots + FuncCallLocation.source_file_digest), and the
+# structure-only evidence envelope (Trace.graph.structure_evidence) are declared
+# with fail-closed load validation so their Phase-3 writers
+# need no further version bump.
+# The amendment rides the SAME v9 window (TLSPEC_VERSION stays 9;
+# every slot optional/entry-dark): bundle relation grammar v2 (required/
+# optional split, successor_of evidence envelope + carry_mode/state_source,
+# the graded-claim vocabulary, the 1 MiB per-row evidence budget) with the
+# three-leg preserve-and-disclose loader doctrine and Bundle
+# preserved-sections carriage; episode ledger grammar v2 (family version 2:
+# declared step_output_kind/step_output_from/step_axis, generic step_output
+# rows, arithmetic cache_len DELETED for the measured carried-state witness
+# slots entry_state_digest/exit_state_digest, capture_digest +
+# perturbed/intervention_digest/fire_count coupling slots, optional
+# step_join); the Trace.provenance.root_entry_point identity fact (written
+# unconditionally) with the Op.tl_authored_root marker and Op.episode_step
+# stamp -- all with fail-closed load validation so those writers need no further
+# version bump.
+# v10 is the batch-2 coordinated schema write: ONE bump for every new saved
+# field of the window (each addition is admitted by the v10 field registry
+# before its writer lands, so no further version bump follows), the corrected
+# floor text in the writer contract (2.31.0, the first tlspec-6 writer; v9
+# froze the false "2.33"), and the reserved generation step-score vocabulary
+# credited to inseq (``RESERVED_STEP_SCORE_NAMES``). The v10 window also admits
+# the ``fed_by`` bundle relation kind (harness bundles: the later member's
+# prompt contains the earlier member's output; optional ``token_spans`` /
+# ``basis`` / ``coverage`` / ``label`` params) and the ``token_boundary_v1``
+# member binding in the reserved ``torchlens.boundary_facts`` sidecar family,
+# and the ``selected_by`` control kind (a router's or judge's decision selected
+# the later member; optional ``chosen`` / ``candidates`` / ``evidence``);
+# a v9 reader refuses both bare kinds, as the loader doctrine requires. The v9
+# contract of record stays frozen byte-for-byte beside the v10 one.
+# v11 (3.0 persisted record shape): every stored key follows its decided
+# public name (renames, removals and private stored fields in one bump); the
+# v10 contract of record stays frozen byte-for-byte beside the v11 one.
+# v12 (3.0 columnar records): ``Op.is_constant`` and ``Op.arg_expressions`` join the
+# op record; the v11 contract of record stays frozen byte-for-byte beside the v12 one.
+TLSPEC_VERSION = 12
+
+# Rehydration floor: this release reads only its own format. Every stamp below
+# the current one was written by torchlens 2.37 and earlier and refuses with the one
+# error built by :func:`below_floor_error`. ``FIRST_FORMAT3_RELEASE`` is the first release
+# that writes the current format (tlspec 12): a manifest whose ``torchlens_version`` stamp
+# is below it was written by an earlier release and refuses at the load door
+# (``raise_if_saved_by_older_major``). ``MIN_TORCHLENS_VERSION_TEXT`` is the same floor
+# release as stamped into the writer contract. The frozen v9, v10 and v11 contracts keep
+# their texts.
+MIN_TLSPEC_VERSION = 12
+FIRST_FORMAT3_RELEASE = "2.38.0"
+MIN_TORCHLENS_VERSION_TEXT = FIRST_FORMAT3_RELEASE
+
+# Reserved generation step-score vocabulary, credited to inseq: the
+# keys of inseq's ``STEP_SCORES_MAP`` (``inseq/attr/step_functions.py``,
+# inseq 0.7.1), verbatim and in inseq's order. A name registration, not a
+# field slot: a future TorchLens generation read surface persists its
+# per-step scores under exactly these names, and the v10 writer contract
+# records them so the names freeze with the contract of record.
+RESERVED_STEP_SCORE_NAMES: tuple[str, ...] = (
+    "logit",
+    "probability",
+    "entropy",
+    "crossentropy",
+    "perplexity",
+    "contrast_logits",
+    "contrast_prob",
+    "contrast_logits_diff",
+    "contrast_prob_diff",
+    "pcxmi",
+    "kl_divergence",
+    "in_context_pvi",
+    "mc_dropout_prob_avg",
+    "top_p_size",
+)
+RESERVED_STEP_SCORE_CREDIT = (
+    "Step-score names from inseq (Sarti et al., ACL 2023 demo; "
+    "https://github.com/inseq-team/inseq), the STEP_SCORES_MAP keys of inseq 0.7.1."
+)
+
+
+#: Top-level torchlens packages the 3.0 rename made private, renamed or folded away. A
+#: pickled module path under one of them was written by torchlens 2.x.
+_PRE_3_PACKAGES = frozenset(
+    [
+        "accessors",
+        "autoroute",
+        "brainpipe",
+        "capture",
+        "captured_run",
+        "constants",
+        "data_classes",
+        "ecosystem",
+        "fastlog",
+        "hash",
+        "ir",
+        "kernel_telemetry",
+        "merged",
+        "multi_trace",
+        "notebook",
+        "observability",
+        "observe",
+        "partial",
+        "postprocess",
+        "quantities",
+        "quickstart",
+        "runnable",
+        "selection",
+        "selection_compare",
+        "selection_graph",
+        "selection_subspace",
+        "selection_values",
+        "semantic",
+        "snoop",
+        "trace_slice",
+        "tviz",
+        "user_funcs",
+        "utils",
+        "visualization",
+    ]
+)
+
+#: Modules under ``torchlens._data_classes`` that held the 2.x record classes before they
+#: moved; nothing in 3 resolves them.
+_PRE_3_RECORD_MODULES = frozenset(
+    ["model_log", "layer_pass_log", "op_log", "module_log", "grad_fn_pass_log", "grad_fn_call_log"]
+)
+
+#: Submodules of public packages that 3.0 made private (a leading underscore): a pickled
+#: module path at or below one of them names a module only an earlier release had. Matched as a
+#: prefix, because ``attribution.onebackward`` and ``receptive_field.rules`` were packages.
+_PRE_3_SUBMODULES = frozenset(
+    {
+        "torchlens.agent.cli",
+        "torchlens.attribution.graph",
+        "torchlens.attribution.onebackward",
+        "torchlens.backends.default_specs",
+        "torchlens.bridge.hf_attention",
+        "torchlens.errors.episode",
+        "torchlens.errors.runnable",
+        "torchlens.intervention.audit",
+        "torchlens.intervention.binding",
+        "torchlens.intervention.bundle",
+        "torchlens.intervention.compose",
+        "torchlens.intervention.edge_semantics",
+        "torchlens.intervention.edge_substitution",
+        "torchlens.intervention.handles",
+        "torchlens.intervention.helpers",
+        "torchlens.intervention.injection",
+        "torchlens.intervention.masked_edit",
+        "torchlens.intervention.model_door",
+        "torchlens.intervention.param_substitution",
+        "torchlens.intervention.population",
+        "torchlens.intervention.predicates",
+        "torchlens.intervention.regions",
+        "torchlens.intervention.replay",
+        "torchlens.intervention.rerun",
+        "torchlens.intervention.runtime",
+        "torchlens.intervention.save",
+        "torchlens.intervention.site_keys",
+        "torchlens.intervention.spec",
+        "torchlens.intervention.spec_compat",
+        "torchlens.intervention.sweep",
+        "torchlens.intervention.types",
+        "torchlens.receptive_field.rules",
+        "torchlens.recording.cleanup",
+        "torchlens.recording.dry_run",
+        "torchlens.recording.exceptions",
+        "torchlens.recording.options",
+        "torchlens.recording.recover",
+        "torchlens.recording.storage_disk",
+        "torchlens.recording.storage_ram",
+        "torchlens.recording.types",
+        "torchlens.validation.backward",
+        "torchlens.validation.consolidated",
+        "torchlens.validation.core",
+        "torchlens.validation.diagnostics",
+        "torchlens.validation.exemptions",
+        "torchlens.validation.invariants",
+        "torchlens.validation.status",
+        "torchlens.viz.batch_summary",
+        "torchlens.viz.feature_maps",
+        "torchlens.viz.node_plots",
+    }
+)
+
+#: Individual globals whose module still exists but whose class name only 2.x wrote.
+_PRE_3_GLOBALS = frozenset({("torchlens._data_classes.op", "TensorLog")})
+
+_REMEDY = (
+    'load it with torchlens 2.36.x or 2.37.x, which read it (pip install "torchlens<2.38"), '
+    "or capture the model again with this release and save that."
+)
+
+_MODELLOG_216_NOTE = (
+    "A portable ModelLog bundle of torchlens 2.16 (io_format_version 2) is the exception: "
+    "torchlens 2.36.x cannot read it either, and only torchlens 2.17.0 does (pip install "
+    "torchlens==2.17.0 in a separate environment)."
+)
+
+
+def below_floor_error(
+    *,
+    observed: str,
+    path: str | None = None,
+    remedy_note: str = "",
+    code: str = "artifact_version_below_floor",
+) -> ArtifactTooOldError:
+    """Build the typed refusal for an artifact saved by torchlens 2.37 and earlier.
+
+    This release reads only the current format; anything older was saved by torchlens 2.37
+    and earlier, so every below-floor site raises this one pre-2.38 refusal with a stable
+    ``fields["code"]``, the ``observed`` marker, the floor, a ``remedy`` and the ``path``
+    when the caller has one.
+
+    Parameters
+    ----------
+    observed:
+        What marks the artifact as pre-2.38 (a pickled module path, a format stamp, a manifest
+        spelling), rendered as ``name=value`` text.
+    path:
+        Artifact path, when the caller has it in scope.
+    remedy_note:
+        One extra sentence appended to the remedy when the standard one is not enough for
+        this origin (the 2.16 ModelLog format).
+    code:
+        Always ``"artifact_version_below_floor"``; raise sites pass it
+        explicitly so the census sees the code where the raise happens,
+        not buried in this factory (registry-kernel precedent).
+
+    Returns
+    -------
+    ArtifactTooOldError
+        The typed refusal, ready to raise.
+    """
+
+    remedy = f"{_REMEDY} {remedy_note}" if remedy_note else _REMEDY
+    return ArtifactTooOldError(
+        f"This artifact was saved by torchlens 2.37 and earlier ({observed}); this torchlens "
+        f"release does not read files saved by torchlens 2.37 and earlier. Remedy: {remedy}",
+        code=code,
+        observed=observed,
+        floor_tlspec_version=MIN_TLSPEC_VERSION,
+        floor_torchlens_version=FIRST_FORMAT3_RELEASE,
+        path=path,
+        remedy=remedy,
+    )
+
+
+def _guard_pre3_format(
+    tlspec_format: str, path: Path, observed_marker: Callable[[], str | None]
+) -> None:
+    """Refuse an identified legacy directory without probing current-format extras."""
+
+    if tlspec_format == "pre_3":
+        observed = observed_marker() or "2.x artifact markers"
+        raise below_floor_error(
+            observed=observed,
+            path=str(path),
+            remedy_note=(
+                _MODELLOG_216_NOTE
+                if observed.startswith("io_format_version=2, n_activation_blobs=")
+                else ""
+            ),
+            code="artifact_version_below_floor",
+        )
+
+
+def modellog_216_error(
+    path: str, *, code: str = "artifact_version_below_floor"
+) -> ArtifactTooOldError:
+    """Build the 2.x refusal for a portable ModelLog bundle of torchlens 2.16.
+
+    Parameters
+    ----------
+    path:
+        Artifact path.
+    code:
+        Always ``"artifact_version_below_floor"``, passed explicitly by each raise site.
+
+    Returns
+    -------
+    ArtifactTooOldError
+        The refusal, ready to raise; its remedy also names the one release that reads it.
+    """
+
+    return below_floor_error(
+        observed="the portable ModelLog format of torchlens 2.16",
+        path=path,
+        remedy_note=_MODELLOG_216_NOTE,
+        code=code,
+    )
+
+
+def _under_pre_3_submodule(module: str) -> bool:
+    """Return whether ``module`` is, or lies under, a submodule 3.0 made private."""
+
+    parts = module.split(".")
+    return any(".".join(parts[:depth]) in _PRE_3_SUBMODULES for depth in range(3, len(parts) + 1))
+
+
+def refuse_pre_3_module_path(module: str, name: str = "") -> None:
+    """Refuse a pickled module path that only torchlens 2.37 and earlier wrote.
+
+    Parameters
+    ----------
+    module:
+        Pickled module path as written in the artifact.
+    name:
+        Pickled class or function name, when the caller has it.
+
+    Raises
+    ------
+    ArtifactTooOldError
+        When ``module`` lives under a package that left the public surface in 3.0, or
+        names a private module or class that only pre-2.38 wrote.
+    """
+
+    root, _, rest = module.partition(".")
+    if root == "torchlens" and (
+        rest.partition(".")[0] in _PRE_3_PACKAGES
+        or module.removeprefix("torchlens._data_classes.") in _PRE_3_RECORD_MODULES
+        or _under_pre_3_submodule(module)
+        or (module, name) in _PRE_3_GLOBALS
+    ):
+        raise below_floor_error(
+            observed=f"module_path={module}", code="artifact_version_below_floor"
+        )
+
+
+def raise_if_manifest_below_floor(raw_version: Any, path: str) -> None:
+    """Refuse an integer manifest stamp below the rehydration floor.
+
+    The shared preflight guard: a below-floor artifact also fails the current
+    schema, so this runs BEFORE schema validation to refuse with the floor
+    named instead of a missing-field error. Non-integer stamps return
+    untouched (their own typed checks own that case).
+
+    Parameters
+    ----------
+    raw_version:
+        The manifest's raw ``tlspec_version`` value.
+    path:
+        Artifact path for the structured fields.
+
+    Raises
+    ------
+    ArtifactTooOldError
+        When ``raw_version`` is an int below ``MIN_TLSPEC_VERSION``.
+    """
+
+    if isinstance(raw_version, int) and raw_version < MIN_TLSPEC_VERSION:
+        raise below_floor_error(
+            observed=f"tlspec_version={raw_version}",
+            path=path,
+            code="artifact_version_below_floor",
+        )
+
+
+_RELEASE_PARTS = re.compile(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?")
+
+
+def _release_parts(version: Any) -> tuple[int, int, int] | None:
+    """Return ``(major, minor, patch)`` from a release stamp, else ``None``.
+
+    Reads the leading numeric ``MAJOR[.MINOR[.PATCH]]`` run of the stamp; a suffix
+    after it is ignored (``"2.38.0rc1"`` reads as ``(2, 38, 0)``) and a missing
+    component counts as ``0``. A stamp that does not start with a digit is not
+    parseable.
+    """
+
+    if not isinstance(version, str):
+        return None
+    match = _RELEASE_PARTS.match(version.strip())
+    if match is None:
+        return None
+    major, minor, patch = (int(part) if part else 0 for part in match.groups())
+    return major, minor, patch
+
+
+def raise_if_saved_by_older_major(saved_version: Any, path: str, *, running_version: str) -> None:
+    """Refuse an artifact that a release before ``FIRST_FORMAT3_RELEASE`` saved.
+
+    This release reads only the saved format that ``FIRST_FORMAT3_RELEASE``
+    introduced: the saved field names and package paths changed in it, and no
+    compatibility reader is carried. A manifest whose ``torchlens_version`` stamp
+    is below that release was written by an earlier one. A stamp from the 2.x
+    line (2.37 and earlier) raises the one pre-2.38 refusal
+    (:func:`below_floor_error`), worded like every other door that recognises
+    such a file; a stamp from an earlier major raises the same error class naming
+    the saving release and the two ways out (that major's releases read the file,
+    or capture again with this one). Artifacts without a parseable
+    ``torchlens_version`` stamp return untouched; their own typed checks own
+    that case.
+
+    Parameters
+    ----------
+    saved_version:
+        The manifest's raw ``torchlens_version`` value.
+    path:
+        Artifact path for the structured fields.
+    running_version:
+        The running release's ``torchlens.__version__``, named in the earlier-major
+        message; passed in so this contract module never imports the package that
+        imports it.
+
+    Raises
+    ------
+    ArtifactTooOldError
+        When the saving release is below ``FIRST_FORMAT3_RELEASE``.
+    """
+
+    saved = _release_parts(saved_version)
+    floor = _release_parts(FIRST_FORMAT3_RELEASE)
+    if saved is None or floor is None or saved >= floor:
+        return
+    if saved[0] == 2:
+        raise below_floor_error(
+            observed=f"torchlens_version={saved_version}",
+            path=path,
+            code="artifact_version_below_floor",
+        )
+    saved_major = saved[0]
+    remedy = (
+        f"load it with torchlens {saved_major}.x (pip install "
+        f"'torchlens<{saved_major + 1}'), or capture the model again with torchlens "
+        f"{running_version} and save that."
+    )
+    raise ArtifactTooOldError(
+        f"This artifact was saved by torchlens {saved_version}; torchlens {running_version} "
+        f"does not read files saved by torchlens {saved_major}.x. Remedy: {remedy}",
+        code="artifact_version_below_floor",
+        observed=f"torchlens_version={saved_version}",
+        floor_tlspec_version=MIN_TLSPEC_VERSION,
+        floor_torchlens_version=FIRST_FORMAT3_RELEASE,
+        path=path,
+        remedy=remedy,
+    )
+
+
+_ABOVE_CEILING_REMEDY = "Upgrade torchlens to the release that wrote this artifact (or newer)."
+
+
+def above_ceiling_error(
+    *,
+    observed: int,
+    subject: str = "Artifact",
+    path: str | None = None,
+    code: str = "artifact_version_above_runtime",
+) -> ArtifactTooNewError:
+    """Build the typed above-runtime-ceiling refusal with structured fields.
+
+    The single constructor for every "artifact is newer than this runtime"
+    refusal (G3 ceiling consolidation): the manifest policy gate, the pickle
+    state gate, and the validation entry all raise through here, so the code,
+    ceiling, and remedy are identical no matter which door the artifact came
+    in through.
+
+    Parameters
+    ----------
+    observed:
+        The declared ``tlspec_version`` on the incoming artifact or state.
+    subject:
+        Human-readable subject named in the message (e.g. ``"Bundle"``).
+    path:
+        Artifact path, when the caller has one.
+    code:
+        Always ``"artifact_version_above_runtime"``; raise sites pass it
+        explicitly so the census sees the code where the raise happens,
+        not buried in this factory (registry-kernel precedent).
+
+    Returns
+    -------
+    ArtifactTooNewError
+        The typed refusal, ready to raise.
+    """
+
+    message = (
+        f"{subject} uses tlspec_version={observed}, but this runtime only supports "
+        f"up to {TLSPEC_VERSION}. {_ABOVE_CEILING_REMEDY}"
+    )
+    return ArtifactTooNewError(
+        message,
+        code=code,
+        observed=observed,
+        ceiling_tlspec_version=TLSPEC_VERSION,
+        path=path,
+        remedy=_ABOVE_CEILING_REMEDY,
+    )
+
+
+def _raise_below_floor(cls_name: str, version_text: str) -> None:
+    """Raise the typed rehydration-floor refusal for one object state.
+
+    Parameters
+    ----------
+    cls_name:
+        Human-readable class name used in the error message.
+    version_text:
+        Rendered source version (``"tlspec_version=N"`` or a description of
+        an unversioned state).
+    """
+
+    raise below_floor_error(
+        observed=version_text,
+        code="artifact_version_below_floor",
+    )
+
+
+@dataclass(frozen=True)
+class JaxPayloadLoadHint:
+    """JAX-specific payload materialization hints.
+
+    Parameters
+    ----------
+    sharding:
+        Explicit JAX ``Sharding`` target. When supplied, materialized JAX
+        payloads are placed with this sharding and reconstruction metadata is
+        not consulted.
+    reconstruct_sharding:
+        Whether to reconstruct a saved ``NamedSharding`` from portable
+        ``codec_metadata``.
+    mesh_axis_names:
+        Optional expected mesh axis names for metadata reconstruction. When
+        provided, the saved contract must match exactly.
+    platform:
+        Optional JAX device platform to use for metadata reconstruction, for
+        example ``"cpu"``.
+    devices:
+        Optional explicit local devices to use for metadata reconstruction.
+
+    Examples
+    --------
+    >>> hint = tl.io.JaxPayloadLoadHint(reconstruct_sharding=True, platform="cpu")
+    >>> (hint.reconstruct_sharding, hint.platform, hint.sharding)
+    (True, 'cpu', None)
+    """
+
+    sharding: Any | None = None
+    reconstruct_sharding: bool = False
+    mesh_axis_names: tuple[str, ...] | None = None
+    platform: str | None = None
+    devices: Sequence[Any] | None = None
+
+
+@dataclass(frozen=True)
+class PayloadLoadHints:
+    """Backend-specific payload materialization hints.
+
+    Parameters
+    ----------
+    jax:
+        Optional JAX payload hint.
+
+    Examples
+    --------
+    >>> hints = tl.io.PayloadLoadHints(jax=tl.io.JaxPayloadLoadHint(platform="cpu"))
+    >>> hints.jax.platform
+    'cpu'
+    >>> tl.io.PayloadLoadHints().jax is None
+    True
+    """
+
+    jax: JaxPayloadLoadHint | None = None
+
+
+class BlobRef(NamedTuple):
+    """Reference to a persisted tensor blob in a portable bundle."""
+
+    blob_id: str
+    kind: str
+
+
+# Pickle-visible identity stays the historical facade path: bundle metadata
+# pickles reference these types by (module, qualname), and the guarded
+# unpickler allowlists exactly those paths -- the physical split must not
+# change a single persisted byte (move-compat law, memo org rule 9). The
+# load-hint classes are runtime options, never persisted, so they keep their
+# real defining module (the class-member license oracle reads it).
+BlobRef.__module__ = "torchlens._io"
+
+
+def read_tlspec_version(state: dict[str, Any], *, cls_name: str, cls: type | None = None) -> int:
+    """Validate the serialized I/O format version for one object state.
+
+    Parameters
+    ----------
+    state:
+        Serialized state dict for the object being restored.
+    cls_name:
+        Human-readable class name used in errors.
+    cls:
+        The portable record class being restored. When provided, the
+        persisted-state contract's known/unknown partition runs here --
+        BEFORE any object mutation, identically on all three storage paths
+        (``__dict__``-backed, hook-restored columnar, slotted) -- and unknown
+        fields refuse typed in both writer directions (MEMO 3.3). The
+        partition is scoped to the governed-artifact-load window armed by
+        the ``.tlspec`` loaders; plain session pickling stays outside the
+        contract because live records legitimately round-trip user-set
+        extras the save path refuses to persist.
+
+    Returns
+    -------
+    int
+        The decoded version, always the current ``TLSPEC_VERSION``.
+
+    Raises
+    ------
+    ArtifactTooOldError
+        If the state predates the current ``tlspec_version`` (a torchlens 2.37 and earlier file,
+        including unversioned pre-sprint states).
+    UnknownPersistedFieldError
+        If ``cls`` is provided, a governed artifact load is in progress, and
+        the state carries fields outside the class's declared contract
+        (fields + defaults + declared aliases).
+    ArtifactError
+        If the serialized version is newer than this runtime understands or
+        is not an integer.
+    """
+
+    validate_prerelease_state(state, cls_name=cls_name)
+    version = state.pop("tlspec_version", None)
+    if version is None:
+        _raise_below_floor(cls_name, "no tlspec_version (predates portable I/O versioning)")
+    if not isinstance(version, int):
+        raise ArtifactError(f"{cls_name} pickle state has invalid tlspec_version={version!r}.")
+    if version > TLSPEC_VERSION:
+        raise above_ceiling_error(
+            observed=version,
+            subject=f"{cls_name} pickle state",
+            code="artifact_version_above_runtime",
+        )
+    if version < TLSPEC_VERSION:
+        _raise_below_floor(cls_name, f"tlspec_version={version}")
+    if cls is not None:
+        from .state_contract import enforce_known_state, governed_load_active
+
+        if governed_load_active():
+            enforce_known_state(cls, state, declared_version=version)
+    return version
+
+
+def default_fill_state(state: dict[str, Any], *, defaults: dict[str, Any]) -> None:
+    """Populate missing state keys with deep-copied default values.
+
+    Parameters
+    ----------
+    state:
+        Mutable serialized state dict being restored.
+    defaults:
+        Mapping from field name to the default value that should be injected
+        when that field is absent.
+    """
+
+    for field_name, default_value in defaults.items():
+        if field_name not in state:
+            state[field_name] = copy.deepcopy(default_value)
+
+
+_COERCIBLE_CONTAINER_TYPES = (list, dict, tuple, set, frozenset)
+
+
+def coerce_container_typed_state(
+    state: dict[str, Any],
+    defaults: dict[str, Any],
+    *,
+    exclude: frozenset[str] | set[str] = frozenset(),
+) -> None:
+    """Coerce present-but-wrong-typed container fields to their declared type.
+
+    ``default_fill_state`` only fills keys that are *absent* from ``state``; by
+    design it never inspects the type of a key that is already present, so a
+    field restored from an older serialization that used a different
+    container type for the same name (e.g. a field that used to default to
+    ``{}`` and now defaults to ``[]``) survives unchanged with the wrong type.
+    That is silent today and crashes or misbehaves later, whenever code calls
+    a list-only method (``.append``) on the restored dict, or vice versa.
+
+    This closes that gap for fields whose declared type is unambiguous: a
+    field is only touched here if its entry in ``defaults`` is exactly a
+    ``list``, ``dict``, ``tuple``, or ``set`` literal. Fields defaulting to
+    ``None``, a scalar, or a non-builtin container (e.g. ``OrderedDict``,
+    a custom accessor class) are left untouched, since for those fields the
+    "declared type" is not a single unambiguous builtin and a naive coercion
+    could silently corrupt a legitimately-varying value (see ``exclude`` for
+    the one known case of this: a field typed ``List[int] | str``).
+
+    ``None`` is treated as the "no data was ever recorded" case (e.g. an old
+    ``Optional``-typed field that is now a required container): converting it
+    to an empty typed container is lossless, since there was never any
+    element data to preserve, and mirrors what an absent key would have
+    received from ``default_fill_state``.
+
+    A present value that is genuinely incompatible with the declared type
+    (``declared_type(current_value)`` raises) is a DIFFERENT case: real
+    corruption, not a legacy container-type migration. Per the
+    validation-is-a-tripwire principle, this function must never silently
+    swallow that into an empty default -- doing so previously turned a loud
+    crash into silent, undetectable data loss (e.g. a corrupted
+    ``layer_dict_main_keys`` quietly coming back as an empty dict instead of
+    surfacing the corruption). Such a field is left in its original,
+    detectably-wrong state and this function raises ``ArtifactError`` so
+    the caller learns about the corruption immediately, instead of shipping a
+    Trace that looks valid but silently lost data.
+
+    Parameters
+    ----------
+    state:
+        Mutable serialized state dict being restored. Expected to have
+        already been passed through ``default_fill_state`` with the same
+        ``defaults`` mapping (so every field in ``defaults`` is present).
+    defaults:
+        The same defaults mapping passed to ``default_fill_state``.
+    exclude:
+        Field names to skip even though their default value is a plain
+        container, for fields whose real declared type is a union with a
+        non-container alternative that must not be coerced away (e.g. a
+        legacy sentinel string like ``"all"``).
+
+    Raises
+    ------
+    ArtifactError
+        If a field is present with a value that cannot be converted to its
+        declared container type (e.g. an ``int`` where a ``dict`` is
+        declared). This is corruption, not a legacy-format field -- the
+        function refuses to silently discard it.
+    """
+
+    for field_name, default_value in defaults.items():
+        if field_name in exclude or field_name not in state:
+            continue
+        declared_type = type(default_value)
+        if declared_type not in _COERCIBLE_CONTAINER_TYPES:
+            continue
+        current_value = state[field_name]
+        if isinstance(current_value, declared_type):
+            continue
+        if current_value is None:
+            # Absent-equivalent: field existed in the old schema but was never
+            # populated. Lossless to convert to an empty typed container.
+            state[field_name] = declared_type()
+            continue
+        try:
+            state[field_name] = declared_type(current_value)
+        except (TypeError, ValueError) as exc:
+            raise ArtifactError(
+                f"State field {field_name!r} is present with value of type "
+                f"{type(current_value).__name__!r} that cannot be converted to the "
+                f"declared container type {declared_type.__name__!r}. This is not a "
+                "recognized legacy container-type migration (e.g. a set stored where "
+                "a list is now declared) -- it looks like corrupted or tampered "
+                "pickle state. Refusing to silently discard the field's contents; "
+                "fix the source of the corruption rather than suppressing this error."
+            ) from exc

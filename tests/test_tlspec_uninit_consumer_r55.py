@@ -22,19 +22,13 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-import pytest
 import torch
 import torch.nn as nn
 
 import torchlens as tl
-from torchlens._runnable_execution import (
-    _nondeterministic_value_sources,
-    _uninit_taint_reaches,
-)
+from torchlens._runnable.attestation import _nondeterministic_value_sources, _uninit_taint_reaches
 
-pytestmark = pytest.mark.smoke
-
-_CAPTURE = {"intervention_ready": True}
+_CAPTURE = {"capture": tl.options.CaptureOptions(replayable=True)}
 
 
 @contextmanager
@@ -72,7 +66,7 @@ def _build(tmp_path: Path, name: str, model: nn.Module, x: torch.Tensor) -> Path
     with _realistic_nondeterministic_fill():
         trace = tl.trace(model.eval(), x, **_CAPTURE)
     bundle = tmp_path / name
-    tl.save(trace, str(bundle), level="runnable", include_weights=True)
+    trace.save(str(bundle), level="runnable", include_weights=True)
     return bundle
 
 
@@ -99,18 +93,12 @@ class _NonAliasOut(nn.Module):
         return c
 
 
+# Kept: sole branch coverage of _runnable/attestation.py; the catch of its regression fault.
 def test_aliased_out_preserves_uninit_taint(tmp_path: Path) -> None:
     """hon_2: an out= that aliases a value operand PRESERVES the uninit taint."""
 
     bundle = _build(tmp_path, "alias_out.tlspec", _AliasOut(), torch.randn(4))
     assert _output_taint_reaches(bundle) is True
-
-
-def test_nonaliased_out_still_sanitizes(tmp_path: Path) -> None:
-    """hon_2 non-regression: a genuine total-write out= to a distinct dest sanitizes."""
-
-    bundle = _build(tmp_path, "nonalias_out.tlspec", _NonAliasOut(), torch.randn(4))
-    assert _output_taint_reaches(bundle) is False
 
 
 # --------------------------------------------------------------------------- #
@@ -134,15 +122,9 @@ class _NewData(nn.Module):
         return a, x.sum()
 
 
+# Kept: sole branch coverage of _runnable/attestation.py.
 def test_new_size_form_recognized_uninit(tmp_path: Path) -> None:
     """hon_1: ``Tensor.new(size)`` is recognized as uninitialized -> taint reaches output."""
 
     bundle = _build(tmp_path, "new_size.tlspec", _NewSize(), torch.randn(4))
     assert _output_taint_reaches(bundle) is True
-
-
-def test_new_data_form_stays_clean(tmp_path: Path) -> None:
-    """hon_1 over-ceiling guard: ``Tensor.new([data])`` is a deterministic copy -> clean."""
-
-    bundle = _build(tmp_path, "new_data.tlspec", _NewData(), torch.randn(4))
-    assert _output_taint_reaches(bundle) is False

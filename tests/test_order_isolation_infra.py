@@ -29,17 +29,23 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "checks"))
+from skip_audit import FULL_TEST_EXTRA_SENTINEL  # noqa: E402
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 _HAS_RANDOMLY = importlib.util.find_spec("pytest_randomly") is not None
 
-#: An importable full-[test]-extra sentinel (same idiom as the skip audit's
-#: FULL_TEST_EXTRA_SENTINEL): when the environment CLAIMS the full test extra,
-#: a missing pytest-randomly is INSTALL BREAKAGE, not a legitimate partial
+#: Shares the skip audit's FULL_TEST_EXTRA_SENTINEL (never a second, driftable
+#: literal here -- a canary leg that installs "timm" directly without the
+#: rest of [test] previously made the old hardcoded "timm" check here falsely
+#: claim full coverage, same as the skip audit's own sentinel, round-2 CI
+#: triage 2026-10-01): when the environment CLAIMS the full test extra, a
+#: missing pytest-randomly is INSTALL BREAKAGE, not a legitimate partial
 #: environment -- the live guards must then FAIL, never skip (3.16 reopened
 #: row: the declaration landed but every guard skipped everywhere, so the
 #: gate layer stayed unarmed even on full installs).
-_CLAIMS_FULL_TEST_EXTRA = importlib.util.find_spec("timm") is not None
+_CLAIMS_FULL_TEST_EXTRA = importlib.util.find_spec(FULL_TEST_EXTRA_SENTINEL) is not None
 
 
 def _require_randomly_or_skip() -> None:
@@ -93,7 +99,6 @@ def _test_extra_deps(pyproject_text: str) -> list[str]:
     return deps
 
 
-@pytest.mark.smoke
 def test_pytest_randomly_declared_in_test_extra() -> None:
     """The [test] extra must declare pytest-randomly (R76 regression pin)."""
 
@@ -110,7 +115,6 @@ def test_pytest_randomly_declared_in_test_extra() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_randomly_plugin_registration_matches_invocation(request: pytest.FixtureRequest) -> None:
     """When installed, the plugin must be live unless explicitly disabled."""
 
@@ -207,7 +211,6 @@ def test_no_randomly_flag_actually_disables_shuffling(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.smoke
 def test_content_registries_are_restored_between_tests(
     request: pytest.FixtureRequest,
 ) -> None:
@@ -233,7 +236,7 @@ def test_content_registries_are_restored_between_tests(
     fixture_fn = conftest_plugin._restore_content_registries
     raw = getattr(fixture_fn, "__wrapped__", None) or fixture_fn.__pytest_wrapped__.obj
 
-    from torchlens.capture.flops import _CUSTOM_OP_RULES
+    from torchlens._capture.flops import _CUSTOM_OP_RULES
 
     sentinel = "r76_isolation_probe_op"
     assert sentinel not in _CUSTOM_OP_RULES

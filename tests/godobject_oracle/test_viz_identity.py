@@ -52,8 +52,8 @@ torch.manual_seed({seed})
 trace = tl.trace(VizCNN(), torch.linspace(-1.0, 1.0, 16).reshape(1, 1, 4, 4))
 with tempfile.TemporaryDirectory() as tmp:
     source = trace.draw(
-        vis_save_only=True, vis_fileformat="svg", vis_outpath=tmp + "/g"
-    )
+        file_format="svg", path=tmp + "/g"
+    ).dot
 print(hashlib.sha256(source.encode()).hexdigest())
 """
 
@@ -105,11 +105,10 @@ def _dot(trace: tl.Trace, tmp_path: Path, **kwargs: Any) -> str:
     """Render a trace and return its DOT source."""
 
     return trace.draw(
-        vis_save_only=True,
-        vis_fileformat="svg",
-        vis_outpath=str(tmp_path / "graph"),
+        file_format="svg",
+        path=str(tmp_path / "graph"),
         **kwargs,
-    )
+    ).dot
 
 
 #: The ``graphviz`` python package is the direct DOT emitter for these
@@ -199,7 +198,6 @@ def _worker_renders() -> dict[str, str]:
     return renders
 
 
-@pytest.mark.smoke
 @pytest.mark.parametrize("model_key", ("viz_cnn", "viz_recurrent"))
 @pytest.mark.parametrize("vis_mode", ("unrolled", "rolled"))
 def test_forward_dot_matches_golden(model_key: str, vis_mode: str) -> None:
@@ -233,7 +231,6 @@ def test_forward_dot_two_process_control() -> None:
     assert hashes[0] == hashes[1]
 
 
-@pytest.mark.smoke
 def test_backward_dot_in_process_stable(tmp_path: Path) -> None:
     """Backward DOT: double-render byte equality + structural invariants.
 
@@ -248,26 +245,30 @@ def test_backward_dot_in_process_stable(tmp_path: Path) -> None:
         trace = tl.trace(
             VizCNN(),
             x,
-            capture=tl.options.CaptureOptions(backward_ready=True),
-            save_mode="reference",
+            capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"),
         )
     loss = trace[trace.ops.keys()[-1]].out.sum()
-    trace.log_backward(loss)
+    trace.backward(loss)
 
-    first = trace.draw_backward(
-        vis_save_only=True,
-        vis_fileformat="svg",
-        vis_outpath=str(tmp_path / "b1"),
-    )
-    second = trace.draw_backward(
-        vis_save_only=True,
-        vis_fileformat="svg",
-        vis_outpath=str(tmp_path / "b2"),
-    )
+    first = trace.draw(
+        graph="backward",
+        file_format="svg",
+        path=str(tmp_path / "b1"),
+    ).dot
+    second = trace.draw(
+        graph="backward",
+        file_format="svg",
+        path=str(tmp_path / "b2"),
+    ).dot
     assert first == second
 
     node_count = sum(1 for line in first.splitlines() if " [" in line and "->" not in line)
     edge_count = sum(1 for line in first.splitlines() if "->" in line)
-    assert (node_count, edge_count) == (16, 12), (
+    # (17, 12) -> (16, 11) with the W051-CAPT3 redundant-output-copy removal:
+    # the capture-side clone of the model output contributed one grad_fn node
+    # and its edge; the retained op payload is now the single copy.
+    # (16, 11) -> (15, 11): the backward key is opt-in (show_legend=True), as on
+    # forward drawings, so the default drawing has no key table node.
+    assert (node_count, edge_count) == (15, 11), (
         f"backward graph structure changed: {node_count} nodes, {edge_count} edges"
     )

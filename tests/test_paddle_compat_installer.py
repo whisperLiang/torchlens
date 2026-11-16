@@ -8,8 +8,6 @@ import pytest
 
 from scripts import paddle_import_compat as installer
 
-pytestmark = pytest.mark.smoke
-
 
 @pytest.fixture
 def installation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -104,10 +102,7 @@ def test_non_regular_managed_target_refuses(installation: Path, tmp_path: Path, 
     else:
         destination = tmp_path / "user-file"
         destination.write_text(installer._HEADER, encoding="utf-8")
-        try:
-            target.symlink_to(destination)
-        except OSError:
-            pytest.skip("symlink creation is unavailable on this platform")
+        target.symlink_to(destination)
     with pytest.raises(RuntimeError, match="Refusing"):
         installer.main(["install"])
     assert not (installation / installer._MODULE_NAME).exists()

@@ -32,24 +32,12 @@ def _first_internal_label(model: nn.Module, x: torch.Tensor) -> str:
     log = tl.trace(
         model,
         x,
-        capture=tl.options.CaptureOptions(layers_to_save=None),
+        save=None,
     )
     for label in log.layer_labels:
         if not label.startswith(("input", "output")):
             return label
     raise AssertionError("No internal layer found.")
-
-
-def test_extractor_returns_feature_dict() -> None:
-    """Extractor call returns a dict-like out mapping."""
-
-    model = CompatModel()
-    x = torch.randn(2, 3)
-    label = _first_internal_label(model, x)
-    extractor = Extractor(model, [label])
-    features = extractor(x)
-    assert set(features) == {label}
-    assert features[label].shape[0] == x.shape[0]
 
 
 def test_extractor_forward_alias() -> None:

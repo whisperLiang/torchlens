@@ -6,12 +6,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._validation_status import ValidationStatus
 from torchlens.options import CaptureOptions
-from torchlens.validation.status import ValidationReplayStatus
+
+pytestmark = pytest.mark.usefixtures("root_edits_in_place")  # D.12: no per-call mutation keyword
 
 GOLDEN_PATH = Path(__file__).with_name("validation_decisions.json")
 
@@ -67,6 +70,37 @@ class TinyBatchNorm(nn.Module):
         """
 
         return self.bn(x) + self.bn.running_mean
+
+
+class TinyTrainBatchNorm(nn.Module):
+    """Training-mode BatchNorm whose fused call writes its running statistics.
+
+    The write happens inside ``batch_norm``, so each written buffer gets a
+    buffer-version node with no replayable function of its own: the genuine
+    functionless boundary that validation exempts.
+    """
+
+    def __init__(self) -> None:
+        """Initialize the model."""
+
+        super().__init__()
+        self.bn = nn.BatchNorm1d(4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run a training-mode BatchNorm pass.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Model output.
+        """
+
+        return self.bn(x)
 
 
 class TinyRecurrent(nn.Module):
@@ -337,7 +371,7 @@ def _first_op_with_func(trace: Any, func_name: str) -> Any:
         Matching operation.
     """
 
-    return next(layer for layer in trace.layer_list if layer.func_name == func_name)
+    return next(layer for layer in trace._layer_list if layer.func_name == func_name)
 
 
 def _wrong_add(input_tensor: torch.Tensor, *_args: Any, **_kwargs: Any) -> torch.Tensor:
@@ -378,7 +412,7 @@ def _save_only_mul(ctx: Any) -> bool:
     return ctx.func_name in {"__mul__", "mul"}
 
 
-def _status_for_trace(trace: Any, outputs: list[torch.Tensor]) -> ValidationReplayStatus:
+def _status_for_trace(trace: Any, outputs: list[torch.Tensor]) -> ValidationStatus:
     """Validate a trace and return its cached status.
 
     Parameters
@@ -390,12 +424,12 @@ def _status_for_trace(trace: Any, outputs: list[torch.Tensor]) -> ValidationRepl
 
     Returns
     -------
-    ValidationReplayStatus
+    ValidationStatus
         Cached torch validation status.
     """
 
     result = trace.validate_forward_pass(outputs)
-    if isinstance(result, ValidationReplayStatus):
+    if isinstance(result, ValidationStatus):
         return result
     return trace.validation_replay_status
 
@@ -404,7 +438,7 @@ def _seeded_status_for_trace(
     seed: int,
     trace: Any,
     outputs: list[torch.Tensor],
-) -> ValidationReplayStatus:
+) -> ValidationStatus:
     """Validate a trace after pinning perturbation RNG.
 
     Parameters
@@ -418,7 +452,7 @@ def _seeded_status_for_trace(
 
     Returns
     -------
-    ValidationReplayStatus
+    ValidationStatus
         Cached torch validation status.
     """
 
@@ -426,7 +460,7 @@ def _seeded_status_for_trace(
     return _status_for_trace(trace, outputs)
 
 
-def _case_summary(status: ValidationReplayStatus) -> dict[str, Any]:
+def _case_summary(status: ValidationStatus) -> dict[str, Any]:
     """Build the JSON-stable golden payload for one case.
 
     Parameters
@@ -442,9 +476,9 @@ def _case_summary(status: ValidationReplayStatus) -> dict[str, Any]:
 
     return {
         "state": status.state,
-        "replayed_node_count": status.replayed_node_count,
-        "unverified_node_count": status.unverified_node_count,
-        "failed_node_count": status.failed_node_count,
+        "replayed_node_count": status.num_replayed_ops,
+        "unverified_node_count": status.num_unverified_ops,
+        "failed_node_count": status.num_failed_ops,
         "unverified_reason_counts": dict(status.unverified_reason_counts),
         "exempted_reason_counts": dict(status.exempted_reason_counts),
         "decisions": list(status.decisions),
@@ -463,13 +497,18 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
     torch.manual_seed(11)
     ff = TinyFeedForward().eval()
     x_ff = torch.randn(2, 4)
-    full_capture = CaptureOptions(layers_to_save="all", save_arg_values=True)
-    ff_trace = tl.trace(ff, x_ff, capture=full_capture)
+    full_capture = CaptureOptions(save_args=True)
+    ff_trace = tl.trace(ff, x_ff, capture=full_capture, save="all")
 
     torch.manual_seed(12)
     bn = TinyBatchNorm().eval()
     x_bn = torch.randn(3, 4)
-    bn_trace = tl.trace(bn, x_bn, capture=full_capture)
+    bn_trace = tl.trace(bn, x_bn, capture=full_capture, save="all")
+
+    torch.manual_seed(23)
+    train_bn = TinyTrainBatchNorm().train()
+    x_train_bn = torch.randn(3, 4)
+    train_bn_trace = tl.trace(train_bn, x_train_bn, capture=full_capture, save="all")
 
     torch.manual_seed(13)
     recurrent = TinyRecurrent().eval()
@@ -478,30 +517,34 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
         recurrent,
         x_recurrent,
         capture=CaptureOptions(
-            layers_to_save="all",
-            save_arg_values=True,
-            random_seed=13,
+            save_args=True,
+            seed=13,
         ),
+        save="all",
     )
 
     torch.manual_seed(14)
     intervention = TinyIntervention().eval()
     x_intervention = torch.randn(2, 3)
-    clean = tl.trace(intervention, x_intervention, capture=full_capture)
+    clean = tl.trace(intervention, x_intervention, capture=full_capture, save="all")
     edited = clean.fork("zero_relu")
-    relu_pass = next(layer for layer in edited.layer_list if layer.func_name == "relu")
-    edited.set(tl.func("relu"), torch.zeros_like(relu_pass.out), confirm_mutation=True)
-    edited.run(intervention, x_intervention)
+    relu_pass = next(layer for layer in edited._layer_list if layer.func_name == "relu")
+    edited.do(
+        tl.func("relu"),
+        torch.zeros_like(relu_pass.out),
+        intervention=tl.options.InterventionOptions(engine="set_only"),
+    )
+    edited = edited.run(intervention, x_intervention)
 
     torch.manual_seed(15)
     empty_like = TinyEmptyLike().eval()
     x_empty = torch.randn(2, 3)
-    empty_trace = tl.trace(empty_like, x_empty, capture=full_capture)
+    empty_trace = tl.trace(empty_like, x_empty, capture=full_capture, save="all")
 
     torch.manual_seed(16)
     corrupted = TinyAddRelu().eval()
     x_corrupted = torch.randn(2, 3)
-    corrupted_trace = tl.trace(corrupted, x_corrupted, capture=full_capture)
+    corrupted_trace = tl.trace(corrupted, x_corrupted, capture=full_capture, save="all")
     _first_op_with_func(corrupted_trace, "__add__").func = _wrong_add
 
     torch.manual_seed(17)
@@ -510,7 +553,8 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
     partial_trace = tl.trace(
         partial_save,
         x_partial,
-        capture=CaptureOptions(layers_to_save="all", save_arg_values=False),
+        capture=CaptureOptions(save_args=False),
+        save="all",
     )
 
     torch.manual_seed(19)
@@ -520,7 +564,7 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
         selective_save,
         x_selective,
         save=_save_only_mul,
-        capture=CaptureOptions(save_arg_values=False),
+        capture=CaptureOptions(save_args=False),
     )
 
     torch.manual_seed(18)
@@ -530,6 +574,7 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
         cholesky,
         x_cholesky,
         capture=full_capture,
+        save="all",
     )
 
     torch.manual_seed(22)
@@ -538,6 +583,7 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
         step_invalid,
         [torch.tensor([-2.0, 0.5, 1.5, 2.5]), torch.tensor(0)],
         capture=full_capture,
+        save="all",
     )
 
     torch.manual_seed(20)
@@ -547,6 +593,7 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
         swamped,
         x_swamped,
         capture=full_capture,
+        save="all",
     )
 
     torch.manual_seed(21)
@@ -556,6 +603,7 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
         multiply_zero,
         x_multiply_zero,
         capture=full_capture,
+        save="all",
     )
 
     torch.manual_seed(22)
@@ -565,6 +613,7 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
         int_multiply_zero,
         x_int_multiply_zero,
         capture=full_capture,
+        save="all",
     )
 
     return {
@@ -573,6 +622,9 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
         ),
         "tiny_batch_norm": _case_summary(
             _seeded_status_for_trace(102, bn_trace, [_trace_output(bn_trace)])
+        ),
+        "tiny_train_batch_norm": _case_summary(
+            _seeded_status_for_trace(113, train_bn_trace, [_trace_output(train_bn_trace)])
         ),
         "tiny_recurrent": _case_summary(
             _seeded_status_for_trace(103, recurrent_trace, [_trace_output(recurrent_trace)])

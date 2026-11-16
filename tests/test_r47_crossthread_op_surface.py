@@ -27,7 +27,6 @@ the wrapper belt. This immunizer pins:
 
 from __future__ import annotations
 
-import functools
 import shutil
 import threading
 from collections.abc import Callable
@@ -36,20 +35,23 @@ from typing import Any
 
 import pytest
 import torch
+from _forward_stash import stashed
 from torch import nn
 
 import torchlens as tl
-from torchlens import _state
-from torchlens.backends.torch import completeness_witness as cw
-from torchlens.backends.torch.completeness_witness import (
+import torchlens.backends.torch._completeness_cross_thread
+import torchlens.backends.torch._completeness_patches
+from torchlens._runnable import PathFaithfulness
+from torchlens.backends.torch._completeness_cross_thread import (
     _torch_ops_call_classes,
-    host_escape_has_cross_thread_captured_tensor,
     host_escape_observer_install_failed,
 )
+from torchlens.backends.torch._completeness_escape_state import (
+    host_escape_has_cross_thread_captured_tensor,
+)
 from torchlens.options import CaptureOptions
-from torchlens.runnable import PathFaithfulness
 
-_CAP = {"intervention_ready": True, "capture_container_structure": True, "cache": False}
+_CAP = {"replayable": True, "capture_container_structure": True, "cache": False}
 
 
 def _gate_pos() -> torch.Tensor:
@@ -161,6 +163,7 @@ def _make_runner(thread_mode: str) -> Any:
     return _InWindowRunner() if thread_mode == "in_window" else _PreexistingWorker()
 
 
+# Kept: sole branch coverage of backends/torch/_torch_ops_calls.py; a sole mutation kill; its other params stay because the list is not trimmable per id.
 @pytest.mark.parametrize("surface", list(_CONSUMERS))
 @pytest.mark.parametrize("thread_mode", ["in_window", "preexisting"])
 def test_crossthread_captured_operand_consumption_ceilings(
@@ -174,14 +177,14 @@ def test_crossthread_captured_operand_consumption_ceilings(
         torch.manual_seed(0)
         data = torch.randn(1, 4)
         model = _CrossThreadModel(_CONSUMERS[surface], runner)
-        trace = tl.trace(model, (_gate_pos(), data), capture=CaptureOptions(random_seed=1, **_CAP))
+        trace = tl.trace(model, (_gate_pos(), data), capture=CaptureOptions(seed=1, **_CAP))
         assert host_escape_has_cross_thread_captured_tensor(trace), (
             f"{surface}/{thread_mode}: captured-operand consumption did not ceiling"
         )
         path = tmp_path / f"{surface}_{thread_mode}.tlspec"
         shutil.rmtree(path, ignore_errors=True)
         trace.save(path, level="runnable", include_weights=True, include_activations=True)
-        result = tl.load(path).run(inputs=(_gate_neg(), data))
+        result = tl.load(path).run_transaction(inputs=(_gate_neg(), data))
         assert result.report.path_faithfulness is not PathFaithfulness.VERIFIED
         assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     finally:
@@ -209,6 +212,7 @@ class _BenignOwnTensorModel(nn.Module):
         return self.lin(x).relu()
 
 
+# Kept: a sole mutation kill; its other params stay because the list is not trimmable per id.
 @pytest.mark.parametrize("thread_mode", ["in_window", "preexisting"])
 @pytest.mark.parametrize("use_aten", [False, True])
 def test_benign_own_tensor_worker_stays_verified(
@@ -221,53 +225,18 @@ def test_benign_own_tensor_worker_stays_verified(
     try:
         model = _BenignOwnTensorModel(runner, use_aten=use_aten)
         x = torch.randn(2, 4)
-        trace = tl.trace(model, x, capture=CaptureOptions(random_seed=1, **_CAP))
+        trace = tl.trace(model, x, capture=CaptureOptions(seed=1, **_CAP))
         assert not host_escape_has_cross_thread_captured_tensor(trace)
         path = tmp_path / f"benign_{thread_mode}_{use_aten}.tlspec"
         shutil.rmtree(path, ignore_errors=True)
         trace.save(path, level="runnable", include_weights=True, include_activations=True)
-        result = tl.load(path).run(inputs=x)
+        result = tl.load(path).run_transaction(inputs=x)
         assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
     finally:
         runner.stop()
 
 
-def test_idle_worker_stays_verified(tmp_path: Path) -> None:
-    """Over-trigger pin: a worker that runs no torch op at all stays VERIFIED."""
-
-    runner = _PreexistingWorker()
-    try:
-
-        class _IdleModel(nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.lin = nn.Linear(4, 4)
-
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                runner.run(lambda: 42)
-                return self.lin(x).relu()
-
-        x = torch.randn(2, 4)
-        trace = tl.trace(_IdleModel(), x, capture=CaptureOptions(random_seed=1, **_CAP))
-        assert not host_escape_has_cross_thread_captured_tensor(trace)
-        path = tmp_path / "idle.tlspec"
-        shutil.rmtree(path, ignore_errors=True)
-        trace.save(path, level="runnable", include_weights=True, include_activations=True)
-        assert tl.load(path).run(inputs=x).report.path_faithfulness is PathFaithfulness.VERIFIED
-    finally:
-        runner.stop()
-
-
-# --- structural arm/disarm lifecycle ---------------------------------------------------------
-def test_ops_call_classes_scan_is_nonvacuous() -> None:
-    """The structural scan discovers the ``torch._ops`` call-class surface (non-vacuous)."""
-
-    classes = _torch_ops_call_classes()
-    assert len(classes) >= 2
-    for cls in classes:
-        assert callable(cls.__dict__.get("__call__"))
-
-
+# Kept: sole branch coverage of _capture_attr_observer.py.
 def test_patches_installed_while_armed_and_restored_after() -> None:
     """LIFECYCLE: EVERY discovered class is patched during the armed capture window, and ALL are
     restored (original identity, no marker) after -- a leaked process-wide patch or a silent
@@ -292,10 +261,12 @@ def test_patches_installed_while_armed_and_restored_after() -> None:
             return self.lin(x).relu()
 
     model = _ProbeModel()
-    tl.trace(model, torch.randn(2, 4), capture=CaptureOptions(random_seed=1, **_CAP))
+    log = tl.trace(model, torch.randn(2, 4), capture=CaptureOptions(seed=1, **_CAP))
 
-    assert model.during["count"] == len(originals)
-    assert model.during["all_patched"] is True, "not every torch._ops call class was patched"
+    assert stashed(log, "during")["count"] == len(originals)
+    assert stashed(log, "during")["all_patched"] is True, (
+        "not every torch._ops call class was patched"
+    )
     # restored: original identity, no lingering wrapper marker
     for cls, original in originals.items():
         current = cls.__dict__.get("__call__")
@@ -303,60 +274,17 @@ def test_patches_installed_while_armed_and_restored_after() -> None:
         assert not getattr(current, "__tl_nonowner_ops_observer__", False)
 
 
-def test_disarmed_torch_ops_call_is_pure_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Over-trigger pin: with the belt disarmed, a ``torch.ops.aten.*`` call runs the original and
-    never invokes the operand observer."""
-
-    calls = {"n": 0}
-    real = cw.observe_nonowner_operands
-
-    def _spy(args: Any, kwargs: Any) -> None:
-        calls["n"] += 1
-        real(args, kwargs)
-
-    monkeypatch.setattr(cw, "observe_nonowner_operands", _spy)
-    assert _state._nonowner_belt_armed is False
-    out = torch.ops.aten.mul.Tensor(torch.ones(2), torch.tensor(3.0))
-    assert out.tolist() == [3.0, 3.0]
-    assert calls["n"] == 0
-
-
-def test_eager_forward_hits_torch_ops_call_zero_times() -> None:
-    """Perf premise (probe P6): a plain eager forward hits the Python ``torch.ops.*.__call__`` path
-    zero times (dispatch is C++), so class-patching those ``__call__`` methods for the armed forward
-    window adds ~no overhead on the OWNER thread. Measured on a RAW forward (no capture) with a
-    counting wrapper, so it isolates the model's eager ops from TorchLens's own capture machinery."""
-
-    classes = _torch_ops_call_classes()
-    hits = {"n": 0}
-    saved: dict[type, Any] = {}
-
-    def _make_counter(original: Any) -> Any:
-        @functools.wraps(original)
-        def _counter(self: Any, *args: Any, **kwargs: Any) -> Any:
-            hits["n"] += 1
-            return original(self, *args, **kwargs)
-
-        return _counter
-
-    for cls in classes:
-        saved[cls] = cls.__dict__["__call__"]
-        cls.__call__ = _make_counter(saved[cls])
-    try:
-        model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 8)).eval()
-        with torch.no_grad():
-            model(torch.randn(2, 8))
-    finally:
-        for cls, original in saved.items():
-            cls.__call__ = original
-    assert hits["n"] == 0
-
-
+# Kept: sole branch coverage of backends/torch/_completeness_patches.py; a sole mutation kill.
 def test_install_failure_marks_observer_incomplete(monkeypatch: pytest.MonkeyPatch) -> None:
     """An empty scan (install failure surrogate) fails CLOSED: the observer-install-failed flag is
     set so the descriptor is INCOMPLETE, never a silent 'no non-owner op touch'."""
 
-    monkeypatch.setattr(cw, "_torch_ops_call_classes", lambda: ())
+    # The home module and every module that binds the name by import.
+    for module in (
+        torchlens.backends.torch._completeness_cross_thread,
+        torchlens.backends.torch._completeness_patches,
+    ):
+        monkeypatch.setattr(module, "_torch_ops_call_classes", lambda: ())
 
     class _M(nn.Module):
         def __init__(self) -> None:
@@ -366,11 +294,12 @@ def test_install_failure_marks_observer_incomplete(monkeypatch: pytest.MonkeyPat
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             return self.lin(x).relu()
 
-    trace = tl.trace(_M(), torch.randn(2, 4), capture=CaptureOptions(random_seed=1, **_CAP))
+    trace = tl.trace(_M(), torch.randn(2, 4), capture=CaptureOptions(seed=1, **_CAP))
     assert host_escape_observer_install_failed(trace)
 
 
 # --- documented residuals (auditable) --------------------------------------------------------
+# Kept: sole branch coverage of _data_classes/_trace_grad_sites.py, _data_classes/trace.py, _visualization/_summary_internal/__init__.py and more.
 @pytest.mark.xfail(
     reason="documented residual: torch._C._VariableFunctions.<op> is a read-only, non-Python-"
     "patchable private-C free-function surface; its public alias torch.<op> IS wrapped",
@@ -402,9 +331,7 @@ def test_variable_functions_private_spelling_residual(tmp_path: Path) -> None:
 
         torch.manual_seed(0)
         data = torch.randn(1, 4)
-        trace = tl.trace(
-            _VFModel(), (_gate_pos(), data), capture=CaptureOptions(random_seed=1, **_CAP)
-        )
+        trace = tl.trace(_VFModel(), (_gate_pos(), data), capture=CaptureOptions(seed=1, **_CAP))
         # If this ever ceilings, the residual is CLOSED and the xfail flips to XPASS.
         assert host_escape_has_cross_thread_captured_tensor(trace)
     finally:

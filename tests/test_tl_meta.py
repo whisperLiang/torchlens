@@ -11,7 +11,7 @@ import pytest
 import torch
 from torch import nn
 
-from torchlens.backends.torch._tl import (
+from torchlens._utils._tensor_label import (
     DecorationTag,
     ModuleMeta,
     ParamMeta,
@@ -48,7 +48,7 @@ def _plain_function() -> None:
     """Provide a callable that accepts custom attributes."""
 
 
-@pytest.mark.smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
 def test_tensor_helpers_lazy_init_and_field_operations() -> None:
     """Tensor helpers should lazy-init and mutate only requested fields."""
     t = torch.ones(2)
@@ -75,21 +75,7 @@ def test_tensor_helpers_lazy_init_and_field_operations() -> None:
     assert t._tl.address == "block.buf"
 
 
-@pytest.mark.smoke
-def test_clear_meta_is_idempotent_and_preserves_foreign_tl() -> None:
-    """clear_meta should remove TorchLens metadata but leave foreign _tl alone."""
-    t = torch.ones(1)
-    set_tensor_label(t, "x_raw")
-    clear_meta(t)
-    assert not hasattr(t, "_tl")
-    clear_meta(t)
-
-    t._tl = {"foreign": True}
-    clear_meta(t)
-    assert t._tl == {"foreign": True}
-
-
-@pytest.mark.smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/_tl.py, campaign mutant kills.
 def test_get_label_list_is_sparse_and_checks_foreign_tl() -> None:
     """get_label_list should return only real labels and reject foreign _tl."""
     a = torch.ones(1)
@@ -107,7 +93,7 @@ def test_get_label_list_is_sparse_and_checks_foreign_tl() -> None:
         get_label_list([c])
 
 
-@pytest.mark.smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
 def test_param_helpers_set_increment_and_restore() -> None:
     """Parameter helpers should preserve pre-capture requires_grad and call counts."""
     p = nn.Parameter(torch.ones(1), requires_grad=False)
@@ -125,20 +111,7 @@ def test_param_helpers_set_increment_and_restore() -> None:
     assert p.requires_grad is False
 
 
-@pytest.mark.smoke
-def test_module_helpers_set_and_read_meta() -> None:
-    """Module helpers should attach permanent module metadata."""
-    module = nn.Linear(2, 2)
-    set_module_meta(module, address="block.0", module_type="Linear")
-
-    meta = get_module_meta(module)
-    assert isinstance(meta, ModuleMeta)
-    assert meta.address == "block.0"
-    assert meta.module_type == "Linear"
-    assert is_tracked(module)
-
-
-@pytest.mark.smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/_tl.py, campaign mutant kills.
 def test_decoration_helpers_are_independent_flags() -> None:
     """Decoration helpers should set and read independent sentinel flags."""
     fn = _plain_function
@@ -160,7 +133,7 @@ def test_decoration_helpers_are_independent_flags() -> None:
     clear_meta(fn)
 
 
-@pytest.mark.smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
 def test_copy_replacement_meta_preserves_subclass_and_is_shallow_copy() -> None:
     """copy_replacement_meta copies the logical dataclass while preserving subclass.
 
@@ -189,11 +162,9 @@ def test_copy_replacement_meta_preserves_subclass_and_is_shallow_copy() -> None:
     assert dst._tl.label_storage.data_ptr() == dst.untyped_storage().data_ptr()
 
 
-@pytest.mark.smoke
 @pytest.mark.parametrize(
     "meta",
     [
-        TensorMeta(label_raw="x", address="buf", buffer_source="parent"),
         ParamMeta(
             param_barcode="abc",
             param_address="linear.weight",
@@ -217,7 +188,7 @@ def test_meta_dataclasses_round_trip(meta: Any) -> None:
     assert type(replaced) is type(meta)
 
 
-@pytest.mark.smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/_tl.py, campaign mutant kills.
 def test_foreign_tl_raises_for_read_helpers_and_is_tracked() -> None:
     """Read helpers should raise when a foreign _tl object is present."""
     t = torch.ones(1)
@@ -228,7 +199,7 @@ def test_foreign_tl_raises_for_read_helpers_and_is_tracked() -> None:
             helper(t)
 
 
-@pytest.mark.smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/_tl.py, campaign mutant kills.
 def test_wrong_kind_meta_raises_on_kind_specific_helpers() -> None:
     """Attribute-backed helpers (tensors/callables) reject another TorchLens
     metadata subclass; registry-backed helpers (params/modules) ignore a foreign
@@ -267,6 +238,7 @@ def test_wrong_kind_meta_raises_on_kind_specific_helpers() -> None:
     clear_meta(_plain_function)
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/_tl.py, campaign mutant kills.
 def test_module_param_metadata_is_registry_backed_not_attribute() -> None:
     """Module/param metadata lives in identity-keyed registries: the user objects
     carry no ``._tl`` attribute, clearing removes the REGISTRY entry, deepcopy does
@@ -274,7 +246,7 @@ def test_module_param_metadata_is_registry_backed_not_attribute() -> None:
     import copy
     import gc
 
-    from torchlens.backends.torch._tl import _MODULE_REGISTRY
+    from torchlens._utils._tensor_label import _MODULE_REGISTRY
 
     m = nn.Linear(2, 2)
     set_module_meta(m, address="enc.lin", module_type="Linear")

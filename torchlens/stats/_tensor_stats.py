@@ -1,0 +1,392 @@
+"""The frozen TensorStats record.
+
+One backend-neutral record owning the NUMBERS; every stats line, card,
+table cell, and seam adapter is a pure formatter over it. Per-family
+evidence carries exact/sampled/unavailable/verdict; known counts
+are exact integers; ``dim``/``dim_names``/``role``/``relations`` are RESERVED
+from day one so per-channel tables, semantic roles, and ``= parent`` marks
+land as renderers, never rework.
+
+Spellings are DOCUMENTED-UNSTABLE pending naming-session ratification.
+"""
+
+from __future__ import annotations
+
+import weakref
+from dataclasses import dataclass, field
+from typing import Any
+
+import torch
+
+from .._utils.fail_open import fail_open
+from ._stats_kernel import KernelResult, run_kernel
+
+#: TensorStats record schema version (bump on any field change).
+TENSOR_STATS_SCHEMA_VERSION = 2
+
+
+@dataclass(frozen=True)
+class FamilyEvidence:
+    """Per-family computation evidence.
+
+    ``policy`` is one of ``exact`` / ``sampled`` / ``unavailable`` /
+    ``verdict``. A nonfinite ``verdict`` proves presence without counts; the
+    ``~`` display mark belongs to the sampled family ONLY, and
+    ``unavailable`` always carries a reason -- never a silent absence.
+
+    Examples
+    --------
+    >>> stats = tl.stats.tensor_stats(torch.tensor([1.0, -2.0, float("nan")]))
+    >>> evidence = stats.nonfinite_evidence
+    >>> isinstance(evidence, FamilyEvidence), evidence.policy, evidence.is_sampled
+    (True, 'exact', False)
+    """
+
+    policy: str
+    population: int
+    sample_size: int | None = None
+    reason: str | None = None
+
+    @property
+    def is_sampled(self) -> bool:
+        """Whether this family rode the seeded gathered sample."""
+
+        return self.policy == "sampled"
+
+
+@dataclass(frozen=True)
+class TensorStats:
+    """Frozen, backend-neutral statistics record for ONE tensor payload.
+
+    Every numeric field is a plain int/float/None (the raw-numbers pin);
+    formatters never touch tensors and this record never holds one.
+
+    Examples
+    --------
+    >>> stats = tl.stats.tensor_stats(torch.tensor([1.0, -2.0, float("nan")]))
+    >>> isinstance(stats, TensorStats)
+    True
+    >>> stats.shape, stats.numel, stats.num_nan, stats.finite_min
+    ((3,), 3, 1, -2.0)
+    """
+
+    schema_version: int
+    shape: tuple[int, ...]
+    dtype: str
+    device: str
+    numel: int
+    nbytes: int | None
+    #: Exact counts when known; None makes no census claim.
+    num_nan: int | None
+    num_posinf: int | None
+    num_neginf: int | None
+    nonfinite_evidence: FamilyEvidence
+    num_zero: int | None
+    num_true: int | None
+    finite_min: float | None
+    finite_max: float | None
+    extrema_evidence: FamilyEvidence
+    mean: float | None
+    mean_evidence: FamilyEvidence
+    mean_se: float | None
+    std: float | None
+    std_evidence: FamilyEvidence
+    std_se: float | None
+    histogram_counts: tuple[int, ...] | None
+    histogram_edges: tuple[float, ...] | None
+    histogram_evidence: FamilyEvidence
+    #: True when moments describe |z| magnitudes (complex stats are
+    #: explicitly magnitude-labeled, never presented as value stats).
+    is_magnitude_based: bool
+    #: Live tensor ``_version`` at computation; a mutated tensor invalidates
+    #: the cache and the next render says so.
+    tensor_version: int | None
+    #: Raw values for tiny tensors (at small n the values ARE the
+    #: summary); ``None`` above the smallness bound.
+    small_values: tuple[float, ...] | None = None
+    #: RESERVED plumbing (deferred != forgotten): per-dim reductions,
+    #: graph-proven semantic roles, and distribution relations.
+    dim: int | None = None
+    dim_names: tuple[str, ...] | None = None
+    role: str | None = None
+    relations: tuple[str, ...] = field(default_factory=tuple)
+
+    def __repr__(self) -> str:
+        """The record reprs as its own core line.
+
+        The dataclass auto-repr printed every field including histogram
+        tuples -- a wall; the designed repr IS the grammar this record
+        exists to serve. Never raises (the line renderer is pure).
+        """
+
+        from ._stats_render import render_core_line  # deferred: cycle stats
+
+        return fail_open(
+            lambda: f"TensorStats({render_core_line(self)})",
+            lambda _error: f"TensorStats({self.dtype}[{','.join(str(d) for d in self.shape)}])",
+        )
+
+    @property
+    def policy(self) -> str:
+        """Summarize populated families; their evidence remains authoritative.
+
+        Any sampled family makes the summary sampled. Only reused facts
+        (track_nonfinite verdicts or its exact zero census) summarize as
+        reuse; otherwise all populated families are exact.
+        """
+
+        families = (
+            self.nonfinite_evidence,
+            self.extrema_evidence,
+            self.mean_evidence,
+            self.std_evidence,
+            self.histogram_evidence,
+        )
+        populated = [evidence for evidence in families if evidence.policy != "unavailable"]
+        if any(evidence.is_sampled for evidence in populated):
+            return "sampled"
+        if populated and all(
+            evidence.policy == "verdict" or evidence.reason == "track_nonfinite"
+            for evidence in populated
+        ):
+            return "reuse"
+        return "exact"
+
+    @property
+    def num_nonfinite(self) -> int | None:
+        """Total nonfinite elements, or None when any count is unknown."""
+
+        if self.num_nan is None or self.num_posinf is None or self.num_neginf is None:
+            return None
+        return self.num_nan + self.num_posinf + self.num_neginf
+
+    @property
+    def num_finite(self) -> int | None:
+        """Elements with finite values, or None when the census is unknown."""
+
+        nonfinite = self.num_nonfinite
+        return None if nonfinite is None else self.numel - nonfinite
+
+    @property
+    def is_empty(self) -> bool:
+        """Whether the payload had zero elements."""
+
+        return self.numel == 0
+
+    @property
+    def is_all_zero(self) -> bool:
+        """Whether every element is exactly zero (exact claim)."""
+
+        return self.numel > 0 and self.num_zero == self.numel
+
+    @property
+    def constant_value(self) -> float | None:
+        """The constant value when every finite element is identical."""
+
+        if (
+            self.numel > 1
+            and self.num_nonfinite == 0
+            and self.finite_min is not None
+            and self.finite_min == self.finite_max
+        ):
+            return self.finite_min
+        return None
+
+    @property
+    def is_all_true(self) -> bool:
+        """bool family: every element true (exact)."""
+
+        return self.num_true is not None and self.num_true == self.numel and self.numel > 0
+
+    @property
+    def is_all_false(self) -> bool:
+        """bool family: every element false (exact)."""
+
+        return self.num_true == 0 and self.numel > 0
+
+    @property
+    def has_no_finite_values(self) -> bool:
+        """Whether no element is finite (the fully poisoned case)."""
+
+        return self.numel > 0 and self.num_finite == 0 and self.num_true is None
+
+
+def _dtype_token(dtype: torch.dtype) -> str:
+    """Backend-neutral compact dtype token (f32/i64/bf16/c64/bool)."""
+
+    text = str(dtype).replace("torch.", "")
+    return {
+        "float32": "f32",
+        "float64": "f64",
+        "float16": "f16",
+        "bfloat16": "bf16",
+        "int64": "i64",
+        "int32": "i32",
+        "int16": "i16",
+        "int8": "i8",
+        "uint8": "u8",
+        "complex64": "c64",
+        "complex128": "c128",
+        "bool": "bool",
+    }.get(text, text)
+
+
+def _record_from_kernel(
+    tensor: torch.Tensor, result: KernelResult, version: int | None
+) -> TensorStats:
+    """Assemble the frozen record from one kernel run."""
+
+    population = result.numel
+    supported = result.unsupported_reason is None
+    nonfinite_evidence = FamilyEvidence(
+        policy="exact" if supported else "unavailable",
+        population=population,
+        reason=result.unsupported_reason,
+    )
+    extrema_evidence = FamilyEvidence(
+        policy="exact" if result.finite_min is not None else "unavailable",
+        population=population,
+        reason=None
+        if result.finite_min is not None
+        else (result.unsupported_reason or "no finite values"),
+    )
+    mean_evidence = FamilyEvidence(
+        policy=result.mean_policy,
+        population=population,
+        reason=result.mean_reason,
+    )
+    sd_evidence = FamilyEvidence(
+        policy=result.sd_policy,
+        population=population,
+        sample_size=result.sd_sample_size,
+    )
+    histogram_evidence = FamilyEvidence(
+        policy=result.histogram_policy,
+        population=population,
+        sample_size=result.histogram_sample_size,
+    )
+    try:
+        nbytes: int | None = tensor.numel() * tensor.element_size()
+    except (RuntimeError, AttributeError):
+        nbytes = None
+    small_values: tuple[float, ...] | None = None
+    if 0 < result.numel <= 16 and not tensor.is_complex():
+        try:
+            small_values = tuple(float(value) for value in tensor.detach().reshape(-1).tolist())
+        except (RuntimeError, TypeError, ValueError):
+            small_values = None
+    return TensorStats(
+        schema_version=TENSOR_STATS_SCHEMA_VERSION,
+        shape=tuple(int(dim) for dim in tensor.shape),
+        dtype=_dtype_token(tensor.dtype),
+        device=str(tensor.device),
+        numel=result.numel,
+        nbytes=nbytes,
+        num_nan=result.nan_count if supported else None,
+        num_posinf=result.posinf_count if supported else None,
+        num_neginf=result.neginf_count if supported else None,
+        nonfinite_evidence=nonfinite_evidence,
+        num_zero=result.zero_count,
+        num_true=result.true_count,
+        finite_min=result.finite_min,
+        finite_max=result.finite_max,
+        extrema_evidence=extrema_evidence,
+        mean=result.mean,
+        mean_evidence=mean_evidence,
+        mean_se=result.mean_se,
+        std=result.sd,
+        std_evidence=sd_evidence,
+        std_se=result.sd_se,
+        histogram_counts=result.histogram_counts,
+        histogram_edges=result.histogram_edges,
+        histogram_evidence=histogram_evidence,
+        is_magnitude_based=result.magnitude_basis,
+        tensor_version=version,
+        small_values=small_values,
+    )
+
+
+#: ``_version``-keyed record cache: a repr must never be a compute
+#: trigger twice, and a cached line that ignores ``_version`` is a stale
+#: number presented as current. Keyed by ``id`` with weakref eviction
+#: (never key a dict on tensors: ``weakref.ref`` equality calls tensor
+#: ``__eq__``, which is elementwise); the cache never extends payload
+#: lifetime.
+_STATS_CACHE: dict[int, tuple[weakref.ref[torch.Tensor], Any, TensorStats]] = {}
+
+
+def _cache_key(tensor: torch.Tensor, version: int | None) -> tuple[Any, ...]:
+    """Cache identity: geometry + dtype + device + mutation version."""
+
+    return (tuple(tensor.shape), str(tensor.dtype), str(tensor.device), version)
+
+
+def _tensor_version(tensor: torch.Tensor) -> int | None:
+    """Best-effort ``_version`` read (inference tensors may refuse)."""
+
+    try:
+        return int(tensor._version)
+    except (RuntimeError, AttributeError):
+        return None
+
+
+def tensor_stats(
+    tensor: torch.Tensor,
+    *,
+    _identity: str | None = None,
+    role: str | None = None,
+) -> TensorStats:
+    """Compute (or serve cached) TensorStats for one dense torch tensor.
+
+    Parameters
+    ----------
+    tensor:
+        Payload to summarize. Never mutated; autograd state untouched.
+    _identity:
+        Internal: stable record identity (op label / site key) seeding the gathered
+        sampler so sampled families are deterministic per record.
+    role:
+        Graph-proven semantic role passthrough (``embedding_index`` etc.);
+        the kernel never invents one.
+
+    Returns
+    -------
+    TensorStats
+        Frozen record; cached per tensor keyed on geometry + ``_version``.
+
+    Examples
+    --------
+    >>> stats = tl.stats.tensor_stats(torch.zeros(2, 5))
+    >>> stats.shape, stats.num_zero, stats.num_nan
+    ((2, 5), 10, 0)
+    """
+
+    version = _tensor_version(tensor)
+    key = _cache_key(tensor, version)
+    cache_id = id(tensor)
+    cached = _STATS_CACHE.get(cache_id)
+    if cached is not None and cached[0]() is tensor and cached[1] == key and cached[2].role == role:
+        return cached[2]
+    record = _record_from_kernel(tensor, run_kernel(tensor, identity=_identity), version)
+    if role is not None:
+        record = _with_role(record, role)
+
+    def _evict(_reference: weakref.ref[torch.Tensor], _id: int = cache_id) -> None:
+        """Drop the cache row when the tensor is collected."""
+
+        _STATS_CACHE.pop(_id, None)
+
+    try:
+        reference = weakref.ref(tensor, _evict)
+    except TypeError:
+        return record
+    _STATS_CACHE[cache_id] = (reference, key, record)
+    return record
+
+
+def _with_role(record: TensorStats, role: str) -> TensorStats:
+    """Return the record with the graph-proven role attached."""
+
+    import dataclasses
+
+    return dataclasses.replace(record, role=role)

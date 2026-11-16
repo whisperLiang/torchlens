@@ -9,9 +9,9 @@ import pytest
 from conftest import tensorflow_backend_modules
 
 import torchlens as tl
-from torchlens.backends import BackendUnsupportedError
 from torchlens.backends.tf.backend import TFBackend
 from torchlens.backends.tf.interventions import TFInterventionSiteUnreachableError
+from torchlens.errors import BackendUnsupportedError
 
 tf, keras, _TF_BACKEND_SKIP_REASON = tensorflow_backend_modules()
 
@@ -22,6 +22,7 @@ pytestmark = [
         _TF_BACKEND_SKIP_REASON is not None,
         reason=_TF_BACKEND_SKIP_REASON or "TensorFlow backend stack is supported",
     ),
+    pytest.mark.rare,
 ]
 
 
@@ -84,10 +85,10 @@ def test_tf_op_level_zero_ablation_changes_downstream_and_marks_site() -> None:
         intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
     )
 
-    relu_op = next(op for op in trace.layer_list if op.func_name == "Relu")
-    add_op = next(op for op in trace.layer_list if op.func_name == "AddV2")
-    assert relu_op.intervention_replaced is True
-    assert relu_op.interventions and relu_op.interventions[0]["backend"] == "tf"
+    relu_op = next(op for op in trace._layer_list if op.func_name == "Relu")
+    add_op = next(op for op in trace._layer_list if op.func_name == "AddV2")
+    assert relu_op.is_edited is True
+    assert relu_op.edits and relu_op.edits[0]["backend"] == "tf"
     assert np.allclose(np.asarray(relu_op.out), [1.0, 0.0, 2.0])
     assert np.allclose(np.asarray(add_op.out), [10.0, 10.0, 10.0])
 
@@ -103,11 +104,12 @@ def test_tf_intervention_graph_stays_honest_by_construction() -> None:
         intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
     )
 
-    add_op = next(op for op in trace.layer_list if op.func_name == "AddV2")
-    zeros_op = next(op for op in trace.layer_list if op.func_name == "ZerosLike")
-    assert tuple(add_op.parents) == (zeros_op.label,)
-    assert trace[add_op.parents[0]] is zeros_op
-    assert add_op.label in zeros_op.children
+    add_op = next(op for op in trace._layer_list if op.func_name == "AddV2")
+    zeros_op = next(op for op in trace._layer_list if op.func_name == "ZerosLike")
+    # Torch parity: parents resolves through the CONDITIONAL label map -- a
+    # single-pass referenced op (zeros_op, here) by its bare layer_label, a
+    # multi-pass one by its pass-qualified label.
+    assert tuple(add_op.parents) == (zeros_op.layer_label,)
     assert np.allclose(np.asarray(zeros_op.out), [0.0, 0.0, 0.0])
 
 
@@ -143,8 +145,8 @@ def test_tf_module_boundary_intervention_substitutes_module_output() -> None:
         intervene=tl.when(tl.module("dense"), tl.scale(0.5)),
     )
 
-    baseline_out = np.asarray(list(baseline.layer_list)[-1].out)
-    intervened_out = np.asarray(list(trace.layer_list)[-1].out)
+    baseline_out = np.asarray(list(baseline._layer_list)[-1].out)
+    intervened_out = np.asarray(list(trace._layer_list)[-1].out)
     assert np.allclose(baseline_out, [[4.0, 4.0]])
     assert np.allclose(intervened_out, [[2.5, 2.5]])
 
@@ -162,7 +164,7 @@ def test_tf_in_module_boundary_intervention_fires_on_containment() -> None:
         intervene=tl.when(tl.in_module("dense"), tl.zero_ablate()),
     )
 
-    final_out = np.asarray(list(trace.layer_list)[-1].out)
+    final_out = np.asarray(list(trace._layer_list)[-1].out)
     assert np.allclose(final_out, [[1.0, 1.0]])
 
 
@@ -180,10 +182,12 @@ def test_tf_unreachable_op_site_refuses_typed() -> None:
 
 
 def test_tf_unmatched_site_is_a_no_op() -> None:
-    """A selector matching nothing preserves output and discloses its zero fires."""
+    """A selector matching nothing anywhere intervenes nowhere and passes."""
 
     x = tf.constant([1.0, -1.0, 2.0])
-    with pytest.warns(UserWarning, match="tf intervention site .* fired at zero sites"):
+    # A selector matching nothing anywhere is a disclosed no-op (see
+    # tests/test_zero_match_disclosures.py), not a silent one: it warns.
+    with pytest.warns(UserWarning, match="fired at zero sites"):
         trace = tl.trace(
             _relu_plus_ten,
             x,
@@ -191,7 +195,7 @@ def test_tf_unmatched_site_is_a_no_op() -> None:
             intervene=tl.when(tl.func("nonexistent_op"), tl.zero_ablate()),
         )
 
-    add_op = next(op for op in trace.layer_list if op.func_name == "AddV2")
+    add_op = next(op for op in trace._layer_list if op.func_name == "AddV2")
     assert np.allclose(np.asarray(add_op.out), [11.0, 10.0, 12.0])
 
 
@@ -206,7 +210,7 @@ def test_tf_callable_action_substitutes() -> None:
         intervene=tl.when(tl.func("relu"), lambda out: out + tf.ones_like(out)),
     )
 
-    add_ops = [op for op in trace.layer_list if op.func_name == "AddV2"]
+    add_ops = [op for op in trace._layer_list if op.func_name == "AddV2"]
     assert np.allclose(np.asarray(add_ops[0].out), [2.0, 1.0, 3.0])
     assert np.allclose(np.asarray(add_ops[-1].out), [12.0, 11.0, 13.0])
 
@@ -233,7 +237,7 @@ def test_tf_unsupported_helper_refuses_typed() -> None:
             _relu_plus_ten,
             x,
             backend="tf",
-            intervene=tl.when(tl.func("relu"), tl.mean_ablate()),
+            intervene=tl.when(tl.func("relu"), tl.mean_ablate(dim=None)),
         )
 
 
@@ -250,14 +254,32 @@ def test_tf_shape_changing_replacement_refuses_typed() -> None:
         )
 
 
-def test_tf_halt_and_recipes_keep_typed_refusals() -> None:
-    """halt= and recipes= refuse typed inside the capture path."""
+def test_tf_halt_keeps_typed_refusal() -> None:
+    """stop_after= refuses typed inside the capture path."""
 
     x = tf.constant([1.0, -1.0, 2.0])
-    with pytest.raises(BackendUnsupportedError, match="halt"):
-        tl.trace(_relu_plus_ten, x, backend="tf", halt=tl.func("relu"))
-    with pytest.raises(BackendUnsupportedError, match="recipes"):
-        tl.trace(_relu_plus_ten, x, backend="tf", recipes=object())
+    with pytest.raises(BackendUnsupportedError, match="stop_after"):
+        tl.trace(_relu_plus_ten, x, backend="tf", stop_after=tl.func("relu"))
+
+
+def test_tf_recipes_snapshot_dispatches() -> None:
+    """facets= attaches a per-trace facet registry snapshot on both tf capture paths."""
+
+    def recipe(record: Any) -> dict[str, Any]:
+        return {"is_relu": "relu" in str(getattr(record, "label", ""))}
+
+    x = tf.constant([1.0, -1.0, 2.0])
+    trace = tl.trace(_relu_plus_ten, x, backend="tf", facets=[recipe])
+    assert trace.facet_functions is not None
+    assert any("recipe" in entry.public.name for entry in trace.facet_functions.functions)
+
+    compiled = tf.function(lambda value: tf.reduce_sum(tf.nn.relu(value)))
+    static = tl.trace(compiled, tf.ones((2, 2)), backend="tf", facets=recipe)
+    assert static.facet_functions is not None
+
+    with pytest.raises(BackendUnsupportedError, match="recipe callables") as info:
+        tl.trace(_relu_plus_ten, x, backend="tf", facets=object())
+    assert info.value.code == "trace_option_unsupported"
 
 
 def test_tf_graph_only_capture_refuses_intervene() -> None:
@@ -296,7 +318,7 @@ def test_tf_intervene_with_grad_options_refuses_typed() -> None:
             tf.ones((2,)),
             backend="tf",
             intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
-            grad_options=GradOptions(),
+            capture=tl.options.CaptureOptions(grad_options=GradOptions()),
         )
 
 
@@ -309,5 +331,5 @@ def test_tf_backward_direction_refuses_typed() -> None:
             _relu_plus_ten,
             x,
             backend="tf",
-            intervene=tl.when(tl.func("relu"), tl.zero_ablate(), direction="backward"),
+            intervene=tl.when(tl.grad(tl.func("relu")), tl.zero_ablate()),
         )

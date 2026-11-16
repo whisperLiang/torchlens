@@ -43,13 +43,13 @@ def main() -> None:
     model = TinyMLP().eval()
     base = torch.randn(2, 8)
     logs = {
-        "clean": tl.trace(model, base, intervention_ready=True),
-        "plus": tl.trace(model, base + 0.2, intervention_ready=True),
-        "minus": tl.trace(model, base - 0.2, intervention_ready=True),
+        "clean": tl.trace(model, base),
+        "plus": tl.trace(model, base + 0.2),
+        "minus": tl.trace(model, base - 0.2),
     }
-    bundle = tl.bundle(logs, baseline="clean")
+    bundle = tl.Bundle(logs, baseline="clean")
 
-    norms = bundle.apply(lambda member: float(member.layer_list[-1].out.norm()))
+    norms = bundle.map(lambda member: float(member.output_ops[-1].out.norm()))
     count = len(bundle)
 
     assert count == 3

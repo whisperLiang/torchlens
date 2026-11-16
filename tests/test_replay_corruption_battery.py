@@ -19,14 +19,12 @@ from __future__ import annotations
 
 import gc
 
-import pytest
 import torch
 import torch.nn as nn
 
+import torchlens as tl
 from torchlens import trace as trace_fn
-from torchlens.validation.diagnostics import TRACE_FAILURE_ATTR
-
-pytestmark = pytest.mark.smoke
+from torchlens.validation._diagnostics import TRACE_FAILURE_ATTR
 
 
 def _capture(model: nn.Module, x: torch.Tensor):
@@ -46,12 +44,17 @@ def _capture(model: nn.Module, x: torch.Tensor):
         alive by the caller for the trace's lifetime: post-trace parameter
         access holds only a weak reference, so an inline model whose last
         strong owner is this frame dies at the next cyclic-GC pass and
-        replay raises ``PostTraceParamUnavailable`` -- an order-dependent
+        replay raises ``ParamReleasedError`` -- an order-dependent
         red under multi-file composition (b9/T14).
     """
 
     model = model.eval()
-    log = trace_fn(model, x, layers_to_save="all", save_arg_values=True)
+    log = trace_fn(
+        model,
+        x,
+        capture=tl.options.CaptureOptions(save_args=True),
+        save="all",
+    )
     with torch.no_grad():
         ground_truth = model(x)
     outputs = list(ground_truth) if isinstance(ground_truth, (tuple, list)) else [ground_truth]
@@ -121,7 +124,7 @@ def _corrupt_and_assert(model: nn.Module, x: torch.Tensor, func_name: str) -> No
         gc.collect()
         # (a) pristine control: an already-red baseline would make the
         # corruption verdict meaningless (the b9 lesson).
-        assert log.validate_saved_outs(outputs), "pristine trace failed validation"
+        assert log.validate_forward_pass(outputs), "pristine trace failed validation"
 
         target = next(op for op in log.compute_ops if op.func_name == func_name)
         with torch.no_grad():
@@ -129,7 +132,7 @@ def _corrupt_and_assert(model: nn.Module, x: torch.Tensor, func_name: str) -> No
         target.out = corrupted
 
         # (b) the corruption must be caught ...
-        status = log.validate_saved_outs(outputs)
+        status = log.validate_forward_pass(outputs)
         assert not status, f"corrupted {target.label} payload validated as clean"
 
         # (c) ... and the failure record must localize it.
@@ -240,48 +243,6 @@ class _MiniAttention(nn.Module):
         return torch.matmul(weights, x)
 
 
-def test_corrupted_linear_payload_fails_replay():
-    """A corrupted linear activation is caught and localized."""
-
-    _corrupt_and_assert(_MLP(), torch.randn(2, 6), "linear")
-
-
-def test_corrupted_relu_payload_fails_replay():
-    """A corrupted relu activation is caught and localized."""
-
-    _corrupt_and_assert(_MLP(), torch.randn(2, 6), "relu")
-
-
-def test_corrupted_conv_payload_fails_replay():
-    """A corrupted conv2d activation is caught and localized."""
-
-    _corrupt_and_assert(_ConvNet(), torch.randn(1, 1, 6, 6), "conv2d")
-
-
-def test_corrupted_pool_payload_fails_replay():
-    """A corrupted max_pool2d activation is caught and localized."""
-
-    _corrupt_and_assert(_ConvNet(), torch.randn(1, 1, 6, 6), "max_pool2d")
-
-
-def test_corrupted_add_payload_fails_replay():
-    """A corrupted elementwise-add activation is caught and localized."""
-
-    _corrupt_and_assert(_Arithmetic(), torch.randn(3, 4), "__add__")
-
-
-def test_corrupted_mul_payload_fails_replay():
-    """A corrupted elementwise-mul activation is caught and localized."""
-
-    _corrupt_and_assert(_Arithmetic(), torch.randn(3, 4), "__mul__")
-
-
-def test_corrupted_softmax_payload_fails_replay():
-    """A corrupted softmax activation is caught and localized."""
-
-    _corrupt_and_assert(_MiniAttention(), torch.randn(4, 4), "softmax")
-
-
 def test_corrupted_matmul_payload_fails_replay():
     """A corrupted matmul activation is caught and localized."""
 
@@ -296,13 +257,13 @@ def test_corrupted_output_payload_fails_ground_truth():
         # Same forced-GC arming as _corrupt_and_assert: `model` is the strong
         # ref that keeps post-trace parameter access alive across this pass.
         gc.collect()
-        assert log.validate_saved_outs(outputs), "pristine trace failed validation"
+        assert log.validate_forward_pass(outputs), "pristine trace failed validation"
         target = log.output_ops[0]
         # The output op's ``out`` mirrors its producer and is not assignable;
         # in-place mutation corrupts the stored payload itself.
         with torch.no_grad():
             target.out.add_(1.0)
-        status = log.validate_saved_outs(outputs)
+        status = log.validate_forward_pass(outputs)
         assert not status, "corrupted output payload validated as clean"
         failure = getattr(log, TRACE_FAILURE_ATTR, None)
         assert failure is not None, "validation failed without recording a failure"

@@ -1,0 +1,46 @@
+"""Typed refusal classes for live narration.
+
+Every raise site in ``torchlens._snoop`` (and every echo refusal raised from
+the entry layers) carries a stable ``fields["code"]`` plus a non-empty
+``fields["remedy"]`` and is ledgered in
+``docs/reference/error_refusal_contract.md``. Callers branch on the code,
+never on message text.
+"""
+
+from __future__ import annotations
+
+from ..errors._base import CaptureError, ConfigurationError
+
+__tl_layer__ = "L5"
+
+
+class NarrationConfigError(ConfigurationError):
+    """Raised for ``narrate=`` configuration refusals at capture entry.
+
+    Examples
+    --------
+    >>> issubclass(NarrationConfigError, tl.errors.ConfigurationError)
+    True
+    >>> issubclass(NarrationConfigError, tl.errors.TorchLensError)
+    True
+    """
+
+
+class NarrationStatsError(CaptureError):
+    """Raised when an armed echo stats rung refuses a value computation.
+
+    The exact rung's numel-budget refusal is a SEMANTIC refusal (the user
+    asked for exact stats on a tensor the documented budget forbids), never
+    an instrumentation failure: it propagates and fails the capture instead
+    of stalling the forward for minutes or silently degrading to a sample.
+
+    Examples
+    --------
+    >>> issubclass(NarrationStatsError, tl.errors.CaptureError)
+    True
+    >>> issubclass(NarrationStatsError, tl.errors.TorchLensError)
+    True
+    """
+
+
+__all__ = ["NarrationConfigError", "NarrationStatsError"]

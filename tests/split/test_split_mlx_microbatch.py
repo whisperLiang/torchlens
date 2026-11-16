@@ -203,5 +203,8 @@ def test_mlx_stateful_microbatches_match_native_sequential_chunks() -> None:
         name = binding._parameters.get(entry.source_id, ("", False))[0]
         if name:
             _close(entry.value, dict(tree_flatten(reference.parameters()))[name])
-    assert all(bool(mx.array_equal(left, right)) for left, right in zip(mx.random.state, saved_rng))
+    assert all(
+        bool(mx.array_equal(left, right))
+        for left, right in zip(mx.random.state, saved_rng, strict=True)
+    )
     assert int(optimizer.step.item()) == 1

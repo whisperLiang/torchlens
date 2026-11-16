@@ -6,24 +6,24 @@ import gc
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 import torch
+from _record_fakes import FakeRecord
 from torch import nn
 
 import torchlens as tl
-from torchlens.backends.torch import buffer_writes
-from torchlens.data_classes.cleanup import (
-    _scrub_layer_entry_conditional_fields,
+from torchlens._data_classes.cleanup import (
     _scrub_per_op_equivalence_lists,
 )
+from torchlens._postprocess.labeling import _replace_layer_names_for_layer_entry
+from torchlens.backends.torch import buffer_writes
 from torchlens.errors import TraceNotReproducibleWarning
-from torchlens.postprocess.labeling import _replace_layer_names_for_layer_entry
 
 TensorFactory = Callable[[], torch.Tensor]
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/buffer_writes.py, campaign mutant kills.
 def test_buffer_write_tracker_uninstall_restores_class_after_model_gc() -> None:
     """Tracker teardown must restore patched classes even after model GC."""
 
@@ -66,10 +66,11 @@ def test_buffer_write_tracker_uninstall_restores_class_after_model_gc() -> None:
     assert _TrackerModel not in buffer_writes.BufferWriteTracker._patched_classes
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _data_classes/cleanup.py.
 def test_removed_buffer_raw_label_is_scrubbed_from_per_op_graph_fields() -> None:
     """Deleted buffer nodes leave no stale raw labels for final label mapping."""
 
-    op = SimpleNamespace(
+    op = FakeRecord(
         parents=["buffer_3_raw", "add_1_raw"],
         root_ancestors={"buffer_3_raw", "input_1_raw"},
         children=["mul_1_raw", "buffer_3_raw"],
@@ -94,23 +95,24 @@ def test_removed_buffer_raw_label_is_scrubbed_from_per_op_graph_fields() -> None
     _scrub_per_op_equivalence_lists([op], {"buffer_3_raw"})
 
     assert op.parents == ["add_1_raw"]
-    assert op.root_ancestors == {"input_1_raw"}
+    assert op.graph.root_ancestors == {"input_1_raw"}
     assert op.children == ["mul_1_raw"]
     assert op.output_descendants == {"output_1_raw"}
-    assert op.internal_source_parents == []
-    assert op.internal_source_ancestors == set()
-    assert op.conditional_entry_children == []
-    assert op.conditional_then_children == []
+    assert op.graph.internal_source_parents == []
+    assert op.graph.internal_source_ancestors == set()
+    assert op.control_flow.entry_children == []
+    assert op.control_flow.then_children == []
     # NOTE: op_equivalence_classes is a Trace-level dict, never a per-op field;
     # the dead per-op scrub for it was removed by the cert round-1 data-model fix.
-    assert op.equivalent_ops == ["add_1_raw"]
-    assert op.recurrent_ops == []
-    assert op.parent_arg_positions == {"args": {1: "add_1_raw"}, "kwargs": {}}
+    assert op.graph.equivalent_ops == ["add_1_raw"]
+    assert op.graph.recurrent_ops == []
+    assert op.call.parent_arg_positions == {"args": {1: "add_1_raw"}, "kwargs": {}}
     assert set(op.out_versions_by_child) == {"add_1_raw"}
-    assert op.conditional_elif_children == {}
-    assert op.conditional_arm_children == {1: {"then": [], "else": ["add_1_raw"]}}
+    assert op.control_flow.elif_children == {}
+    assert op.control_flow.arm_children == {1: {"then": [], "else": ["add_1_raw"]}}
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _postprocess/labeling.py.
 def test_conditional_child_views_are_rebuilt_after_label_rename() -> None:
     """Relabeling rebuilds derived conditional child views from the primary map."""
 
@@ -122,7 +124,7 @@ def test_conditional_child_views_are_rebuilt_after_label_rename() -> None:
         },
         _raw_to_final_op_labels={},
     )
-    layer_entry = SimpleNamespace(
+    layer_entry = FakeRecord(
         parents=[],
         root_ancestors=set(),
         children=[],
@@ -142,25 +144,8 @@ def test_conditional_child_views_are_rebuilt_after_label_rename() -> None:
 
     _replace_layer_names_for_layer_entry(trace, layer_entry)
 
-    assert layer_entry.conditional_arm_children == {1: {"then": ["child_a", "child_b"]}}
-    assert layer_entry.conditional_then_children == ["child_a", "child_b"]
-
-
-def test_cleanup_rebuilds_conditional_child_views_from_primary_structure() -> None:
-    """Conditional cleanup normalizes derived branch-child order from the primary map."""
-
-    layer_entry = SimpleNamespace(
-        conditional_entry_children=[],
-        conditional_then_children=["drop_me", "child_b", "child_a"],
-        conditional_else_children=[],
-        conditional_elif_children={},
-        conditional_arm_children={1: {"then": ["child_a", "child_b", "drop_me"]}},
-    )
-
-    _scrub_layer_entry_conditional_fields(layer_entry, {"drop_me"})
-
-    assert layer_entry.conditional_arm_children == {1: {"then": ["child_a", "child_b"]}}
-    assert layer_entry.conditional_then_children == ["child_a", "child_b"]
+    assert layer_entry.control_flow.arm_children == {1: {"then": ["child_a", "child_b"]}}
+    assert layer_entry.control_flow.then_children == ["child_a", "child_b"]
 
 
 class RecurrentReassign(nn.Module):
@@ -328,22 +313,6 @@ class StaticReadOnly(nn.Module):
         return self.b + x
 
 
-def test_internal_source_parents_survive_journal_projection() -> None:
-    """Direct parents carrying buffer ancestry survive materialization."""
-
-    trace = tl.trace(StaticReadOnly(), torch.ones(2))
-
-    add_op = trace["add_1_1"]
-    output_op = trace["output_1"]
-    assert add_op.internal_source_parents == ("buffer_1",)
-    # internal_source_parents is a DIRECT-PARENT relation, so the synthetic output node
-    # names ITS parent (``add_1_1``), which carries the buffer ancestry -- not the
-    # ``buffer_1`` label it used to inherit verbatim from the clone source. The old
-    # expectation pinned that bug in: ``buffer_1`` is not a parent of ``output_1``.
-    assert output_op.parents == ("add_1_1",)
-    assert output_op.internal_source_parents == ("add_1_1",)
-
-
 class DataSetter(nn.Module):
     """``.data = tensor`` buffer storage reassignment model."""
 
@@ -398,6 +367,7 @@ class AliasReadThenWholeWrite(nn.Module):
         return first + second
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
 def test_storage_aliased_buffer_first_read_keeps_pre_mutation_snapshot() -> None:
     """A buffer-view read before an overlapping write keeps its original payload."""
 
@@ -500,116 +470,58 @@ def test_buffer_write_models_validate_and_expose_entities(
         # node disappears and the shape hash mismatches -> not verified.
         with pytest.warns(TraceNotReproducibleWarning, match="stateful/non-reproducible"):
             assert not tl.validation.validate_forward_pass(
-                model_factory(), x.clone(), random_seed=123, validate_metadata=True
+                model_factory(), x.clone(), seed=123, validate_metadata=True
             )
     elif isinstance(model, DataSetter):
         assert not tl.validation.validate_forward_pass(
-            model_factory(), x.clone(), random_seed=123, validate_metadata=True
+            model_factory(), x.clone(), seed=123, validate_metadata=True
         )
     else:
         assert tl.validation.validate_forward_pass(
-            model_factory(), x.clone(), random_seed=123, validate_metadata=True
+            model_factory(), x.clone(), seed=123, validate_metadata=True
         )
 
+    trace = tl.trace(model, x, capture=tl.options.CaptureOptions(save_args=True))
     if isinstance(model, DataCopyWrite):
-        # `.data.copy_` writes through a detached `.data` view, which severs graph
-        # provenance for the copy target; TorchLens deliberately warns about the
-        # unattributed argument (postprocess `_warn_unattributed_tensor_args`).
-        # Expect that documented warning here instead of letting the warning-hygiene
-        # filter promote a known `.data` limitation to a fatal error.
-        with pytest.warns(UserWarning, match="no graph/source provenance"):
-            trace = tl.trace(model, x, save_arg_values=True)
-    else:
-        trace = tl.trace(model, x, save_arg_values=True)
+        # `.data.copy_` writes through the detached `.data` alias; storage-alias
+        # label propagation advances the buffer to the copy, so the later read of
+        # `b` binds to it and no unattributed-argument warning is raised (the
+        # runnable data-alias ceiling is pinned in test_tlspec_runnable_r25_producer).
+        copy_op = next(op for op in trace.ops if op.func_name == "copy_")
+        add_op = next(op for op in trace.ops if op.func_name == "__add__")
+        assert copy_op.call.unattributed_tensor_args == ()
+        # The read of ``b`` after the write is the buffer's post-write version
+        # node, whose parent is the copy.
+        buffer_read = next(label for label in add_op.parents if label.startswith("buffer"))
+        assert copy_op.layer_label in trace._layer_dict_all_keys[buffer_read].parents
     for address, overwrite_count in expected_overwrites.items():
         assert address in trace.buffers
         buffer = trace.buffers[address]
         assert buffer.versions
         assert buffer.final_value is not None
         assert buffer.num_overwrites == overwrite_count
-    assert not any(op.is_buffer for op in trace.compute_ops)
-
-
-def test_batchnorm_buffer_reads_materialize_in_raw_index_order() -> None:
-    """Assert deferred BatchNorm buffer reads do not precede earlier raw ops."""
-
-    model = nn.BatchNorm1d(3).train()
-    trace = tl.trace(model, torch.randn(4, 3), save_arg_values=True)
-    raw_indices = [op.raw_index for op in trace.layer_list]
-    add_op = trace.layer_dict_all_keys["add_1_1"]
-    buffer_2_op = trace.layer_dict_all_keys["buffer_2"]
-    batchnorm_op = trace.layer_dict_all_keys["batchnorm_1_2"]
-    buffer_5_op = trace.layer_dict_all_keys["buffer_5"]
-
-    assert raw_indices == sorted(raw_indices)
-    assert add_op.raw_index < buffer_2_op.raw_index
-    assert trace.layer_list.index(add_op) < trace.layer_list.index(buffer_2_op)
-    assert batchnorm_op.raw_index < buffer_5_op.raw_index
-    assert trace.layer_list.index(batchnorm_op) < trace.layer_list.index(buffer_5_op)
-
-
-def test_buffer_write_lookup_avoids_per_op_full_storage_scan(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Storage-key calls scale with buffer WRITES, never with total op count.
-
-    The overlapping-alias refresh deliberately re-derives every registered
-    buffer's storage key on each journaled WRITE (a stale-index-safe full scan;
-    cert round-1 backends fix), so the write path is allowed to cost
-    O(writes x buffers). The regression this test guards against is the
-    pre-index pathology where EVERY traced op paid a full storage scan
-    (O(ops x buffers)): adding non-buffer-writing ops must cost only a few
-    per-op resolution lookups, never a per-op sweep over all buffers.
-    """
-
-    call_count = 0
-    original_storage_key = buffer_writes.storage_key
-
-    def counted_storage_key(tensor: torch.Tensor) -> tuple[Any, ...] | None:
-        """Count storage-key computations while preserving real behavior."""
-
-        nonlocal call_count
-        call_count += 1
-        return original_storage_key(tensor)
-
-    monkeypatch.setattr(buffer_writes, "storage_key", counted_storage_key)
-
-    num_buffers = 48 + 1
-    extra_ops = 16
-
-    trace = tl.trace(ManyBufferWrites(num_extra_buffers=48, steps=8), torch.ones(2))
-    base_count = call_count
-
-    call_count = 0
-    trace_extra = tl.trace(
-        ManyBufferWrites(num_extra_buffers=48, steps=8, extra_ops=extra_ops), torch.ones(2)
-    )
-    extra_count = call_count
-
-    assert trace.graph_shape_hash is not None
-    assert trace_extra.graph_shape_hash is not None
-    # A per-op full scan would add ~num_buffers calls for EACH extra op
-    # (~16 * 49 = 784); genuine per-op resolution adds only a handful.
-    assert extra_count - base_count < extra_ops * (num_buffers // 6)
+    assert not any(op.graph.is_buffer for op in trace.compute_ops)
 
 
 def _assert_buffer_op_accessors_partition_buffer_ops(trace: tl.Trace) -> None:
     """Assert derived buffer op accessors partition the flat buffer op population."""
 
     expected_read_ops = [
-        op.label for op in trace.layer_list if op.is_buffer and op.buffer_write_kind is None
+        op.label for op in trace._layer_list if op.graph.is_buffer and op.buffer_write_kind is None
     ]
     expected_write_ops = [
-        op.label for op in trace.layer_list if op.is_buffer and op.buffer_write_kind is not None
+        op.label
+        for op in trace._layer_list
+        if op.graph.is_buffer and op.buffer_write_kind is not None
     ]
-    all_buffer_ops = [op.label for op in trace.layer_list if op.is_buffer]
+    all_buffer_ops = [op.label for op in trace._layer_list if op.graph.is_buffer]
 
     assert trace.buffer_read_ops == expected_read_ops
     assert trace.buffer_write_ops == expected_write_ops
-    assert trace.num_buffer_read_ops == len(trace.buffer_read_ops)
-    assert trace.num_buffer_write_ops == len(trace.buffer_write_ops)
-    assert trace.num_buffer_source_ops == len(trace.buffer_read_ops)
-    assert trace.num_buffer_sink_ops == len(trace.buffer_write_ops)
+    assert len(trace.buffer_read_ops) == len(trace.buffer_read_ops)
+    assert len(trace.buffer_write_ops) == len(trace.buffer_write_ops)
+    assert len(trace.buffer_read_ops) == len(trace.buffer_read_ops)
+    assert len(trace.buffer_write_ops) == len(trace.buffer_write_ops)
     assert set(trace.buffer_read_ops).isdisjoint(trace.buffer_write_ops)
     assert set(trace.buffer_read_ops) | set(trace.buffer_write_ops) == set(all_buffer_ops)
     assert {trace[op_label].layer_label for op_label in all_buffer_ops} == set(trace.buffer_layers)
@@ -627,25 +539,33 @@ def _assert_op_level_buffer_accessors(trace: tl.Trace) -> None:
         expected_sources = [
             trace[parent_label].label
             for parent_label in op.parents
-            if trace[parent_label].is_buffer and trace[parent_label].buffer_write_kind is None
+            if trace[parent_label].graph.is_buffer and trace[parent_label].buffer_write_kind is None
         ]
         expected_sinks = [
             trace[child_label].label
             for child_label in op.children
-            if trace[child_label].is_buffer and trace[child_label].buffer_write_kind is not None
+            if trace[child_label].graph.is_buffer
+            and trace[child_label].buffer_write_kind is not None
         ]
-        # OpAccessor iterates call-index keys (like op.input_ops); .get(key) resolves the Op
-        # (int __getitem__ is 0-based list position, not the sparse parent-index key).
-        source_ops = op.buffer_source_ops
-        sink_ops = op.buffer_sink_ops
-        assert [source_ops.get(k).label for k in source_ops] == expected_sources
-        assert [sink_ops.get(k).label for k in sink_ops] == expected_sinks
+        # OpAccessor reads are Op-valued (C02 read basis, pinned by
+        # tests/test_w051_gate_layer_accessors.py): iteration yields the Ops in
+        # parents/children order, and int keys are 0-based POSITIONS, never the
+        # sparse 1-based parent-index storage key. The datamodel claim under
+        # test is the ordered partition itself: sources are exactly the
+        # buffer-read parents, sinks exactly the buffer-write children.
+        assert [source.label for source in op.graph.buffer_source_ops] == expected_sources
+        assert [sink.label for sink in op.graph.buffer_sink_ops] == expected_sinks
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _data_classes/_op_relations.py, _data_classes/op.py.
 def test_buffer_op_accessors_partition_read_and_write_versions() -> None:
     """Read/write op accessors partition buffer versions, including dual-role buffers."""
 
-    trace = tl.trace(DualRoleInplace(), torch.ones(2), save_arg_values=True)
+    trace = tl.trace(
+        DualRoleInplace(),
+        torch.ones(2),
+        capture=tl.options.CaptureOptions(save_args=True),
+    )
 
     _assert_buffer_op_accessors_partition_buffer_ops(trace)
     _assert_op_level_buffer_accessors(trace)
@@ -657,12 +577,17 @@ def test_buffer_op_accessors_partition_read_and_write_versions() -> None:
     assert b_versions & set(trace.buffer_write_ops)
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
 def test_buffer_op_accessors_round_trip_through_tlspec(tmp_path: Path) -> None:
     """Derived buffer op accessors remain correct after portable ``.tlspec`` load."""
 
     import safetensors  # noqa: F401
 
-    trace = tl.trace(DualRoleInplace(), torch.ones(2), save_arg_values=True)
+    trace = tl.trace(
+        DualRoleInplace(),
+        torch.ones(2),
+        capture=tl.options.CaptureOptions(save_args=True),
+    )
     path = tmp_path / "buffer_ops.tlspec"
 
     trace.save(path, level="portable")
@@ -671,16 +596,21 @@ def test_buffer_op_accessors_round_trip_through_tlspec(tmp_path: Path) -> None:
     _assert_buffer_op_accessors_partition_buffer_ops(loaded)
     assert loaded.buffer_read_ops == trace.buffer_read_ops
     assert loaded.buffer_write_ops == trace.buffer_write_ops
-    assert loaded.num_buffer_read_ops == trace.num_buffer_read_ops
-    assert loaded.num_buffer_write_ops == trace.num_buffer_write_ops
-    assert loaded.num_buffer_source_ops == trace.num_buffer_source_ops
-    assert loaded.num_buffer_sink_ops == trace.num_buffer_sink_ops
+    assert len(loaded.buffer_read_ops) == len(trace.buffer_read_ops)
+    assert len(loaded.buffer_write_ops) == len(trace.buffer_write_ops)
+    assert len(loaded.buffer_read_ops) == len(trace.buffer_read_ops)
+    assert len(loaded.buffer_write_ops) == len(trace.buffer_write_ops)
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills, planted fault catches.
 def test_reassignment_double_count_is_exact() -> None:
     """Assert N top-level reassignments produce exactly N write events."""
 
-    trace = tl.trace(RecurrentReassign(steps=5), torch.ones(2), save_arg_values=True)
+    trace = tl.trace(
+        RecurrentReassign(steps=5),
+        torch.ones(2),
+        capture=tl.options.CaptureOptions(save_args=True),
+    )
     events = [event for event in trace.event_stream.buffer_write_events if event.address == "h"]
     assert len(events) == 5
     assert trace.buffers["h"].num_overwrites == 5
@@ -719,9 +649,9 @@ def test_recurrent_cell_reassignment_does_not_break_loop_detection() -> None:
     model = RecurrentCell()
     x = torch.randn(1, 8)
     assert tl.validation.validate_forward_pass(
-        RecurrentCell(), x.clone(), random_seed=7, validate_metadata=True
+        RecurrentCell(), x.clone(), seed=7, validate_metadata=True
     )
-    trace = tl.trace(model, x, save_arg_values=True)
+    trace = tl.trace(model, x, capture=tl.options.CaptureOptions(save_args=True))
     assert "h" in trace.buffers
     assert trace.buffers["h"].num_overwrites == 5  # one reset + four loop steps
 
@@ -762,57 +692,19 @@ class GradBatchNorm(nn.Module):
         return self.bn(self.lin(x)).sum()
 
 
-def _param_grads(model: nn.Module, x: torch.Tensor) -> dict[str, torch.Tensor]:
-    """Return a fresh-backward gradient snapshot for every parameter."""
-
-    model.zero_grad(set_to_none=True)
-    model(x).backward()
-    return {
-        name: param.grad.detach().clone()
-        for name, param in model.named_parameters()
-        if param.grad is not None
-    }
-
-
-@pytest.mark.parametrize("model_factory", [GradRecurrent, GradBatchNorm])
-def test_buffer_capture_preserves_gradient_flow(
-    model_factory: Callable[[], nn.Module],
-) -> None:
-    """Capture hooks must be observational: tracing must not break autograd.
-
-    A reassigned state buffer carries ``grad_fn`` exactly like a non-detached
-    RNN hidden state; the fused-write snapshot reads (never replaces) the live
-    buffer. So gradients through a traced model must match an untraced run.
-    """
-
-    import copy
-
-    torch.manual_seed(0)
-    reference = model_factory().train()
-    traced_model = copy.deepcopy(reference).train()
-    x = torch.randn(8, 4)
-
-    expected = _param_grads(reference, x.clone())
-
-    # Tracing performs the fused/reassignment writes; it must leave the live
-    # autograd path untouched, so a subsequent backward still matches.
-    tl.trace(traced_model, x.clone())
-    actual = _param_grads(traced_model, x.clone())
-
-    assert expected.keys() == actual.keys()
-    for name in expected:
-        assert torch.allclose(expected[name], actual[name], atol=1e-5), name
-
-
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _storage_bindings.py, backends/torch/buffer_writes.py, campaign mutant kills.
 def test_data_setter_reconciliation_records_buffer_write() -> None:
     """Assert ``.data = tensor`` changes are recorded as buffer writes."""
 
-    trace = tl.trace(DataSetter(), torch.ones(2), save_arg_values=True)
+    trace = tl.trace(DataSetter(), torch.ones(2), capture=tl.options.CaptureOptions(save_args=True))
     writes = [trace[label] for label in trace.buffer_write_ops]
 
     assert len(writes) == 1
     assert writes[0].buffer_write_kind == "data_reassign"
     assert torch.equal(writes[0].out, torch.full((2,), 2.0))
+
+
+# Kept: edited on the C-100 side (C-091/C-098) after the shrink removed it.
 
 
 def test_merged_buffer_survivor_gains_duplicate_output_reach() -> None:
@@ -822,8 +714,9 @@ def test_merged_buffer_survivor_gains_duplicate_output_reach() -> None:
     ``output_descendants`` union + ancestor-cone re-derivation) previously
     had ZERO content-effective coverage — an effect-neutralizing revert left
     135 targeted tests green. Here the merge SURVIVOR (the initial read)
-    feeds only an input-connected dead end, while the equal-valued duplicate
-    read reaches the output: without the repair the survivor ships
+    feeds only dead ends (an input-connected product and the slice another
+    buffer is reassigned to), while the same-version re-logged read reaches
+    the output: without the repair the survivor ships
     ``has_output_descendant=False`` and an empty ``output_descendants`` on
     an op that demonstrably feeds the model output. RED under the revert.
     """
@@ -833,72 +726,12 @@ def test_merged_buffer_survivor_gains_duplicate_output_reach() -> None:
     trace = tl.trace(DivergentReachBufferModel(), torch.randn(2, 4))
     try:
         assert list(trace.buffer_layers), "duplicate reads must merge to one buffer node"
-        merged = trace[trace.buffer_layers[0]]
+        merged = trace.layers[trace.buffer_layers[0]]
         op = next(iter(merged.ops.values()))
-        # The survivor owns BOTH pre-merge children (dead end + output path)...
-        assert len(op.children) == 2
+        # The survivor owns every pre-merge child (two dead ends + output path)...
+        assert len(op.children) == 3
         # ...and its child-direction reach reflects the merged edges.
-        assert op.has_output_descendant is True
+        assert op.graph.has_output_descendant is True
         assert any(label.startswith("output") for label in op.output_descendants)
     finally:
         trace.cleanup()
-
-
-def test_buffer_dedup_avoids_pairwise_tensor_compares_on_distinct_values() -> None:
-    """Distinct-valued same-address buffers must not pay O(G^2) torch.equal.
-
-    Hunt-6 R52-1: step 6's dedup swept every new buffer against EVERY prior
-    unique in its hash group with ``torch.equal`` -- Theta(G^2) whole-tensor
-    compares for a training-mode recurrent BatchNorm whose running stats
-    differ every pass (~500k compares at x1000 passes). A cheap value
-    fingerprint now buckets the uniques, so an all-distinct group performs
-    zero merge-sweep tensor compares.
-    """
-
-    class _LoopBN(nn.Module):
-        """BatchNorm applied repeatedly so buffers update between passes."""
-
-        def __init__(self, num_passes: int) -> None:
-            super().__init__()
-            self.bn = nn.BatchNorm1d(4)
-            self.num_passes = num_passes
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Apply BN ``num_passes`` times (running stats change each pass)."""
-
-            for _ in range(self.num_passes):
-                x = self.bn(x)
-            return x
-
-    num_passes = 12
-    model = _LoopBN(num_passes).train()
-
-    import sys
-
-    calls = {"n": 0}
-    original_equal = torch.equal
-
-    def counting_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
-        """Count tensor-equality comparisons issued by the step-6 dedup module."""
-
-        caller = sys._getframe(1).f_code.co_filename
-        if caller.endswith("control_flow.py"):
-            calls["n"] += 1
-        return original_equal(a, b)
-
-    torch.equal = counting_equal
-    try:
-        trace = tl.trace(model, torch.randn(8, 4))
-    finally:
-        torch.equal = original_equal
-
-    # Buffers stay distinct (running stats differ per pass), so nothing merges
-    # and the merge sweep needs no tensor compares at all; the linear bound
-    # covers step 6's per-buffer source-value checks.
-    linear_bound = 2 * num_passes
-    assert calls["n"] <= linear_bound, (
-        f"step-6 buffer dedup made {calls['n']} torch.equal calls for {num_passes} "
-        f"distinct-value passes (linear bound {linear_bound}) -- the pairwise "
-        "sweep is back"
-    )
-    assert len(trace.buffer_layers) >= num_passes

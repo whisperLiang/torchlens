@@ -1,0 +1,355 @@
+# Documentation site. Sources are Markdown under docs/; the build tool reads this
+# file. The nav, exclude_docs and redirect blocks are generated from
+# docs/_site_map.yaml by tools/docs/site_nav.py: edit the site map, not the blocks.
+site_name: TorchLens
+site_url: https://johnmarktaylor91.github.io/torchlens/
+site_description: Capture, inspect and edit every operation of a PyTorch model.
+repo_url: https://github.com/johnmarktaylor91/torchlens
+repo_name: johnmarktaylor91/torchlens
+edit_uri: edit/main/docs/
+docs_dir: docs
+strict: true
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+
+plugins:
+  - search
+  - redirects:
+      redirect_maps:
+        # <generated:redirects>
+        recipes/acdc_ioi.md: field-guide/acdc_ioi.md
+        recipes/conditional_steering.md: field-guide/conditional_steering.md
+        recipes/dissection.md: field-guide/dissection.md
+        recipes/feature_visualisation.md: field-guide/feature_visualisation.md
+        recipes/generation_step_attribution.md: field-guide/generation_step_attribution.md
+        recipes/jacobian_lens.md: field-guide/jacobian_lens.md
+        recipes/lrp_epsilon_litmus.md: field-guide/lrp_epsilon_litmus.md
+        recipes/lrp_transformers_lxt.md: field-guide/lrp_transformers_lxt.md
+        recipes/pretrained_saes.md: field-guide/pretrained_saes.md
+        recipes/prisma_clip_sae.md: field-guide/prisma_clip_sae.md
+        recipes/quantus.md: field-guide/quantus.md
+        recipes/sae_crosscoder_diff.md: field-guide/sae_crosscoder_diff.md
+        recipes/sae_latent_export.md: field-guide/sae_latent_export.md
+        recipes/sae_trainers.md: field-guide/sae_trainers.md
+        recipes/seeded_subsample.md: field-guide/seeded_subsample.md
+        recipes/tcav.md: field-guide/tcav.md
+        recipes/torchcam.md: field-guide/torchcam.md
+        recipes/trainable_backbone.md: field-guide/trainable_backbone.md
+        recipes/training_ribbon.md: field-guide/training_ribbon.md
+        recipes/tuned_lens.md: field-guide/tuned_lens.md
+        recipes/weightwatcher.md: field-guide/weightwatcher.md
+        migration/captum.md: migration/from_captum.md
+        migration/nnsight.md: migration/from_nnsight.md
+        migration/pyvene.md: migration/from_pyvene.md
+        migration/transformerlens.md: migration/from_transformerlens.md
+        # </generated:redirects>
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            docstring_style: numpy
+            show_source: false
+            show_root_heading: false
+            show_submodules: false
+            members_order: source
+            filters: ["!^_"]
+            show_signature_annotations: true
+            separate_signature: true
+
+extra:
+  version:
+    provider: mike
+    default: latest
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+exclude_docs: |
+  # <generated:exclude_docs>
+  /_site_map.yaml
+  /internal/
+  /README.md
+  /_perf_numbers.md
+  /_perf_numbers_provisional.md
+  /_watch_perf_numbers.md
+  /internal/agent-reference/architecture.md
+  /internal/agent-reference/brainpipe-f20-spellings-documented-unstable.md
+  /internal/agent-reference/common-patterns.md
+  /internal/agent-reference/conventions.md
+  /internal/agent-reference/critical-invariants.md
+  /internal/agent-reference/current-2-x-surface.md
+  /internal/agent-reference/feature-inspection.md
+  /internal/agent-reference/keep-the-glossary-docs-in-lockstep-with-code-locked.md
+  /internal/agent-reference/known-gotchas.md
+  /internal/agent-reference/package/architecture-overview.md
+  /internal/agent-reference/package/files-in-this-directory.md
+  /internal/agent-reference/package/key-concepts.md
+  /internal/reference/name_index.md
+  /internal/reference/name_index_keywords.md
+  /internal/agent-reference/package/newer-2-x-subsystems.md
+  /internal/agent-reference/package/public-surface.md
+  /internal/agent-reference/package/subpackages.md
+  /internal/agent-reference/package/top-level-modules.md
+  /maintainers/architecture.md
+  /maintainers/persisted_fields.md
+  /maintainers/review_checklist.md
+  /maintainers/saved_format_3.md
+  /maintainers/saved_format_3_design.md
+  /maintainers/testing.md
+  /maintainers/docstring_examples_census.md
+  /maintainers/where.md
+  /neuroai/demand_ledger.md
+  /reference/capture_spine_contract.md
+  /reference/capture_state_contract.md
+  /internal/reference/lens_gallery_spec.md
+  /reference/merged_trace_contract.md
+  /reference/oracle_independence.md
+  /reference/runnable_model.md
+  /reference/runnable_tlspec_contract.md
+  /internal/reference/tensor_parallel_design.md
+  /internal/reference/trace_core_design.md
+  /internal/reference/ui_regrouping_plan.md
+  /reference/warning_contract.md
+  # </generated:exclude_docs>
+
+nav:
+  # <generated:nav>
+  - index.md
+  - Get started:
+      - also_in_torchlens.md
+      - faq.md
+      - quickstart.md
+  - Start from your field:
+      - fields/debugging_and_training.md
+      - fields/mechanistic_interpretability.md
+      - fields/teaching.md
+  - Field guide:
+      - field-guide/acdc_ioi.md
+      - field-guide/conditional_steering.md
+      - field-guide/craft_concepts.md
+      - field-guide/das_gpt2.md
+      - field-guide/dissection.md
+      - field-guide/entropy_steering.md
+      - field-guide/extract_features.md
+      - field-guide/feature_visualisation.md
+      - field-guide/generation_attention.md
+      - field-guide/generation_step_attribution.md
+      - field-guide/intervene.md
+      - field-guide/jacobian_lens.md
+      - field-guide/linear_probes.md
+      - field-guide/lrp_epsilon_litmus.md
+      - field-guide/lrp_transformers_lxt.md
+      - field-guide/pretrained_saes.md
+      - field-guide/prisma_clip_sae.md
+      - field-guide/quantus.md
+      - field-guide/running_examples.md
+      - field-guide/sae_crosscoder_diff.md
+      - field-guide/sae_latent_export.md
+      - field-guide/sae_trainers.md
+      - field-guide/see_and_inspect.md
+      - field-guide/seeded_subsample.md
+      - field-guide/tcav.md
+      - field-guide/tensor_images.md
+      - field-guide/torchcam.md
+      - field-guide/trainable_backbone.md
+      - field-guide/training_ribbon.md
+      - field-guide/tuned_lens.md
+      - field-guide/weightwatcher.md
+      - Use with an agent:
+          - for-ai-agents.md
+      - Scale and speed:
+          - guides/fast_paths.md
+          - performance.md
+      - Intervene:
+          - guides/kv_cache.md
+      - See and inspect:
+          - guides/offline_report.md
+          - guides/treescope_cards.md
+          - guides/visualization.md
+      - Debug numerics and training:
+          - memory_debugging.md
+          - monitor_training.md
+      - Neuroscience:
+          - neuroai/byo_alignment.md
+          - neuroai/himalaya.md
+          - neuroai/journey.md
+          - neuroai/loaders.md
+          - neuroai/netrep.md
+          - neuroai/protein_language_model.md
+          - neuroai/task_rnn_circuits.md
+      - Circuits and features:
+          - sae_training_handoff.md
+      - Save, share and reproduce:
+          - skeleton_change_recipe.md
+  - Reproduction Gallery:
+      - gallery/any_architecture.md
+      - gallery/basis_grid.md
+      - gallery/bundles_harness.md
+      - gallery/causal_tracing.md
+      - gallery/cnn_fields.md
+      - gallery/index.md
+      - gallery/ioi_circuit.md
+      - gallery/jacobian_lens.md
+      - gallery/neuro_rdms.md
+  - Where to start:
+      - doors/agents.md
+      - doors/mechinterp.md
+      - doors/neuroai.md
+      - doors/vision.md
+  - Concepts:
+      - activation_transform_persistence.md
+      - backward.md
+      - buffers.md
+      - conditional_attribution.md
+      - containers.md
+      - facets.md
+      - gradient_contract.md
+      - guides/grouping.md
+      - guides/model_conveniences.md
+      - how-it-works.md
+      - intervention_explainers.md
+      - native-torch.md
+      - non_goals.md
+      - rank_layout.md
+      - receptive_projective_fields.md
+      - reference/selection_completeness.md
+      - semantic_io.md
+      - speed_optimized_defaults.md
+      - stochastic_edits.md
+      - visibility.md
+  - Relation to other packages:
+      - bridges.md
+      - migration/autocircuit.md
+      - migration/baukit.md
+      - migration/coming_from_torchsnooper.md
+      - migration/comparison.md
+      - migration/cross_engine.md
+      - migration/from_bertviz_ecco.md
+      - migration/from_captum.md
+      - migration/from_flax_tabulate.md
+      - migration/from_fx.md
+      - migration/from_hf_kwargs.md
+      - migration/from_hooks.md
+      - migration/from_intermediate_layer_getter.md
+      - migration/from_model_zoos.md
+      - migration/from_nnsight.md
+      - migration/from_pyvene.md
+      - migration/from_surgeon_pytorch.md
+      - migration/from_thingsvision.md
+      - migration/from_timm_features_only.md
+      - migration/from_torchextractor.md
+      - migration/from_torchinfo.md
+      - migration/from_torchview.md
+      - migration/from_torchvision_feature_extraction.md
+      - migration/from_torchviz_hiddenlayer.md
+      - migration/from_transformerlens.md
+      - migration/from_transformers_interpret.md
+      - migration/index.md
+      - migration/inseq.md
+      - migration/interop.md
+      - migration/landscape.md
+      - migration/multi_gpu_extraction.md
+      - migration/penzai.md
+      - migration/profilers_alongside.md
+      - migration/repe.md
+      - migration/saelens.md
+      - migration/scoped_detached_patching.md
+      - migration/where_to_go_instead.md
+  - Benchmarks:
+      - benchmarks/capture.md
+      - benchmarks/summary_performance.md
+  - Reference:
+      - backends.md
+      - intervention_api.md
+      - method_x_model_compatibility.md
+      - reference/agent_capabilities.md
+      - reference/attribution.md
+      - reference/brain_benchmarking_seam.md
+      - reference/capture_outcomes.md
+      - reference/checks_kit.md
+      - reference/collapse.md
+      - reference/compat_matrix.md
+      - reference/composition_matrix.md
+      - reference/debug.md
+      - reference/deployment_envelope.md
+      - reference/device_attribution.md
+      - reference/encoding.md
+      - reference/episode_capture.md
+      - reference/error_refusal_contract.md
+      - reference/experiments.md
+      - reference/export.md
+      - reference/glossary.md
+      - reference/harness_bundles.md
+      - reference/hash.md
+      - reference/kernel_telemetry.md
+      - reference/lenses.md
+      - reference/lit_bridge.md
+      - reference/lovely_reprs.md
+      - reference/mechinterp.md
+      - reference/model_explorer.md
+      - reference/netron_export.md
+      - reference/neuro.md
+      - reference/observability_substrate.md
+      - reference/onebackward_reads.md
+      - reference/report_family.md
+      - reference/stable_api.md
+      - reference/stats.md
+      - reference/structure_only_capabilities.md
+      - reference/summary.md
+      - reference/trackers.md
+      - reference/transforms.md
+      - reference/tviz.md
+      - reference/weightsfree_capture.md
+      - migration/split_3_x.md
+      - reference/split_memory.md
+      - reference/split_native_runtime.md
+      - reference/split_runtime_acceptance.md
+      - reference/split_runtime_repairs.md
+      - reference/split_state_bindings.md
+      - Backends:
+          - backends/jax.md
+          - backends/mlx.md
+          - backends/paddle.md
+          - backends/tf.md
+          - backends/tinygrad.md
+          - backends/torch.md
+      - API:
+          - reference/api/dataset_extraction.md
+  - Project:
+      - LIMITATIONS.md
+      - acknowledgments.md
+      - migration/lovely_stats_line.md
+      - migration/v2.0_api_changes.md
+      - reference/deprecations.md
+      - reference/limitations.md
+      - Historical reports:
+          - archive/split_training_dag_fp64.md
+  # </generated:nav>

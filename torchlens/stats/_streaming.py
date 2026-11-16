@@ -1,0 +1,834 @@
+"""Streaming statistic kernels."""
+
+from __future__ import annotations
+
+import math
+import warnings
+from typing import Any, Protocol, cast
+
+import torch
+
+from .._errors import InvalidArgumentError
+from ..errors import TorchLensWarning
+
+__tl_layer__ = "L5"
+
+
+class StreamingStat(Protocol):
+    """Protocol implemented by all streaming statistic accumulators.
+
+    Examples
+    --------
+    >>> stat: StreamingStat = tl.stats.Mean(name="activation_mean")
+    >>> stat.update(torch.ones(4))
+    >>> stat.name, stat.compute()
+    ('activation_mean', 1.0)
+    """
+
+    name: str | None
+
+    def update(self, value: Any) -> None:
+        """Update the accumulator with one batch value."""
+
+    def compute(self) -> Any:
+        """Return the finalized statistic value."""
+
+
+def _as_float_tensor(value: Any) -> torch.Tensor:
+    """Return ``value`` as a detached CPU float tensor.
+
+    Parameters
+    ----------
+    value:
+        Tensor-like value.
+
+    Returns
+    -------
+    torch.Tensor
+        Flattened CPU float tensor.
+    """
+
+    if isinstance(value, torch.Tensor):
+        return value.detach().to(device="cpu", dtype=torch.float64).reshape(-1)
+    return torch.as_tensor(value, dtype=torch.float64).reshape(-1)
+
+
+class Mean:
+    """Running mean accumulator.
+
+    Examples
+    --------
+    >>> running = Mean()
+    >>> running.update(torch.tensor([1.0, 2.0, 3.0]))
+    >>> running.update(torch.tensor([5.0]))
+    >>> running.compute()
+    2.75
+    """
+
+    def __init__(self, name: str | None = None) -> None:
+        """Initialize the accumulator.
+
+        Parameters
+        ----------
+        name:
+            Optional metric name.
+        """
+
+        self.name = name
+        self._count = 0
+        self._mean: torch.Tensor | None = None
+
+    def update(self, value: Any) -> None:
+        """Update the running mean.
+
+        Parameters
+        ----------
+        value:
+            Tensor-like batch value.
+        """
+
+        tensor = _as_float_tensor(value)
+        if tensor.numel() == 0:
+            return
+        batch_mean = tensor.mean()
+        batch_count = int(tensor.numel())
+        if self._mean is None:
+            self._mean = batch_mean
+            self._count = batch_count
+            return
+        total = self._count + batch_count
+        self._mean = self._mean + (batch_mean - self._mean) * (batch_count / total)
+        self._count = total
+
+    def compute(self) -> float:
+        """Return the finalized mean.
+
+        Returns
+        -------
+        float
+            Running mean, or NaN when no values were seen.
+        """
+
+        if self._mean is None:
+            return math.nan
+        return float(self._mean.item())
+
+
+class Norm:
+    """Running mean of per-update tensor norms.
+
+    Each ``update()`` reduces the provided batch to one scalar norm before the
+    running mean is updated. This is intentionally different from a global norm
+    over all elements seen across all updates, so regrouping the same values
+    into different update batches can change the reported result.
+
+    Examples
+    --------
+    >>> running = Norm(p=2)
+    >>> running.update(torch.tensor([3.0, 4.0]))
+    >>> running.update(torch.tensor([0.0, 0.0]))
+    >>> running.compute()
+    2.5
+    """
+
+    def __init__(self, p: float = 2.0, name: str | None = None) -> None:
+        """Initialize the norm accumulator.
+
+        Parameters
+        ----------
+        p:
+            Norm order passed to ``torch.linalg.vector_norm``.
+        name:
+            Optional metric name.
+        """
+
+        self.name = name
+        self.p = float(p)
+        self._mean = Mean()
+
+    def update(self, value: Any) -> None:
+        """Update the running norm mean."""
+
+        tensor = _as_float_tensor(value)
+        if tensor.numel() == 0:
+            return
+        self._mean.update(torch.linalg.vector_norm(tensor, ord=self.p))
+
+    def compute(self) -> float:
+        """Return the finalized mean norm."""
+
+        return self._mean.compute()
+
+
+class Covariance:
+    """Running covariance matrix accumulator.
+
+    Examples
+    --------
+    >>> cov = Covariance()
+    >>> cov.update(torch.randn(16, 3))
+    >>> cov.update(torch.randn(16, 3))
+    >>> cov.compute().shape
+    torch.Size([3, 3])
+    """
+
+    def __init__(
+        self,
+        name: str | None = None,
+        *,
+        device: Any = None,
+        dtype: Any = None,
+    ) -> None:
+        """Initialize the accumulator.
+
+        Parameters
+        ----------
+        name:
+            Optional metric name.
+        device:
+            Compute/state device (default: historical CPU).
+        dtype:
+            Floating compute dtype (default: historical ``float64``).
+        """
+
+        self.name = name
+        self._device, self._dtype = _resolve_placement(device, dtype)
+        self._count = 0
+        self._mean: torch.Tensor | None = None
+        self._m2: torch.Tensor | None = None
+
+    def update(self, value: Any) -> None:
+        """Update covariance from one batch.
+
+        Parameters
+        ----------
+        value:
+            Tensor-like batch. One-dimensional inputs are treated as one row.
+        """
+
+        tensor = torch.as_tensor(value).detach().to(device=self._device, dtype=self._dtype)
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(0)
+        tensor = tensor.reshape(tensor.shape[0], -1)
+        if self._mean is not None and tensor.shape[1] != self._mean.numel():
+            raise ValueError("Covariance feature dimensions cannot change across updates.")
+        rows = tensor.shape[0]
+        if rows == 0:
+            return
+        if self._mean is None:
+            self._mean = torch.zeros(tensor.shape[1], dtype=self._dtype, device=self._device)
+            self._m2 = torch.zeros(
+                (tensor.shape[1], tensor.shape[1]), dtype=self._dtype, device=self._device
+            )
+        assert self._m2 is not None
+        # Chan et al. batch combine: one FxF update per BATCH with in-place
+        # accumulation (the per-row Welford loop allocated a fresh FxF outer
+        # product per ROW, ~33 MB of churn for modest feature widths).
+        batch_mean = tensor.mean(dim=0)
+        centered = tensor - batch_mean
+        total = self._count + rows
+        delta = batch_mean - self._mean
+        self._m2 += centered.T @ centered
+        self._m2 += torch.outer(delta, delta) * (self._count * rows / total)
+        self._mean += delta * (rows / total)
+        self._count = total
+
+    def compute(self) -> torch.Tensor:
+        """Return the finalized covariance matrix.
+
+        Returns
+        -------
+        torch.Tensor
+            Covariance matrix.
+        """
+
+        if self._m2 is None:
+            return torch.empty((0, 0), dtype=self._dtype, device=self._device)
+        if self._count < 2:
+            return torch.zeros_like(self._m2)
+        return self._m2 / (self._count - 1)
+
+
+def _resolve_placement(device: Any, dtype: Any) -> tuple[torch.device, torch.dtype]:
+    """Resolve the accumulator compute placement.
+
+    The ONE policy seam for accumulator ``device=``/``dtype=`` keywords, so
+    later accumulators cannot fork conventions: ``None`` means the historical
+    CPU ``float64`` contract (bit-identical default), an explicit device
+    keeps state and computation there, and only floating dtypes are lawful.
+
+    Parameters
+    ----------
+    device:
+        Target device or ``None`` for the historical CPU placement.
+    dtype:
+        Target floating dtype or ``None`` for the historical ``float64``.
+
+    Returns
+    -------
+    tuple[torch.device, torch.dtype]
+        Resolved placement.
+
+    Raises
+    ------
+    ValueError
+        If ``dtype`` is not a floating dtype.
+    """
+
+    resolved_device = torch.device(device) if device is not None else torch.device("cpu")
+    resolved_dtype = dtype if dtype is not None else torch.float64
+    if not isinstance(resolved_dtype, torch.dtype) or not resolved_dtype.is_floating_point:
+        raise ValueError(f"Accumulator dtype must be a floating torch.dtype; got {dtype!r}.")
+    return resolved_device, resolved_dtype
+
+
+def _as_feature_matrix(
+    value: Any,
+    device: torch.device | None = None,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Return ``value`` as a detached feature matrix on the given placement.
+
+    Parameters
+    ----------
+    value:
+        Tensor-like batch. One-dimensional inputs are treated as one row.
+    device:
+        Target device (default: the historical CPU placement).
+    dtype:
+        Target dtype (default: the historical ``float64``).
+
+    Returns
+    -------
+    torch.Tensor
+        A two-dimensional ``(n_rows, n_features)`` tensor.
+    """
+
+    tensor = (
+        torch.as_tensor(value).detach().to(device=device or "cpu", dtype=dtype or torch.float64)
+    )
+    if tensor.ndim == 0:
+        raise ValueError("A feature batch must have at least one dimension.")
+    if tensor.ndim == 1:
+        tensor = tensor.unsqueeze(0)
+    return tensor.reshape(tensor.shape[0], -1)
+
+
+class CrossCovariance:
+    """Running cross-covariance matrix accumulator.
+
+    The accumulator retains only feature-sized running means and the cross
+    second moment. Inputs are converted to detached tensors on the resolved
+    placement (default: the historical CPU ``float64``).
+
+    Examples
+    --------
+    >>> cross = CrossCovariance()
+    >>> cross.update(torch.randn(10, 3), torch.randn(10, 2))
+    >>> cross.compute().shape
+    torch.Size([3, 2])
+    """
+
+    def __init__(
+        self,
+        name: str | None = None,
+        *,
+        device: Any = None,
+        dtype: Any = None,
+    ) -> None:
+        """Initialize the accumulator.
+
+        Parameters
+        ----------
+        name:
+            Optional metric name.
+        device:
+            Compute/state device (default: historical CPU).
+        dtype:
+            Floating compute dtype (default: historical ``float64``).
+        """
+
+        self.name = name
+        self._device, self._dtype = _resolve_placement(device, dtype)
+        self._count = 0
+        self._mean_a: torch.Tensor | None = None
+        self._mean_b: torch.Tensor | None = None
+        self._m2: torch.Tensor | None = None
+
+    def update(self, a: Any, b: Any) -> None:
+        """Update cross-covariance from one paired batch.
+
+        Parameters
+        ----------
+        a:
+            First tensor-like batch, with rows as observations.
+        b:
+            Second tensor-like batch, with rows as observations.
+
+        Raises
+        ------
+        ValueError
+            If the batches have different row counts or a feature dimension
+            changes across updates.
+        """
+
+        matrix_a = _as_feature_matrix(a, self._device, self._dtype)
+        matrix_b = _as_feature_matrix(b, self._device, self._dtype)
+        if matrix_a.shape[0] != matrix_b.shape[0]:
+            raise ValueError(
+                "CrossCovariance requires matched row counts; "
+                f"got {matrix_a.shape[0]} and {matrix_b.shape[0]}."
+            )
+        if self._mean_a is not None and matrix_a.shape[1] != self._mean_a.numel():
+            raise ValueError("CrossCovariance feature dimensions cannot change across updates.")
+        if self._mean_b is not None and matrix_b.shape[1] != self._mean_b.numel():
+            raise ValueError("CrossCovariance feature dimensions cannot change across updates.")
+        rows = matrix_a.shape[0]
+        if rows == 0:
+            return
+        if self._mean_a is None or self._mean_b is None:
+            self._mean_a = torch.zeros(matrix_a.shape[1], dtype=self._dtype, device=self._device)
+            self._mean_b = torch.zeros(matrix_b.shape[1], dtype=self._dtype, device=self._device)
+            self._m2 = torch.zeros(
+                (matrix_a.shape[1], matrix_b.shape[1]), dtype=self._dtype, device=self._device
+            )
+        assert self._m2 is not None
+        # Same batch combine as Covariance.update: one (d_a, d_b) update per
+        # BATCH instead of one fresh outer product per row.
+        batch_mean_a = matrix_a.mean(dim=0)
+        batch_mean_b = matrix_b.mean(dim=0)
+        centered_a = matrix_a - batch_mean_a
+        centered_b = matrix_b - batch_mean_b
+        total = self._count + rows
+        delta_a = batch_mean_a - self._mean_a
+        delta_b = batch_mean_b - self._mean_b
+        self._m2 += centered_a.T @ centered_b
+        self._m2 += torch.outer(delta_a, delta_b) * (self._count * rows / total)
+        self._mean_a += delta_a * (rows / total)
+        self._mean_b += delta_b * (rows / total)
+        self._count = total
+
+    def compute(self) -> torch.Tensor:
+        """Return the finalized sample cross-covariance matrix.
+
+        Returns
+        -------
+        torch.Tensor
+            Cross-covariance with shape ``(d_a, d_b)``. Fewer than two rows
+            produce a zero matrix of the established feature shape.
+        """
+
+        if self._m2 is None:
+            return torch.empty((0, 0), dtype=self._dtype, device=self._device)
+        if self._count < 2:
+            return torch.zeros_like(self._m2)
+        return self._m2 / (self._count - 1)
+
+
+def _refuse_nonfinite_cka_input(matrix: torch.Tensor, argument: str) -> None:
+    """Refuse NaN/Inf CKA input typed, matching ``tl.repgeom.rdm``.
+
+    Parameters
+    ----------
+    matrix:
+        Feature matrix about to enter the CKA reduction.
+    argument:
+        Which representation (``"a"`` or ``"b"``) the matrix came from.
+
+    Raises
+    ------
+    InvalidArgumentError
+        ``cka_input_nonfinite`` when any entry is NaN or infinite.
+    """
+
+    if bool(torch.isfinite(matrix).all()):
+        return
+    raise InvalidArgumentError(
+        f"CKA input {argument!r} contains NaN or infinite values; CKA would "
+        "silently return NaN or a meaningless score",
+        code="cka_input_nonfinite",
+        remedy=(
+            "clean or mask the non-finite entries first (for example "
+            "torch.nan_to_num(x) or drop the affected rows), as tl.repgeom.rdm requires"
+        ),
+        argument=argument,
+    )
+
+
+def _warn_zero_variance_cka() -> float:
+    """Warn that a zero-variance representation makes CKA undefined; return NaN."""
+
+    warnings.warn(
+        TorchLensWarning(
+            "CKA is undefined because a representation has zero variance (every row "
+            "is identical after centering); returning NaN. Remedy: check the site "
+            "selection and the inputs, a constant activation carries no geometry",
+            code="cka_zero_variance",
+        ),
+        stacklevel=3,
+    )
+    return math.nan
+
+
+#: Similarity-repository identifier of linear CKA with the biased Gretton HSIC.
+LINEAR_CKA_ID = "measure/*/cka-kernel=linear-hsic=gretton-score"
+
+
+class SimilarityScore(float):
+    """A similarity score that names the exact measure variant it computes.
+
+    It is a ``float`` (arithmetic, comparison, ``repr`` and JSON encoding are a
+    float's) with one extra attribute, ``similarity_repository_id``: the
+    similarity-repository catalogue identifier of the variant, for example
+    ``measure/*/cka-kernel=linear-hsic=gretton-score``. :meth:`to_dict` is the
+    serialized form that keeps the identifier; arithmetic on a score returns a
+    plain ``float``. Spelling DOCUMENTED-UNSTABLE.
+
+    Examples
+    --------
+    >>> score = SimilarityScore(0.5, "measure/demo")
+    >>> score + 0.25, score.similarity_repository_id
+    (0.75, 'measure/demo')
+    >>> score.to_dict()
+    {'score': 0.5, 'similarity_repository_id': 'measure/demo'}
+    """
+
+    similarity_repository_id: str | None
+
+    def __new__(cls, value: float, similarity_repository_id: str | None) -> SimilarityScore:
+        """Create a score from its value and its measure identifier."""
+
+        score = super().__new__(cls, value)
+        score.similarity_repository_id = similarity_repository_id
+        return score
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Pickle with the identifier."""
+
+        return (type(self), (float(self), self.similarity_repository_id))
+
+    def __repr__(self) -> str:
+        """Return the float's repr."""
+
+        return float.__repr__(self)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return ``{"score": float, "similarity_repository_id": str | None}``."""
+
+        return {"score": float(self), "similarity_repository_id": self.similarity_repository_id}
+
+
+class CKA:
+    r"""Streaming linear centered kernel alignment accumulator.
+
+    Linear CKA is
+
+    .. math::
+
+        \operatorname{CKA}(A, B) =
+        \frac{\lVert C_{AB}\rVert_F^2}
+        {\lVert C_{AA}\rVert_F\,\lVert C_{BB}\rVert_F}.
+
+    Only feature-sized covariance terms are retained. If either input has
+    zero variance, ``compute()`` returns NaN (warning ``cka_zero_variance``)
+    because the alignment denominator is zero; a NaN or infinite batch refuses
+    ``cka_input_nonfinite`` at ``update()``. This follows the linear CKA formulation of Kornblith et al. (2019).
+
+    The variant is the similarity-repository's
+    ``cka-kernel=linear-hsic=gretton-score`` (linear kernel, biased Gretton
+    HSIC); :attr:`similarity_repository_id` records it (spelling
+    DOCUMENTED-UNSTABLE).
+
+    Examples
+    --------
+    >>> acc = CKA()
+    >>> a = torch.randn(32, 6)
+    >>> acc.update(a, 3 * a + 1)
+    >>> score = acc.compute()
+    >>> abs(score - 1.0) < 1e-6, score.similarity_repository_id.startswith("measure/")
+    (True, True)
+    """
+
+    #: Similarity-repository identifier of the exact CKA variant computed.
+    similarity_repository_id: str = LINEAR_CKA_ID
+
+    def __init__(
+        self,
+        name: str | None = None,
+        *,
+        device: Any = None,
+        dtype: Any = None,
+    ) -> None:
+        """Initialize the accumulator.
+
+        Parameters
+        ----------
+        name:
+            Optional metric name.
+        device:
+            Compute/state device (e.g. ``"cuda"``).
+            ``None`` keeps the historical CPU placement bit-identical.
+        dtype:
+            Floating compute dtype (default: historical ``float64``).
+        """
+
+        self.name = name
+        self._device, self._dtype = _resolve_placement(device, dtype)
+        self._cross = CrossCovariance(device=device, dtype=dtype)
+        self._covariance_a = Covariance(device=device, dtype=dtype)
+        self._covariance_b = Covariance(device=device, dtype=dtype)
+
+    def update(self, a: Any, b: Any) -> None:
+        """Update linear CKA from one paired batch.
+
+        Parameters
+        ----------
+        a:
+            First tensor-like batch, with rows as observations.
+        b:
+            Second tensor-like batch, with rows as observations.
+        """
+
+        matrix_a = _as_feature_matrix(a)
+        matrix_b = _as_feature_matrix(b)
+        _refuse_nonfinite_cka_input(matrix_a, "a")
+        _refuse_nonfinite_cka_input(matrix_b, "b")
+        self._cross.update(matrix_a, matrix_b)
+        self._covariance_a.update(matrix_a)
+        self._covariance_b.update(matrix_b)
+
+    def compute(self) -> SimilarityScore:
+        """Return the finalized linear CKA value.
+
+        Returns
+        -------
+        SimilarityScore
+            Linear CKA as a float carrying ``similarity_repository_id``, or NaN
+            (with a ``cka_zero_variance`` warning) when either representation
+            has zero variance.
+        """
+
+        cross = self._cross.compute()
+        covariance_a = self._covariance_a.compute()
+        covariance_b = self._covariance_b.compute()
+        numerator = torch.linalg.matrix_norm(cross, ord="fro").square()
+        denominator = torch.linalg.matrix_norm(covariance_a, ord="fro") * torch.linalg.matrix_norm(
+            covariance_b, ord="fro"
+        )
+        if denominator.item() == 0.0:
+            return SimilarityScore(_warn_zero_variance_cka(), LINEAR_CKA_ID)
+        return SimilarityScore(float((numerator / denominator).item()), LINEAR_CKA_ID)
+
+
+def cka(a: Any, b: Any, *, device: Any = None, dtype: Any = None) -> SimilarityScore:
+    r"""Compute one-shot linear centered kernel alignment.
+
+    Linear CKA is
+
+    .. math::
+
+        \operatorname{CKA}(A, B) =
+        \frac{\lVert C_{AB}\rVert_F^2}
+        {\lVert C_{AA}\rVert_F\,\lVert C_{BB}\rVert_F}.
+
+    This is the linear CKA measure described by Kornblith et al. (2019): the
+    similarity-repository's ``cka-kernel=linear-hsic=gretton-score`` (linear
+    kernel, biased Gretton HSIC), the same variant as :class:`CKA`.
+    Inputs are treated as ``(n_observations, n_features)`` matrices; the
+    default computes on CPU ``float64`` (bit-identical to the historical
+    behavior). A zero-variance input produces NaN with a ``cka_zero_variance``
+    warning; NaN or infinite input refuses ``cka_input_nonfinite``, as
+    ``tl.repgeom.rdm`` does.
+
+    Parameters
+    ----------
+    a:
+        First tensor-like representation.
+    b:
+        Second tensor-like representation with the same row count.
+    device:
+        Compute device (e.g. ``"cuda"`` keeps the Gram
+        work on-device). ``None`` keeps the historical CPU placement.
+    dtype:
+        Floating compute dtype (default: historical ``float64``).
+
+    Returns
+    -------
+    SimilarityScore
+        Linear CKA as a float carrying ``similarity_repository_id``, or NaN for a
+        degenerate zero-variance input.
+
+    Raises
+    ------
+    InvalidArgumentError
+        ``cka_input_nonfinite`` when either input holds NaN or Inf.
+
+    Examples
+    --------
+    >>> a = torch.randn(32, 6)
+    >>> abs(tl.stats.cka(a, 2 * a) - 1.0) < 1e-6
+    True
+    >>> tl.stats.cka(a, torch.randn(32, 4)) < 1.0
+    True
+    """
+
+    resolved_device, resolved_dtype = _resolve_placement(device, dtype)
+    matrix_a = _as_feature_matrix(a, resolved_device, resolved_dtype)
+    matrix_b = _as_feature_matrix(b, resolved_device, resolved_dtype)
+    if matrix_a.shape[0] != matrix_b.shape[0]:
+        raise ValueError(
+            f"CKA requires matched row counts; got {matrix_a.shape[0]} and {matrix_b.shape[0]}."
+        )
+    _refuse_nonfinite_cka_input(matrix_a, "a")
+    _refuse_nonfinite_cka_input(matrix_b, "b")
+
+    centered_a = matrix_a - matrix_a.mean(dim=0, keepdim=True)
+    centered_b = matrix_b - matrix_b.mean(dim=0, keepdim=True)
+    gram_a = centered_a @ centered_a.T
+    gram_b = centered_b @ centered_b.T
+    denominator = torch.linalg.matrix_norm(gram_a, ord="fro") * torch.linalg.matrix_norm(
+        gram_b, ord="fro"
+    )
+    if denominator.item() == 0.0:
+        return SimilarityScore(_warn_zero_variance_cka(), LINEAR_CKA_ID)
+    numerator = torch.sum(gram_a * gram_b)
+    return SimilarityScore(float((numerator / denominator).item()), LINEAR_CKA_ID)
+
+
+class PCA:
+    """Simple incremental PCA backed by running covariance.
+
+    Examples
+    --------
+    >>> pca = PCA(num_components=2)
+    >>> pca.update(torch.randn(50, 4))
+    >>> result = pca.compute()
+    >>> result["components"].shape, result["n_samples"], result["n_features"]
+    (torch.Size([2, 4]), 50, 4)
+    """
+
+    def __init__(self, num_components: int, name: str | None = None) -> None:
+        """Initialize the estimator.
+
+        Parameters
+        ----------
+        num_components:
+            Number of principal components to return.
+        name:
+            Optional metric name.
+        """
+
+        self.name = name
+        self.n_components = int(num_components)
+        self._covariance = Covariance(name=name)
+
+    def update(self, value: Any) -> None:
+        """Update the PCA estimator.
+
+        Parameters
+        ----------
+        value:
+            Tensor-like batch.
+        """
+
+        self._covariance.update(value)
+
+    def _solve(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Eigensolve the running covariance with deterministic sign canonicalization.
+
+        Each component row is flipped so its largest-magnitude entry is
+        positive (first occurrence on exact ties, per ``torch.argmax``), so
+        two identical fits produce IDENTICAL arrays — an eigensolver's sign
+        choice is otherwise arbitrary.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            ``(components, explained_variance)`` — ``(k, d)`` rows and the
+            descending eigenvalues.
+        """
+
+        cov = self._covariance.compute()
+        if cov.numel() == 0:
+            return (
+                torch.empty((0, 0), dtype=torch.float64),
+                torch.empty((0,), dtype=torch.float64),
+            )
+        values, vectors = torch.linalg.eigh(cov)
+        order = torch.argsort(values, descending=True)[: self.n_components]
+        components = vectors[:, order].T.contiguous()
+        anchor = components.abs().argmax(dim=1, keepdim=True)
+        flip = torch.where(torch.gather(components, 1, anchor) < 0, -1.0, 1.0)
+        return components * flip, values[order]
+
+    def compute(self) -> dict[str, Any]:
+        """Return components, variances, and the additive fit facts.
+
+        Returns
+        -------
+        dict[str, Any]
+            ``components`` (sign-canonicalized) and ``explained_variance``
+            as before, plus ``mean`` (the feature mean the fit centered
+            on), ``n_samples``, ``n_features``, and ``digest`` (the
+            ``sha256:`` content digest of the fitted arrays).
+        """
+
+        from ._fitted import fitted_digest  # deferred: cycle stats
+
+        components, explained = self._solve()
+        mean = self._covariance._mean
+        mean = torch.empty((0,), dtype=torch.float64) if mean is None else mean.detach().clone()
+        return {
+            "components": components,
+            "explained_variance": explained,
+            "mean": mean,
+            "n_samples": self._covariance._count,
+            "n_features": int(mean.numel()),
+            "digest": fitted_digest(components, mean, explained),
+        }
+
+    def fitted(self, fit_scope: str = "unspecified") -> Any:
+        """Freeze the fit into a persistable :class:`~torchlens.stats.FittedPCA`.
+
+        Parameters
+        ----------
+        fit_scope:
+            Recorded disclosure of what the fit consumed (fitting across
+            held-out stimuli leaks analysis information; say so here).
+
+        Returns
+        -------
+        FittedPCA
+            The frozen payload ``tl.stats.save_fitted`` persists and
+            ``tl.transforms.pca_apply`` consumes.
+
+        Raises
+        ------
+        FittedArtifactError
+            ``pca_fitted_unavailable`` when fewer than two rows were seen —
+            there is no covariance to solve, and fabricating a basis would
+            be a silent wrong number.
+        """
+
+        from ._fitted import FittedArtifactError, FittedPCA, fitted_digest  # deferred: cycle stats
+
+        if self._covariance._count < 2:
+            raise FittedArtifactError(
+                f"PCA saw {self._covariance._count} row(s); a fit needs at "
+                "least two rows before fitted() has anything to freeze.",
+                code="pca_fitted_unavailable",
+                remedy="update() the estimator with the fitting batches first",
+                n_samples=self._covariance._count,
+            )
+        components, explained = self._solve()
+        # count >= 2 (checked above) implies the running mean exists.
+        mean = cast(torch.Tensor, self._covariance._mean).detach().clone()
+        return FittedPCA(
+            components=components,
+            mean=mean,
+            explained_variance=explained,
+            num_samples=self._covariance._count,
+            num_features=int(mean.numel()),
+            fit_scope=str(fit_scope),
+            digest=fitted_digest(components, mean, explained),
+        )

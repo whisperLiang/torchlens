@@ -27,7 +27,6 @@ FRAMEWORK_NAMES = {"torch", "tf", "tensorflow", "keras", "jax", "mlx", "tinygrad
 _HARDWARE_CLASS = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 
-@pytest.mark.smoke
 def test_no_direct_deviceref_construction_in_backends() -> None:
     """Backends must route device metadata through ``DeviceRef.from_value``.
 
@@ -48,7 +47,6 @@ def test_no_direct_deviceref_construction_in_backends() -> None:
     )
 
 
-@pytest.mark.smoke
 @pytest.mark.parametrize(
     ("raw", "expected_backend", "expected_name"),
     [
@@ -68,13 +66,11 @@ def test_tf_device_normalizer_yields_hardware_class(
     assert ref.backend not in FRAMEWORK_NAMES
 
 
-@pytest.mark.smoke
 @pytest.mark.parametrize("raw", ["", None])
 def test_tf_device_normalizer_unknown_is_none(raw: object) -> None:
     assert device_ref_from_tf_device(raw) is None
 
 
-@pytest.mark.smoke
 @pytest.mark.parametrize(
     ("raw", "expected_backend", "expected_name"),
     [
@@ -94,7 +90,6 @@ def test_paddle_place_normalizer_yields_hardware_class(
     assert ref.backend not in FRAMEWORK_NAMES
 
 
-@pytest.mark.smoke
 def test_paddle_place_normalizer_unknown_is_none() -> None:
     assert _device_ref_from_paddle_place(None) is None
 
@@ -108,12 +103,12 @@ def test_unknown_module_identity_mode_refuses_typed_on_all_five_previews() -> No
     parity is pinned runtime-free.
     """
 
-    from torchlens.backends import BackendUnsupportedError
     from torchlens.backends.jax.backend import _resolve_jax_module_identity_mode
     from torchlens.backends.mlx.backend import _resolve_mlx_module_identity_mode
     from torchlens.backends.paddle.backend import _resolve_paddle_module_identity_mode
     from torchlens.backends.tf.backend import _resolve_tf_module_identity_mode
     from torchlens.backends.tinygrad.backend import _resolve_tinygrad_module_identity_mode
+    from torchlens.errors import BackendUnsupportedError
 
     for resolver in (
         _resolve_jax_module_identity_mode,

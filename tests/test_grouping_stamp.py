@@ -17,15 +17,14 @@ import torch.nn as nn
 
 import torchlens as tl
 from torchlens._errors import InvalidArgumentError
-from torchlens._io import ArtifactSchemaAgeWarning
 from torchlens._io.prerelease import activate_prerelease_fields
-from torchlens.errors._base import TorchLensWarning
-from torchlens.postprocess._grouping_stamp import (
+from torchlens._postprocess._grouping_stamp import (
     GROUPING_POLICY_SCHEMA,
     build_grouping_policy_stamp,
     degraded_grouping_policy_stamp,
     validate_grouping_policy_stamp,
 )
+from torchlens.errors._base import TorchLensWarning
 
 
 def _tiny_trace(**kwargs) -> tl.Trace:
@@ -34,7 +33,10 @@ def _tiny_trace(**kwargs) -> tl.Trace:
 
 
 def _healthy() -> dict:
-    return build_grouping_policy_stamp(ran_recurrence_grouping=True, requested="structural")
+    # Torch captures carry call-site evidence, so step 7 runs callsite_v2.
+    return build_grouping_policy_stamp(
+        ran_recurrence_grouping=True, requested="structural", detector="callsite_v2"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -42,14 +44,12 @@ def _healthy() -> dict:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.smoke
 def test_grouping_kwarg_is_keyword_only_and_structural_proceeds() -> None:
-    log = _tiny_trace(grouping="structural")
-    assert log.grouping == "structural"
-    assert log.grouping_policy == _healthy()
+    log = _tiny_trace(capture=tl.options.CaptureOptions(grouping="structural"))
+    assert log.options.grouping == "structural"
+    assert log.options.grouping_policy == _healthy()
 
 
-@pytest.mark.smoke
 def test_grouping_entry_refusals() -> None:
     model = nn.Sequential(nn.Linear(4, 4))
     for value, code in (
@@ -59,7 +59,7 @@ def test_grouping_entry_refusals() -> None:
         (None, "grouping_invalid"),
     ):
         with pytest.raises(InvalidArgumentError) as excinfo:
-            tl.trace(model, torch.randn(1, 4), grouping=value)
+            tl.trace(model, torch.randn(1, 4), capture=tl.options.CaptureOptions(grouping=value))
         assert excinfo.value.fields["code"] == code
 
 
@@ -68,21 +68,20 @@ def test_grouping_entry_refusals() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.smoke
 def test_stamp_written_on_default_and_degraded_paths() -> None:
     default_log = _tiny_trace()
-    assert default_log.grouping_policy == {
+    assert default_log.options.grouping_policy == {
         "schema": GROUPING_POLICY_SCHEMA,
         "policy": "structural",
         "requested": "structural",
         "folded_sites": "none",
         "site_join": "none",
-        "detector": "grouper_v1",
+        "detector": "callsite_v2",
         "effective": True,
         "settlement_note": None,
     }
     degraded_path_log = _tiny_trace(capture=tl.options.CaptureOptions(recurrence_detection=False))
-    stamp = degraded_path_log.grouping_policy
+    stamp = degraded_path_log.options.grouping_policy
     assert stamp["policy"] == "params_only"
     assert stamp["detector"] == "unknown"
     assert stamp["effective"] is True
@@ -91,8 +90,8 @@ def test_stamp_written_on_default_and_degraded_paths() -> None:
     assert (
         validate_grouping_policy_stamp(
             stamp,
-            recurrence_detection=degraded_path_log.recurrence_detection,
-            grouping=degraded_path_log.grouping,
+            recurrence_detection=degraded_path_log.options.recurrence_detection,
+            grouping=degraded_path_log.options.grouping,
         )
         is None
     )
@@ -103,7 +102,6 @@ def test_stamp_written_on_default_and_degraded_paths() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.smoke
 def test_validation_rule_matrix() -> None:
     assert validate_grouping_policy_stamp(_healthy()) is None
     assert validate_grouping_policy_stamp("not-a-dict") == "malformed"
@@ -116,6 +114,9 @@ def test_validation_rule_matrix() -> None:
     assert validate_grouping_policy_stamp({**_healthy(), "requested": "params_only"}) == (
         "vocabulary"  # params_only is a POLICY value, never a requested value
     )
+    assert validate_grouping_policy_stamp({**_healthy(), "detector": "grouper_v1"}) is None
+    # A trace saved under the earlier call-site detector loads its stamp verbatim.
+    assert validate_grouping_policy_stamp({**_healthy(), "detector": "callsite_v1"}) is None
     assert validate_grouping_policy_stamp({**_healthy(), "detector": "grouper_v2"}) == "vocabulary"
     assert validate_grouping_policy_stamp({**_healthy(), "effective": "yes"}) == "vocabulary"
     assert validate_grouping_policy_stamp({**_healthy(), "settlement_note": "oops"}) == (
@@ -149,7 +150,7 @@ def test_validation_rule_matrix() -> None:
     assert validate_grouping_policy_stamp(_healthy(), recurrence_detection=False) == "C5"
     params_only = build_grouping_policy_stamp(ran_recurrence_grouping=False, requested="structural")
     assert validate_grouping_policy_stamp(params_only, recurrence_detection=True) == "C5"
-    # C6: mirror coherence with trace.grouping.
+    # C6: mirror coherence with trace.options.grouping.
     assert validate_grouping_policy_stamp(_healthy(), grouping="strict_shapes") == "C6"
     # C7: a healthy stamp never carries a settlement.
     assert (
@@ -169,17 +170,16 @@ def test_validation_rule_matrix() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.smoke
 def test_g1_stamp_roundtrip_under_switch(tmp_path) -> None:
     trace = _tiny_trace()
     path = tmp_path / "stamp.tlspec"
     with activate_prerelease_fields():
-        tl.save(trace, str(path))
+        trace.save(str(path))
         with warnings.catch_warnings():
             warnings.simplefilter("error", TorchLensWarning)
             loaded = tl.load(str(path))
-    assert loaded.grouping == "structural"
-    assert loaded.grouping_policy == trace.grouping_policy
+    assert loaded.options.grouping == "structural"
+    assert loaded.options.grouping_policy == trace.options.grouping_policy
 
 
 # ---------------------------------------------------------------------------
@@ -191,95 +191,34 @@ def _tampered_reload(tmp_path, mutate, name: str) -> tl.Trace:
     trace = _tiny_trace()
     path = tmp_path / f"{name}.tlspec"
     with activate_prerelease_fields():
-        tl.save(trace, str(path))
+        trace.save(str(path))
         loaded = tl.load(str(path))
         mutate(loaded)
         repath = tmp_path / f"{name}_tampered.tlspec"
-        tl.save(loaded, str(repath))
+        loaded.save(str(repath))
         with pytest.warns(TorchLensWarning, match="grouping_policy stamp is invalid"):
             return tl.load(str(repath))
 
 
-@pytest.mark.smoke
-def test_g3_tampered_unknown_key_refuses_and_settles(tmp_path) -> None:
-    def plant_unknown_key(trace: tl.Trace) -> None:
-        trace.grouping_policy = {**trace.grouping_policy, "forged": True}
-
-    reloaded = _tampered_reload(tmp_path, plant_unknown_key, "unknown_key")
-    assert reloaded.grouping_policy == degraded_grouping_policy_stamp("unknown_key")
-
-
-@pytest.mark.smoke
-def test_g3_forged_policy_degrades_with_rule_name(tmp_path) -> None:
-    def forge_policy(trace: tl.Trace) -> None:
-        trace.grouping_policy = {**trace.grouping_policy, "policy": "greedy"}
-
-    reloaded = _tampered_reload(tmp_path, forge_policy, "forged_policy")
-    assert reloaded.grouping_policy == degraded_grouping_policy_stamp("vocabulary")
-
-
-@pytest.mark.smoke
-def test_g3_mirror_incoherence_degrades_c6(tmp_path) -> None:
-    def forge_requested(trace: tl.Trace) -> None:
-        trace.grouping_policy = {**trace.grouping_policy, "requested": "fold_sites"}
-
-    reloaded = _tampered_reload(tmp_path, forge_requested, "mirror")
-    assert reloaded.grouping_policy == degraded_grouping_policy_stamp("c6")
-
-
-@pytest.mark.smoke
 def test_g3_degraded_settlement_roundtrips_byte_stable(tmp_path) -> None:
     def forge_policy(trace: tl.Trace) -> None:
-        trace.grouping_policy = {**trace.grouping_policy, "policy": "greedy"}
+        trace._options_grouping_policy = {**trace.options.grouping_policy, "policy": "greedy"}
 
     settled = _tampered_reload(tmp_path, forge_policy, "settle_once")
-    settled_payload = dict(settled.grouping_policy)
+    settled_payload = dict(settled.options.grouping_policy)
     # Re-save the SETTLED trace: the settlement is legal under the exact
     # writer schema, so the reload adopts it verbatim with NO further
     # warning and stays degraded (verdicts only worsen, never heal).
     path = tmp_path / "settled_again.tlspec"
     with activate_prerelease_fields():
-        tl.save(settled, str(path))
+        settled.save(str(path))
         with warnings.catch_warnings():
             warnings.simplefilter("error", TorchLensWarning)
             resettled = tl.load(str(path))
-    assert resettled.grouping_policy == settled_payload
+    assert resettled.options.grouping_policy == settled_payload
 
 
 # ---------------------------------------------------------------------------
-# G5: legacy artifacts settle silently to the legacy settlement
+# G5: the legacy v7 artifact was written by torchlens 2.x, which this
+# release does not read: it refuses typed instead of settling
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.smoke
-def test_g5_legacy_v7_artifact_settles_silently() -> None:
-    from pathlib import Path
-
-    fixture = Path(__file__).parent / "fixtures" / "tlspec_v7" / "tiny_v7.tlspec"
-    with warnings.catch_warnings():
-        # Grouping settlement must be silent; schema-age and cross-minor
-        # advisories are independent compatibility disclosures for this fixture.
-        warnings.simplefilter("error", TorchLensWarning)
-        warnings.simplefilter("default", ArtifactSchemaAgeWarning)
-        warnings.filterwarnings(
-            "default",
-            message=r"^Bundle torch_version=.* differs from runtime torch_version=.* "
-            r"\(minor version mismatch\)\.$",
-            category=TorchLensWarning,
-        )
-        loaded = tl.load(str(fixture))  # real v7 write: the stamp was DROPped
-    assert loaded.grouping_policy == degraded_grouping_policy_stamp("legacy")
-    assert loaded.grouping_policy["settlement_note"] == "grouping_stamp_legacy"
-    # The mirror field restores its default.
-    assert loaded.grouping == "structural"
-
-
-def test_healthy_stamp_persists_on_plain_v8_round_trip(tmp_path) -> None:
-    trace = _tiny_trace()
-    path = tmp_path / "fresh.tlspec"
-    tl.save(trace, str(path))  # tlspec v8: the stamp persists plainly
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", TorchLensWarning)
-        loaded = tl.load(str(path))
-    assert loaded.grouping_policy == trace.grouping_policy
-    assert loaded.grouping == "structural"

@@ -11,10 +11,10 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.distributed import UncapturedCollectiveOpError, _lifecycle as lifecycle
+from torchlens._distributed import _lifecycle as lifecycle
+from torchlens._distributed._recognizer import UncapturedCollectiveOpError
 
 pytestmark = [
-    pytest.mark.smoke,
     pytest.mark.skipif(
         not torch.distributed.is_available() or not torch.distributed.is_gloo_available(),
         reason="torch.distributed gloo unavailable",

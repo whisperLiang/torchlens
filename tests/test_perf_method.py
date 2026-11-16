@@ -9,15 +9,15 @@ phase-local peaks.
 
 from __future__ import annotations
 
-import json
-import sys
-import textwrap
+import gc
+from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
 from torch import nn
 
-from benchmarks import perf_suite
+from benchmarks.artifact_size import artifact_size_bytes
 from benchmarks.perf_gate import compare_gate_payloads, normalize_gate_payload
 from benchmarks.perf_runner import (
     _operation,
@@ -25,7 +25,6 @@ from benchmarks.perf_runner import (
     _run_timing,
     _select_fastlog_names,
 )
-from torchlens.utils._subprocess import run_bounded_subprocess
 
 
 def _tiny_model() -> tuple[nn.Module, torch.Tensor]:
@@ -120,7 +119,46 @@ def _payload(rows: list[dict[str, object]]) -> dict[str, object]:
     )
 
 
-@pytest.mark.smoke
+def test_artifact_size_bytes_sums_a_directory_artifact(tmp_path: Path) -> None:
+    """A directory artifact measures the bytes of its files, never the directory entry."""
+
+    bundle = tmp_path / "trace.tlspec"
+    (bundle / "nested").mkdir(parents=True)
+    (bundle / "manifest.json").write_bytes(b"m" * 10)
+    (bundle / "nested" / "blob.bin").write_bytes(b"b" * 1000)
+    assert artifact_size_bytes(bundle) == 1010
+    assert artifact_size_bytes(bundle) != bundle.stat().st_size
+
+    single = tmp_path / "single.bin"
+    single.write_bytes(b"s" * 7)
+    assert artifact_size_bytes(single) == 7
+
+    empty = tmp_path / "empty.tlspec"
+    empty.mkdir()
+    assert artifact_size_bytes(empty) == 0
+    with pytest.raises(FileNotFoundError):
+        artifact_size_bytes(tmp_path / "missing.tlspec")
+
+
+def test_runner_save_and_load_operations_report_artifact_bytes() -> None:
+    """Both save-path operations record the saved bundle's bytes, not the directory entry."""
+
+    model, x = _tiny_model()
+    for operation, name in (("aux_save", "trace_0.tlspec"), ("aux_load", "trace_fixture.tlspec")):
+        state: dict[str, Any] = {}
+        fn = _operation(operation, model, x, "cpu", state)
+        if operation == "aux_save":
+            fn()
+        tempdir = state["_tempdir"]
+        saved = Path(tempdir.name) / name
+        try:
+            assert saved.is_dir(), operation
+            assert state["serialized_file_size_bytes"] == artifact_size_bytes(saved), operation
+            assert state["serialized_file_size_bytes"] != saved.stat().st_size, operation
+        finally:
+            tempdir.cleanup()
+
+
 def test_runner_fastlog_zero_operation_executes_on_current_api() -> None:
     """The fastlog_zero cell runs against the current ``save=`` predicate API."""
 
@@ -134,7 +172,24 @@ def test_runner_fastlog_zero_operation_executes_on_current_api() -> None:
     assert "save=" in str(state["fastlog_zero_policy"])
 
 
-@pytest.mark.smoke
+@pytest.mark.parametrize(
+    "operation",
+    ["fastlog_module", "fastlog_all", "aux_validate", "aux_compat_report"],
+)
+def test_runner_record_validate_and_doctor_operations_execute_on_current_api(
+    operation: str,
+) -> None:
+    """The tl.record, tl.validate and tl.report.doctor cells run on the current API."""
+
+    model, x = _tiny_model()
+    state: dict[str, object] = {}
+
+    fn = _operation(operation, model, x, "cpu", state)
+    result = fn()
+
+    assert result is not None
+
+
 def test_runner_fastlog_selectivity_operations_execute_on_current_api() -> None:
     """Selectivity cells (dry_run + record) run against the ``save=`` API."""
 
@@ -148,7 +203,6 @@ def test_runner_fastlog_selectivity_operations_execute_on_current_api() -> None:
     assert state["fastlog_selected_func_names"]
 
 
-@pytest.mark.smoke
 def test_runner_fastlog_halt_operation_executes_on_current_api() -> None:
     """Halt-fraction cells derive their halt index through the ``save=`` API."""
 
@@ -162,7 +216,25 @@ def test_runner_fastlog_halt_operation_executes_on_current_api() -> None:
     assert state["fastlog_halt_raw_index"] >= 1
 
 
-@pytest.mark.smoke
+def test_runner_aux_save_reports_the_saved_bytes_not_the_directory_entry() -> None:
+    """``serialized_file_size_bytes`` sums the files a save wrote (a ``.tlspec`` is a directory)."""
+
+    model, x = _tiny_model()
+    state: dict[str, object] = {}
+
+    fn = _operation("aux_save", model, x, "cpu", state)
+    fn()
+
+    tempdir = state["_tempdir"]
+    saved = Path(tempdir.name) / "trace_0.tlspec"  # type: ignore[attr-defined]
+    expected = sum(child.stat().st_size for child in saved.rglob("*") if child.is_file())
+    assert expected > 0
+    assert state["serialized_file_size_bytes"] == expected
+    if saved.is_dir():
+        assert state["serialized_file_size_bytes"] != saved.stat().st_size
+    tempdir.cleanup()  # type: ignore[attr-defined]
+
+
 def test_select_fastlog_names_returns_nonempty_selection() -> None:
     """Name selection sees real op events from the predicate dry run."""
 
@@ -174,47 +246,39 @@ def test_select_fastlog_names_returns_nonempty_selection() -> None:
     assert all(isinstance(name, str) and name for name in names)
 
 
-@pytest.mark.smoke
-def test_gate_fails_when_baseline_row_disappears_from_current() -> None:
-    """A TorchLens baseline row absent from the current run blocks the gate."""
+@pytest.mark.parametrize(
+    ("operation", "expected_passed", "report_key"),
+    [
+        ("fastlog_op_10", False, "missing_current_rows"),
+        ("peer_baukit", True, "unmatched_baseline_rows"),
+    ],
+    ids=[
+        "gate_fails_when_baseline_row_disappears_from_current",
+        "gate_reports_non_torchlens_disappearance_without_blocking",
+    ],
+)
+def test_gate_handles_baseline_row_disappearance(
+    operation: str, expected_passed: bool, report_key: str
+) -> None:
+    """A TorchLens baseline row absent from the current run blocks the gate;
+    a vanished peer row is disclosed but does not block the gate."""
 
     baseline = _payload(
         [
             _row("resnet18", "cpu", "tl_trace", 100.0),
-            _row("resnet18", "cpu", "fastlog_op_10", 40.0),
+            _row("resnet18", "cpu", operation, 40.0),
         ]
     )
     current = _payload([_row("resnet18", "cpu", "tl_trace", 100.0)])
 
     comparison = compare_gate_payloads(baseline, current)
 
-    assert comparison["passed"] is False
-    assert comparison["missing_current_rows"] == [
-        {"model": "resnet18", "device": "cpu", "operation": "fastlog_op_10"}
+    assert comparison["passed"] is expected_passed
+    assert comparison[report_key] == [
+        {"model": "resnet18", "device": "cpu", "operation": operation}
     ]
 
 
-@pytest.mark.smoke
-def test_gate_reports_non_torchlens_disappearance_without_blocking() -> None:
-    """A vanished peer row is disclosed but does not block the gate."""
-
-    baseline = _payload(
-        [
-            _row("resnet18", "cpu", "tl_trace", 100.0),
-            _row("resnet18", "cpu", "peer_baukit", 40.0),
-        ]
-    )
-    current = _payload([_row("resnet18", "cpu", "tl_trace", 100.0)])
-
-    comparison = compare_gate_payloads(baseline, current)
-
-    assert comparison["passed"] is True
-    assert comparison["unmatched_baseline_rows"] == [
-        {"model": "resnet18", "device": "cpu", "operation": "peer_baukit"}
-    ]
-
-
-@pytest.mark.smoke
 def test_gate_current_only_rows_stay_blocking_under_new_field_name() -> None:
     """Current rows with no baseline entry still block, under an honest name."""
 
@@ -235,7 +299,6 @@ def test_gate_current_only_rows_stay_blocking_under_new_field_name() -> None:
     assert "missing_baseline_rows" not in comparison
 
 
-@pytest.mark.smoke
 def test_gate_tolerance_ignores_current_run_iqr() -> None:
     """A noisy current run cannot widen its own regression tolerance."""
 
@@ -248,7 +311,6 @@ def test_gate_tolerance_ignores_current_run_iqr() -> None:
     assert comparison["checks"][0]["tolerance_ms"] == 10.0
 
 
-@pytest.mark.smoke
 def test_gate_tolerance_parameters_are_configurable() -> None:
     """The relative tolerance and floor are explicit knobs, not constants."""
 
@@ -263,7 +325,6 @@ def test_gate_tolerance_parameters_are_configurable() -> None:
     assert "0.02" in strict["tolerance_policy"]
 
 
-@pytest.mark.smoke
 def test_gate_fails_when_no_matched_rows_are_comparable() -> None:
     """Matched rows with no usable timing metrics cannot silently pass."""
 
@@ -282,7 +343,6 @@ def test_gate_fails_when_no_matched_rows_are_comparable() -> None:
     ]
 
 
-@pytest.mark.smoke
 def test_run_timing_records_cpu_time_alongside_wall_time() -> None:
     """Timing passes record process-time statistics next to wall-clock stats."""
 
@@ -295,60 +355,6 @@ def test_run_timing_records_cpu_time_alongside_wall_time() -> None:
     assert len(stats["cpu_samples_ms"]) == 5
 
 
-@pytest.mark.smoke
-def test_startup_cell_uses_independent_process_trials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One-shot startup timings need fresh processes on both sides of the gate."""
-
-    tags: list[str] = []
-
-    def fake_run_cell_once(
-        operation: str,
-        model: str,
-        device: str,
-        pass_type: str,
-        *,
-        samples: int,
-        timeout: int,
-        tag: str,
-        threads: int,
-    ) -> dict[str, object]:
-        """Return one distinct cold-start observation."""
-
-        tags.append(tag)
-        index = len(tags)
-        assert samples == 1
-        return {
-            "operation": operation,
-            "model": model,
-            "device": device,
-            "pass_type": pass_type,
-            "status": "ok",
-            "elapsed_s": 1.0,
-            "timing": {
-                "samples_ms": [1000.0 + index * 100],
-                "cpu_samples_ms": [900.0 + index * 100],
-            },
-        }
-
-    monkeypatch.setattr(perf_suite, "_run_cell_once", fake_run_cell_once)
-    result = perf_suite._run_cell(
-        "first_capture_target",
-        "tinynet",
-        "cpu",
-        "timing",
-        samples=10,
-        timeout=180,
-        tag="baseline",
-    )
-
-    assert len(tags) == perf_suite.STARTUP_TRIALS == len(set(tags))
-    assert result["timing"]["sample_count"] == perf_suite.STARTUP_TRIALS
-    assert result["timing"]["cpu_median_ms"] == 1200.0
-    assert result["timing"]["cpu_iqr_ms"] == 200.0
-    assert result["metadata"]["independent_startup_trials"] == perf_suite.STARTUP_TRIALS
-
-
-@pytest.mark.smoke
 def test_run_memory_reports_phase_local_peaks() -> None:
     """Memory passes report phase-local peak deltas, not only end-state deltas."""
 
@@ -365,7 +371,13 @@ def test_run_memory_reports_phase_local_peaks() -> None:
         assert metrics["uss_peak_delta_mb_memory_pass"] >= metrics["uss_delta_mb_memory_pass"]
 
 
+# ``serial``: the phase-local peak is the process RSS high-water mark. The
+# transient is a fresh mapping, so only another process's memory pressure can
+# hide it: under xdist the kernel can reclaim this worker's cold pages during
+# the measured call, RSS falls by as much as the transient adds, and the
+# high-water mark never rises.
 @pytest.mark.heavy
+@pytest.mark.serial
 def test_run_memory_detects_transient_inside_measured_call() -> None:
     """An allocate-touch-free transient INSIDE ``fn()`` must register.
 
@@ -376,38 +388,85 @@ def test_run_memory_detects_transient_inside_measured_call() -> None:
     advertised phase-local peak field.
     """
 
+    def _touch(buffer: bytearray) -> None:
+        for index in range(0, len(buffer), 4096):
+            buffer[index] = 1
+
+    # Prime the process-lifetime high water ABOVE anything the measured
+    # phase will reach, so lifetime-subtract semantics read 0.0.
+    primer = bytearray(256 * 1024 * 1024)
+    _touch(primer)
+    del primer
+
     transient_mb = 128
-    # The runner's real memory lane uses a fresh process. Match that scope:
-    # unrelated allocator pools and late reclamation from earlier tests can
-    # offset a live allocation in a whole-pytest-process RSS delta.
-    probe = textwrap.dedent("""
-        import json
-        from benchmarks.perf_runner import _run_memory
 
-        def touch(buffer: bytearray) -> None:
-            for index in range(0, len(buffer), 4096):
-                buffer[index] = 1
+    def _transient() -> None:
+        buffer = bytearray(transient_mb * 1024 * 1024)
+        _touch(buffer)
+        del buffer
 
-        # Put the lifetime peak above the measured phase. A lifetime-subtract
-        # implementation still reads zero and must fail the parent assertion.
-        primer = bytearray(256 * 1024 * 1024)
-        touch(primer)
-        del primer
-
-        def transient() -> None:
-            buffer = bytearray(128 * 1024 * 1024)
-            touch(buffer)
-            del buffer
-
-        print(json.dumps(_run_memory(transient, "cpu", memory_runs=3)))
-    """)
-    child = run_bounded_subprocess([sys.executable, "-c", probe], timeout=30, text=True)
-    metrics = json.loads(child.stdout)
+    metrics = _run_memory(_transient, "cpu", memory_runs=3)
 
     if not metrics.get("rss_high_water_phase_local"):
         pytest.skip("RSS high-water reset unavailable on this platform")
     observed = metrics["phase_rss_high_water_delta_mb"]
     assert observed >= transient_mb * 0.8, (
         f"phase-local RSS peak {observed:.1f} MB missed a {transient_mb} MB "
-        f"allocate-touch-free transient inside the measured call: {metrics}"
+        "allocate-touch-free transient inside the measured call"
     )
+
+
+class _Cycle:
+    """A self-referencing holder: only the cyclic garbage collector frees it."""
+
+    def __init__(self, size: int) -> None:
+        self.me = self
+        self.buffer = bytearray(size)
+        for index in range(0, size, 4096):
+            self.buffer[index] = 1
+
+
+@pytest.mark.serial
+def test_run_memory_detects_transient_when_garbage_is_collected_mid_phase() -> None:
+    """Garbage resident at the phase start cannot hide a transient by being freed mid-phase.
+
+    In a long-lived process (a test worker that ran other tests first) the
+    process can hold unreachable reference cycles when the memory pass starts.
+    If a collection frees them inside the measured call, resident memory drops
+    by their size, and a transient no larger than that never lifts the high
+    water above the phase-start level: the phase peak read 0.0. Here the
+    measured call itself forces that collection; automatic collection is off
+    so the garbage is still resident when the memory pass starts.
+    """
+
+    transient_mb = 128
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        metrics = _run_memory_after_cyclic_garbage(transient_mb)
+    finally:
+        if was_enabled:
+            gc.enable()
+
+    if not metrics.get("rss_high_water_phase_local"):
+        pytest.skip("RSS high-water reset unavailable on this platform")
+    observed = metrics["phase_rss_high_water_delta_mb"]
+    assert observed >= transient_mb * 0.8, (
+        f"phase-local RSS peak {observed:.1f} MB missed a {transient_mb} MB transient "
+        "after garbage held at the phase start was collected inside the measured call"
+    )
+
+
+def _run_memory_after_cyclic_garbage(transient_mb: int) -> dict[str, Any]:
+    """Leave 256 MiB of cyclic garbage, then measure a call that collects it and allocates."""
+
+    _Cycle(256 * 1024 * 1024)  # dropped at once: 256 MiB of cyclic garbage
+
+    def _collect_then_transient() -> None:
+        gc.collect()
+        buffer = bytearray(transient_mb * 1024 * 1024)
+        for index in range(0, len(buffer), 4096):
+            buffer[index] = 1
+        del buffer
+
+    return _run_memory(_collect_then_transient, "cpu", memory_runs=1)

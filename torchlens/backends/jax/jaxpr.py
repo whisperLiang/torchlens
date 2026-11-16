@@ -3,18 +3,14 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Literal, TypeAlias, cast
 
-from ...ir.events import JaxEquationKind
+from ..._ir.events import JaxEquationKind
+from .. import _entry_refusals as _refusals
 from ..registry import BackendUnsupportedError
-from ._jit_call_policy import (
-    _has_donated_invars,
-    _jit_call_params_are_known,
-    _jit_shardings_are_unspecified,
-)
+from ._source_path_components import _normalize_jax_source_path_component
 from .modules import decode_module_call_scope, decode_module_scope
 
 SAFE_JIT_NAMES = frozenset(
@@ -42,10 +38,21 @@ REJECTED_NESTED_PRIMITIVES = frozenset(
 )
 EFFECT_PRIMITIVES = frozenset({"debug_callback", "io_callback", "pure_callback"})
 PURE_JIT_CALL_PRIMITIVES = frozenset({"jit", "pjit"})
-_ITERATION_COMPONENT_RE = re.compile(
-    r"^(?P<prefix>(?:scan|while)[_\-:]?)?(?:iter|iteration)(?P<sep>[:=_-])\d+$"
+JIT_CALL_PARAM_NAMES = frozenset(
+    {
+        "compiler_options_kvs",
+        "ctx_mesh",
+        "donated_invars",
+        "in_layouts",
+        "in_shardings",
+        "inline",
+        "jaxpr",
+        "keep_unused",
+        "name",
+        "out_layouts",
+        "out_shardings",
+    }
 )
-_BRACKETED_ITERATION_RE = re.compile(r"(?P<prefix>\b(?:scan|while))\[(?:iter=)?\d+\]")
 
 
 @dataclass(frozen=True)
@@ -261,13 +268,14 @@ def reject_undeclared_consts(closed_jaxpr: Any) -> None:
 
     Raises
     ------
-    ValueError
-        If the jaxpr contains closure constants.
+    BackendUnsupportedError
+        If the jaxpr contains closure constants (a ``ValueError`` subclass, so
+        existing ``except ValueError`` callers keep working).
     """
 
     consts = tuple(getattr(closed_jaxpr, "consts", ()))
     if consts:
-        raise ValueError(
+        raise BackendUnsupportedError(
             "JAX backend found closed-jaxpr constants. Pass captured values as explicit "
             "pytree leaves to fn(params, *inputs); hidden closure constants are unsupported "
             "in this preview."
@@ -397,8 +405,7 @@ def interpret_closed_jaxpr_with_inlining(
             primitive_name = eqn.primitive.name
             eqn_path = (*path, f"{eqn_index}:{primitive_name}")
             if primitive_name == "scan":
-                if jax_control_flow == "reject":
-                    raise ValueError(f"unsupported nested primitive: {primitive_name}")
+                _refusals.refuse_if_control_flow_rejected(jax_control_flow, primitive_name)
                 if jax_control_flow == "region":
                     outputs = _interpret_region(
                         eqn=eqn,
@@ -449,8 +456,7 @@ def interpret_closed_jaxpr_with_inlining(
                     _write_env(env, var, value, core)
                 continue
             if primitive_name == "cond":
-                if jax_control_flow == "reject":
-                    raise ValueError(f"unsupported nested primitive: {primitive_name}")
+                _refusals.refuse_if_control_flow_rejected(jax_control_flow, primitive_name)
                 outputs = _interpret_cond(
                     eqn=eqn,
                     env=env,
@@ -465,8 +471,7 @@ def interpret_closed_jaxpr_with_inlining(
                     _write_env(env, var, value, core)
                 continue
             if primitive_name in {"while", "while_loop"}:
-                if jax_control_flow == "reject":
-                    raise ValueError(f"unsupported nested primitive: {primitive_name}")
+                _refusals.refuse_if_control_flow_rejected(jax_control_flow, primitive_name)
                 if jax_control_flow == "region":
                     outputs = _interpret_region(
                         eqn=eqn,
@@ -515,11 +520,8 @@ def interpret_closed_jaxpr_with_inlining(
                 for var, value in zip(eqn.outvars, outputs, strict=True):
                     _write_env(env, var, value, core)
                 continue
-            if primitive_name == "custom_vjp_call" or (
-                primitive_name == "custom_jvp_call" and not _can_inline_call(eqn, core)
-            ):
-                if jax_control_flow == "reject":
-                    raise ValueError(f"unsupported nested primitive: {primitive_name}")
+            if primitive_name == "custom_vjp_call":
+                _refusals.refuse_if_control_flow_rejected(jax_control_flow, primitive_name)
                 outputs = _interpret_region(
                     eqn=eqn,
                     env=env,
@@ -528,7 +530,7 @@ def interpret_closed_jaxpr_with_inlining(
                     inlined_depth=inlined_depth,
                     captures=captures,
                     jax_max_control_flow_unroll=jax_max_control_flow_unroll,
-                    unverified_reason=f"{primitive_name}_forward_region",
+                    unverified_reason="custom_vjp_forward_region",
                     inherited_module_stack=inherited_module_stack,
                     inherited_module_call_stack=inherited_module_call_stack,
                     rewrite_outputs=rewrite_outputs,
@@ -537,11 +539,11 @@ def interpret_closed_jaxpr_with_inlining(
                     _write_env(env, var, value, core)
                 continue
             if primitive_name in REJECTED_NESTED_PRIMITIVES:
-                raise ValueError(f"unsupported nested primitive: {primitive_name}")
+                _refusals.refuse_nested_primitive(primitive_name)
             if eqn.effects:
-                raise ValueError(f"unsupported equation effects: {primitive_name} {eqn.effects}")
+                _refusals.refuse_equation_effects(primitive_name, eqn.effects)
             if primitive_name in EFFECT_PRIMITIVES:
-                raise ValueError(f"unsupported jaxpr effect primitive: {primitive_name}")
+                _refusals.refuse_effect_primitive(primitive_name)
             nested = _closed_jaxpr_param(eqn, core)
             inputs = tuple(_read_env(env, var, core) for var in eqn.invars)
             if nested is not None:
@@ -574,7 +576,7 @@ def interpret_closed_jaxpr_with_inlining(
                     _write_env(env, var, value, core)
                 continue
             if _has_nested_jaxpr(eqn, core):
-                raise ValueError(f"unsupported nested jaxpr in primitive: {primitive_name}")
+                _refusals.refuse_nested_jaxpr(primitive_name)
             result = eqn.primitive.bind(*inputs, **eqn.params)
             outputs = tuple(result if eqn.primitive.multiple_results else (result,))
             capture_index = len(captures)
@@ -1156,7 +1158,7 @@ def _execute_region_equation(eqn: Any, inputs: Sequence[Any]) -> tuple[Any, ...]
         Boundary outputs.
     """
 
-    if eqn.primitive.name in {"custom_jvp_call", "custom_vjp_call"}:
+    if eqn.primitive.name == "custom_vjp_call":
         return _evaluate_closed_jaxpr_no_capture(eqn.params["call_jaxpr"], inputs)
     result = eqn.primitive.bind(*tuple(inputs), **eqn.params)
     return tuple(result if eqn.primitive.multiple_results else (result,))
@@ -1204,20 +1206,14 @@ def _can_import_region(eqn: Any, core: Any) -> bool:
     """
 
     primitive_name = eqn.primitive.name
-    if primitive_name not in {
-        "scan",
-        "while",
-        "while_loop",
-        "custom_jvp_call",
-        "custom_vjp_call",
-    }:
+    if primitive_name not in {"scan", "while", "while_loop", "custom_vjp_call"}:
         return False
     if eqn.effects:
         return False
     if primitive_name in EFFECT_PRIMITIVES:
         return False
     nested_jaxprs = _nested_jaxpr_params(eqn, core)
-    if primitive_name in {"custom_jvp_call", "custom_vjp_call"}:
+    if primitive_name == "custom_vjp_call":
         call_jaxpr = eqn.params.get("call_jaxpr")
         if not isinstance(call_jaxpr, core.ClosedJaxpr):
             return False
@@ -1317,13 +1313,11 @@ def _region_metadata(
                 "trip_count_status": "exceeds_unroll_cap",
             }
         )
-    elif primitive_name in {"custom_jvp_call", "custom_vjp_call"}:
+    elif primitive_name == "custom_vjp_call":
         metadata.update(
             {
-                "has_custom_backward": primitive_name == "custom_vjp_call",
-                "has_custom_jvp": primitive_name == "custom_jvp_call",
-                "derivative_jaxpr_status": "metadata_only",
-                "true_backward_status": "region_metadata_only",
+                "has_custom_backward": True,
+                "true_backward_status": "rejected",
                 "trip_count_kind": "call_region",
             }
         )
@@ -1353,7 +1347,7 @@ def _named_region_jaxprs(eqn: Any, nested_jaxprs: Sequence[Any]) -> tuple[tuple[
             ("cond", eqn.params["cond_jaxpr"]),
             ("body", eqn.params["body_jaxpr"]),
         )
-    if eqn.primitive.name in {"custom_jvp_call", "custom_vjp_call"}:
+    if eqn.primitive.name == "custom_vjp_call":
         return (("forward", eqn.params["call_jaxpr"]),)
     return tuple((f"nested_{index}", nested) for index, nested in enumerate(nested_jaxprs))
 
@@ -1413,10 +1407,7 @@ def _region_sanitized_params(params: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def replay_equation(
-    capture: JaxEquationCapture,
-    inputs: Sequence[Any] | None = None,
-    *,
-    params_override: Mapping[str, Any] | None = None,
+    capture: JaxEquationCapture, inputs: Sequence[Any] | None = None
 ) -> tuple[Any, ...]:
     """Replay a captured equation on saved inputs.
 
@@ -1426,9 +1417,6 @@ def replay_equation(
         Captured equation.
     inputs
         Optional replacement inputs. When omitted, saved inputs are used.
-    params_override
-        Optional primitive params used for split dynamic-shape replay. Omitted
-        validation calls bind the captured params unchanged.
 
     Returns
     -------
@@ -1443,13 +1431,7 @@ def replay_equation(
         raise NotImplementedError(
             f"JAX replay kind {capture.kind!r} is not registered; expected one of: {expected}."
         ) from exc
-    if params_override is not None and capture.kind != "primitive":
-        raise NotImplementedError(
-            f"JAX replay kind {capture.kind!r} does not support params_override."
-        )
-    if params_override is None:
-        return handler(capture, inputs)
-    return _replay_primitive(capture, inputs, params_override=params_override)
+    return handler(capture, inputs)
 
 
 def reject_attributed_module_strict_control_flow(closed_jaxpr: Any) -> None:
@@ -1720,37 +1702,6 @@ def normalize_jax_source_path(source_path: Sequence[str]) -> tuple[str, ...]:
     return tuple(normalized)
 
 
-def _normalize_jax_source_path_component(component: str, *, is_leaf: bool) -> str | None:
-    """Normalize one source-path component.
-
-    Parameters
-    ----------
-    component
-        Source-path component.
-    is_leaf
-        Whether this component names the captured equation itself.
-
-    Returns
-    -------
-    str | None
-        Normalized component, or ``None`` when the component is only an
-        iteration marker.
-    """
-
-    iteration_match = _ITERATION_COMPONENT_RE.match(component)
-    if iteration_match is not None:
-        return None
-    without_bracketed_iteration = _BRACKETED_ITERATION_RE.sub(
-        lambda match: match.group("prefix"),
-        component,
-    )
-    if is_leaf:
-        _ordinal, separator, primitive_name = without_bracketed_iteration.partition(":")
-        if separator and _ordinal.isdigit() and primitive_name:
-            return primitive_name
-    return without_bracketed_iteration
-
-
 JaxReplayHandler = Callable[[JaxEquationCapture, Sequence[Any] | None], tuple[Any, ...]]
 ALL_JAX_EQUATION_KINDS: tuple[JaxEquationKind, ...] = (
     "primitive",
@@ -1762,10 +1713,7 @@ ALL_JAX_EQUATION_KINDS: tuple[JaxEquationKind, ...] = (
 
 
 def _replay_primitive(
-    capture: JaxEquationCapture,
-    inputs: Sequence[Any] | None = None,
-    *,
-    params_override: Mapping[str, Any] | None = None,
+    capture: JaxEquationCapture, inputs: Sequence[Any] | None = None
 ) -> tuple[Any, ...]:
     """Replay a captured JAX primitive bind.
 
@@ -1775,8 +1723,6 @@ def _replay_primitive(
         Captured primitive equation.
     inputs
         Optional replacement inputs. When omitted, saved inputs are used.
-    params_override
-        Optional primitive params replacing captured params.
 
     Returns
     -------
@@ -1785,8 +1731,7 @@ def _replay_primitive(
     """
 
     replay_inputs = tuple(capture.input_values if inputs is None else inputs)
-    params = capture.params if params_override is None else params_override
-    result = capture.primitive_obj.bind(*replay_inputs, **params)
+    result = capture.primitive_obj.bind(*replay_inputs, **capture.params)
     return tuple(result if capture.primitive_obj.multiple_results else (result,))
 
 
@@ -1976,13 +1921,6 @@ def _evaluate_closed_jaxpr_no_capture(closed_jaxpr: Any, args: Sequence[Any]) ->
         _write_env(env, var, arg, core)
     for eqn in closed_jaxpr.jaxpr.eqns:
         primitive_name = eqn.primitive.name
-        nested = _closed_jaxpr_param(eqn, core)
-        if nested is not None:
-            nested_inputs = tuple(_read_env(env, var, core) for var in eqn.invars)
-            outputs = _evaluate_closed_jaxpr_no_capture(nested, nested_inputs)
-            for var, value in zip(eqn.outvars, outputs, strict=True):
-                _write_env(env, var, value, core)
-            continue
         if primitive_name in REJECTED_NESTED_PRIMITIVES or _has_nested_jaxpr(eqn, core):
             raise ValueError(f"unsupported nested jaxpr in replay primitive: {primitive_name}")
         if eqn.effects:
@@ -2170,11 +2108,8 @@ def _jax_zero_tap_jvp(primals: tuple[Any, Any], tangents: tuple[Any, Any]) -> tu
 try:
     import jax
 
-    _jax_zero_tap_impl: Callable[[Any, Any], Any] = cast(
-        Callable[[Any, Any], Any],
-        jax.custom_jvp(lambda value, delta: value),
-    )
-    _jax_zero_tap_impl.defjvp(_jax_zero_tap_jvp)  # type: ignore[attr-defined]
+    _jax_zero_tap_impl = jax.custom_jvp(lambda value, delta: value)
+    _jax_zero_tap_impl.defjvp(_jax_zero_tap_jvp)
 except Exception:  # pragma: no cover - import-time fallback for non-JAX environments.
 
     def _jax_zero_tap_impl(value: Any, delta: Any) -> Any:
@@ -2255,7 +2190,7 @@ def _closed_jaxpr_param(eqn: Any, core: Any) -> Any | None:
 
     if eqn.primitive.name in PURE_JIT_CALL_PRIMITIVES:
         nested = eqn.params.get("jaxpr")
-    elif eqn.primitive.name in {"custom_jvp_call", "custom_vjp_call"}:
+    elif eqn.primitive.name == "custom_jvp_call":
         nested = eqn.params.get("call_jaxpr")
     else:
         return None
@@ -2398,6 +2333,82 @@ def _nested_jaxpr_is_pure_inlinable(eqn: Any, closed_jaxpr: Any, core: Any) -> b
     if not _jit_shardings_are_unspecified(eqn.params.get("out_shardings", ())):
         return False
     return _closed_jaxpr_is_effect_free_and_const_free(closed_jaxpr, core)
+
+
+def _jit_call_params_are_known(eqn: Any) -> bool:
+    """Return whether a JIT-shaped call uses only audited parameters.
+
+    Parameters
+    ----------
+    eqn
+        Candidate call equation.
+
+    Returns
+    -------
+    bool
+        True when all parameter names are part of the audited JIT-call frame.
+    """
+
+    return set(eqn.params) <= JIT_CALL_PARAM_NAMES
+
+
+def _has_donated_invars(donated_invars: Any) -> bool:
+    """Return whether any nested JIT input is donated.
+
+    Parameters
+    ----------
+    donated_invars
+        Donation flags from the JAX call equation.
+
+    Returns
+    -------
+    bool
+        True when any donation flag is truthy.
+    """
+
+    if isinstance(donated_invars, bool):
+        return donated_invars
+    if isinstance(donated_invars, Sequence):
+        return any(bool(flag) for flag in donated_invars)
+    return bool(donated_invars)
+
+
+def _jit_shardings_are_unspecified(shardings: Any) -> bool:
+    """Return whether a JIT sharding parameter is fully unspecified.
+
+    Parameters
+    ----------
+    shardings
+        JAX ``in_shardings`` or ``out_shardings`` parameter value.
+
+    Returns
+    -------
+    bool
+        True when every entry is JAX's unspecified sharding sentinel.
+    """
+
+    if shardings is None:
+        return True
+    if not isinstance(shardings, Sequence) or isinstance(shardings, str):
+        shardings = (shardings,)
+    return all(_is_unspecified_jax_sharding(sharding) for sharding in shardings)
+
+
+def _is_unspecified_jax_sharding(sharding: Any) -> bool:
+    """Return whether a value is JAX's unspecified sharding sentinel.
+
+    Parameters
+    ----------
+    sharding
+        Candidate sharding value.
+
+    Returns
+    -------
+    bool
+        True for the JAX ``UnspecifiedValue`` sentinel.
+    """
+
+    return type(sharding).__name__ == "UnspecifiedValue"
 
 
 def _closed_jaxpr_is_effect_free_and_const_free(closed_jaxpr: Any, core: Any) -> bool:

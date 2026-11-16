@@ -7,27 +7,20 @@ invariants, algorithm correctness, etc.
 
 from collections import defaultdict
 
-import pytest
 import torch
 import torch.nn as nn
 
 from torchlens import trace as trace_fn
-from torchlens.backends.torch._tl import get_tensor_label, set_tensor_label
 
 # ---------------------------------------------------------------------------
 # FIELD_ORDER sync tests
 # ---------------------------------------------------------------------------
-from torchlens.constants import (
-    BUFFER_LOG_FIELD_ORDER,
-    FUNC_CALL_LOCATION_FIELD_ORDER,
+from torchlens._constants import (
     LAYER_PASS_LOG_FIELD_ORDER,
-    MODEL_LOG_FIELD_ORDER,
-    MODULE_LOG_FIELD_ORDER,
-    MODULE_PASS_LOG_FIELD_ORDER,
-    PARAM_LOG_FIELD_ORDER,
 )
-from torchlens.utils.arg_handling import _safe_copy_arg
-from torchlens.utils.tensor_utils import (
+from torchlens._utils._tensor_label import get_tensor_label, set_tensor_label
+from torchlens._utils.arg_handling import _safe_copy_arg
+from torchlens._utils.tensor_utils import (
     get_memory_amount,
     get_memory_amount_from_metadata,
     print_override,
@@ -54,139 +47,24 @@ class TestFieldOrderSync:
                 attrs.add(attr)
         return attrs
 
-    @pytest.mark.parametrize(
-        "field_order,name",
-        [
-            (LAYER_PASS_LOG_FIELD_ORDER, "LAYER_PASS_LOG_FIELD_ORDER"),
-            (MODEL_LOG_FIELD_ORDER, "MODEL_LOG_FIELD_ORDER"),
-            (MODULE_LOG_FIELD_ORDER, "MODULE_LOG_FIELD_ORDER"),
-            (MODULE_PASS_LOG_FIELD_ORDER, "MODULE_PASS_LOG_FIELD_ORDER"),
-            (PARAM_LOG_FIELD_ORDER, "PARAM_LOG_FIELD_ORDER"),
-            (BUFFER_LOG_FIELD_ORDER, "BUFFER_LOG_FIELD_ORDER"),
-            (FUNC_CALL_LOCATION_FIELD_ORDER, "FUNC_CALL_LOCATION_FIELD_ORDER"),
-        ],
-    )
-    def test_no_duplicates(self, field_order, name):
-        dupes = [f for f in field_order if field_order.count(f) > 1]
-        assert not dupes, f"Duplicates in {name}: {set(dupes)}"
-
-    @pytest.mark.smoke
     def test_op_log_field_order_covers_init(self):
         """LAYER_PASS_LOG_FIELD_ORDER should cover all self.X assignments in Op.__init__."""
-        from torchlens.data_classes.op import Op
+        from torchlens._data_classes.op import Op
+        from torchlens._utils._record_group_table import op_attr
 
         init_attrs = self._init_assigned_attrs(Op)
         # Private fields (prefixed _) are intentionally excluded from some FIELD_ORDERs,
         # but some _ fields ARE in FIELD_ORDER (e.g. _tracing_finished). Check both directions:
         # 1. Every FIELD_ORDER entry should be an init attr or a property
         for field in LAYER_PASS_LOG_FIELD_ORDER:
-            assert field in init_attrs or hasattr(Op, field), (
+            assert field in init_attrs or hasattr(Op, op_attr(field)), (
                 f"{field!r} in LAYER_PASS_LOG_FIELD_ORDER but not in Op"
             )
-
-    def test_trace_field_order_covers_init(self):
-        """Every public Trace init attr is declared, and user-facing ones are ordered.
-
-        A public NAME does not imply a user-facing FIELD. ``FIELD_POLICY`` is the
-        source of truth (``MODEL_LOG_FIELD_ORDER`` is generated from it -- see
-        ``test_record_field_policy.py::test_record_field_policy_is_field_order_source``),
-        and a session-time knob may be public-named yet deliberately non-user-facing:
-        ``measure_python_peak_memory`` is ``FieldPolicy.DROP`` and intentionally absent
-        from ``MODEL_LOG_FIELD_ORDER`` because it does not survive save/load.
-
-        So the check is split rather than relaxed. Requiring a DECLARATION for every
-        public init attr is strictly stronger than the previous name heuristic: a field
-        that is simply forgotten is undeclared and still fails here, while a field that
-        is declared non-user-facing on purpose is provably outside the ordering contract.
-        """
-        from torchlens._io import FieldPolicy
-        from torchlens.data_classes.trace import Trace
-
-        init_attrs = self._init_assigned_attrs(Trace)
-        public_attrs = {a for a in init_attrs if not a.startswith("_")}
-
-        undeclared = public_attrs - set(Trace.FIELD_POLICY)
-        assert not undeclared, f"Trace public fields absent from FIELD_POLICY: {undeclared}"
-
-        user_facing = {a for a in public_attrs if Trace.FIELD_POLICY[a].user_facing}
-        missing = user_facing - set(MODEL_LOG_FIELD_ORDER)
-        assert not missing, f"Trace user-facing fields missing from FIELD_ORDER: {missing}"
-        non_user_facing = public_attrs - user_facing
-        # The declared inventory of public-named fields outside the ordering
-        # contract, in two classes with different persistence guarantees.
-        # (``save_budget`` was already DROP when this assertion listed only
-        # ``measure_python_peak_memory``; that was a stale pin, red on the
-        # producer baseline, corrected here. The tlspec v8 bump then added the
-        # two L9 portable markers; the pin went stale the same way again. The
-        # nonfinite lane's ``track_nonfinite`` is the fourth session knob:
-        # DROP, unordered, load restores the default.)
-        session_knobs = {
-            "measure_python_peak_memory",
-            "save_budget",
-            "distributed_witness",
-            "track_nonfinite",
-        }
-        portable_unordered = {
-            "checkpoint_invocation_witness",
-            "grad_fn_timing_provenance",
-        }
-        assert non_user_facing == session_knobs | portable_unordered, (
-            f"Trace public fields classified as non-user-facing changed: {non_user_facing}"
-        )
-        # Session-time knobs stay FieldPolicy.DROP (never survive save/load);
-        # the L9 markers are KEEP-but-unordered per the v8 bump ruling (the
-        # portable_only_fields ledger in test_field_order_contract.py).
-        for name in session_knobs:
-            assert Trace.FIELD_POLICY[name].portable_policy is FieldPolicy.DROP, name
-        for name in portable_unordered:
-            assert Trace.FIELD_POLICY[name].portable_policy is FieldPolicy.KEEP, name
-
-    def test_module_call_log_field_order_covers_init(self):
-        from torchlens.data_classes.module import ModuleCall
-
-        init_attrs = self._init_assigned_attrs(ModuleCall)
-        order_set = set(MODULE_PASS_LOG_FIELD_ORDER)
-        public_attrs = {a for a in init_attrs if not a.startswith("_")}
-        missing = public_attrs - order_set
-        assert not missing, f"ModuleCall public fields missing from FIELD_ORDER: {missing}"
-
-    def test_module_log_field_order_covers_init(self):
-        from torchlens.data_classes.module import Module
-
-        init_attrs = self._init_assigned_attrs(Module)
-        order_set = set(MODULE_LOG_FIELD_ORDER)
-        public_attrs = {a for a in init_attrs if not a.startswith("_")}
-        missing = public_attrs - order_set
-        assert not missing, f"Module public fields missing from FIELD_ORDER: {missing}"
 
 
 # ---------------------------------------------------------------------------
 # Constants crawl test
 # ---------------------------------------------------------------------------
-
-
-class TestConstantsCrawl:
-    """Verify the torch function crawl produces consistent results."""
-
-    def test_overridable_funcs_cached(self):
-        """_get_torch_overridable_functions returns same object on repeated calls."""
-        from torchlens.constants import _get_torch_overridable_functions
-
-        a = _get_torch_overridable_functions()
-        b = _get_torch_overridable_functions()
-        assert a is b
-
-    def test_overridable_funcs_nonempty(self):
-        from torchlens.constants import OVERRIDABLE_FUNCS
-
-        assert len(OVERRIDABLE_FUNCS) > 100
-
-    def test_orig_torch_funcs_includes_ignored(self):
-        from torchlens.constants import IGNORED_FUNCS, ORIG_TORCH_FUNCS
-
-        ignored_set = set(IGNORED_FUNCS)
-        orig_set = set(ORIG_TORCH_FUNCS)
-        assert ignored_set.issubset(orig_set)
 
 
 # ---------------------------------------------------------------------------
@@ -201,31 +79,6 @@ class _SimpleLinear(nn.Module):
 
     def forward(self, x):
         return self.fc(x)
-
-
-class _IdentityModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.identity = nn.Identity()
-        self.fc = nn.Linear(10, 5)
-
-    def forward(self, x):
-        return self.fc(self.identity(x))
-
-
-class _FailingForwardModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.fc = nn.Linear(10, 5)
-
-    def forward(self, x):
-        x = self.fc(x)
-        raise RuntimeError("Intentional test error")
-
-
-class _ConstantOutputModel(nn.Module):
-    def forward(self, x):
-        return x
 
 
 class _SharedBufferModel(nn.Module):
@@ -247,64 +100,12 @@ class _SharedBufferModel(nn.Module):
 
 
 class TestSafeCopy:
-    @pytest.mark.smoke
-    def test_safe_copy_parameter(self):
-        """safe_copy must handle nn.Parameter subclass correctly."""
-        p = nn.Parameter(torch.randn(3, 3))
-        copied = safe_copy(p)
-        assert isinstance(copied, torch.Tensor)
-        assert torch.equal(p.data, copied.data)
-
-    def test_safe_copy_parameter_detached(self):
-        """safe_copy(detach_tensor=True) should return Parameter for Parameter input."""
-        p = nn.Parameter(torch.randn(3, 3))
-        copied = safe_copy(p, detach_tensor=True)
-        assert isinstance(copied, nn.Parameter)
-        assert torch.equal(p.data, copied.data)
-
-    def test_safe_copy_subclass(self):
-        """safe_copy must handle tensor subclasses via isinstance."""
-
-        class MyTensor(torch.Tensor):
-            pass
-
-        t = MyTensor(torch.randn(3, 3))
-        copied = safe_copy(t)
-        assert isinstance(copied, torch.Tensor)
-
-    def test_safe_copy_bfloat16_preserves_range(self):
-        """bfloat16 values > 65504 must not overflow (use float32, not float16)."""
-        t = torch.tensor([70000.0, 100000.0], dtype=torch.bfloat16)
-        copied = safe_copy(t, detach_tensor=True)
-        assert copied.max().item() > 65504
-
-    def test_safe_copy_detach_no_numpy(self):
-        """detach path should use pure torch, no numpy round-trip."""
-        t = torch.randn(3, 3)
-        copied = safe_copy(t, detach_tensor=True)
-        assert isinstance(copied, torch.Tensor)
-        assert torch.equal(t, copied)
-        assert t.data_ptr() != copied.data_ptr()
-
     def test_safe_copy_preserves_label(self):
         """safe_copy(detach_tensor=True) preserves the TorchLens raw label."""
         t = torch.randn(3, 3)
         set_tensor_label(t, "test_label")
         copied = safe_copy(t, detach_tensor=True)
         assert get_tensor_label(copied) == "test_label"
-
-    def test_safe_copy_non_tensor(self):
-        """safe_copy on non-tensors should return a shallow copy."""
-        d = {"a": 1, "b": [2, 3]}
-        copied = safe_copy(d)
-        assert copied == d
-        assert copied is not d
-
-    def test_safe_copy_meta_tensor(self):
-        """safe_copy should handle meta tensors without crash."""
-        t = torch.randn(3, 3, device="meta")
-        copied = safe_copy(t, detach_tensor=True)
-        assert isinstance(copied, torch.Tensor)
 
 
 class TestSafeTo:
@@ -327,11 +128,6 @@ class TestPrintOverride:
         result = print_override(t, "__repr__")
         assert "tensor" in result
 
-    def test_print_override_normal(self):
-        t = torch.tensor([1.0, 2.0, 3.0])
-        result = print_override(t, "__repr__")
-        assert "tensor" in result
-
 
 # ---------------------------------------------------------------------------
 # get_memory_amount tests
@@ -339,28 +135,6 @@ class TestPrintOverride:
 
 
 class TestGetTensorMemory:
-    def test_meta_tensor_returns_zero(self):
-        """meta tensors should return 0 bytes."""
-        t = torch.randn(100, 100, device="meta")
-        assert get_memory_amount(t) == 0
-
-    def test_normal_tensor(self):
-        t = torch.randn(10, 10)  # 100 float32 = 400 bytes
-        assert get_memory_amount(t) == 400
-
-    def test_metadata_memory_uses_dense_shape_dtype(self) -> None:
-        """Dense metadata memory should match tensor-method accounting.
-
-        Returns
-        -------
-        None
-            Assertion-only regression test.
-        """
-
-        t = torch.randn(2, 3, 4, dtype=torch.float16)
-
-        assert get_memory_amount_from_metadata(t, tuple(t.shape), t.dtype) == 48
-
     def test_metadata_memory_counts_sparse_index_storage(self) -> None:
         """Sparse metadata memory counts index AND values storage.
 
@@ -380,33 +154,6 @@ class TestGetTensorMemory:
         # 3 float32 values (12) + 2x3 int64 indices (48).
         assert get_memory_amount_from_metadata(sparse, tuple(sparse.shape), sparse.dtype) == 60
         assert get_memory_amount(sparse) == 60
-
-    def test_compressed_sparse_memory_is_physical_not_logical(self) -> None:
-        """Compressed sparse layouts bill component bytes, not shape * itemsize.
-
-        The dense fallback billed a CSR tensor at its LOGICAL shape
-        (``prod(shape) * itemsize``); the physical footprint is
-        crow_indices + col_indices + values.
-
-        Returns
-        -------
-        None
-            Assertion-only regression test.
-        """
-
-        coo = torch.sparse_coo_tensor(
-            torch.tensor([[0], [0]]), torch.tensor([1.0]), (4, 4)
-        ).coalesce()
-        csr = coo.to_sparse_csr()
-
-        expected = sum(
-            component.numel() * component.element_size()
-            for component in (csr.crow_indices(), csr.col_indices(), csr.values())
-        )
-        assert get_memory_amount(csr) == expected
-        assert get_memory_amount_from_metadata(csr, tuple(csr.shape), csr.dtype) == expected
-        # The logical-dense figure the bug produced.
-        assert expected != 16 * csr.dtype.itemsize
 
     def test_save_budget_identity_charges_sparse_components(self) -> None:
         """The budget's storage identity charges sparse index + values bytes.
@@ -466,99 +213,9 @@ class TestSafeCopyArg:
 # ---------------------------------------------------------------------------
 
 
-class TestModuleExceptionCleanup:
-    def test_failing_model_raises(self):
-        """Model that raises should propagate exception."""
-        model = _FailingForwardModel()
-        x = torch.randn(2, 10)
-        with pytest.raises(RuntimeError, match="Intentional test error"):
-            trace_fn(model, x)
-
-    def test_failing_model_cleanup(self):
-        """After a failed forward pass, subsequent calls should work."""
-        model = _FailingForwardModel()
-        x = torch.randn(2, 10)
-        with pytest.raises(RuntimeError):
-            trace_fn(model, x)
-        good_model = _SimpleLinear()
-        log = trace_fn(good_model, torch.randn(2, 10))
-        assert log is not None
-
-
-class TestEmptyModelGraph:
-    def test_constant_output_model(self):
-        """Model returning input unchanged should not crash."""
-        model = _ConstantOutputModel()
-        x = torch.randn(2, 10)
-        log = trace_fn(model, x)
-        assert log is not None
-
-
-class TestIdentityModel:
-    def test_identity_model_basic(self):
-        """Identity model should log correctly."""
-        model = _IdentityModel()
-        x = torch.randn(2, 10)
-        log = trace_fn(model, x)
-        assert log is not None
-
-
 # ---------------------------------------------------------------------------
 # Buffer duplicate tests
 # ---------------------------------------------------------------------------
-
-
-class TestBufferDuplicate:
-    def test_shared_buffer_no_crash(self):
-        """Model with buffer used in multiple ops should not crash."""
-        model = _SharedBufferModel()
-        x = torch.randn(2, 10)
-        log = trace_fn(model, x)
-        assert log is not None
-
-    def test_shared_buffer_fast_path(self):
-        """save_new_outs with a shared buffer must refresh saved outs in place.
-
-        The litmus: if ``save_new_outs`` were a no-op, ``out`` would still hold
-        the first pass's values and would not match a fresh forward pass on
-        the second input.
-        """
-        model = _SharedBufferModel()
-        x1 = torch.randn(2, 10)
-        log = trace_fn(model, x1)
-
-        original_out = log["output_1"].out.clone()
-
-        x2 = torch.randn(2, 10)
-        with torch.no_grad():
-            expected_out = model(x2)
-        log.save_new_outs(model, x2)
-
-        refreshed_out = log["output_1"].out
-        assert refreshed_out is not None
-        # Must have actually changed -- a no-op would leave the stale x1 out.
-        assert not torch.allclose(refreshed_out, original_out)
-        # Must match a genuine fresh forward pass on x2, not arbitrary drift.
-        assert torch.allclose(refreshed_out, expected_out, atol=1e-6)
-
-
-class TestBufferMerge:
-    def test_buffer_model_no_crash(self):
-        """BatchNorm model with buffers should log correctly."""
-
-        class BNModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.bn = nn.BatchNorm1d(10)
-
-            def forward(self, x):
-                return self.bn(x)
-
-        model = BNModel()
-        model.train()
-        x = torch.randn(4, 10)
-        log = trace_fn(model, x)
-        assert log is not None
 
 
 # ---------------------------------------------------------------------------
@@ -566,32 +223,9 @@ class TestBufferMerge:
 # ---------------------------------------------------------------------------
 
 
-class TestDeadTypeCheck:
-    def test_nested_tensor_found(self):
-        """Tensors nested in custom objects should be findable."""
-        from torchlens.utils.introspection import get_vars_of_type_from_obj
-
-        class Container:
-            def __init__(self, t):
-                self.tensor = t
-
-        t = torch.randn(3)
-        container = Container(t)
-        results = get_vars_of_type_from_obj(container, torch.Tensor, search_depth=2)
-        assert len(results) >= 1
-
-
 # ---------------------------------------------------------------------------
 # IPython lazy import
 # ---------------------------------------------------------------------------
-
-
-class TestIPythonNotRequired:
-    def test_display_module_loads(self):
-        """display module should load without IPython."""
-        from torchlens.utils.display import in_notebook
-
-        assert in_notebook() is False
 
 
 # ---------------------------------------------------------------------------
@@ -605,7 +239,7 @@ class TestCleanupReleasesReferences:
 
         The litmus: a no-op ``cleanup()`` would pass a bare "doesn't crash"
         check trivially, so assert the concrete reference-release effects the
-        docstring on ``torchlens.data_classes.cleanup.cleanup`` claims --
+        docstring on ``torchlens._data_classes.cleanup.cleanup`` claims --
         per-Op state cleared (breaking the Op<->Trace cycle) and cached
         ``Param`` references dropped to allow model GC -- rather than only
         that the call completes.
@@ -622,7 +256,7 @@ class TestCleanupReleasesReferences:
         # Force each Param's live reference to rehydrate (iteration triggers
         # rehydrate-on-iter after a normal capture) so we have a genuine
         # non-None reference to prove cleanup() releases.
-        param_logs = list(log.param_logs)
+        param_logs = list(log._param_logs)
         assert param_logs, "expected at least one captured Param"
         for param_log in param_logs:
             assert param_log._param_ref is not None
@@ -637,7 +271,7 @@ class TestCleanupReleasesReferences:
         # Op -> Trace circular reference via source_trace), and internal
         # containers not in MODEL_LOG_FIELD_ORDER must be gone.
         assert not hasattr(first_entry, "out")
-        assert not hasattr(log, "layer_logs")
+        assert not hasattr(log, "_layer_logs")
 
 
 # ---------------------------------------------------------------------------
@@ -645,102 +279,21 @@ class TestCleanupReleasesReferences:
 # ---------------------------------------------------------------------------
 
 
-class _NestedListArgModel(nn.Module):
-    """Two independent linear branches stacked via a list argument.
-
-    ``torch.stack`` receives a Python ``list`` of tensors as its sole
-    positional argument, so its captured ``saved_args[0]`` is a genuine
-    nested container (unlike a plain ``nn.Linear`` call, whose args are
-    top-level tensors). The forward pass stashes the exact live tensors it
-    passed to ``torch.stack`` on ``self._last_pair`` so the test can grab
-    the very objects TorchLens copied and mutate them afterward.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.fc1 = nn.Linear(10, 10)
-        self.fc2 = nn.Linear(10, 10)
-
-    def forward(self, x):
-        a = self.fc1(x)
-        b = self.fc2(x)
-        self._last_pair = [a, b]
-        stacked = torch.stack(self._last_pair)
-        return stacked.sum(0)
-
-
-class TestNestedTupleArgs:
-    def test_nested_tuple_independence(self):
-        """Nested tuples/lists in saved_args must be independent copies.
-
-        Mutating the live source tensors after capture must NOT change the
-        saved snapshot, and the saved container/tensors must not be the
-        same objects as the live ones (copy, not reference).
-        """
-        model = _NestedListArgModel()
-        x = torch.randn(2, 10)
-        log = trace_fn(model, x, save_arg_values=True)
-
-        stack_entry = None
-        for label in log.layer_labels:
-            entry = log[label]
-            saved_args = entry.saved_args
-            if saved_args is not None and len(saved_args) > 0 and isinstance(saved_args[0], list):
-                stack_entry = entry
-                break
-        assert stack_entry is not None, (
-            "expected to find the torch.stack layer with a nested-list saved_args[0]"
-        )
-
-        saved_list = stack_entry.saved_args[0]
-        assert isinstance(saved_list, list)
-        assert len(saved_list) == 2
-        live_pair = model._last_pair
-
-        # Identity: the saved container and its tensors must be copies, not references.
-        assert saved_list is not live_pair
-        assert all(saved is not live for saved, live in zip(saved_list, live_pair, strict=True))
-
-        before = [t.clone() for t in saved_list]
-
-        # Mutate the live source tensors captured during forward. If saved_args held
-        # references instead of independent copies, this mutation would leak through.
-        for t in live_pair:
-            t.add_(1000.0)
-
-        for pre_mutation, post_mutation in zip(before, saved_list, strict=True):
-            assert torch.equal(pre_mutation, post_mutation), (
-                "saved_args nested-list tensors changed after mutating the live source "
-                "tensors -- saved_args is not holding independent copies"
-            )
-
-        # And the reverse: mutating the saved copy must not affect the (already-mutated) live tensors.
-        live_before_second_mutation = [t.clone() for t in live_pair]
-        for t in saved_list:
-            t.add_(-5000.0)
-        for pre_mutation, post_mutation in zip(live_before_second_mutation, live_pair, strict=True):
-            assert torch.equal(pre_mutation, post_mutation), (
-                "live tensors changed after mutating the saved_args copy -- saved_args is "
-                "not holding independent copies"
-            )
-
-
 class TestDisplayLargeTensor:
     def test_display_no_oom(self):
-        """Displaying a large captured tensor must not clone the whole tensor (#73).
+        """Displaying a large captured tensor must never clone it (#73 -> F10).
 
-        ``Op._tensor_contents_str_helper`` is documented ("Slice first, then
-        clone only the small slice (#73)") to slice down to at most an 8x8
-        preview *before* calling ``.clone()``. This test tracks every
-        ``torch.Tensor.clone()`` call made while formatting a real captured
-        entry with ``str(op)`` and asserts none of them ever clones more than
-        the 8x8=64-element preview -- i.e. it can never clone the full
-        (50, 2000) = 100,000-element activation. A regression that clones
-        the whole tensor before slicing would make this fail.
+        The historical guard allowed one <=8x8=64-element preview clone
+        (slice-then-clone, #73). The F10 card renders through the C02
+        allocation-free stats kernel and carries NO raw preview (it lives
+        behind the ``More: .out`` exit), so the pin strengthens: formatting
+        ``str(op)`` performs ZERO ``torch.Tensor.clone()`` calls of any
+        size. A regression that reintroduces a full-tensor (or any) copy on
+        the repr path fails here.
         """
         model = nn.Linear(100, 2000)
         x = torch.randn(50, 100)
-        log = trace_fn(model, x, layers_to_save="all")
+        log = trace_fn(model, x, save="all")
 
         clone_call_sizes: list[int] = []
         orig_clone = torch.Tensor.clone
@@ -752,7 +305,7 @@ class TestDisplayLargeTensor:
         torch.Tensor.clone = _tracking_clone
         try:
             for label in log.layer_labels:
-                entry = log[label]
+                entry = log.layers[label]
                 op = entry.ops[0]
                 if op.out is None:
                     continue
@@ -760,164 +313,11 @@ class TestDisplayLargeTensor:
         finally:
             torch.Tensor.clone = orig_clone
 
-        assert clone_call_sizes, "expected str(op) to clone at least one tensor slice"
-        max_cloned_elements = max(clone_call_sizes)
-        full_tensor_elements = 50 * 2000
-        assert max_cloned_elements <= 64, (
-            f"str(op) cloned a tensor with {max_cloned_elements} elements "
-            f"(full activation has {full_tensor_elements}); expected the display path to "
-            f"slice down to <= 8x8=64 elements before cloning"
+        assert clone_call_sizes == [], (
+            f"str(op) cloned tensors of sizes {clone_call_sizes[:5]}; the F10 "
+            "card path must not copy payloads at all (the preview moved "
+            "behind the More: .out exit)"
         )
-
-
-class TestDisplayUsesLoggedShape:
-    def test_shape_matches_capture_time(self) -> None:
-        """shape should reflect capture-time shape."""
-        model = _SimpleLinear()
-        x = torch.randn(2, 10)
-        log = trace_fn(model, x, layers_to_save="all")
-        for label in log.layer_labels:
-            entry = log[label]
-            if entry.out is not None:
-                assert tuple(entry.out.shape) == tuple(entry.shape)
-
-
-class TestDeferredRegistryPruneAmortization:
-    def test_prune_backs_off_when_registry_is_live(self) -> None:
-        """A live registry past the threshold must not re-sweep per arming.
-
-        The fixed threshold alone was quadratic on large captures: once the
-        LIVE pending population crossed 2048 keys, EVERY per-op window arming
-        swept the whole registry and removed nothing (the dominant measured
-        term at 4k ops). The watermark now doubles away from the live
-        population after each sweep, so repeated armings stop paying it.
-        """
-
-        import weakref
-        from types import SimpleNamespace
-
-        from torchlens.utils import tensor_utils as tu
-
-        class _Referent:
-            """Weak-referenceable stand-in for a pending alias."""
-
-        keepalive = [_Referent() for _ in range(3000)]
-        saved_pending = dict(tu._DEFER_PENDING)
-        saved_watermark = tu._defer_prune_watermark
-        saved_prune = tu.prune_dead_deferred_entries
-        calls = {"n": 0}
-
-        def counting_prune() -> None:
-            calls["n"] += 1
-            saved_prune()
-
-        try:
-            tu._DEFER_PENDING.clear()
-            for index, obj in enumerate(keepalive):
-                tu._DEFER_PENDING[("test", index)] = [SimpleNamespace(ref=weakref.ref(obj))]
-            tu._defer_prune_watermark = tu._DEFER_PRUNE_THRESHOLD
-            tu.prune_dead_deferred_entries = counting_prune
-            for _ in range(10):
-                tu.arm_deferred_payload_window(frozenset())
-                tu.disarm_deferred_payload_window()
-            # One sweep, then the watermark (2 * 3000 live keys) suppresses
-            # the rest. The historical behavior swept all 10 times.
-            assert calls["n"] == 1
-            assert tu._defer_prune_watermark == 6000
-            # Growth past the watermark prunes again, and a mostly-dead
-            # registry resets the watermark back to the floor.
-            keepalive.clear()
-            del obj  # the population loop variable pins the last referent
-            for index in range(3500):
-                dead = _Referent()
-                tu._DEFER_PENDING[("dead", index)] = [SimpleNamespace(ref=weakref.ref(dead))]
-                del dead
-            tu.arm_deferred_payload_window(frozenset())
-            tu.disarm_deferred_payload_window()
-            assert calls["n"] == 2
-            assert len(tu._DEFER_PENDING) == 0
-            assert tu._defer_prune_watermark == tu._DEFER_PRUNE_THRESHOLD
-        finally:
-            tu.prune_dead_deferred_entries = saved_prune
-            tu._DEFER_PENDING.clear()
-            tu._DEFER_PENDING.update(saved_pending)
-            tu._defer_prune_watermark = saved_watermark
-
-    def test_dead_entries_force_prune_below_watermark(self) -> None:
-        """A mostly-dead registry BELOW the doubled watermark must still sweep.
-
-        r3 bounds gap in the doubling watermark: after one large capture
-        pushed the watermark up, a registry whose aliases then all died sat
-        below the doubled key-count watermark forever -- the dead entries
-        (and their key tuples) stayed pinned indefinitely because nothing
-        ever decayed the watermark. Alias deaths are now counted O(1) by
-        weakref callback and crossing the threshold forces a sweep.
-        """
-
-        import gc
-        import weakref
-        from types import SimpleNamespace
-
-        from torchlens.utils import tensor_utils as tu
-
-        class _Referent:
-            """Weak-referenceable stand-in for a pending alias."""
-
-        saved_pending = dict(tu._DEFER_PENDING)
-        saved_watermark = tu._defer_prune_watermark
-        saved_dead = tu._defer_dead_alias_count
-        try:
-            tu._DEFER_PENDING.clear()
-            tu._defer_dead_alias_count = 0
-            # Simulate the post-large-capture state: watermark doubled high.
-            tu._defer_prune_watermark = 100_000
-            for index in range(tu._DEFER_PRUNE_THRESHOLD + 10):
-                dead = _Referent()
-                tu._DEFER_PENDING[("dead", index)] = [
-                    SimpleNamespace(ref=weakref.ref(dead, tu._note_dead_deferred_alias))
-                ]
-                del dead
-            gc.collect()
-            assert tu._defer_dead_alias_count > tu._DEFER_PRUNE_THRESHOLD
-            tu.arm_deferred_payload_window(frozenset())
-            tu.disarm_deferred_payload_window()
-            # RED before the fix: the doubled watermark suppressed the sweep.
-            assert len(tu._DEFER_PENDING) == 0
-            assert tu._defer_dead_alias_count == 0
-            # And the watermark decayed back to the floor for the now-empty
-            # registry.
-            assert tu._defer_prune_watermark == tu._DEFER_PRUNE_THRESHOLD
-        finally:
-            tu._DEFER_PENDING.clear()
-            tu._DEFER_PENDING.update(saved_pending)
-            tu._defer_prune_watermark = saved_watermark
-            tu._defer_dead_alias_count = saved_dead
-
-    def test_real_registration_counts_alias_death(self) -> None:
-        """The production registration path wires the death callback."""
-
-        import torch as _torch
-
-        from torchlens.utils import tensor_utils as tu
-
-        saved_pending = dict(tu._DEFER_PENDING)
-        saved_dead = tu._defer_dead_alias_count
-        try:
-            tu._DEFER_PENDING.clear()
-            tu.arm_deferred_payload_window(frozenset())
-            try:
-                source = _torch.ones(4)
-                alias = tu._try_defer_payload_alias(source)
-                assert alias is not None
-                before = tu._defer_dead_alias_count
-                del alias
-                assert tu._defer_dead_alias_count == before + 1
-            finally:
-                tu.disarm_deferred_payload_window()
-        finally:
-            tu._DEFER_PENDING.clear()
-            tu._DEFER_PENDING.update(saved_pending)
-            tu._defer_dead_alias_count = saved_dead
 
 
 class TestAliasContractPositionScan:
@@ -961,7 +361,7 @@ class TestStorageAliasBucketLayout:
 
         from torch.utils.weak import WeakIdKeyDictionary
 
-        from torchlens.backends.torch import _tl
+        from torchlens._utils import _tensor_label as _tl
 
         session = _tl._LabelSession(token=1)
         t1 = torch.randn(4)

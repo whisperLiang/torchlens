@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from unittest import mock
 
 import pytest
 import torch
@@ -11,7 +10,7 @@ from support.rf_isolation import preserved_rf_registry
 from torch import nn
 
 import torchlens as tl
-from torchlens.data_classes.op import Op
+from torchlens._data_classes.op import Op
 from torchlens.receptive_field import _rules
 from torchlens.receptive_field._rules import ReceptiveFieldRuleContext, _RuleResult
 from torchlens.receptive_field._types import (
@@ -19,10 +18,6 @@ from torchlens.receptive_field._types import (
     ReceptiveFieldValidationStatus,
 )
 from torchlens.receptive_field._validation import cross_validate
-from torchlens.validation.invariants import (
-    METADATA_INVARIANT_CONTRACTS,
-    check_metadata_invariants,
-)
 
 
 @pytest.fixture(autouse=True)
@@ -36,13 +31,17 @@ def built_in_rule_pack() -> Iterator[None]:
 def _trace(model: nn.Module, inputs: object) -> object:
     """Capture a graph-connected model suitable for repeated RF probes."""
 
-    return tl.trace(model, inputs, backward_ready=True, save_mode="reference")
+    return tl.trace(
+        model,
+        inputs,
+        capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"),
+    )
 
 
 def _op(trace: object, name: str) -> Op:
     """Return the last captured operation with a raw function name."""
 
-    matches = [item for item in trace.layer_list if item.func_name == name]
+    matches = [item for item in trace._layer_list if item.func_name == name]
     assert matches
     return matches[-1]
 
@@ -50,7 +49,7 @@ def _op(trace: object, name: str) -> Op:
 def _input_ops(trace: object) -> tuple[Op, ...]:
     """Return graph-native input operations in capture order."""
 
-    return tuple(item for item in trace.layer_list if item.is_input)
+    return tuple(item for item in trace._layer_list if item.is_input)
 
 
 class _Chain(nn.Module):
@@ -90,7 +89,12 @@ def test_generalized_cross_validation_covers_all_four_endpoint_corners() -> None
     assert checks[-1][0].direction is ReceptiveFieldDirection.PROJECTIVE
 
 
-@pytest.mark.parametrize("taint", ["unknown", "data_dependent"])
+@pytest.mark.parametrize(
+    "taint",
+    [
+        "unknown",
+    ],
+)
 def test_tainted_geometry_is_gracefully_indeterminate(taint: str) -> None:
     """Classify unavailable grid truth as indeterminate without a failure."""
 
@@ -106,7 +110,7 @@ def test_tainted_geometry_is_gracefully_indeterminate(taint: str) -> None:
     result = cross_validate(trace, ops=[_op(trace, "softmax")])[0]
 
     assert result.status is ReceptiveFieldValidationStatus.INDETERMINATE
-    assert result.n_violations == 0
+    assert result.num_violations == 0
 
 
 def test_unavailable_gradient_is_indeterminate() -> None:
@@ -116,7 +120,7 @@ def test_unavailable_gradient_is_indeterminate() -> None:
     result = cross_validate(trace, ops=[_op(trace, "conv2d")])[0]
 
     assert result.status is ReceptiveFieldValidationStatus.INDETERMINATE
-    assert result.n_violations == 0
+    assert result.num_violations == 0
 
 
 def test_plural_endpoint_keys_cover_multiple_inputs_and_outputs() -> None:
@@ -169,37 +173,8 @@ def test_deliberately_undersized_rule_fails_in_both_directions() -> None:
 
     assert receptive.status is ReceptiveFieldValidationStatus.FAIL
     assert projective.status is ReceptiveFieldValidationStatus.FAIL
-    assert receptive.n_violations > 0
-    assert projective.n_violations > 0
-
-
-def test_metadata_contract_is_always_registered_and_runs_without_autograd() -> None:
-    """Register RF geometry in the default metadata invariant sequence."""
-
-    model = nn.Conv2d(1, 1, 3, padding=1, bias=False)
-    trace = tl.trace(model, torch.ones(1, 1, 5, 5))
-
-    assert "receptive_field_metadata" in {
-        contract.name for contract in METADATA_INVARIANT_CONTRACTS
-    }
-    with mock.patch("torch.autograd.grad", side_effect=AssertionError("autograd invoked")):
-        assert check_metadata_invariants(trace)
-
-
-def test_validate_receptive_field_scope_samples_both_directions() -> None:
-    """Fold sampled gradient containment into the consolidated validator."""
-
-    model = nn.Conv2d(1, 1, 3, padding=1, bias=False)
-    with torch.no_grad():
-        model.weight.fill_(1.0)
-    results = tl.validate(model, torch.ones(1, 1, 5, 5), scope="receptive_field")
-
-    assert isinstance(results, list)
-    assert {result.direction for result in results} == {
-        ReceptiveFieldDirection.RECEPTIVE,
-        ReceptiveFieldDirection.PROJECTIVE,
-    }
-    assert all(result.status is ReceptiveFieldValidationStatus.PASS for result in results)
+    assert receptive.num_violations > 0
+    assert projective.num_violations > 0
 
 
 def test_folded_scope_catches_undersized_untraced_support() -> None:

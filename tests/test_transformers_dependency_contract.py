@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from importlib.metadata import requires
 
-import pytest
 from packaging.requirements import Requirement
-
-pytestmark = pytest.mark.smoke
 
 
 def test_hf_and_test_extras_share_transformers_4_and_5_support() -> None:

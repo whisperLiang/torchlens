@@ -1,0 +1,735 @@
+"""Member-pairwise delta and comparison helpers for :class:`Bundle`.
+
+Split from ``bundle/__init__.py`` along the module-level helper seam (R43
+file-size ceiling): every callable here is either a dynamic Bundle method
+served by ``Bundle.__getattr__`` (``delta_map``, ``norm_delta``,
+``output_delta``, ``compare``, ``aligned_pairs``, ``show_diff``) or a shared
+metric/lookup primitive those methods and ``Bundle`` internals call
+(``_distance_value``, ``_metric_label``, ``_tensor_field``, ...). Behavior is
+unchanged; ``torchlens.bundle`` re-exports every name.
+
+The diff picture (``Bundle.draw(graph="diff")``) draws one node per op, so a
+multi-pass layer (a module called twice, a recurrent cell) draws one node per
+pass, as ``trace.draw`` does. ``site_deltas`` computes its values per pass,
+keyed by site: a single-pass layer's site is its supergraph node name and pass
+``k`` of a multi-pass layer is ``"<node>:<k>"``, the row key of
+``Bundle.compare`` and ``Bundle.rank_changes``. A layer-level value (a stored
+comparison) joins the passes instead (``_tensor_field``).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal
+
+import torch
+
+from .._comparison_tensor import _comparison_tensor
+from .._data_classes._module_edit_sites import edited_stand_in, replaced_site
+from .._errors import InvalidArgumentError
+from ..intervention._metrics import is_scalar_like, relative_l1, resolve_metric
+from ..intervention.errors import BundleMemberError
+
+if TYPE_CHECKING:
+    from .._data_classes.trace import Trace
+    from . import Bundle
+
+
+def _metric_label(metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor]) -> str:
+    """Return a stable label for a metric specifier.
+
+    Parameters
+    ----------
+    metric:
+        Metric name or callable.
+
+    Returns
+    -------
+    str
+        Human-readable metric label.
+    """
+
+    return metric if isinstance(metric, str) else getattr(metric, "__name__", "callable")
+
+
+def _pass_ops(layer: Any) -> list[Any]:
+    """Return a logical layer's ops in pass order (``[]`` for an op or a layer without ops)."""
+
+    values = getattr(getattr(layer, "ops", None), "values", None)
+    if values is None:
+        return []
+    return sorted(values(), key=lambda op: int(getattr(op, "pass_number", 1) or 1))
+
+
+def _tensor_field(
+    layer: Any, field: Literal["out", "grad"], codec: Any = None
+) -> torch.Tensor | None:
+    """Return a tensor field from a layer-like object.
+
+    A logical layer with several passes (a module called twice, a recurrent
+    cell) has no single value: ``Layer.out`` refuses with
+    ``layer_pass_ambiguous``. Its passes' tensors are joined in pass order
+    into one flat tensor, so a layer-level comparison covers every pass and
+    never picks one silently; the registered metrics flatten their operands,
+    so a single-pass layer compares exactly as before.
+
+    Parameters
+    ----------
+    layer:
+        Layer or Op-like object.
+    field:
+        Tensor field to read.
+
+    Returns
+    -------
+    torch.Tensor | None
+        Tensor value when available; for a multi-pass layer, ``None`` unless
+        every pass holds the field.
+    """
+
+    ops = _pass_ops(layer)
+    if len(ops) > 1:
+        parts = [part for op in ops if (part := _op_tensor_field(op, field, codec)) is not None]
+        if len(parts) != len(ops):
+            return None
+        device = parts[0].device
+        return torch.cat([part.reshape(-1).to(device) for part in parts])
+    return _op_tensor_field(layer, field, codec)
+
+
+def _op_tensor_field(op: Any, field: Literal["out", "grad"], codec: Any) -> torch.Tensor | None:
+    """Read an op's payload, using the owning trace's codec when supplied."""
+
+    value = getattr(op, field, None)
+    if codec is not None:
+        return _comparison_tensor(value, codec)
+    return value if isinstance(value, torch.Tensor) else None
+
+
+def _member_distances(
+    reference: torch.Tensor,
+    candidates: dict[str, torch.Tensor | None],
+    baseline_name: str,
+    metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    site: str,
+) -> dict[str, float]:
+    """Return each member's distance from the baseline value at one site.
+
+    The baseline member reads ``0.0``; a member without a tensor is omitted.
+    """
+
+    values: dict[str, float] = {}
+    for member_name, candidate in candidates.items():
+        if candidate is None:
+            continue
+        values[member_name] = (
+            0.0
+            if member_name == baseline_name
+            else _distance_value(reference, candidate, metric, site=site)
+        )
+    return values
+
+
+def _same_payload(reference: torch.Tensor, candidate: torch.Tensor) -> bool:
+    """Return whether two tensors hold the same shape, dtype and values.
+
+    NaN-aware: NaN entries count as equal when they sit at the same positions,
+    so a payload compared with itself is always the same payload.
+
+    Parameters
+    ----------
+    reference:
+        Reference tensor.
+    candidate:
+        Compared tensor.
+
+    Returns
+    -------
+    bool
+        ``True`` when the payloads are identical.
+    """
+
+    if reference.shape != candidate.shape or reference.dtype != candidate.dtype:
+        return False
+    if reference.device != candidate.device:
+        candidate = candidate.to(reference.device)
+    if not (reference.is_floating_point() or reference.is_complex()):
+        return bool(torch.equal(reference, candidate))
+    reference_nan = torch.isnan(reference)
+    if not torch.equal(reference_nan, torch.isnan(candidate)):
+        return False
+    finite_mask = ~reference_nan
+    return bool(torch.equal(reference[finite_mask], candidate[finite_mask]))
+
+
+def _finite_operands(
+    reference: torch.Tensor, candidate: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Drop the non-finite positions two operands agree on.
+
+    An additive attention mask puts ``-inf`` at the same positions of both
+    operands; a registered metric subtracts or normalises them and reads
+    ``nan`` even when every finite entry differs. When the non-finite entries
+    sit at the same positions with the same values (NaN-aware) the metric is
+    taken over the finite positions; otherwise the operands pass unchanged.
+
+    Parameters
+    ----------
+    reference:
+        Reference tensor.
+    candidate:
+        Compared tensor, same shape and dtype.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        The operands, flattened to their shared finite positions when the
+        non-finite entries agree.
+    """
+
+    if not (reference.is_floating_point() or reference.is_complex()):
+        return reference, candidate
+    finite = torch.isfinite(reference)
+    if bool(finite.all()):
+        return reference, candidate
+    if reference.device != candidate.device:
+        candidate = candidate.to(reference.device)
+    if not torch.equal(finite, torch.isfinite(candidate)):
+        return reference, candidate
+    if not _same_payload(reference[~finite], candidate[~finite]):
+        return reference, candidate
+    return reference[finite], candidate[finite]
+
+
+def _distance_value(
+    reference: torch.Tensor,
+    candidate: torch.Tensor,
+    metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    *,
+    site: str | None = None,
+) -> float:
+    """Return a Python float distance between two tensors.
+
+    Under a registered metric, identical payloads read ``0.0`` without
+    evaluating it and non-finite entries the operands agree on (an additive
+    ``-inf`` attention mask) are left out (see :func:`_finite_operands`); a
+    user callable is evaluated as given. Operands of different shapes refuse
+    (typed) instead of being compared flattened or failing inside torch.
+
+    Parameters
+    ----------
+    reference:
+        Reference tensor.
+    candidate:
+        Compared tensor.
+    metric:
+        Metric name or callable.
+    site:
+        Site label named by the shape refusal, when known.
+
+    Returns
+    -------
+    float
+        Scalar distance.
+
+    Raises
+    ------
+    InvalidArgumentError
+        ``code="metric_shape_mismatch"`` on different shapes (a 0-d and a
+        1-element tensor still compare as scalars).
+    """
+
+    metric_fn = resolve_metric(metric)
+    scalar_pair = is_scalar_like(reference) and is_scalar_like(candidate)
+    if not scalar_pair and reference.shape != candidate.shape:
+        metric_name = getattr(metric_fn, "__name__", None) or _metric_label(metric)
+        raise InvalidArgumentError(
+            f"Bundle comparison at site {site!r} under {metric_name} received shapes "
+            f"{tuple(reference.shape)} and {tuple(candidate.shape)}",
+            code="metric_shape_mismatch",
+            remedy=(
+                "compare members whose aligned sites hold the same shape; a shape-changing "
+                "edit or input (a longer prompt) has no element-wise distance at that site"
+            ),
+            site=site,
+            reference_shape=tuple(reference.shape),
+            candidate_shape=tuple(candidate.shape),
+        )
+    if isinstance(metric, str):
+        if _same_payload(reference, candidate):
+            return 0.0
+        reference, candidate = _finite_operands(reference, candidate)
+    value = relative_l1(reference, candidate) if scalar_pair else metric_fn(reference, candidate)
+    return float(value.detach().item())
+
+
+def _resolve_member_name(bundle: Bundle, member: str | Trace | None) -> str:
+    """Resolve a member name or Trace reference within a bundle.
+
+    Parameters
+    ----------
+    bundle:
+        Bundle being queried.
+    member:
+        Member name, Trace reference, or ``None``.
+
+    Returns
+    -------
+    str
+        Resolved member name.
+    """
+
+    if member is None:
+        # An empty bundle has no default member: refuse typed, never StopIteration.
+        return next(iter(bundle.names)) if bundle.names else bundle._baseline_or_raise(None)
+    if isinstance(member, str):
+        if member not in bundle:
+            raise KeyError(f"Unknown bundle member {member!r}.")
+        return member
+    for name, log in bundle.members.items():
+        if log is member:
+            return name
+    raise KeyError("Trace is not a member of this Bundle.")
+
+
+def _bundle_delta_map(
+    self: Bundle,
+    metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = "relative_l2",
+    *,
+    baseline: str | Trace | None = None,
+    on: Literal["out", "grad"] = "out",
+) -> dict[str, dict[str, float]]:
+    """Return per-node tensor deltas from a baseline trace.
+
+    Parameters
+    ----------
+    metric:
+        Metric name from ``torchlens.intervention._metrics`` or a callable.
+    baseline:
+        Baseline member name or log. Defaults to the configured baseline, then
+        the first member.
+    on:
+        Tensor field to compare.
+
+    Returns
+    -------
+    dict[str, dict[str, float]]
+        Mapping of supergraph node name to member-name distance values. Members
+        without a tensor at a node are omitted for that node.
+
+    Raises
+    ------
+    BundleComparisonError
+        The comparison gate's stable codes (``bundle_gate_ordering_topology``,
+        ``bundle_gate_model_axis_unmet``, ``bundle_gate_input_values_differ``,
+        ``bundle_gate_input_identity_unproven``) for any (baseline, member)
+        pair that is not a comparison operand; ``norm_delta``,
+        ``output_delta`` and ``compare`` run the same gate.
+    """
+
+    baseline_name = _gated_baseline(self, "delta_map", baseline)
+    return _delta_map_values(self, metric, baseline_name, on)
+
+
+def _gated_baseline(self: Bundle, operation: str, baseline: str | Trace | None) -> str:
+    """Resolve the delta baseline, then gate every (baseline, member) operand pair.
+
+    The baseline defaults to the configured one, then the first member; the
+    comparison gate (topology, model-axis floor, site line-up) then refuses
+    any pair whose sites do not pair one to one, such as two runs whose
+    data-dependent control flow took different branches. Runs on different
+    inputs whose graphs line up compare; a site whose shapes differ refuses
+    at the metric (``metric_shape_mismatch``).
+    """
+
+    baseline_name = (
+        self._baseline_or_raise(baseline)
+        if baseline is not None or self.baseline_name is not None or not self.names
+        else next(iter(self.names))
+    )
+    pairs = [(baseline_name, name) for name in self.names if name != baseline_name]
+    self._require_comparable(operation, pairs=pairs)
+    return baseline_name
+
+
+def _delta_map_values(
+    self: Bundle,
+    metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    baseline_name: str,
+    on: Literal["out", "grad"],
+    members: Sequence[str] | None = None,
+) -> dict[str, dict[str, float]]:
+    """Compute per-node deltas from an already-gated baseline member.
+
+    ``members`` restricts the compared members to the gated ones (``None``:
+    every member, which the public reads gate).
+    """
+
+    result: dict[str, dict[str, float]] = {}
+    supergraph = self.supergraph
+    for graph_node_label in supergraph.topological_order:
+        node = supergraph.nodes[graph_node_label]
+        reference_layer = node.layer_refs.get(baseline_name)
+        if reference_layer is None:
+            continue
+        reference = self._comparison_field(reference_layer, on)
+        if reference is None:
+            continue
+        candidates = {
+            member_name: self._comparison_field(node.layer_refs[member_name], on)
+            for member_name in (self.names if members is None else members)
+            if member_name in node.layer_refs
+        }
+        values = _member_distances(reference, candidates, baseline_name, metric, graph_node_label)
+        if values:
+            result[graph_node_label] = values
+    return result
+
+
+def _bundle_norm_delta(
+    self: Bundle,
+    *,
+    baseline: str | Trace | None = None,
+    on: Literal["out", "grad"] = "out",
+) -> dict[str, dict[str, float]]:
+    """Return relative L2 deltas for every comparable bundle node.
+
+    Parameters
+    ----------
+    baseline:
+        Baseline member name or log.
+    on:
+        Tensor field to compare.
+
+    Returns
+    -------
+    dict[str, dict[str, float]]
+        Per-node relative L2 distances keyed by member name.
+    """
+
+    return _delta_map_values(self, "relative_l2", _gated_baseline(self, "norm_delta", baseline), on)
+
+
+def _output_layer_pairs(
+    target_log: Trace,
+    candidate_log: Trace,
+) -> list[tuple[Any, Any]]:
+    """Return paired output layers by output index.
+
+    Parameters
+    ----------
+    target_log:
+        Reference model log.
+    candidate_log:
+        Compared model log.
+
+    Returns
+    -------
+    list[tuple[Any, Any]]
+        Paired output layer-like objects.
+    """
+
+    target_labels = list(getattr(target_log, "output_layers", []) or [])
+    candidate_labels = list(getattr(candidate_log, "output_layers", []) or [])
+    if target_labels and candidate_labels:
+        # A silent shortest-prefix zip would report only the surviving
+        # outputs' deltas, so a member that LOST an output compared clean.
+        # Arity mismatch is a structural divergence and must refuse, never
+        # truncate.
+        if len(target_labels) != len(candidate_labels):
+            raise BundleMemberError(
+                f"output comparison refused: the target trace has "
+                f"{len(target_labels)} output layers but the member has "
+                f"{len(candidate_labels)} ({target_labels!r} vs {candidate_labels!r}); "
+                "the graphs are structurally divergent, so a per-output delta "
+                "would silently ignore the missing/extra outputs."
+            )
+        pairs: list[tuple[Any, Any]] = []
+        for target_label, candidate_label in zip(target_labels, candidate_labels, strict=True):
+            try:
+                pairs.append((target_log[target_label], candidate_log[candidate_label]))
+            except (KeyError, IndexError):
+                continue
+        return pairs
+    target_layers = list(target_log._layer_list)
+    candidate_layers = list(candidate_log._layer_list)
+    return [(target_layers[-1], candidate_layers[-1])] if target_layers and candidate_layers else []
+
+
+def _bundle_output_delta(
+    self: Bundle,
+    target: str | Trace,
+    *,
+    metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = "relative_l2",
+    on: Literal["out", "grad"] = "out",
+) -> dict[str, dict[str, float]]:
+    """Return output divergence for every member versus a target trace.
+
+    Parameters
+    ----------
+    target:
+        Target member name or ``Trace`` reference.
+    metric:
+        Metric name or callable.
+    on:
+        Tensor field to compare.
+
+    Returns
+    -------
+    dict[str, dict[str, float]]
+        Member-keyed output distance mapping.
+    """
+
+    target_name = _gated_baseline(self, "output_delta", _resolve_member_name(self, target))
+    return _output_delta_values(self, target_name, metric, on)
+
+
+def _output_delta_values(
+    self: Bundle,
+    target_name: str,
+    metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    on: Literal["out", "grad"],
+) -> dict[str, dict[str, float]]:
+    """Compute output deltas against an already-gated target member."""
+
+    target_log = self[target_name]
+    result: dict[str, dict[str, float]] = {}
+    for member_name, member_log in self.members.items():
+        output_values: dict[str, float] = {}
+        for output_index, (target_layer, member_layer) in enumerate(
+            _output_layer_pairs(target_log, member_log)
+        ):
+            reference = self._comparison_field(target_layer, on)
+            candidate = self._comparison_field(member_layer, on)
+            if reference is None or candidate is None:
+                continue
+            label = str(getattr(target_layer, "layer_label", f"output_{output_index}"))
+            output_values[label] = (
+                0.0
+                if member_name == target_name
+                else _distance_value(reference, candidate, metric, site=label)
+            )
+        result[member_name] = output_values
+    return result
+
+
+def _alignment_score(left: Any, right: Any, left_index: int, right_index: int) -> float:
+    """Return a conservative cross-architecture alignment score.
+
+    Parameters
+    ----------
+    left:
+        Left layer-like object.
+    right:
+        Right layer-like object.
+    left_index:
+        Topological index of ``left``.
+    right_index:
+        Topological index of ``right``.
+
+    Returns
+    -------
+    float
+        Heuristic score in ``[0, 1]``.
+    """
+
+    score = 0.0
+    if getattr(left, "module", None) == getattr(right, "module", None):
+        score += 0.35
+    if getattr(left, "func_name", None) == getattr(right, "func_name", None):
+        score += 0.35
+    if getattr(left, "shape", None) == getattr(right, "shape", None):
+        score += 0.2
+    distance = abs(left_index - right_index)
+    score += max(0.0, 0.1 - (distance * 0.01))
+    return min(score, 1.0)
+
+
+def _bundle_aligned_pairs(
+    self: Bundle,
+    left: str | Trace | None = None,
+    right: str | Trace | None = None,
+    *,
+    min_score: float = 0.45,
+) -> list[tuple[Any, Any]]:
+    """Return best-match layer pairs across two bundle members.
+
+    Alignment rules are intentionally conservative:
+
+    1. Prefer exact module path and operation name matches.
+    2. Use tensor shape and topological proximity to break ties.
+    3. Pair each right-side layer at most once.
+
+    Parameters
+    ----------
+    left:
+        Left member name or log. Defaults to the first bundle member.
+    right:
+        Right member name or log. Defaults to the second bundle member.
+    min_score:
+        Minimum heuristic score required to emit a pair.
+
+    Returns
+    -------
+    list[tuple[Any, Any]]
+        Paired layer-like objects, ordered by the left trace.
+    """
+
+    names = self.names
+    if len(names) < 2 and (left is None or right is None):
+        raise ValueError("aligned_pairs requires at least two bundle members.")
+    left_name = _resolve_member_name(self, left if left is not None else names[0])
+    right_name = _resolve_member_name(self, right if right is not None else names[1])
+    left_layers = list(self[left_name]._layer_list)
+    right_layers = list(self[right_name]._layer_list)
+    available_right = set(range(len(right_layers)))
+    pairs: list[tuple[Any, Any]] = []
+    for left_index, left_layer in enumerate(left_layers):
+        best_index: int | None = None
+        best_score = 0.0
+        for right_index in available_right:
+            score = _alignment_score(left_layer, right_layers[right_index], left_index, right_index)
+            if score > best_score:
+                best_index = right_index
+                best_score = score
+        if best_index is not None and best_score >= min_score:
+            available_right.remove(best_index)
+            pairs.append((left_layer, right_layers[best_index]))
+    return pairs
+
+
+# Per-pass sites of the diff picture (see the module docstring).
+
+
+@dataclass(frozen=True)
+class SiteDeltas:
+    """Per-site distances of the compared members from the baseline.
+
+    Attributes
+    ----------
+    values:
+        Site key to member name to distance. Members without a tensor at a
+        site are omitted there.
+    node_for_label:
+        Member layer label to its supergraph node name.
+    """
+
+    values: Mapping[str, Mapping[str, float]]
+    node_for_label: Mapping[str, str]
+
+    def key(self, op: Any) -> str:
+        """Return the site key of one drawn op (``"<layer>:<k>"`` for pass ``k`` of a multi-pass layer).
+
+        A module edit's replacement op takes the key of the op it replaced.
+        """
+
+        op = replaced_site(op)
+        layer_label = str(getattr(op, "layer_label", ""))
+        node = self.node_for_label.get(layer_label, layer_label)
+        # The pass suffix of ``_aligned_sites.site_row_key``, the compare row key.
+        if int(getattr(op, "num_passes", 1) or 1) > 1:
+            return f"{node}:{op.pass_number}"
+        return node
+
+    def value(self, op: Any, member: str) -> float:
+        """Return ``member``'s distance at ``op``'s site, ``0.0`` when it has none."""
+
+        return float(self.values.get(self.key(op), {}).get(member, 0.0))
+
+
+def site_deltas(
+    bundle: Bundle,
+    metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    baseline_name: str,
+    on: Literal["out", "grad"],
+    members: Sequence[str],
+) -> SiteDeltas:
+    """Compute per-pass distances of ``members`` from an already-gated baseline.
+
+    Pass ``k`` of a member's layer is compared with pass ``k`` of the
+    baseline's layer at the same supergraph node (``metric`` over the ``on``
+    field); a pass one side lacks has no value and the baseline reads ``0.0``.
+    Where a member's module edit replaced the op, the replacement's value is
+    read (``_data_classes._module_edit_sites``).
+
+    Returns
+    -------
+    SiteDeltas
+        The per-site values and the label-to-node map the renderer looks them up by.
+    """
+
+    supergraph = bundle.supergraph
+    values: dict[str, dict[str, float]] = {}
+    # Keyed by label rather than ``id(layer)``: the structural alignment and
+    # the supergraph materialize independent layer objects.
+    node_for_label = {
+        str(layer.layer_label): str(node_name)
+        for node_name, node in supergraph.nodes.items()
+        for layer in node.layer_refs.values()
+    }
+    for node_name in supergraph.topological_order:
+        values.update(
+            _node_site_values(
+                str(node_name),
+                supergraph.nodes[node_name],
+                metric,
+                baseline_name,
+                on,
+                members,
+                _stand_in_reader(bundle),
+            )
+        )
+    return SiteDeltas(values=values, node_for_label=node_for_label)
+
+
+def _node_site_values(
+    node_name: str,
+    node: Any,
+    metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    baseline_name: str,
+    on: Literal["out", "grad"],
+    members: Sequence[str],
+    read_tensor: Callable[[str, Any, Any], torch.Tensor | None],
+) -> dict[str, dict[str, float]]:
+    """Return one supergraph node's per-site values: one site, or one per baseline pass."""
+
+    reference_layer = node.layer_refs.get(baseline_name)
+    if reference_layer is None:
+        return {}
+    member_passes = {
+        name: _ops_by_pass(node.layer_refs[name]) for name in members if name in node.layer_refs
+    }
+    reference_passes = _ops_by_pass(reference_layer)
+    values: dict[str, dict[str, float]] = {}
+    for pass_number, reference_op in reference_passes.items():
+        reference = read_tensor(baseline_name, reference_op, on)
+        if reference is None:
+            continue
+        site = node_name if len(reference_passes) == 1 else f"{node_name}:{pass_number}"
+        candidates = {
+            name: read_tensor(name, passes[pass_number], on) if pass_number in passes else None
+            for name, passes in member_passes.items()
+        }
+        site_values = _member_distances(reference, candidates, baseline_name, metric, site)
+        if site_values:
+            values[site] = site_values
+    return values
+
+
+def _stand_in_reader(bundle: Bundle) -> Callable[[str, Any, Any], torch.Tensor | None]:
+    """Read a member op's field, or its module edit's replacement where the member has one."""
+
+    def read(member: str, op: Any, on: Any) -> torch.Tensor | None:
+        """Read ``on`` from ``op``'s edited stand-in in ``member``'s trace."""
+
+        return bundle._comparison_field(edited_stand_in(op, bundle._members[member]), on)
+
+    return read
+
+
+def _ops_by_pass(layer: Any) -> dict[int, Any]:
+    """Return a layer's ops keyed by pass number; an op stands for itself as pass 1."""
+
+    ops = _pass_ops(layer) or [layer]
+    return {int(getattr(op, "pass_number", 1) or 1): op for op in ops}

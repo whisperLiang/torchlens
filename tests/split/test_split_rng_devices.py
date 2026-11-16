@@ -27,6 +27,7 @@ class Stochastic(nn.Module):
         return (value * torch.rand_like(value)).tanh()
 
 
+@pytest.mark.cuda
 @pytest.mark.parametrize("source,destination", [("cpu", "cuda"), ("cuda", "cpu")])
 @pytest.mark.parametrize("retain_trace", [False, True])
 def test_stochastic_training_preserves_masks_values_and_gradients_across_devices(

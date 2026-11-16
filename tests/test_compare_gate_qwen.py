@@ -1,0 +1,137 @@
+"""A-GATE real-model leg: two real Qwen2.5-0.5B-Instruct turns (foldB s5 row 5).
+
+Toy-only validation is disqualifying for chain territory: two successive
+turns of one real chat model are exactly the Path-1 shape (one live model
+object, different inputs, ``same_object`` relationship), and the topology
+refusal is the exchange-side requirement this lane precedes chain reads for.
+Composition per the real-model matrix row: topology refusal x save/load x
+rank audit, every refusal asserting its stable code (test law 3).
+
+Offline by design: the checkout's pinned revision must already sit in the
+local HF cache (it is a cached matrix row); the test checks the cache before
+loading and skips visibly when the snapshot is absent, never downloads.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+import torch
+from support.hf_cache import skip_unless_hf_checkpoint_cached
+
+import torchlens as tl
+from torchlens._errors import InvalidArgumentError
+from torchlens.intervention.errors import BundleComparisonError
+from torchlens.types import Relationship
+
+pytestmark = pytest.mark.slow
+
+_MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
+# The public HF git revision pinned by tests/real_model/artifact_registry.jsonl.
+_REVISION = "7ae557604adf67be50417f59c2c2f167def9a775"  # pragma: allowlist secret
+
+
+def _chat_ids(tokenizer: object, messages: list[dict[str, str]]) -> torch.Tensor:
+    """Return chat-templated input ids for one conversation state.
+
+    Parameters
+    ----------
+    tokenizer:
+        Qwen tokenizer.
+    messages:
+        Chat messages in transformers chat format.
+
+    Returns
+    -------
+    torch.Tensor
+        ``input_ids`` tensor with the generation prompt appended.
+    """
+
+    encoded = tokenizer.apply_chat_template(  # type: ignore[attr-defined]
+        messages, add_generation_prompt=True, return_tensors="pt"
+    )
+    if isinstance(encoded, torch.Tensor):
+        return encoded
+    return encoded["input_ids"]
+
+
+def test_two_real_turns_topology_refusal_and_rank_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two real conversation turns refuse comparison for the right reasons.
+
+    One model load carries every leg: (1) the live pair derives the identity
+    relationship, lines up, and refuses typed on the turns' different shapes
+    (never on the identity rank);
+    (2) with the ``successor_of`` row the refusal keys on TOPOLOGY, taking
+    precedence over input evidence; (3) both survive the Bundle artifact
+    round trip; (4) the loaded pair's relationship rank only ever goes DOWN
+    (the save/load rank audit on a real model).
+    """
+
+    transformers = pytest.importorskip("transformers")
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+
+    # Cache presence is checked BEFORE loading: a missing snapshot is a
+    # visible skip, and a cached snapshot that fails to load fails loudly.
+    skip_unless_hf_checkpoint_cached(_MODEL_ID, revision=_REVISION)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(_MODEL_ID, revision=_REVISION)
+    model = transformers.AutoModelForCausalLM.from_pretrained(
+        _MODEL_ID, revision=_REVISION, dtype=torch.float32
+    )
+    model.eval()
+
+    turn1_ids = _chat_ids(tokenizer, [{"role": "user", "content": "Name one prime number."}])
+    turn2_ids = _chat_ids(
+        tokenizer,
+        [
+            {"role": "user", "content": "Name one prime number."},
+            {"role": "assistant", "content": "7 is a prime number."},
+            {"role": "user", "content": "Name another one."},
+        ],
+    )
+    assert turn1_ids.shape != turn2_ids.shape
+
+    turn1 = tl.trace(model, turn1_ids)
+    turn2 = tl.trace(model, turn2_ids)
+    bundle = tl.Bundle({"turn1": turn1, "turn2": turn2})
+
+    # Path-1 shape on a real chat model: the derived relationship is the
+    # identity rank, exactly the evidence the old gate accepted as proof of
+    # input equality.
+    assert bundle.comparability("turn1", "turn2") is Relationship.SAME_OBJECT
+
+    # WITHOUT the ordering row, the two turns are legitimate cross-input
+    # operands whose graphs line up (equal graph-shape hashes), and the
+    # refusal is the per-site shape guard's (right reason: the turns have
+    # different token counts), naming the site.
+    assert turn1._provenance_fingerprint == turn2._provenance_fingerprint
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        bundle.at(tl.module("model.norm")).compare()
+    assert excinfo.value.fields["code"] == "metric_shape_mismatch"
+    assert excinfo.value.fields["site"]
+
+    # WITH the ordering row, topology takes precedence over input evidence.
+    bundle.relate({"kind": "successor_of", "from": "turn2", "to": "turn1", "params": {}})
+    with pytest.raises(BundleComparisonError) as excinfo:
+        bundle.at(tl.module("model.norm")).compare()
+    assert excinfo.value.fields["code"] == "bundle_gate_ordering_topology"
+    assert excinfo.value.fields["ordering_path"] == ["successor_of"]
+
+    # Everything repeated after the Bundle artifact round trip (test law 2).
+    path = tmp_path / "qwen_chain.tlspec"
+    bundle.save(str(path))
+    loaded = tl.load(str(path))
+
+    loaded_rel = loaded.comparability("turn1", "turn2")
+    # Rank audit: identity evidence does not survive serialization; the
+    # loaded pair settles to the graph/input-signature evidence that
+    # round-trips (different lengths -> different input signature).
+    assert loaded_rel is Relationship.SHARED_GRAPH_DIFFERENT_INPUT
+
+    with pytest.raises(BundleComparisonError) as excinfo:
+        loaded.at(tl.module("model.norm")).compare()
+    assert excinfo.value.fields["code"] == "bundle_gate_ordering_topology"
+    assert excinfo.value.fields["ordering_path"] == ["successor_of"]

@@ -2,10 +2,11 @@
 
 The torch.compile coexistence contract (compile verdict, 2026-08-12) makes two
 countable promises: ZERO new compiles happen while a TorchLens capture holds
-the ``force_eager`` stance, and TorchLens's wrapper install/uninstall costs at
-most ONE bounded recompile on the next compiled call after capture. This
-helper exposes the measurement so users can verify both promises on their own
-models instead of taking them on faith.
+the ``force_eager`` stance, and TorchLens's wrapper install/uninstall costs a
+bounded burst of recompilations on the first compiled call after each
+capture, then steady state (measured on real models: none on ``resnet18``, six to
+seven frames on a tiny GPT-2). This helper exposes the measurement so users can
+verify both promises on their own models instead of taking them on faith.
 """
 
 from __future__ import annotations
@@ -15,8 +16,8 @@ from collections.abc import Iterator
 from typing import Any, cast
 
 from .._errors import _actionable_message, _ActionableErrorMixin
+from .._utils import _torch_compat
 from ..errors._base import CompatibilityError
-from ..utils import _torch_compat
 
 
 class CompileCountsUnavailableError(_ActionableErrorMixin, CompatibilityError, RuntimeError):
@@ -25,6 +26,14 @@ class CompileCountsUnavailableError(_ActionableErrorMixin, CompatibilityError, R
     Keeps its historical ``RuntimeError`` base while joining the taxonomy
     with a stable code and a default remedy, so single-message raise sites
     and existing ``except RuntimeError`` callers stay valid (R64).
+
+    Examples
+    --------
+    >>> err = CompileCountsUnavailableError("no counters")
+    >>> err.fields["code"]
+    'compile_counts_unavailable'
+    >>> isinstance(err, RuntimeError), isinstance(err, tl.errors.CompatibilityError)
+    (True, True)
     """
 
     code: str = "compile_counts_unavailable"
@@ -141,15 +150,10 @@ def count_compiles() -> Iterator[CompileCounts]:
 
     Examples
     --------
-    Verify the coexistence contract on a compiled model::
-
-        with tl.debug.count_compiles() as during:
-            trace = tl.trace(model, x)
-        assert during.frames_compiled == 0  # zero compiles during capture
-
-        with tl.debug.count_compiles() as after:
-            model(x)
-        assert after.frames_compiled <= 1  # one bounded recompile after
+    >>> with count_compiles() as during:
+    ...     _ = tl.trace(model, x)
+    >>> during.frames_compiled
+    0
     """
 
     counters = _torch_compat.get_dynamo_compile_counters(force_probe=True)

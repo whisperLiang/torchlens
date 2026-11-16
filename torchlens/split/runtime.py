@@ -8,6 +8,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from torchlens.errors import ArgumentTypeError
+from torchlens.split.errors import SplitRequestError
+
 from .._state import pause_logging
 from .adapters.base import SegmentBundle, SplitBackendAdapter
 from .batching import BatchSpec
@@ -37,7 +40,17 @@ if TYPE_CHECKING:
 
 
 class SplitRuntime(SplitGraph):
-    """Prepared split runtime for prefix/suffix replay."""
+    """Prepared split runtime for prefix/suffix replay.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> partition = graph.compute_dag().to_partition(())
+    >>> analysis = graph.analyze(partition)
+    >>> runtime = graph.materialize(analysis)
+    >>> runtime.replay(torch.ones(4, 3)).shape
+    torch.Size([4, 2])
+    """
 
     model: Any
     _trace: Any | None
@@ -226,7 +239,10 @@ class SplitRuntime(SplitGraph):
                 # operand, not mutable server-owned state.
                 continue
             if len(matches) > 1:
-                raise ValueError(f"Cannot bind boundary buffer {key!r} to unique suffix state")
+                raise SplitRequestError(
+                    f"Cannot bind boundary buffer {key!r} to unique suffix state",
+                    code=SplitRequestError.code,
+                )
             tensors[key] = bindings[matches[0].state_id]["suffix"]
         return ReplayBoundary(
             backend=boundary.backend,
@@ -245,7 +261,11 @@ class SplitRuntime(SplitGraph):
     def repartition(self, partition: GraphPartition) -> SplitRuntime:
         """Materialize another DAG partition using the current effective training state."""
         if not isinstance(partition, GraphPartition):
-            raise TypeError("partition must be a GraphPartition")
+            raise ArgumentTypeError(
+                "partition must be a GraphPartition",
+                code="split_argument_type",
+                remedy="pass a GraphPartition created by dag.to_partition",
+            )
         with self._temporary_segment_state_snapshots() as snapshots:
             analysis = self._analyze_partition(partition, state_snapshots=snapshots)
             return self._materialize(analysis, state_snapshots=snapshots)
@@ -449,6 +469,7 @@ class SplitRuntime(SplitGraph):
                                 split_point=split_point,
                                 reason="divergent segment state replicas",
                             ),
+                            code=SplitUnsupportedError.code,
                         )
 
     def _validate_recut_prefix_state(
@@ -476,6 +497,7 @@ class SplitRuntime(SplitGraph):
                             split_point=self.request.boundary,
                             reason="divergent prefix state replicas",
                         ),
+                        code=SplitUnsupportedError.code,
                     )
 
     def run_prefix(
@@ -518,6 +540,7 @@ class SplitRuntime(SplitGraph):
                     split_point=self.request.boundary,
                     reason="partition_training_boundary_write",
                 ),
+                code=SplitUnsupportedError.code,
             )
         if self.segments.training_prefix is None:
             raise SplitUnsupportedError(
@@ -527,6 +550,7 @@ class SplitRuntime(SplitGraph):
                     split_point=self.request.boundary,
                     reason="unsupported training prefix",
                 ),
+                code=SplitUnsupportedError.code,
             )
         placed_inputs, placed_kwargs = self._place_inputs(inputs, input_kwargs)
         return self._annotate_boundary(
@@ -598,12 +622,16 @@ class SplitRuntime(SplitGraph):
                     split_point=self.request.boundary,
                     reason="backend mismatch",
                 ),
+                code=SplitBoundaryError.code,
             )
         program = self.trace_graph.shape_program
         if program is not None and program.batch_probe is not None:
             batch = boundary.metadata.get("runtime_batch_size")
             if batch is None:
-                raise SplitBoundaryError("Boundary is missing runtime batch metadata.")
+                raise SplitBoundaryError(
+                    "Boundary is missing runtime batch metadata.",
+                    code=SplitBoundaryError.code,
+                )
             program.batch_probe.require_batch(
                 int(batch), backend=self.adapter.name, split_point=self.request.boundary
             )
@@ -733,6 +761,7 @@ class SplitRuntime(SplitGraph):
                     split_point=self.request.boundary,
                     reason="named_state_exchange_unsupported",
                 ),
+                code=SplitUnsupportedError.code,
             )
         return method
 
@@ -885,7 +914,7 @@ class SplitRuntime(SplitGraph):
         return load_boundary(path, adapter=self.adapter)
 
 
-__all__ = ["SplitRuntime"]
+__all__ = ("SplitRuntime",)
 
 
 def _inherited_segment_entries(

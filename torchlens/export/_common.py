@@ -1,0 +1,241 @@
+"""Shared export helpers (subpackage promotion).
+
+Helpers consumed by more than one export-target family live here so the
+per-family modules never import each other or the package facade.
+"""
+
+from __future__ import annotations
+
+import math
+import sys
+from typing import Any
+
+from .._data_classes._trace_missing_attrs import is_live_trace
+from .._errors import ArgumentTypeError
+from .._utils._record_group_table import record_member
+
+__tl_layer__ = "L7"
+
+
+def _require_trace(log: Any, *, exporter: str) -> None:
+    """Refuse a non-``Trace`` input to a graph exporter, typed.
+
+    Without this gate a wrong argument reached the projection code and either
+    crashed deep inside it or wrote a plausible empty artifact.
+
+    Parameters
+    ----------
+    log:
+        Candidate capture passed to the exporter.
+    exporter:
+        Public exporter spelling used in the message (``"tl.export.netron"``).
+
+    Raises
+    ------
+    ArgumentTypeError
+        ``export_expected_trace`` when ``log`` is not a ``Trace``.
+    """
+
+    from .._data_classes.trace import Trace
+
+    if isinstance(log, Trace):
+        return
+    raise ArgumentTypeError(
+        f"{exporter} expected a Trace, got {type(log).__name__}",
+        code="export_expected_trace",
+        remedy=(
+            f"capture first and pass the Trace, e.g. {exporter}(tl.trace(model, x), path); "
+            "for a saved artifact pass tl.load(artifact_path)"
+        ),
+        argument="log",
+        received_type=type(log).__name__,
+    )
+
+
+def _iter_layers(log: Any) -> list[Any]:
+    """Return layer-pass entries in export order.
+
+    Parameters
+    ----------
+    log:
+        Model log-like object.
+
+    Returns
+    -------
+    list[Any]
+        Layer entries.
+    """
+
+    return list(log._layer_list or log._layer_dict_main_keys.values())
+
+
+def _repeated_layer_labels(entries: list[Any]) -> set[str]:
+    """Return rolled layer labels that occur in multiple execution passes.
+
+    Parameters
+    ----------
+    entries:
+        Layer-pass entries in export order.
+
+    Returns
+    -------
+    set[str]
+        Labels requiring pass qualification for unique export node IDs.
+    """
+
+    counts: dict[str, int] = {}
+    for entry in entries:
+        label = str(getattr(entry, "layer_label", ""))
+        counts[label] = counts.get(label, 0) + 1
+    return {label for label, count in counts.items() if count > 1}
+
+
+def _export_node_id(entry: Any, repeated_labels: set[str]) -> str:
+    """Return a unique static-export node ID for one layer pass.
+
+    Parameters
+    ----------
+    entry:
+        Layer-pass entry.
+    repeated_labels:
+        Rolled labels requiring pass qualification.
+
+    Returns
+    -------
+    str
+        Pass-qualified ID for recurrent layers, otherwise the stable rolled label.
+    """
+
+    layer_label = str(getattr(entry, "layer_label", ""))
+    if layer_label in repeated_labels:
+        return str(getattr(entry, "label", layer_label))
+    return layer_label
+
+
+def _node_type(entry: Any) -> str:
+    """Return the semantic node type for an exported entry.
+
+    Parameters
+    ----------
+    entry:
+        Layer-pass log entry.
+
+    Returns
+    -------
+    str
+        Semantic node type.
+    """
+
+    if getattr(entry, "is_input", False):
+        return "input"
+    if getattr(entry, "is_output", False):
+        return "output"
+    if record_member(entry, "is_buffer", False):
+        return "buffer"
+    if record_member(entry, "is_terminal_bool", False):
+        return "bool"
+    if int(getattr(entry, "num_params", 0) or 0) > 0:
+        return "parameterized"
+    return "operation"
+
+
+def _static_graph_data(log: Any) -> dict[str, Any]:
+    """Serialize a Trace into static graph data.
+
+    Parameters
+    ----------
+    log:
+        TorchLens ``Trace`` to serialize.
+
+    Returns
+    -------
+    dict[str, Any]
+        Node and edge metadata for SVG/HTML exporters.
+    """
+
+    entries = _iter_layers(log)
+    repeated_labels = _repeated_layer_labels(entries)
+    node_ids = {_export_node_id(entry, repeated_labels) for entry in entries}
+    nodes: list[dict[str, Any]] = []
+    for index, entry in enumerate(entries):
+        node_id = _export_node_id(entry, repeated_labels) or f"node_{index}"
+        nodes.append(
+            {
+                "id": node_id,
+                "label": str(getattr(entry, "layer_label", node_id)),
+                "type": _node_type(entry),
+                "shape": "x".join(str(dim) for dim in getattr(entry, "shape", ()) or ()),
+                "memory": str(record_member(entry, "activation_memory", "")),
+                "x": 80 + (index % 8) * 180,
+                "y": 80 + (index // 8) * 110,
+            }
+        )
+    edges: list[dict[str, str]] = []
+    for entry in entries:
+        target = _export_node_id(entry, repeated_labels)
+        for parent in getattr(entry, "parents", None) or []:
+            if parent in node_ids:
+                edges.append({"source": str(parent), "target": target})
+    width = max((int(node["x"]) for node in nodes), default=0) + 160
+    height = max((int(node["y"]) for node in nodes), default=0) + 100
+    return {
+        "title": log._source_class_name if is_live_trace(log) else "TorchLens graph",
+        "nodes": nodes,
+        "edges": edges,
+        "width": width,
+        "height": height,
+    }
+
+
+def _scalarize_cell(value: Any) -> Any:
+    """Return a scalar-safe representation of a table cell.
+
+    Shared body for ``_parquet_cell`` and ``_tracker_cell``, which apply
+    the identical primitive-or-repr coercion for two distinct call sites
+    (pyarrow/Parquet column safety and strict tracker table types respectively).
+
+    Parameters
+    ----------
+    value:
+        Original dataframe cell.
+
+    Returns
+    -------
+    Any
+        Primitive value or string representation.
+    """
+
+    if value is None or type(value) in (str, int, bool):
+        return value
+    if isinstance(value, float):
+        return None if math.isnan(value) else float(value)
+    try:
+        import numpy as np
+        import pandas as pd
+
+        if isinstance(value, np.generic):
+            native = value.item()
+            if type(native) in (str, int, float, bool):
+                return _scalarize_cell(native)
+        missing = pd.isna(value)
+        if isinstance(missing, bool | np.bool_) and bool(missing):
+            return None
+    except Exception:
+        pass
+    return repr(value)
+
+
+def _cook_recording(log: Any) -> Any:
+    """Return ``log`` cooked into a Trace when it is a ``Recording``, else unchanged.
+
+    The exporters' product is Trace structure and saved values, so a sparse
+    recording is cooked through ``Recording.to_trace()`` first; its typed
+    refusals (failed, events not retained, multi-pass) propagate unchanged.
+    The ``sys.modules`` gate keeps ordinary exports free of the recording
+    import: a Recording can only exist after its module was imported.
+    """
+
+    recording_types = sys.modules.get("torchlens.recording._types")
+    if recording_types is not None and isinstance(log, recording_types.Recording):
+        return log.to_trace()
+    return log

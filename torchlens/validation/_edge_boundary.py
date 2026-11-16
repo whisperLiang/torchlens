@@ -1,4 +1,4 @@
-"""Edge-intervention boundary validation (L6 4.3), split out of ``core.py``.
+"""Edge-intervention boundary validation, split out of ``core.py``.
 
 One replay-phase check family: a child op carrying tier-(ii)
 edge-substitution entries gets a DIFFERENT check, never NO check. The
@@ -12,10 +12,13 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from .._utils._record_group_table import record_member
+from ._snapshot_binding import snapshot_binding_explained
+
 if TYPE_CHECKING:
-    from ..data_classes.op import Op
-    from ..data_classes.trace import Trace
-    from .core import ValidationCheckResult
+    from .._data_classes.op import Op
+    from .._data_classes.trace import Trace
+    from ._core import ValidationCheckResult
 
 
 def _check_edge_intervention_boundary(
@@ -38,11 +41,11 @@ def _check_edge_intervention_boundary(
       "exempted". A wrong stored output under a corroborated entry FAILS
       (skip-shaped acceptance is impossible by construction).
 
-    Node-level ``intervention_replaced`` corroboration never fires for edges:
+    Node-level ``is_edited`` corroboration never fires for edges:
     edge substitution replaces no node's output.
     """
 
-    entries = getattr(target_op, "edge_substitutions", None) or {}
+    entries = record_member(target_op, "edge_substitutions", None) or {}
     if not entries:
         return None
     failure = _fail_uncorroborated_edge_entries(trace, target_op, entries)
@@ -56,24 +59,26 @@ def _fail_uncorroborated_edge_entries(
 ) -> ValidationCheckResult | None:
     """Fail any tier-(ii) entry missing its FireRecord address or stamp verdict."""
 
-    from .core import ValidationCheckResult
-    from .diagnostics import CHECK_REPLAY, ValidationFailure, record_validation_failure
+    from ._core import ValidationCheckResult  # deferred: cycle validation
+    from ._diagnostics import CHECK_REPLAY, ValidationFailure, record_validation_failure
 
     stamps = getattr(target_op, "edge_replacement_stamps", None) or {}
     fire_addresses = {
         tuple(getattr(record, "edge_address", ()) or ())
-        for record in (getattr(target_op, "interventions", None) or ())
+        for record in (getattr(target_op, "edits", None) or ())
         if getattr(record, "edge_address", None) is not None
     }
-    for store_key in entries:
+    from ..intervention._edge_substitution import tensor_content_digest
+
+    for store_key, payload in entries.items():
         arg_kind, arg_path = store_key
-        address = (target_op.func_call_id, arg_kind, tuple(arg_path))
+        address = (target_op.call.call_id, arg_kind, tuple(arg_path))
         stamp = stamps.get(store_key)
         if address not in fire_addresses or not stamp or not stamp.get("verdict"):
             record_validation_failure(
                 trace,
                 ValidationFailure(
-                    check=CHECK_REPLAY,
+                    check_name=CHECK_REPLAY,
                     op_label=target_op.label,
                     func_name=getattr(target_op, "func_name", None),
                     message=(
@@ -83,6 +88,31 @@ def _fail_uncorroborated_edge_entries(
                 ),
             )
             return ValidationCheckResult.failed_result("edge_substitution_uncorroborated")
+        # The stamp's value_digest is the CONTENT half of the corroboration:
+        # a stored value that no longer digests to what was stamped is a
+        # tampered or foreign store row, and re-executing the child from it
+        # would corroborate the wrong value (AUD-CODE 4.10: the digest was
+        # minted at every write and checked nowhere).
+        value = payload.get("value") if isinstance(payload, dict) else None
+        stamped_digest = stamp.get("value_digest")
+        if (
+            isinstance(value, torch.Tensor)
+            and isinstance(stamped_digest, str)
+            and tensor_content_digest(value) != stamped_digest
+        ):
+            record_validation_failure(
+                trace,
+                ValidationFailure(
+                    check_name=CHECK_REPLAY,
+                    op_label=target_op.label,
+                    func_name=getattr(target_op, "func_name", None),
+                    message=(
+                        f"edge-substitution entry at {address!r} does not digest to its "
+                        "corroboration stamp (stored value and stamped value_digest disagree)"
+                    ),
+                ),
+            )
+            return ValidationCheckResult.failed_result("edge_substitution_stamp_mismatch")
     return None
 
 
@@ -91,19 +121,65 @@ def _splice_edge_substitution_args(
 ) -> tuple[dict[str, Any] | None, ValidationCheckResult | None]:
     """Splice tier-(ii) substituted values into the captured call arguments."""
 
-    from .core import ValidationCheckResult
-    from .diagnostics import CHECK_REPLAY, ValidationFailure, record_validation_failure
+    from ._core import ValidationCheckResult  # deferred: cycle validation
+    from ._diagnostics import CHECK_REPLAY, ValidationFailure, record_validation_failure
+    from ._replay_grad_fidelity import replay_copy_for_slot
 
     args = list(input_args["args"])
     kwargs = dict(input_args["kwargs"])
     for store_key, payload in entries.items():
         arg_kind, arg_path = store_key
+        is_region = isinstance(payload, dict) and payload.get("substitution_kind") == "region"
+        if is_region:
+            # Region exit substitutions may sit at nested container
+            # paths; the region splice rebuilds the container faithfully, so
+            # the SAME re-execute-and-compare check runs at the nested
+            # address -- a capability extension of this check, never a
+            # weakening (the depth-1 tripwire below still refuses foreign
+            # edge rows it cannot apply faithfully).
+            value = payload.get("value")
+            if isinstance(value, torch.Tensor):
+                from ..intervention._regions import _splice_occurrence
+
+                value = replay_copy_for_slot(
+                    trace,
+                    target_op,
+                    "args" if arg_kind == "positional" else "kwargs",
+                    arg_path[0] if len(tuple(arg_path)) == 1 else tuple(arg_path),
+                    value,
+                )
+
+                spliced_args, kwargs = _splice_occurrence(
+                    tuple(args), kwargs, (None, arg_kind, tuple(arg_path)), value
+                )
+                args = list(spliced_args)
+                continue
+        if len(tuple(arg_path)) != 1:
+            # TRIPWIRE (shared with the replay/edge splice sites): a nested
+            # store key at this top-level splice would silently re-execute
+            # the child from the WRONG spliced argument and could validate
+            # green. Refuse the entry as invalid instead of guessing.
+            record_validation_failure(
+                trace,
+                ValidationFailure(
+                    check_name=CHECK_REPLAY,
+                    op_label=target_op.label,
+                    func_name=getattr(target_op, "func_name", None),
+                    message=(
+                        f"edge-substitution entry at {store_key!r} has a nested "
+                        "argument path; the top-level splice cannot apply it "
+                        "faithfully (foreign or future-schema store row)"
+                    ),
+                ),
+            )
+            failed = ValidationCheckResult.failed_result("edge_substitution_nested_path")
+            return None, failed
         value = payload.get("value") if isinstance(payload, dict) else None
         if not isinstance(value, torch.Tensor):
             record_validation_failure(
                 trace,
                 ValidationFailure(
-                    check=CHECK_REPLAY,
+                    check_name=CHECK_REPLAY,
                     op_label=target_op.label,
                     func_name=getattr(target_op, "func_name", None),
                     message=f"edge-substitution payload at {store_key!r} is not a tensor",
@@ -112,9 +188,13 @@ def _splice_edge_substitution_args(
             failed = ValidationCheckResult.failed_result("edge_substitution_payload_invalid")
             return None, failed
         if arg_kind == "positional":
-            args[int(arg_path[0])] = value
+            args[int(arg_path[0])] = replay_copy_for_slot(
+                trace, target_op, "args", int(arg_path[0]), value
+            )
         else:
-            kwargs[arg_path[0]] = value
+            kwargs[arg_path[0]] = replay_copy_for_slot(
+                trace, target_op, "kwargs", arg_path[0], value
+            )
     spliced = dict(input_args)
     spliced["args"] = tuple(args)
     spliced["kwargs"] = kwargs
@@ -126,14 +206,14 @@ def _reexecute_edge_boundary(
 ) -> ValidationCheckResult:
     """Re-execute the child from the spliced tier-(ii) values and compare outputs."""
 
-    from ..utils.tensor_utils import tensor_nanequal
-    from .core import (
+    from .._utils.tensor_utils import tensor_nanequal
+    from ._core import (  # deferred: cycle validation
         ValidationCheckResult,
         _execute_func_with_restored_state,
         _prepare_input_args_for_validating_layer,
         _saved_out_payload,
     )
-    from .diagnostics import CHECK_REPLAY, ValidationFailure, record_validation_failure
+    from ._diagnostics import CHECK_REPLAY, ValidationFailure, record_validation_failure
 
     input_args, unverified_reason = _prepare_input_args_for_validating_layer(trace, target_op, [])
     if input_args is None:
@@ -153,7 +233,7 @@ def _reexecute_edge_boundary(
         record_validation_failure(
             trace,
             ValidationFailure(
-                check=CHECK_REPLAY,
+                check_name=CHECK_REPLAY,
                 op_label=target_op.label,
                 func_name=getattr(target_op, "func_name", None),
                 message=(
@@ -164,3 +244,118 @@ def _reexecute_edge_boundary(
         )
         return ValidationCheckResult.failed_result("edge_boundary_reexecution_mismatch")
     return ValidationCheckResult("edge_intervention_boundary", "edge_boundary_reexecuted")
+
+
+def _parent_arg_evidence(
+    trace: Trace, target_layer: Op, parent_layer: Op
+) -> tuple[torch.Tensor, str | None] | ValidationCheckResult:
+    """Resolve the parent value a child's saved arg slot must be compared against.
+
+    Returns ``(parent_outs, capture_digest)`` or an ``unverified`` result.
+    ``out_versions_by_child`` stores per-child snapshots when an in-place op
+    modified the tensor between uses (capture truth; compared directly, the
+    pass-qualified child label first). Otherwise the parent's saved out is the
+    evidence -- EXCEPT on a REPLAY-PROPAGATED trace (AUD-CODE 2.9): once the
+    replay engine has overwritten this parent's out, the child's
+    ``saved_args`` snapshot (capture truth, retained unmodified by design)
+    can no longer be compared against ``parent.out`` (a pushed value that
+    legitimately differs) -- every non-identity edited fork false-FAILED at
+    the first downstream op. The engine records the capture-time content
+    digest of every out it overwrites, so the SAME equality question ("does
+    the snapshot at this slot equal the parent's capture-time value?") is
+    answered against that digest: still exact, still bidirectional, never
+    skipped. A recomputed parent with no recordable digest stays unverified,
+    never validated.
+    """
+
+    from ._core import (  # deferred: cycle validation
+        ValidationCheckResult,
+        _op_for_validation_label,
+        _saved_out_payload,
+    )
+
+    target_op_label = getattr(target_layer, "label", target_layer.layer_label)
+    versions = parent_layer.out_versions_by_child
+    for key in (target_op_label, target_layer.layer_label):
+        if key in versions:
+            # A snapshot is the bound slot's content, so it agrees with any binding;
+            # it stands as evidence only when the recorded graph explains it.
+            if not snapshot_binding_explained(
+                target_layer,
+                parent_layer,
+                _saved_out_payload,
+                lambda label: _op_for_validation_label(trace, label),
+                trace.__dict__.get("_foreign_departures"),
+            ):
+                return ValidationCheckResult.failed_result("arg_logging_mismatch")
+            return versions[key], None
+    capture_digest = _replay_capture_digest_for(trace, parent_layer)
+    if capture_digest is None and _is_replay_recomputed(trace, parent_layer):
+        return ValidationCheckResult.unverified("replay_recomputed_parent_unattested")
+    parent_outs = _saved_out_payload(parent_layer)
+    if parent_outs is None:
+        return ValidationCheckResult.unverified("parent_payload_missing")
+    return parent_outs, capture_digest
+
+
+def _tensor_content_digest(value: torch.Tensor) -> str:
+    """Return the replay engine's content digest of one tensor (shared spelling)."""
+
+    from ..intervention._edge_substitution import tensor_content_digest
+
+    return tensor_content_digest(value)
+
+
+def _replay_capture_digest_for(trace: Trace, op: Op) -> str | None:
+    """Return the capture-time digest of an op's out if replay overwrote it."""
+
+    from ..intervention._replay_context import replay_capture_digest
+
+    return replay_capture_digest(trace, op)
+
+
+def _is_replay_recomputed(trace: Trace, op: Op) -> bool:
+    """Return whether the replay engine has overwritten this op's out on this trace.
+
+    Derived from the replay run context's committed-site set (the digest
+    ledger keys), so a site whose pre-edit out could not be digested still
+    reads as recomputed and is never mistaken for capture truth.
+    """
+
+    from ..intervention._replay_context import REPLAY_CAPTURE_DIGESTS_KEY, _replay_site_key
+
+    run_ctx = getattr(trace, "last_run", None)
+    if not isinstance(run_ctx, dict):
+        return False
+    digests = run_ctx.get(REPLAY_CAPTURE_DIGESTS_KEY)
+    return isinstance(digests, dict) and _replay_site_key(op) in digests
+
+
+def _capture_payload_equal(trace: Trace, candidate: Op, target_layer: Op, value: Any) -> bool:
+    """Return whether ``value`` equals the candidate's CAPTURE-TIME out as the target consumed it.
+
+    A child-versioned snapshot (``out_versions_by_child``) is capture truth
+    and compares directly; a replay-recomputed candidate compares through its
+    recorded capture digest; an untouched candidate compares its saved out.
+    Unknown evidence (no payload, no digest) reads as not equal.
+    """
+
+    from .._utils.tensor_utils import tensor_nanequal
+    from ._core import _saved_out_payload  # deferred: cycle validation
+
+    if not isinstance(value, torch.Tensor):
+        return False
+    versions = getattr(candidate, "out_versions_by_child", None) or {}
+    for key in (getattr(target_layer, "label", None), target_layer.layer_label):
+        if key is not None and key in versions:
+            snapshot = versions[key]
+            return isinstance(snapshot, torch.Tensor) and bool(
+                tensor_nanequal(value, snapshot, allow_tolerance=False)
+            )
+    digest = _replay_capture_digest_for(trace, candidate)
+    if digest is not None:
+        return _tensor_content_digest(value) == digest
+    if _is_replay_recomputed(trace, candidate):
+        return False
+    payload = _saved_out_payload(candidate)
+    return payload is not None and bool(tensor_nanequal(value, payload, allow_tolerance=False))

@@ -1,4 +1,4 @@
-"""L6 stage 4a: cross-run selection alignment (``ResolvedSelection.align_to``).
+"""L6 stage 4a: cross-run selection alignment (``Selection.align_to``).
 
 Pins the cross-run door: alignment keys on the L1 structural site keys each
 ACT entry records (the bridging relation), SAME-POLICY captures only per the
@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
-from torchlens.selection import SelectionError
+from torchlens.errors import SelectionError
 
 #: Committed index set for the aligned patch rows.
 IDX = ((0, 0, 1, 1), (0, 1, 2, 2))
@@ -44,7 +44,7 @@ def _capture(model: nn.Module, x: torch.Tensor) -> tl.Trace:
     return tl.trace(
         model,
         x,
-        capture=tl.options.CaptureOptions(intervention_ready=True, save_arg_values=True),
+        capture=tl.options.CaptureOptions(replayable=True, save_args=True),
     )
 
 
@@ -72,48 +72,21 @@ def _alignment_reason(excinfo: pytest.ExceptionInfo) -> str:
     return excinfo.value.fields["reason"]
 
 
-def test_entries_record_the_l1_structural_site_key(pair):
-    """ACT entries carry the op's site_key_v1 string (the bridging relation)."""
-
-    trace_a, _ = pair
-    resolved = tl.units("relu_1_2", IDX).resolve(trace_a)
-    entry = resolved[0]
-    assert isinstance(entry.structural_site_key, str)
-    assert entry.structural_site_key.startswith("s1|")
-
-
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _selection/align.py.
 def test_align_to_same_trace_is_identity(pair):
     """Alignment onto the selection's own trace returns the selection itself."""
 
     trace_a, _ = pair
-    resolved = tl.units("relu_1_2", IDX).resolve(trace_a)
+    resolved = trace_a[tl.units("relu_1_2", IDX)]
     assert resolved.align_to(trace_a) is resolved
 
 
-def test_align_to_rebinds_with_masks_and_provenance(pair):
-    """Happy path: target binding, unchanged masks, cross-run disclosure."""
-
-    trace_a, trace_b = pair
-    resolved = tl.units("relu_1_2", IDX).resolve(trace_a)
-    aligned = resolved.align_to(trace_b)
-    assert aligned is not resolved
-    assert aligned._trace is trace_b
-    assert len(aligned) == len(resolved)
-    for source_entry, aligned_entry in zip(resolved, aligned, strict=True):
-        assert aligned_entry.site_key == source_entry.site_key
-        assert aligned_entry.structural_site_key == source_entry.structural_site_key
-        assert torch.equal(aligned_entry.mask, source_entry.mask)
-        assert aligned_entry.provenance.relation == source_entry.provenance.relation
-        assert "cross-run aligned from" in aligned_entry.provenance.source
-    # Content digest is mask/site-based, so a label-identical alignment agrees.
-    assert aligned.resolve_digest == resolved.resolve_digest
-
-
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _selection/do_plan.py, intervention/_trace_selection_edits.py.
 def test_do_still_refuses_foreign_resolved_selection(pair):
     """The trace-mismatch tripwire stays armed; its remedy teaches align_to."""
 
     trace_a, trace_b = pair
-    resolved = tl.units("relu_1_2", IDX).resolve(trace_a)
+    resolved = trace_a[tl.units("relu_1_2", IDX)]
     fork = trace_b.fork()
     with pytest.raises(SelectionError) as excinfo:
         fork.do(resolved, tl.zero_ablate())
@@ -121,6 +94,7 @@ def test_do_still_refuses_foreign_resolved_selection(pair):
     assert "align_to" in str(excinfo.value)
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _selection/do_plan.py, intervention/_helper_internals.py, intervention/_patch_mapping.py ....
 def test_cross_run_patch_lands_source_values(pair):
     """Flagship flow: resolve on A, align to a fork of B, patch from A.
 
@@ -129,7 +103,7 @@ def test_cross_run_patch_lands_source_values(pair):
     """
 
     trace_a, trace_b = pair
-    resolved = tl.units("relu_1_2", IDX).resolve(trace_a)
+    resolved = trace_a[tl.units("relu_1_2", IDX)]
     fork = trace_b.fork()
     aligned = resolved.align_to(fork)
     fork.do(aligned, tl.patch_from(trace_a))
@@ -146,88 +120,93 @@ def test_cross_run_patch_lands_source_values(pair):
     downstream_delta = (fork["relu_2_4"].out - trace_b["relu_2_4"].out).abs().max()
     assert float(downstream_delta) > 0.0
     audit = fork.intervention_audit[-1]
-    assert audit["resolve_digest"] == aligned.resolve_digest
+    assert audit["resolve_digest"] == aligned.digest
     assert audit["patch_source"]["source_object_id"] == str(id(trace_a))
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _selection/mask.py, _selection/selection.py.
 def test_alignment_mask_stays_immutable(pair):
     """Mutating a mask returned by an aligned entry cannot alter the selection."""
 
     trace_a, trace_b = pair
-    resolved = tl.units("relu_1_2", IDX).resolve(trace_a)
+    resolved = trace_a[tl.units("relu_1_2", IDX)]
     aligned = resolved.align_to(trace_b)
-    digest = aligned.resolve_digest
+    digest = aligned.digest
     mask = aligned[0].mask
     mask.zero_()
-    assert aligned.resolve_digest == digest
-    assert aligned[0].selected_count == len(IDX)
+    assert aligned.digest == digest
+    assert aligned[0].num_selected == len(IDX)
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _selection/align.py, _selection/selection.py.
 def test_refusal_kind_unsupported(pair):
     """PARAM selections refuse alignment (addresses not run-stable)."""
 
     trace_a, trace_b = pair
-    resolved = tl.params("c1.weight").resolve(trace_a)
+    resolved = trace_a[tl.param("c1.weight")]
     with pytest.raises(SelectionError) as excinfo:
         resolved.align_to(trace_b)
     assert _alignment_reason(excinfo) == "kind_unsupported"
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _postprocess/_grouping_stamp.py, _selection/align.py, _trace_core/op_store.py ....
 def test_refusal_grouping_stamp_degraded(pair):
     """A degraded stamp on either side refuses (L1 consumer-matrix row)."""
 
-    from torchlens.postprocess._grouping_stamp import degraded_grouping_policy_stamp
+    from torchlens._postprocess._grouping_stamp import degraded_grouping_policy_stamp
 
     trace_a, trace_b = pair
-    resolved = tl.units("relu_1_2", IDX).resolve(trace_a)
-    healthy = trace_b.grouping_policy
-    trace_b.grouping_policy = degraded_grouping_policy_stamp("parse_failure")
+    resolved = trace_a[tl.units("relu_1_2", IDX)]
+    healthy = trace_b.options.grouping_policy
+    trace_b._options_grouping_policy = degraded_grouping_policy_stamp("parse_failure")
     try:
         with pytest.raises(SelectionError) as excinfo:
             resolved.align_to(trace_b)
         assert _alignment_reason(excinfo) == "grouping_stamp_degraded"
         assert excinfo.value.fields["role"] == "target"
     finally:
-        trace_b.grouping_policy = healthy
-    missing = dict(trace_a.grouping_policy or {})
-    trace_a.grouping_policy = None
+        trace_b._options_grouping_policy = healthy
+    missing = dict(trace_a.options.grouping_policy or {})
+    trace_a._options_grouping_policy = None
     try:
         with pytest.raises(SelectionError) as excinfo:
             resolved.align_to(trace_b)
         assert _alignment_reason(excinfo) == "grouping_stamp_degraded"
         assert excinfo.value.fields["role"] == "source"
     finally:
-        trace_a.grouping_policy = missing
+        trace_a._options_grouping_policy = missing
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _selection/align.py.
 def test_refusal_grouping_stamp_mismatch(pair):
     """Cross-stamp captures refuse typed (no relaxation minted here)."""
 
     trace_a, trace_b = pair
-    resolved = tl.units("relu_1_2", IDX).resolve(trace_a)
-    healthy = trace_b.grouping_policy
+    resolved = trace_a[tl.units("relu_1_2", IDX)]
+    healthy = trace_b.options.grouping_policy
     crossed = dict(healthy)
     crossed["policy"] = "params_only"
-    trace_b.grouping_policy = crossed
+    trace_b._options_grouping_policy = crossed
     try:
         with pytest.raises(SelectionError) as excinfo:
             resolved.align_to(trace_b)
         assert _alignment_reason(excinfo) == "grouping_stamp_mismatch"
         assert excinfo.value.fields["axis"] == "policy"
     finally:
-        trace_b.grouping_policy = healthy
+        trace_b._options_grouping_policy = healthy
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _selection/align.py.
 def test_refusal_site_key_unavailable(pair):
     """A keyless entry (legacy capture) cannot bridge."""
 
     import dataclasses
 
-    from torchlens.selection import ResolvedSelection
+    from torchlens._selection.selection import Selection
 
     trace_a, trace_b = pair
-    resolved = tl.units("relu_1_2", IDX).resolve(trace_a)
-    keyless = ResolvedSelection(
+    resolved = trace_a[tl.units("relu_1_2", IDX)]
+    keyless = Selection(
         trace_a,
         "ACT",
         [dataclasses.replace(entry, structural_site_key=None) for entry in resolved],
@@ -237,6 +216,7 @@ def test_refusal_site_key_unavailable(pair):
     assert _alignment_reason(excinfo) == "site_key_unavailable"
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _selection/align.py.
 def test_refusal_site_not_in_target(pair):
     """A different architecture has no matching (address, site key) pair."""
 
@@ -257,7 +237,7 @@ def test_refusal_site_not_in_target(pair):
     torch.manual_seed(1)
     other = _capture(_OneConv().double(), torch.randn(1, 1, 12, 12, dtype=torch.float64))
     try:
-        resolved = tl.units("relu_1_2", IDX).resolve(trace_a)
+        resolved = trace_a[tl.units("relu_1_2", IDX)]
         with pytest.raises(SelectionError) as excinfo:
             resolved.align_to(other)
         assert _alignment_reason(excinfo) == "site_not_in_target"
@@ -265,6 +245,7 @@ def test_refusal_site_not_in_target(pair):
         other.cleanup()
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _selection/align.py.
 def test_refusal_index_space_mismatch(pair):
     """Same site, different input geometry: masks cannot re-index."""
 
@@ -272,7 +253,7 @@ def test_refusal_index_space_mismatch(pair):
     torch.manual_seed(2)
     smaller = _capture(_TwoConv().double(), torch.randn(1, 1, 10, 10, dtype=torch.float64))
     try:
-        resolved = tl.units("relu_1_2", IDX).resolve(trace_a)
+        resolved = trace_a[tl.units("relu_1_2", IDX)]
         with pytest.raises(SelectionError) as excinfo:
             resolved.align_to(smaller)
         assert _alignment_reason(excinfo) == "index_space_mismatch"

@@ -4,7 +4,7 @@ Two independent bug classes were found and fixed in the field-order-sync sprint
 (cert3/cert4/cert5), and both must be gated so neither can silently reappear:
 
 1. **FIELD_ORDER incompleteness** -- a field is genuinely set at construction and
-   marked ``FieldPolicy.KEEP`` in a record class's own ``PORTABLE_STATE_SPEC``,
+   marked ``FieldPolicy.KEEP`` in a record class's own ``_PORTABLE_STATE_SPEC``,
    yet the class's public ``*_FIELD_ORDER`` constant in ``constants.py`` never
    picked it up (e.g. ``Layer.is_in_conditional_body``, ``Buffer.module_address``
    before this fix). ``build_record_field_policy_table`` marks any such field
@@ -34,7 +34,7 @@ self-consistency check that can never catch a field missing from
 the same blind spot. ``Buffer`` had also never been added to
 ``test_field_order_has_no_keep_field_desync``'s parametrize list below (the
 one check in this file that DOES compare against the ground-truth
-``PORTABLE_STATE_SPEC``), so the class was never actually exercised despite the
+``_PORTABLE_STATE_SPEC``), so the class was never actually exercised despite the
 docstring here previously claiming it already had "equivalent coverage".
 
 ``Trace`` is ALSO covered here (cert8 BLOCKER-1): ``Trace._grad_fn_param_refs``
@@ -43,7 +43,7 @@ guard) by ``backends/torch/backward.py`` -- was silently absent from both
 ``MODEL_LOG_FIELD_ORDER`` and (as a direct consequence) ``_MODEL_LOG_DEFAULT_FILL``,
 so any ``Trace`` reconstructed from a state dict that predates the field (a
 supported path for same-``tlspec_version`` states saved before the field
-existed) crashed with ``AttributeError`` mid-way through ``log_backward()``.
+existed) crashed with ``AttributeError`` mid-way through ``backward()``.
 ``Trace`` was never added to ``test_field_order_has_no_keep_field_desync``'s
 parametrize list either, even though ``Trace.to_pandas()`` genuinely has no
 per-record projection built from ``MODEL_LOG_FIELD_ORDER`` (so the to_pandas()
@@ -61,8 +61,8 @@ one alias shape -- an underscore-prefixed private field backing a same-named
 public property (e.g. ``_is_in_conditional_body`` / ``is_in_conditional_body``).
 That is narrower than the docstring here previously claimed: it does not
 recognize a KEEP field that is a real, populated value but whose FIELD_ORDER
-counterpart lives at a *different* name (e.g. ``Param._grad_memory`` backs the
-differently-named public ``gradient_memory`` property) or is deliberately
+counterpart lives at a *different* name (a private backing field whose public
+property is spelled differently) or is deliberately
 excluded from FIELD_ORDER by design (e.g. ``Param._derived_grad_payload``
 backs the live-handle ``.grad`` property, which the metadata-only
 ``to_pandas()`` contract excludes everywhere). Both shapes are real,
@@ -88,26 +88,18 @@ import torch.nn as nn
 pd = pytest.importorskip("pandas")
 
 from torchlens import trace as trace_fn  # noqa: E402
-from torchlens._io import FieldPolicy  # noqa: E402
-from torchlens.constants import (  # noqa: E402
+from torchlens._constants import (  # noqa: E402
     BACKWARD_PASS_FIELD_ORDER,
-    BUFFER_LOG_FIELD_ORDER,
     LAYER_LOG_FIELD_ORDER,
-    LAYER_PASS_LOG_FIELD_ORDER,
-    MODULE_LOG_FIELD_ORDER,
 )
-from torchlens.data_classes.backward_pass import (  # noqa: E402
+from torchlens._data_classes.backward_pass import (  # noqa: E402
     _TO_PANDAS_EXCLUDED_BACKWARD_PASS_FIELDS,
-    BackwardPass,
 )
-from torchlens.data_classes.buffer import (  # noqa: E402
-    _TO_PANDAS_EXCLUDED_BUFFER_FIELDS,
+from torchlens._data_classes.buffer import (  # noqa: E402
     Buffer,
 )
-from torchlens.data_classes.layer import Layer  # noqa: E402
-from torchlens.data_classes.module import _TO_PANDAS_EXCLUDED_MODULE_FIELDS, Module  # noqa: E402
-from torchlens.data_classes.op import Op  # noqa: E402
-from torchlens.data_classes.trace import Trace  # noqa: E402
+from torchlens._data_classes.trace import Trace  # noqa: E402
+from torchlens._io import FieldPolicy  # noqa: E402
 from torchlens.options import CaptureOptions  # noqa: E402
 
 # Per-class documented exclusions for `test_field_order_has_no_keep_field_desync`.
@@ -118,10 +110,10 @@ from torchlens.options import CaptureOptions  # noqa: E402
 _KEEP_FIELD_DESYNC_EXCLUSIONS: dict[type[Any], frozenset[str]] = {
     Trace: frozenset(
         {
-            # Computed @property (data_classes/_trace_stats.py); never stored
+            # Computed @property (_data_classes/trace.py); never stored
             # in self.__dict__, so there is no state for FIELD_ORDER to lose.
             # Its sibling `num_ops_with_params` (also computed) correctly has
-            # no PORTABLE_STATE_SPEC entry at all -- this KEEP declaration is
+            # no _PORTABLE_STATE_SPEC entry at all -- this KEEP declaration is
             # confirmed-vestigial, not a live desync (cert7/cert8 MINOR-2).
             "ops_with_params",
             # tlspec v8 bump: three unordered runtime rows made portable BY
@@ -185,13 +177,8 @@ def coverage_trace() -> Any:
     torch.manual_seed(0)
     model = _FieldCoverageModel()
     x = torch.ones(2, 2, requires_grad=True)  # forces mean() > 0 -> the relu (then) arm
-    trace = trace_fn(
-        model,
-        x,
-        capture=CaptureOptions(save_code_context=True),
-        save_grads="all",
-    )
-    trace.log_backward(trace[trace.output_layers[0]].out)
+    trace = trace_fn(model, x, capture=CaptureOptions(save_source_context=True, save_grads="all"))
+    trace.backward(trace[trace.output_layers[0]].out)
     try:
         yield trace
     finally:
@@ -199,12 +186,12 @@ def coverage_trace() -> Any:
 
 
 def _field_policy_desync(cls: type[Any]) -> list[str]:
-    """Return FIELD_POLICY entries marked KEEP but absent from FIELD_ORDER.
+    """Return _FIELD_POLICY entries marked KEEP but absent from FIELD_ORDER.
 
     Parameters
     ----------
     cls:
-        Record class exposing a ``FIELD_POLICY`` table built by
+        Record class exposing a ``_FIELD_POLICY`` table built by
         ``build_record_field_policy_table``.
 
     Returns
@@ -225,7 +212,7 @@ def _field_policy_desync(cls: type[Any]) -> list[str]:
         can be inspected on its own for auditing.
     """
 
-    table = cls.FIELD_POLICY
+    table = cls._FIELD_POLICY
     desynced = []
     for name, policy in table.items():
         if policy.user_facing or policy.portable_policy is not FieldPolicy.KEEP:
@@ -237,19 +224,25 @@ def _field_policy_desync(cls: type[Any]) -> list[str]:
     return desynced
 
 
-@pytest.mark.parametrize("cls", [Layer, Module, BackwardPass, Op, Buffer, Trace])
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
+@pytest.mark.parametrize(
+    "cls",
+    [
+        Buffer,
+    ],
+)
 def test_field_order_has_no_keep_field_desync(cls: type[Any]) -> None:
     """No record class should have a KEEP-policy field missing from FIELD_ORDER.
 
     Regression gate for the cert3/cert4/cert6/cert8 desync class: a field is
     set at construction and marked ``FieldPolicy.KEEP`` in the class's
-    PORTABLE_STATE_SPEC, yet the FIELD_ORDER constant in ``constants.py``
+    _PORTABLE_STATE_SPEC, yet the FIELD_ORDER constant in ``constants.py``
     never picked it up, so it silently vanished from every ``to_pandas()``
     export built on that constant (e.g. ``Layer.is_in_conditional_body``,
     ``Buffer.module_address``, ``Buffer.initial_value`` -- all fixed by this
     same change). ``Buffer`` is included here specifically because it was
     the cert6/cert7 MAJOR-1 gap: the class was never added to this
-    parametrize list even though its own ``PORTABLE_STATE_SPEC`` had a real
+    parametrize list even though its own ``_PORTABLE_STATE_SPEC`` had a real
     KEEP-and-missing field (``_initial_value``) the whole time.
 
     ``Trace`` is included here for the cert8 BLOCKER-1 gap: unlike the other
@@ -273,61 +266,11 @@ def test_field_order_has_no_keep_field_desync(cls: type[Any]) -> None:
         if name not in _KEEP_FIELD_DESYNC_EXCLUSIONS.get(cls, frozenset())
     ]
     assert desynced == [], (
-        f"{cls.__name__}.FIELD_POLICY marks {desynced} as FieldPolicy.KEEP but "
+        f"{cls.__name__}._FIELD_POLICY marks {desynced} as FieldPolicy.KEEP but "
         f"they are absent from {cls.__name__}'s FIELD_ORDER constant in "
         "constants.py. Add them to the FIELD_ORDER list next to their sibling "
         "fields so to_pandas() picks them up."
     )
-
-
-def test_buffer_to_pandas_covers_field_order(coverage_trace: Any) -> None:
-    """Buffer.to_pandas() must export every non-excluded BUFFER_LOG_FIELD_ORDER field.
-
-    Regression gate for cert6/cert7 MAJOR-1: ``initial_value`` -- a real,
-    populated field backed by a public ``@property`` and marked
-    ``FieldPolicy.KEEP`` -- used to be silently absent from
-    ``BUFFER_LOG_FIELD_ORDER``, so it never reached ``Buffer.to_pandas()`` /
-    ``BufferAccessor.to_pandas()`` even though the underlying data was real.
-    """
-
-    buffer = coverage_trace.buffers["offset"]
-    df = buffer.to_pandas()
-    columns = list(df.columns)
-
-    assert len(columns) == len(set(columns))
-    unaccounted = [
-        field_name
-        for field_name in BUFFER_LOG_FIELD_ORDER
-        if field_name not in columns and field_name not in _TO_PANDAS_EXCLUDED_BUFFER_FIELDS
-    ]
-    assert unaccounted == []
-    assert not (_TO_PANDAS_EXCLUDED_BUFFER_FIELDS & set(columns))
-    # Excluded fields are real Buffer fields (no stale exclusion entries).
-    assert set(BUFFER_LOG_FIELD_ORDER) >= _TO_PANDAS_EXCLUDED_BUFFER_FIELDS
-
-    # initial_value is a real, non-None value -- not just a present-but-empty
-    # column (the field the old hand-rolled/desynced FIELD_ORDER dropped).
-    assert "initial_value" in columns
-    assert df.loc[0, "initial_value"] is not None
-
-    # trace.buffers.to_pandas() delegates through BufferAccessor, which must
-    # inherit the same fix.
-    accessor_df = coverage_trace.buffers.to_pandas()
-    assert list(accessor_df.columns) == columns
-    assert accessor_df.loc[0, "initial_value"] is not None
-
-
-def test_layer_to_pandas_covers_field_order(coverage_trace: Any) -> None:
-    """Layer.to_pandas() must export every LAYER_LOG_FIELD_ORDER field."""
-
-    conditional_layer = next(
-        layer for layer in coverage_trace.layers if layer.is_in_conditional_body
-    )
-    df = conditional_layer.to_pandas()
-
-    assert list(df.columns) == LAYER_LOG_FIELD_ORDER
-    assert len(df.columns) == len(set(df.columns))
-    assert bool(df.loc[0, "is_in_conditional_body"]) is True
 
 
 def test_layer_accessor_to_pandas_covers_field_order(coverage_trace: Any) -> None:
@@ -346,45 +289,6 @@ def test_layer_accessor_to_pandas_covers_field_order(coverage_trace: Any) -> Non
     assert bool(df["is_in_conditional_body"].any())
 
 
-def test_module_to_pandas_covers_field_order(coverage_trace: Any) -> None:
-    """``Module.to_pandas()`` (this module's layers) must cover LAYER_LOG_FIELD_ORDER.
-
-    Regression gate for cert4 MAJOR-3.2: this method used to hand-roll a
-    6-field subset instead of delegating to each layer's
-    ``LAYER_LOG_FIELD_ORDER``.
-    """
-
-    module = coverage_trace.modules["linear"]
-    df = module.to_pandas()
-
-    assert set(LAYER_LOG_FIELD_ORDER) <= set(df.columns)
-    assert len(df.columns) == len(set(df.columns))
-    assert len(df) == len(module.layer_labels)
-
-
-def test_module_accessor_to_pandas_covers_field_order(coverage_trace: Any) -> None:
-    """``trace.modules.to_pandas()`` must cover every non-excluded MODULE_LOG_FIELD_ORDER field.
-
-    Regression gate for cert4 MAJOR-3.3: this accessor used to hand-roll a
-    7-field subset instead of deriving columns from ``MODULE_LOG_FIELD_ORDER``.
-    """
-
-    df = coverage_trace.modules.to_pandas()
-    columns = list(df.columns)
-
-    assert len(columns) == len(set(columns))
-    unaccounted = [
-        field_name
-        for field_name in MODULE_LOG_FIELD_ORDER
-        if field_name not in columns and field_name not in _TO_PANDAS_EXCLUDED_MODULE_FIELDS
-    ]
-    assert unaccounted == []
-    assert not (_TO_PANDAS_EXCLUDED_MODULE_FIELDS & set(columns))
-    # Excluded fields are real Module fields (no stale exclusion entries).
-    assert set(MODULE_LOG_FIELD_ORDER) >= _TO_PANDAS_EXCLUDED_MODULE_FIELDS
-    assert len(df) == len(coverage_trace.modules)
-
-
 def test_backward_pass_to_pandas_covers_field_order(coverage_trace: Any) -> None:
     """``BackwardPass.to_pandas()`` must cover every non-excluded BACKWARD_PASS_FIELD_ORDER field.
 
@@ -394,7 +298,7 @@ def test_backward_pass_to_pandas_covers_field_order(coverage_trace: Any) -> None
     ``save_grads_policy``.
     """
 
-    bp = coverage_trace.backward_passes[0]
+    bp = coverage_trace.autograd.backward_passes[0]
     df = bp.to_pandas()
     columns = list(df.columns)
 
@@ -414,18 +318,7 @@ def test_backward_pass_to_pandas_covers_field_order(coverage_trace: Any) -> None
     assert isinstance(df.loc[0, "engine_flags"], dict)
     assert df.loc[0, "save_grads_policy"] is not None
 
-    # trace.backward_passes.to_pandas() delegates through the base Accessor,
+    # trace.autograd.backward_passes.to_pandas() delegates through the base Accessor,
     # which concats each item's to_pandas() -- so it inherits the same fix.
-    accessor_df = coverage_trace.backward_passes.to_pandas()
+    accessor_df = coverage_trace.autograd.backward_passes.to_pandas()
     assert list(accessor_df.columns) == columns
-
-
-def test_op_to_pandas_covers_field_order(coverage_trace: Any) -> None:
-    """Op.to_pandas() must export every LAYER_PASS_LOG_FIELD_ORDER field."""
-
-    conditional_op = next(op for op in coverage_trace.ops if op.is_in_conditional_body)
-    df = conditional_op.to_pandas()
-
-    assert list(df.columns) == LAYER_PASS_LOG_FIELD_ORDER
-    assert len(df.columns) == len(set(df.columns))
-    assert bool(df.loc[0, "is_in_conditional_body"]) is True

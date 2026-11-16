@@ -1,0 +1,179 @@
+"""F32 folded rider: listA rows 17/21 evidence at REAL HF causal-LM tier.
+
+Both rows shipped with toy-only evidence and the excuse "real-model runnable
+saves blocked by row 2 Cache defect". FIX-A (lane A05) landed, so a runnable
+save of a real HF causal-LM works; this file upgrades the evidence:
+
+* Row 17 (weight-free runnable warns): the R0 roster's shrunk-config
+  ``GPT2LMHeadModel`` saves ``level="runnable"`` with the default
+  ``include_weights=False``, loads, and ``run()`` executes on RANDOM
+  role-init state with the loud S-18 ``runnable_random_init_run`` warning.
+  The ``include_weights=True`` sibling settles VERIFIED and reproduces the
+  captured logits bit-faithfully -- the FIX-A dividend the rows waited on.
+* Row 21 (loaded-backward refuses before mutation; outcome gate learns
+  Recording): the same real architecture, not a toy Sequential.
+
+Unblocking defect fixed in the same change and pinned here: the sparse-run
+structure witness's ``_container_kind`` dispatched ``dataclasses.is_dataclass``
+BEFORE ``_is_hf_model_output``, and HF ``ModelOutput`` subclasses ARE
+dataclasses -- so a real GPT-2's recorded ``hf_model_output`` witness compared
+against a runtime "dataclass" kind and every honest identical run
+false-DIVERGED with ``OUTPUT_STRUCTURE_MISMATCH`` (same bug class as the r67
+C2 registered-branch inversion).
+"""
+
+from __future__ import annotations
+
+import warnings
+
+import pytest
+import torch
+
+import torchlens as tl
+from torchlens._capture.outcome import (
+    CaptureStatus,
+    outcome_for,
+    require_capture_capability,
+)
+from torchlens._runnable import PathFaithfulness, StateSource
+from torchlens.errors import ReattachError, RunCapabilityUnavailableError, TorchLensWarning
+from torchlens.options import CaptureOptions
+
+pytest.importorskip("transformers")
+
+from tests.real_model.r0.families import (  # noqa: E402
+    _token_ids,
+    build_gpt2,
+    build_gpt2_default_cache,
+)
+from tests.support.hf_capabilities import (  # noqa: E402
+    attention_masks_avoid_vmap,
+    gpt2_attention_keeps_causal_mask_buffer,
+)
+
+pytestmark = [pytest.mark.heavy, pytest.mark.real_model]
+
+
+@pytest.fixture(scope="module")
+def gpt2_and_inputs():
+    torch.manual_seed(0)
+    return build_gpt2("eager").eval(), _token_ids()
+
+
+@pytest.fixture(scope="module")
+def runnable_trace(gpt2_and_inputs):
+    model, input_ids = gpt2_and_inputs
+    trace = tl.trace(model, input_ids, capture=CaptureOptions(replayable=True))
+    try:
+        yield trace
+    finally:
+        trace.cleanup()
+
+
+# Kept: sole branch coverage of _io/runnable.py, _runnable/state.py, _runnable/witness_contracts.py; a sole mutation kill; the catch of its regression fault.
+def test_gpt2_weight_free_runnable_random_run_warns(tmp_path, gpt2_and_inputs, runnable_trace):
+    """Row 17 at real-model tier: the default weight-free runnable artifact of
+    a real HF causal-LM loads, runs on RANDOM role-init state, and warns with
+    the contracted S-18 code naming both remedies."""
+
+    _, input_ids = gpt2_and_inputs
+    path = tmp_path / "gpt2_runnable"
+    if gpt2_attention_keeps_causal_mask_buffer():
+        # 4.x GPT-2 keeps its causal mask as a used non-persistent buffer, which
+        # the runnable save stores as required state and discloses.
+        with pytest.warns(TorchLensWarning, match="NON-persistent"):
+            runnable_trace.save(path, level="runnable")
+    else:
+        runnable_trace.save(path, level="runnable")
+    loaded = tl.load(path)
+    if not attention_masks_avoid_vmap():
+        # 4.x builds GPT-2's attention mask through ``torch.vmap``: the recorded
+        # callable is a vmapped closure with no import path, so once the random
+        # state binds the run refuses typed, naming that callable.
+        with pytest.raises(ReattachError) as excinfo:
+            loaded.run_transaction(inputs=input_ids, seed=0)
+        assert excinfo.value.fields["code"] == "private_api_unavailable"
+        recorded = [
+            dict(diagnostic.details).get("recorded_key", "")
+            for diagnostic in excinfo.value.fields["diagnostics"]
+        ]
+        assert any("vmap" in key for key in recorded)
+        return
+    with pytest.warns(TorchLensWarning, match="RANDOM") as record:
+        result = loaded.run_transaction(inputs=input_ids, seed=0)
+    assert result.report.state_source is StateSource.RANDOM_INITIALIZATION
+    warnings_seen = [w.message for w in record if issubclass(w.category, TorchLensWarning)]
+    # S-18 contract: consumers branch on fields["code"], never message text.
+    assert any(
+        getattr(w, "fields", {}).get("code") == "runnable_random_init_run" for w in warnings_seen
+    )
+    messages = [str(w) for w in warnings_seen]
+    assert any("include_weights=True" in m and "load_state_dict" in m for m in messages)
+
+
+# Kept: sole branch coverage of backends/torch/_trace_backward.py; a sole mutation kill.
+def test_gpt2_loaded_backward_refuses_before_mutation(tmp_path, gpt2_and_inputs):
+    """Row 21 at real-model tier: ``backward`` on a bundle-loaded real HF
+    trace refuses typed BEFORE mutating backward state."""
+
+    model, input_ids = gpt2_and_inputs
+    trace = tl.trace(model, input_ids, capture=CaptureOptions(backward_ready=True))
+    trace.save(tmp_path / "gpt2_bundle")
+    loaded = tl.load(tmp_path / "gpt2_bundle")
+    live_loss = model(input_ids=input_ids).logits.sum()
+    with pytest.raises(RunCapabilityUnavailableError, match="bundle-loaded"):
+        loaded.backward(live_loss)
+    assert len(loaded.autograd.backward_passes or []) == 0
+    assert len(loaded.autograd.grad_fns) == 0
+    with pytest.raises(RunCapabilityUnavailableError, match="bundle-loaded"):
+        loaded.capture_backward()
+
+
+# Kept: sole branch coverage of _capture/_outcome_types.py; a sole mutation kill.
+def test_gpt2_recording_outcome_gate_reads_complete(gpt2_and_inputs):
+    """Row 21 at real-model tier: the N1-N5 chokepoint reads a slots-backed
+    real-model ``Recording``'s settled COMPLETE outcome without the false
+    hand-built-object warning."""
+
+    model, input_ids = gpt2_and_inputs
+    rec = tl.record(model, input_ids, save=tl.func("softmax"))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        settled = outcome_for(rec)
+        gate_outcome = require_capture_capability(rec, "save_analysis")
+    assert settled is not None and settled.status is CaptureStatus.COMPLETE
+    assert gate_outcome.status is CaptureStatus.COMPLETE
+    hand_built = [w for w in caught if "hand-built" in str(w.message)]
+    assert hand_built == []
+
+
+# Kept: a sole mutation kill.
+def test_gpt2_default_cache_config_live_run_reaches_verdict_or_typed_remedy(gpt2_and_inputs):
+    """AUD-HONESTY H1 at the R0 roster tier: the rows above pin ``use_cache=False`` +
+    ``replayable=True`` only, so the HF DEFAULT configuration (KV cache on) was
+    never exercised by a ``run()`` test. On both the default capture and the
+    ``replayable`` capture a default-config GPT-2 ``run()`` must reach VERIFIED
+    or a TYPED remedy (never the bare "Not enough leaves" ValueError the audit hit),
+    and the remedy must name ``use_cache=False``."""
+
+    _, input_ids = gpt2_and_inputs
+    torch.manual_seed(0)
+    model = build_gpt2_default_cache("eager").eval()
+    assert model.config.use_cache is True
+    for options in (CaptureOptions(), CaptureOptions(replayable=True)):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            trace = tl.trace(model, input_ids, capture=options)
+        result = trace.run_transaction(inputs=input_ids)
+        if result.report.path_faithfulness is PathFaithfulness.VERIFIED:
+            continue
+        checks = [
+            c for c in result.report.contract_checks if c.name == "live_output_reconstruction"
+        ]
+        assert len(checks) == 1 and not checks[0].passed
+        diagnostic = checks[0].diagnostic
+        assert diagnostic.code.value == "output_structure_mismatch"
+        details = dict(diagnostic.details)
+        assert details["reason"] == "opaque_leaf", details
+        assert "use_cache=False" in details["remedy"]
+        assert diagnostic.message.rstrip(".").endswith(details["remedy"])

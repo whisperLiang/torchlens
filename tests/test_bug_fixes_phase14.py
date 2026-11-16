@@ -11,21 +11,21 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from _record_fakes import FlatNamespace
 
 import torchlens as tl
-from torchlens.capture.arg_positions import FUNC_ARG_SPECS, extract_tensors_and_params
-from torchlens.data_classes.func_call_location import FuncCallLocation
-from torchlens.options import SaveOptions
-from torchlens.utils.hashing import make_short_barcode_from_input
-from torchlens.utils.tensor_utils import tensor_nanequal
+from torchlens._capture.arg_positions import FUNC_ARG_SPECS, extract_tensors_and_params
+from torchlens._data_classes.func_call_location import FuncCallLocation
+from torchlens._utils.hashing import make_short_barcode_from_input
+from torchlens._utils.tensor_utils import tensor_nanequal
+from torchlens._visualization._render_common import GRADIENT_ARROW_COLOR
+from torchlens.errors import MetadataInvariantError
 from torchlens.validation import (
-    MetadataInvariantError,
     check_metadata_invariants,
     validate_forward_pass,
 )
-from torchlens.validation.core import _check_arglocs_correct_for_arg
-from torchlens.validation.exemptions import _check_interpolate_exempt, _check_lstm_exempt
-from torchlens.visualization._render_common import GRADIENT_ARROW_COLOR
+from torchlens.validation._core import _check_arglocs_correct_for_arg
+from torchlens.validation._exemptions import _check_interpolate_exempt, _check_lstm_exempt
 
 
 def _sample_func_for_location(x: torch.Tensor) -> torch.Tensor:
@@ -339,7 +339,7 @@ def test_functional_parameter_view_does_not_inflate_param_counts() -> None:
     """Differentiable tensor views are not counted as separate parameters."""
 
     model = _FunctionalParameterViewModel()
-    trace = tl.trace(model, torch.randn(2, 4), save_arg_values=True)
+    trace = tl.trace(model, torch.randn(2, 4), capture=tl.options.CaptureOptions(save_args=True))
 
     assert trace.num_params == model.weight.numel()
     assert trace.num_params_trainable == model.weight.numel()
@@ -361,24 +361,23 @@ def test_view_mutation_output_recomputes_transformed_payload_metadata(
     trace = tl.trace(
         _ViewMutationOutputTransformModel(),
         input_value,
-        save=SaveOptions(
-            activation_transform=lambda value: value + 10,
-            save_raw_activations=save_raw_activations,
+        capture=tl.options.CaptureOptions(
+            activation_transform=lambda value: value + 10, save_raw_activations=save_raw_activations
         ),
     )
     output_op = trace[trace.output_layers[0]]
 
     assert output_op.shape == (6, 3)
     assert output_op.dtype == expected_raw.dtype
-    assert output_op.activation_memory == expected_raw.nelement() * expected_raw.element_size()
+    assert output_op.cost.activation_memory == expected_raw.nelement() * expected_raw.element_size()
     if save_raw_activations:
         assert torch.equal(output_op.out, expected_raw)
     else:
         assert output_op.out is None
-    assert torch.equal(output_op.transformed_out, expected_transformed)
-    assert output_op.transformed_out_shape == (6, 3)
-    assert output_op.transformed_out_dtype == expected_transformed.dtype
-    assert output_op.transformed_activation_memory == (
+    assert torch.equal(output_op.payload.transformed_out, expected_transformed)
+    assert output_op.payload.transformed_out_shape == (6, 3)
+    assert output_op.payload.transformed_out_dtype == expected_transformed.dtype
+    assert output_op.cost.transformed_activation_memory == (
         expected_transformed.nelement() * expected_transformed.element_size()
     )
     assert check_metadata_invariants(trace) is True
@@ -390,20 +389,20 @@ def test_conditional_then_children_merge_across_multipass_layerlog() -> None:
     trace = tl.trace(
         _AlternatingRecurrentModel(),
         torch.ones(1, 4),
-        layers_to_save="all",
-        save_code_context=True,
+        capture=tl.options.CaptureOptions(save_source_context=True),
+        save="all",
     )
-    conditional_id = trace.conditional_records[0].id
+    conditional_id = trace.graph.conditional_records[0].id
     parent_layer = next(
         layer
-        for layer in trace.layer_logs.values()
-        if conditional_id in layer.conditional_arm_children
-        and "then" in layer.conditional_arm_children[conditional_id]
-        and "else" in layer.conditional_arm_children[conditional_id]
+        for layer in trace._layer_logs.values()
+        if conditional_id in layer.control_flow.arm_children
+        and "then" in layer.control_flow.arm_children[conditional_id]
+        and "else" in layer.control_flow.arm_children[conditional_id]
     )
 
-    assert parent_layer.conditional_then_children
-    assert parent_layer.conditional_else_children
+    assert parent_layer.control_flow.then_children
+    assert parent_layer.control_flow.else_children
     assert check_metadata_invariants(trace) is True
 
 
@@ -413,13 +412,13 @@ def test_conditional_then_invariant_catches_derived_view_corruption() -> None:
     trace = tl.trace(
         _AlternatingRecurrentModel(),
         torch.ones(1, 4),
-        layers_to_save="all",
-        save_code_context=True,
+        capture=tl.options.CaptureOptions(save_source_context=True),
+        save="all",
     )
     parent_layer = next(
-        layer for layer in trace.layer_logs.values() if layer.conditional_then_children
+        layer for layer in trace._layer_logs.values() if layer.control_flow.then_children
     )
-    parent_layer.conditional_then_children = []
+    parent_layer._control_flow_then_children = []
 
     with pytest.raises(MetadataInvariantError, match="conditional_then_children"):
         check_metadata_invariants(trace)
@@ -470,7 +469,7 @@ def test_validation_arglocs_allow_same_parent_tensor_in_multiple_slots() -> None
         out_versions_by_child={},
         func_name="input",
     )
-    target = SimpleNamespace(
+    target = FlatNamespace(
         layer_label="add_1_1",
         parents=["input_1"],
         parent_arg_positions={"args": {0: "input_1"}, "kwargs": {}},
@@ -493,7 +492,7 @@ def test_lstm_exemption_only_treats_hidden_state_as_structural() -> None:
     h = torch.zeros(1, 2, 3)
     c = torch.ones(1, 2, 3)
     weight = torch.randn(12, 3)
-    layer = SimpleNamespace(
+    layer = FlatNamespace(
         saved_args=(h.clone(), (h, c), [weight]),
         parent_arg_positions={
             "args": {0: "equal_data", 1: "hidden", 2: "weight"},
@@ -521,7 +520,7 @@ def test_lstm_exemption_resolves_real_nested_hidden_state_positions() -> None:
 
     h = torch.zeros(1, 2, 3)
     c = torch.ones(1, 2, 3)
-    layer = SimpleNamespace(
+    layer = FlatNamespace(
         saved_args=(torch.randn(4, 2, 3), (h, c)),
         parent_arg_positions={
             "args": {0: "data", (1, 0): "h0", (1, 1): "c0"},
@@ -543,7 +542,7 @@ def test_interpolate_exemption_uses_scale_factor_position_not_content() -> None:
     """Equal-valued input and scale tensors are disambiguated structurally."""
 
     equal_value = torch.tensor(2.0)
-    layer = SimpleNamespace(
+    layer = FlatNamespace(
         saved_args=(equal_value, None, equal_value.clone()),
         saved_kwargs={},
         parent_arg_positions={
@@ -560,11 +559,10 @@ def test_interpolate_exemption_uses_scale_factor_position_not_content() -> None:
     assert not _check_interpolate_exempt(trace, layer, ["equal_data"])  # type: ignore[arg-type]
 
 
-@pytest.mark.smoke
 def test_validate_forward_pass_handles_identity_output_layer() -> None:
     """Validation perturbs through synthetic output identity nodes."""
 
-    assert validate_forward_pass(_IdentityOutputModel(), torch.randn(2, 3), random_seed=1)
+    assert validate_forward_pass(_IdentityOutputModel(), torch.randn(2, 3), seed=1)
 
 
 def test_rolled_forward_graph_supports_grad_arrows(tmp_path: Path) -> None:
@@ -573,14 +571,13 @@ def test_rolled_forward_graph_supports_grad_arrows(tmp_path: Path) -> None:
     trace = tl.trace(
         _ResidualRecurrentModel(),
         torch.randn(2, 3, requires_grad=True),
-        save_grads="all",
+        capture=tl.options.CaptureOptions(save_grads="all"),
     )
     trace[trace.output_layers[0]].out.backward()
     dot = trace.draw(
-        vis_mode="rolled",
-        vis_outpath=str(tmp_path / "rolled_grad"),
-        vis_fileformat="dot",
-        vis_save_only=True,
-    )
+        rolled=True,
+        path=str(tmp_path / "rolled_grad"),
+        file_format="dot",
+    ).dot
 
     assert GRADIENT_ARROW_COLOR in dot

@@ -7,8 +7,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._ir.intervention import FunctionEventInput
 from torchlens.backends.torch.aliasing import detect_torch_alias_contract
-from torchlens.ir.intervention import FunctionEventInput
 
 
 class FastPassAliasMutationModel(nn.Module):
@@ -40,7 +40,12 @@ def test_selective_save_rebuilds_out_versions_for_child_lookup() -> None:
     model = FastPassAliasMutationModel()
     x = torch.ones(2, 4)
 
-    trace = tl.trace(model, x, layers_to_save=["mul"], save_arg_values=True)
+    trace = tl.trace(
+        model,
+        x,
+        capture=tl.options.CaptureOptions(save_args=True),
+        save=["mul"],
+    )
 
     parent = trace["add_1_1"]
     assert trace._replay_arg_version_data_complete
@@ -58,10 +63,15 @@ def test_selective_save_without_arg_values_reports_versions_incomplete() -> None
     model = FastPassAliasMutationModel()
     x = torch.ones(2, 4)
 
-    trace = tl.trace(model, x, layers_to_save=["mul"], save_arg_values=False)
+    trace = tl.trace(
+        model,
+        x,
+        capture=tl.options.CaptureOptions(save_args=False),
+        save=["mul"],
+    )
 
     assert not trace._replay_arg_version_data_complete
-    assert all(not op.out_versions_by_child for op in trace.layer_list)
+    assert all(not op.out_versions_by_child for op in trace._layer_list)
     with pytest.raises(ValueError, match="child-version snapshots"):
         trace.validate_forward_pass([model(x).detach().clone()], validate_metadata=False)
 

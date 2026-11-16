@@ -3,61 +3,27 @@
 from __future__ import annotations
 
 import functools
-import inspect
+import sys
 import threading
 import warnings
 from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
 
+from torchlens._utils import _torch_compat
+
 from ... import _state
-from ...errors import ScalarEscapeWarning
-from ._tl import (
+from ..._utils import _exception_notes
+from ..._utils._tensor_label import (
+    DescriptorCompatProperty,
     get_tensor_label,
 )
-
-if TYPE_CHECKING:
-    from .completeness_witness import (
-        _HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS,
-        _HOST_ESCAPE_BOOL_SOURCE_LABELS,
-        _HOST_ESCAPE_CROSS_THREAD_CAPTURED,
-        _HOST_ESCAPE_MUTABLE_WRITEBACK,
-        _HOST_ESCAPE_RAW_POINTER,
-        _HOST_ESCAPE_STATE_SOURCE_NAMES,
-        _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE,
-        _INPUT_METADATA_VIEW_READ,
-        _ORIG_UNTYPED_STORAGE_DATA_PTR,
-        _STORAGE_ACCESSOR_FAIL_CLOSED,
-        _STORAGE_ACCESSOR_MUTATOR,
-        _STORAGE_ACCESSOR_NBYTES,
-        _STORAGE_ACCESSOR_ORIGIN_BRIDGE,
-        _STORAGE_ACCESSOR_PLACEMENT,
-        _STORAGE_ACCESSOR_RAW_POINTER,
-        _STORAGE_ACCESSOR_VALUE_READ,
-        _TORCHLENS_ROOT,
-        HOST_VALUE_ESCAPE_METHODS,
-        STATE_METADATA_MIRROR,
-        _CompletenessDispatchMode,
-        _expand_state_alias_addresses,
-        _internal_read_active,
-        _nonowner_escape_observe,
-        _nonowner_ptr_is_captured,
-        _observe_state_metadata_read,
-        _PlainScalarEscapeState,
-        _record_escape_source_tensor,
-        _record_input_metadata_read_at_site,
-        _record_input_storage_nbytes,
-        _record_state_metadata_observation,
-        _record_state_metadata_read,
-        _register_storage_handle_origin,
-        _resolve_storage_origin,
-        _WitnessState,
-        internal_scalar_read,
-    )
+from ...errors import ScalarEscapeWarning
+from ...errors._base import transparent_contextmanager
+from ._bool_check_records import bool_check_record_label
 
 __all__ = (
     "_nonowner_storage_observe",
@@ -70,6 +36,7 @@ __all__ = (
     "_make_host_value_escape_method",
     "_first_scalar_escape_source",
     "_record_bool_consumer_location",
+    "_record_plain_direct_escape",
     "_make_plain_scalar_escape_method",
     "_external_warning_stacklevel",
     "capture_scalar_escape_warning",
@@ -80,7 +47,7 @@ __all__ = (
 
 
 def _nonowner_storage_observe(state: _WitnessState, storage: Any) -> None:
-    """Ceiling the capture when a NON-owner thread touches a CAPTURED storage handle (r67)."""
+    """Ceiling the capture when a NON-owner thread touches a CAPTURED storage handle."""
 
     try:
         backing = (
@@ -96,7 +63,7 @@ def _nonowner_storage_observe(state: _WitnessState, storage: Any) -> None:
 
 
 def _record_state_value_escape(trace: Any, addresses: set[str]) -> None:
-    """Join a storage-spelling VALUE read into the state digest witness (r67 C3)."""
+    """Join a storage-spelling VALUE read into the state digest witness."""
 
     addresses = _expand_state_alias_addresses(trace, addresses)
     state_names = _HOST_ESCAPE_STATE_SOURCE_NAMES.get(trace)
@@ -249,24 +216,31 @@ def _make_storage_property_wrapper(
                 _nonowner_storage_observe(state, self)
         return value
 
-    return property(getter)
+    # doc= MUST be explicit (never defaulted): see DescriptorCompatProperty's
+    # constructor-landmine note in _tl.py.
+    replacement = DescriptorCompatProperty(getter, doc=name)
+    objclass = getattr(descriptor, "__objclass__", None)
+    if objclass is not None:
+        replacement.__objclass__ = objclass
+    replacement.__name__ = name
+    return replacement
 
 
 def _make_storage_raw_pointer_wrapper(original: Any, state: _WitnessState) -> Any:
     """Wrap ``UntypedStorage.data_ptr`` / ``TypedStorage.data_ptr`` to fail closed, then read through.
 
-    ``tensor.data_ptr()`` is fail-closed by :func:`_make_invisible_escape_wrapper` (r15-H1), but the
+    ``tensor.data_ptr()`` is fail-closed by :func:`_make_invisible_escape_wrapper`, but the
     SAME raw pointer is reachable off the Storage HANDLE: ``tensor.untyped_storage().data_ptr()`` /
     ``tensor.storage().data_ptr()`` call ``data_ptr`` on the ``UntypedStorage`` / ``TypedStorage``
     object, NOT on ``torch.Tensor`` -- so the Tensor patch never fires and the raw pointer escapes
-    unobserved (r16-C1). A ``ctypes`` READ through it bakes a stale literal and a WRITE through it
+    unobserved. A ``ctypes`` READ through it bakes a stale literal and a WRITE through it
     mutates the source with no dispatch, no version bump, and no byte the forward-end watch can
     re-inspect. A genuine USER storage ``data_ptr()`` therefore fails closed to UNVERIFIABLE, exactly
     like the Tensor path. Scoped to the ``data_ptr()`` ACCESSOR only: read-only
     ``untyped_storage().nbytes()`` / ``.size()`` (pure metadata, no pointer) never trips it.
     TorchLens's own capture-internal storage-pointer reads (``aliasing._tensors_alias`` ->
     ``untyped_storage().data_ptr()``) run under the ``internal_scalar_read`` marker and are excluded.
-    r43: the OWNER thread fails closed (blanket raw-pointer flag) exactly as before; a NON-OWNER
+    the OWNER thread fails closed (blanket raw-pointer flag) exactly as before; a NON-OWNER
     thread ceilings ONLY when the storage belongs to a CAPTURED tensor (its raw pointer, read via
     the original accessor, is a captured input/param/activation pointer), so a foreign library's
     own ``data_ptr()`` reads never ceiling the capture.
@@ -306,7 +280,7 @@ def _make_storage_raw_pointer_wrapper(original: Any, state: _WitnessState) -> An
 
 
 def _completeness_census_active() -> bool:
-    """Return whether the aten completeness census mode is on the active dispatch stack (r39).
+    """Return whether the aten completeness census mode is on the active dispatch stack.
 
     The mode-independent method/predicate belt is only NEEDED when the census is BLIND -- inside
     a ``_disable_current_modes()`` region that popped :class:`_CompletenessDispatchMode` off the
@@ -317,23 +291,21 @@ def _completeness_census_active() -> bool:
     unattributable gate. So the belt records ONLY when the census is not currently observing.
 
     The stack query routes through the ``_torch_compat`` accessor
-    (``HAS_DISPATCH_MODE_STACK_QUERY``) and FAILS CLOSED (r-b4 R26-1): "cannot answer"
+    (``HAS_DISPATCH_MODE_STACK_QUERY``) and FAILS CLOSED: "cannot answer"
     reads as census-INACTIVE so the belt records the escape. The historical
     ``except Exception: return True`` failed OPEN -- a private-API rename silently
     disarmed the belt in exactly the census-blind regions it exists to cover,
     converting a belt-witnessed escape into an unwitnessed one (false VERIFIED).
     """
 
-    from torchlens.utils._torch_compat import get_current_dispatch_mode_stack
-
-    stack = get_current_dispatch_mode_stack()
+    stack = _torch_compat.get_current_dispatch_mode_stack()
     if stack is None:
         return False
     return any(isinstance(mode, _CompletenessDispatchMode) for mode in stack)
 
 
 def _make_host_value_escape_method(original: Any, state: _WitnessState, name: str) -> Any:
-    """Wrap a tensor->host VALUE method to record its tensor operand SOURCES (r39 hon2_1).
+    """Wrap a tensor->host VALUE method to record its tensor operand SOURCES.
 
     ``item`` / ``__bool__`` / ``__int__`` / ``__float__`` / ``__index__`` / ``__complex__`` and
     the pure predicates ``equal`` / ``allclose`` / ``is_nonzero`` all read a captured tensor's
@@ -346,7 +318,7 @@ def _make_host_value_escape_method(original: Any, state: _WitnessState, name: st
 
     Records ``self`` plus any tensor argument (``equal`` / ``allclose`` take a second tensor
     operand), gated to the active trace with TorchLens's own marked internal reads excluded.
-    r43: fires on every thread under the owner-vs-non-owner rule -- on a NON-owner thread the
+    fires on every thread under the owner-vs-non-owner rule -- on a NON-owner thread the
     census mode is never on that thread's dispatch stack (a ``TorchDispatchMode`` is
     thread-local), so this belt is correctly PRIMARY there and ceilings a captured-tensor touch;
     a benign own-tensor touch records nothing. Always calls the exact original unchanged
@@ -383,7 +355,7 @@ def _make_host_value_escape_method(original: Any, state: _WitnessState, name: st
                             if isinstance(value, torch.Tensor):
                                 _record_escape_source_tensor(state.trace, value)
             elif state.belt_armed:
-                # r43: a NON-owner value escape ceilings iff its receiver OR any tensor operand
+                # a NON-owner value escape ceilings iff its receiver OR any tensor operand
                 # is a captured tensor (the census is thread-local, so the belt is PRIMARY here).
                 _nonowner_escape_observe(state, self)
                 for value in (*args, *kwargs.values()):
@@ -394,31 +366,11 @@ def _make_host_value_escape_method(original: Any, state: _WitnessState, name: st
     return wrapper
 
 
-def _first_scalar_escape_source() -> tuple[str | None, int | None]:
-    """Return the first non-TorchLens frame for a scalar escape call.
-
-    Returns
-    -------
-    tuple[str | None, int | None]
-        Source filename and line, or ``(None, None)`` if no user frame is visible.
-    """
-    frame = inspect.currentframe()
-    try:
-        frame = frame.f_back if frame is not None else None
-        while frame is not None:
-            filename = Path(frame.f_code.co_filename).resolve()
-            try:
-                filename.relative_to(_TORCHLENS_ROOT)
-            except ValueError:
-                return str(filename), frame.f_lineno
-            frame = frame.f_back
-    finally:
-        del frame
-    return None, None
-
-
 def _record_bool_consumer_location(trace: Any, source: torch.Tensor) -> None:
     """Record where one labelled bool tensor reached Python's ``__bool__`` protocol.
+
+    A later conditional test of a bool that already decides one is recorded under its own
+    clone (``_bool_check_records``), so each conditional keeps its own terminal bool.
 
     Parameters
     ----------
@@ -449,16 +401,48 @@ def _record_bool_consumer_location(trace: Any, source: torch.Tensor) -> None:
     if locations is None:
         locations = {}
         _HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS[trace] = locations
-    entries = locations.setdefault(label, [])
     location = (filename, line_number)
+    label = bool_check_record_label(trace, source, label, location, locations)
+    entries = locations.setdefault(label, [])
     if location not in entries:
         entries.append(location)
+    _HOST_ESCAPE_BOOL_SOURCE_LABELS.setdefault(trace, set()).add(label)
 
-    bool_sources = _HOST_ESCAPE_BOOL_SOURCE_LABELS.get(trace)
-    if bool_sources is None:
-        bool_sources = set()
-        _HOST_ESCAPE_BOOL_SOURCE_LABELS[trace] = bool_sources
-    bool_sources.add(label)
+
+def _record_plain_direct_escape(trace: Any, source: torch.Tensor, name: str) -> None:
+    """Queue a user-code data read of a source-less tensor as a provenance gap.
+
+    ``G.tolist()`` / ``float(G)`` / ``np.asarray(G)`` on a closure or module-global
+    tensor moves its value into Python with no op at all, so no pruned op can carry
+    the source-less witness. A read whose immediate caller is user code (not TorchLens,
+    not torch's own Python, which reads its temporaries inside wrapped calls) of a
+    tensor with no input/op/buffer/Parameter provenance is queued on the transient
+    ``_plain_direct_escape_gaps``; the provenance disclosure step persists it.
+
+    Parameters
+    ----------
+    trace:
+        Active plain capture trace.
+    source:
+        Unlabelled tensor receiver of the escape method.
+    name:
+        Escape method name.
+    """
+
+    from ._ops_arguments import _tensor_has_known_provenance
+
+    # Frame 0 is this helper, 1 the belt wrapper, 2 the escape's caller (C callers
+    # such as ``float()`` or NumPy's ``__array__`` lookup add no Python frame).
+    caller = sys._getframe(2)
+    filename = Path(caller.f_code.co_filename).resolve()
+    for root in (_TORCHLENS_ROOT, Path(torch.__file__).resolve().parent):
+        if filename.is_relative_to(root):
+            return
+    if _tensor_has_known_provenance(trace, source):
+        return
+    trace.__dict__.setdefault("_plain_direct_escape_gaps", []).append(
+        f"{name}() on a source-less tensor at {filename}:{caller.f_lineno} (no op)"
+    )
 
 
 def _make_plain_scalar_escape_method(
@@ -506,43 +490,29 @@ def _make_plain_scalar_escape_method(
             and _state._active_trace is state.trace
             and threading.get_ident() == state.owner_thread_id
             and not _internal_read_active()
-            and get_tensor_label(self) is not None
         ):
-            state.count += 1
-            if state.first_file is None:
-                state.first_file, state.first_line = _first_scalar_escape_source()
-            if name == "__bool__":
-                _record_bool_consumer_location(state.trace, self)
+            label = get_tensor_label(self)
+            if label is None:
+                _record_plain_direct_escape(state.trace, self, name)
+            else:
+                # Raw labels whose data escaped, read (and popped) by postprocess: the
+                # source-less witness of an orphan-pruned op is kept only when its
+                # value reached an escape (a dead op's is not). Data conversions
+                # (``tolist``/``numpy``/``__array__``/``__dlpack__``) escape too, but
+                # are not scalar escapes: they feed the label set only.
+                state.trace.__dict__.setdefault("_plain_scalar_escape_labels", set()).add(
+                    str(label)
+                )
+                if name not in INVISIBLE_HOST_ESCAPE_FUNCS:
+                    if name == "__bool__":
+                        _record_bool_consumer_location(state.trace, self)
+                    _tally_plain_scalar_escape(state, self, name)
         return original(self, *args, **kwargs)
 
     return wrapper
 
 
-def _external_warning_stacklevel() -> int:
-    """Return a warning stack level that resolves outside the TorchLens package.
-
-    Returns
-    -------
-    int
-        Stack level suitable for :func:`warnings.warn`.
-    """
-    level = 1
-    frame = inspect.currentframe()
-    try:
-        frame = frame.f_back if frame is not None else None
-        while frame is not None:
-            try:
-                Path(frame.f_code.co_filename).resolve().relative_to(_TORCHLENS_ROOT)
-            except ValueError:
-                return level
-            level += 1
-            frame = frame.f_back
-    finally:
-        del frame
-    return level
-
-
-@contextmanager
+@transparent_contextmanager
 def capture_scalar_escape_warning(trace: Any) -> Iterator[None]:
     """Warn once when a plain capture reads captured tensor data as Python scalars.
 
@@ -562,16 +532,16 @@ def capture_scalar_escape_warning(trace: Any) -> Iterator[None]:
     belt and are deliberately excluded. This lightweight observer neither
     constructs witness state nor changes capture verification verdicts.
     """
-    if bool(getattr(trace, "intervention_ready", False)):
+    if bool(getattr(trace, "is_replayable", False)):
         yield
         return
-    if bool(getattr(trace, "structure_only", False)):
+    if bool(trace._options_structure_only):
         # L7a: structure-only sessions run the ESCALATED belt
         # (structure_only_belt.structure_only_escape_belt), which raises typed
         # teaching refusals instead of aggregating a warning; installing this
         # record-and-warn belt underneath it would be dead weight. The
-        # intervention_ready early-exit above is UNREACHABLE in-mode (the
-        # structure_only + intervention_ready combination refuses at entry
+        # replayable early-exit above is UNREACHABLE in-mode (the
+        # structure_only + replayable combination refuses at entry
         # with structure_only_option_conflict), pinned by the entry tests.
         yield
         return
@@ -593,14 +563,17 @@ def capture_scalar_escape_warning(trace: Any) -> Iterator[None]:
     # ``__enter__`` raises) used to strand the already-installed methods for
     # the life of the process.
     try:
-        for name in HOST_VALUE_ESCAPE_METHODS & {
-            "item",
-            "__bool__",
-            "__int__",
-            "__float__",
-            "__index__",
-            "__complex__",
-        }:
+        for name in (
+            HOST_VALUE_ESCAPE_METHODS
+            & {
+                "item",
+                "__bool__",
+                "__int__",
+                "__float__",
+                "__index__",
+                "__complex__",
+            }
+        ) | INVISIBLE_HOST_ESCAPE_FUNCS:
             original = getattr(torch.Tensor, name, None)
             if original is None or not callable(original):
                 continue
@@ -623,12 +596,31 @@ def capture_scalar_escape_warning(trace: Any) -> Iterator[None]:
             if state.first_file is not None and state.first_line is not None
             else "an unknown user source location"
         )
+        # SF5 (sumfam wave-0 item 5): the advisory used to EVAPORATE -- a
+        # Python warning is process-transient, so a shared artifact could not
+        # answer "did tensor data escape to Python scalars during capture?".
+        # Record it on the trace's annotations (FieldPolicy.KEEP -> persists)
+        # BEFORE warnings.warn, whose filters may raise. Only locals, ``state``
+        # and builtins are used here -- hence isinstance guards, not try/except.
+        annotations = getattr(state.trace, "annotations", None)
+        rows = (
+            annotations.setdefault("capture_advisories", [])
+            if isinstance(annotations, dict)
+            else None
+        )
+        row_message, warning_text = _scalar_escape_advisory_texts(state, location)
+        if isinstance(rows, list):
+            rows.append(
+                {
+                    "kind": "scalar_escape",
+                    "count": int(state.count),
+                    "first_location": (location if state.first_file is not None else None),
+                    "message": row_message,
+                }
+            )
         warnings.warn(
             ScalarEscapeWarning(
-                "TorchLens observed "
-                f"{state.count} tensor-to-Python scalar escape(s) during capture; "
-                f"first at {location}. Keep it as a tensor or pass the value as an "
-                "explicit input; the dependence is not captured.",
+                warning_text,
                 file_path=state.first_file,
                 line_no=state.first_line,
                 count=state.count,
@@ -640,29 +632,26 @@ def capture_scalar_escape_warning(trace: Any) -> Iterator[None]:
         yield
     except BaseException as inflight:
         _restore_scalar_belt()
-        # b3-sol (R07 filter-hazard rollup): this advisory used to fire from an
-        # unconditional ``finally``, so a warnings-as-error filter raised it
-        # DURING UNWIND and replaced the real in-flight capture failure
-        # (cascading into the terminal capture-failed advisory). On the
-        # exception path the advisory degrades to a note; the success path
-        # below keeps full filter semantics.
-        # NOTE: only names present in completeness_witness's namespace may be
-        # used here -- this contextmanager executes REBOUND into that module's
-        # globals() (rebind_contextmanager), so a _completeness_storage-only
-        # import raises NameError at call time.
+        # Firing this advisory from an unconditional ``finally`` would let a
+        # warnings-as-error filter raise it DURING UNWIND and replace the
+        # real in-flight capture failure (cascading into the terminal
+        # capture-failed advisory). On the exception path the advisory degrades to a note;
+        # the success path below keeps full filter semantics.
+        # NOTE: this arm runs while the user's exception is in flight, so it
+        # uses only names bound at this module's top; a name that failed to
+        # resolve here would replace the in-flight exception with a NameError.
         try:
             _warn_escapes()
         except Exception:
-            # Bare try/except (NOT contextlib.suppress): per the rebind NOTE
-            # above, this body runs with completeness_witness's globals, where
-            # `suppress` is not bound -- the name lookup itself NameError'd and
-            # replaced the user's in-flight exception (the exact bug this arm
-            # exists to prevent).
+            # Bare try/except, no helper: the advisory must never replace the
+            # user's in-flight exception (the exact bug this arm exists to prevent).
             try:
-                inflight.add_note(
+                _exception_notes.defer_failure_note(
+                    state.trace,
+                    inflight,
                     "TorchLens scalar-escape advisory suppressed (a warnings "
                     f"filter raised it): {state.count} tensor-to-Python scalar "
-                    "escape(s) were observed during this failed capture."
+                    "escape(s) were observed during this failed capture.",
                 )
             except Exception:
                 pass
@@ -673,12 +662,12 @@ def capture_scalar_escape_warning(trace: Any) -> Iterator[None]:
 
 
 def _make_host_value_predicate_module_wrapper(original: Any, state: _WitnessState) -> Any:
-    """Wrap ``torch.equal`` / ``torch.allclose`` / ``torch.is_nonzero`` to record operands (r39).
+    """Wrap ``torch.equal`` / ``torch.allclose`` / ``torch.is_nonzero`` to record operands.
 
     Like the Tensor-method belt, records every tensor operand ONLY when the aten census is not
     currently observing (a ``_disable_current_modes()`` region), so it complements -- never
     duplicates or pre-empts -- the census. On a non-owner thread the census mode is never on
-    that thread's stack, so this belt is correctly primary there (r43 owner-vs-non-owner rule:
+    that thread's stack, so this belt is correctly primary there (owner-vs-non-owner rule:
     a captured-tensor operand ceilings, a benign own-tensor operand records nothing). Distinct
     from :func:`_make_module_escape_wrapper` (dlpack export), which is census-INVISIBLE always
     and therefore records unconditionally.
@@ -724,7 +713,7 @@ def _make_module_escape_wrapper(original: Any, state: _WitnessState) -> Any:
     Used for ``torch.utils.dlpack.to_dlpack`` (and, if patchable, ``torch._C._to_dlpack``), which
     are C bindings that NEVER call the Python ``Tensor.__dlpack__`` the method patch covers. The
     wrapper records every tensor operand as an escape source under the active-forward gate
-    (r41: on every thread -- in-window fail-closed, foreign positive-only), then calls through
+    (on every thread -- in-window fail-closed, foreign positive-only), then calls through
     unchanged so the exported capsule is byte-identical.
     """
 
@@ -749,7 +738,7 @@ def _make_module_escape_wrapper(original: Any, state: _WitnessState) -> Any:
                     for value in (*args, *kwargs.values()):
                         if isinstance(value, torch.Tensor):
                             _record_escape_source_tensor(state.trace, value)
-                            # r65 (F2): ``to_dlpack`` exports a zero-copy capsule pinning
+                            # ``to_dlpack`` exports a zero-copy capsule pinning
                             # the operand's full layout (strides + byte offset), so a
                             # state-derived operand records the exact-layout read kinds,
                             # mirroring the ``__dlpack__`` method belt.
@@ -770,12 +759,14 @@ def _make_module_escape_wrapper(original: Any, state: _WitnessState) -> Any:
     return wrapper
 
 
-def _make_invisible_escape_property(descriptor: Any, state: _WitnessState) -> property:
+def _make_invisible_escape_property(
+    descriptor: Any, state: _WitnessState, name: str = "__cuda_array_interface__"
+) -> property:
     """Wrap a zero-copy buffer PROPERTY to record its SOURCE tensor, then read through.
 
     Used for ``__cuda_array_interface__`` (a non-callable getset descriptor the method
     patch cannot wrap). The property getter records the receiver tensor as an escape
-    source under the same active-forward gate (r41: on every thread -- in-window
+    source under the same active-forward gate (on every thread -- in-window
     fail-closed, foreign positive-only), then delegates to the original descriptor so
     the returned value is byte-identical.
     """
@@ -797,7 +788,7 @@ def _make_invisible_escape_property(descriptor: Any, state: _WitnessState) -> pr
             if threading.get_ident() == state.owner_thread_id:
                 if _state._logging_enabled:
                     _record_escape_source_tensor(state.trace, self)
-                    # r65 (F2): the CUDA array interface dict carries an explicit
+                    # the CUDA array interface dict carries an explicit
                     # ``strides`` key + data pointer -- a zero-copy layout export exactly
                     # like ``numpy()``/``__dlpack__`` -- so a state-derived receiver
                     # records the exact-layout read kinds.
@@ -811,4 +802,65 @@ def _make_invisible_escape_property(descriptor: Any, state: _WitnessState) -> pr
                 _nonowner_escape_observe(state, self)
         return descriptor.__get__(self, torch.Tensor)
 
-    return property(getter)
+    # doc= MUST be explicit (never defaulted): see DescriptorCompatProperty's
+    # constructor-landmine note in _tl.py.
+    replacement = DescriptorCompatProperty(getter, doc=name)
+    replacement.__objclass__ = getattr(descriptor, "__objclass__", torch.Tensor)
+    replacement.__name__ = name
+    return replacement
+
+
+# Late imports: the split modules of this package import one another (cycles), so each
+# imports its siblings once every definition above exists.
+from ._completeness_boundaries import (  # noqa: E402
+    _record_input_metadata_read_at_site,
+)
+from ._completeness_cross_thread import (  # noqa: E402
+    _internal_read_active,
+    _nonowner_escape_observe,
+    _nonowner_ptr_is_captured,
+)
+from ._completeness_dispatch_names import (  # noqa: E402
+    _external_warning_stacklevel,
+    _first_scalar_escape_source,
+    _record_escape_source_tensor,
+    _scalar_escape_advisory_texts,
+    _tally_plain_scalar_escape,
+)
+from ._completeness_metadata import (  # noqa: E402
+    _expand_state_alias_addresses,
+    _observe_state_metadata_read,
+    _record_input_storage_nbytes,
+    _record_state_metadata_observation,
+    _record_state_metadata_read,
+    _register_storage_handle_origin,
+    _resolve_storage_origin,
+)
+from ._completeness_origins import (  # noqa: E402
+    internal_scalar_read,
+)
+from .completeness_witness import (  # noqa: E402
+    _HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS,
+    _HOST_ESCAPE_BOOL_SOURCE_LABELS,
+    _HOST_ESCAPE_CROSS_THREAD_CAPTURED,
+    _HOST_ESCAPE_MUTABLE_WRITEBACK,
+    _HOST_ESCAPE_RAW_POINTER,
+    _HOST_ESCAPE_STATE_SOURCE_NAMES,
+    _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE,
+    _INPUT_METADATA_VIEW_READ,
+    _ORIG_UNTYPED_STORAGE_DATA_PTR,
+    _STORAGE_ACCESSOR_FAIL_CLOSED,
+    _STORAGE_ACCESSOR_MUTATOR,
+    _STORAGE_ACCESSOR_NBYTES,
+    _STORAGE_ACCESSOR_ORIGIN_BRIDGE,
+    _STORAGE_ACCESSOR_PLACEMENT,
+    _STORAGE_ACCESSOR_RAW_POINTER,
+    _STORAGE_ACCESSOR_VALUE_READ,
+    _TORCHLENS_ROOT,
+    HOST_VALUE_ESCAPE_METHODS,
+    INVISIBLE_HOST_ESCAPE_FUNCS,
+    STATE_METADATA_MIRROR,
+    _CompletenessDispatchMode,
+    _PlainScalarEscapeState,
+    _WitnessState,
+)

@@ -6,19 +6,29 @@ import inspect
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any, Literal, TypeAlias, cast
 
-from ..data_classes._compaction import compact_op_metadata
-from ..data_classes.layer import Layer
-from ..data_classes.module import ModuleAccessor
-from ..data_classes.trace import Trace, _init_module_hierarchy_data
-from ..ir.op_record import amend_preview_output_parent_mark
-from ..postprocess._grouping_stamp import build_grouping_policy_stamp
-from ..postprocess._site_key import SiteKeyMinter
-from ..postprocess.finalization import _build_module_logs, _build_root_module_log
-from ..postprocess.loop_grouping_adapter import RecurrenceAssignment
-from ..quantities import Bytes
-from ._recurrence import compute_preview_recurrence_assignments, relabel_edge_metadata
+from .._capture._nonfinite_prefix import strip_raw_label_suffix
+from .._data_classes._compaction import compact_op_metadata
+from .._data_classes._site_key import SiteKeyMinter
+from .._data_classes._trace_state_io import fill_unset_declared_fields
+from .._data_classes.layer import Layer
+from .._data_classes.module import ModuleAccessor
+from .._data_classes.trace import Trace
+from .._ir.container import ContainerSpec
+from .._ir.op_record import amend_preview_output_parent_mark, amend_preview_output_parent_rebind
+from .._ir.workspaces import _init_module_hierarchy_data
+from .._postprocess._grouping_stamp import build_grouping_policy_stamp
+from .._postprocess._recurrence import compute_preview_recurrence_assignments, relabel_edge_metadata
+from .._postprocess.finalization import _build_module_logs, _build_root_module_log
+from .._postprocess.loop_grouping_adapter import RecurrenceAssignment
+from .._quantities import Bytes
+from .._utils._record_group_table import record_member
+from .._utils.hashing import compute_graph_shape_hash, populate_normalized_layer_addresses
+from ._constants import ConstantLedger, apply_constants_rule
+from ._finalize_distances import compute_preview_input_output_distances
+from ._finalize_totals import _count_trace_ops, _update_param_totals_from_layers
 from .registry import BackendName
 
 OpHook: TypeAlias = Callable[[Any, Trace, set[str]], None]
@@ -31,6 +41,28 @@ MetadataTopLevelPredicate: TypeAlias = Callable[
 ]
 OpTopLevelPredicate: TypeAlias = Callable[[str], bool]
 TrainingModeResolver: TypeAlias = Callable[[dict[str, Any]], bool]
+_ParamSource: TypeAlias = Literal["native-module", "pytree-derived", "none"]
+
+
+def _attach_op_to_layer(
+    trace: Trace,
+    op_log: Any,
+    enrich_layer: LayerEnrichmentHook | None,
+) -> None:
+    """Attach one finalized op to its layer log, creating the layer on first sight."""
+
+    layer_log = trace._layer_logs.get(op_log.layer_label)
+    layer_created = layer_log is None
+    if layer_log is None:
+        layer_log = Layer(op_log)
+    layer_log.ops[op_log.pass_number] = op_log
+    layer_log.call_labels.append(op_log.label)
+    if op_log.num_passes != 1:
+        layer_log.num_passes = op_log.num_passes
+    if layer_created:
+        if enrich_layer is not None:
+            enrich_layer(layer_log, op_log)
+        trace._layer_logs[op_log.layer_label] = layer_log
 
 
 def finalize_single_pass_trace(
@@ -50,6 +82,7 @@ def finalize_single_pass_trace(
     compute_input_output_distances: bool | None = None,
     recurrence_detection: bool = False,
     relabel_sidecar_labels: SidecarRelabelHook | None = None,
+    constants: ConstantLedger | None = None,
 ) -> None:
     """Finalize raw single-pass op logs into public trace accessors.
 
@@ -58,7 +91,7 @@ def finalize_single_pass_trace(
     trace:
         Trace whose ``_raw_layer_dict`` contains backend-created op logs.
     backend_name:
-        Canonical backend name written to ``trace.backend``.
+        Canonical backend name written to ``trace.provenance.backend``.
     module_tree:
         Optional object-module discovery tree for object-module traces.
     attach_function_root_module:
@@ -76,14 +109,14 @@ def finalize_single_pass_trace(
     update_param_totals_from_layers:
         Whether trace parameter counters should be recomputed from finalized layers.
     count_layers_with_attached_params:
-        Whether to compute ``trace.num_layers_with_params`` from attached params.
+        Whether to compute ``trace._num_layers_with_params`` from attached params.
     finish_before_module_logs:
         Whether to set ``_tracing_finished`` before module logs are attached.
     compute_input_output_distances:
         Whether to run the neutral input/output distance flood (torch Step 4)
         over the finalized single-pass graph. ``None`` reads the request the
-        backend stored on ``trace.mark_layer_depths``; the effective value is
-        written back to ``trace.mark_layer_depths`` either way.
+        backend stored on ``trace.options.mark_layer_depths``; the effective value is
+        written back to ``trace.options.mark_layer_depths`` either way.
     recurrence_detection:
         Whether to run the neutral recurrence grouper over the raw graph and
         apply its assignments (multi-pass layers, pass-qualified op labels,
@@ -91,10 +124,18 @@ def finalize_single_pass_trace(
         single-pass layout.
     relabel_sidecar_labels:
         Backend hook receiving the COMPLETE ``{raw_label: final_op_label}``
-        mapping after grouping relabels the graph. Backends holding
+        mapping after per-op final labels are assigned. Backends holding
         label-keyed sidecar state (validation replay inventories, intervention
         records) must remap it atomically here; capture-index-keyed sidecars
-        may ignore the hook. Also called when recurrence detection is off.
+        may ignore the hook. Called unconditionally (N5: every op's raw label
+        differs from its final label now, not only multi-pass group members),
+        not only when ``recurrence_detection`` is on.
+    constants:
+        The capture's :class:`~torchlens.backends._constants.ConstantLedger`
+        when the backend keeps one. The shared constants rule audits the raw
+        graph against it first (closure constants are parentless source ops
+        with payload evidence, literal producers stay parentless); the rule
+        runs with or without a ledger.
 
     Returns
     -------
@@ -102,6 +143,10 @@ def finalize_single_pass_trace(
         The trace is updated in place.
     """
 
+    # The shared constants rule runs first, on raw labels: a constant op
+    # recorded with parents or without payload evidence refuses here, before
+    # any op is finalized or relabelled.
+    apply_constants_rule(trace, backend_name=backend_name, ledger=constants)
     _mint_preview_site_keys(trace)
     assignments: dict[str, RecurrenceAssignment] | None = None
     if recurrence_detection:
@@ -117,71 +162,77 @@ def finalize_single_pass_trace(
             enrich_op(op_log)
         if attach_op_params is not None:
             attach_op_params(op_log, trace, seen_param_barcodes)
-            if not isinstance(op_log.param_memory, Bytes):
-                op_log.param_memory = Bytes(int(op_log.param_memory))
-        if getattr(op_log, "_param_logs", []):
+            if not isinstance(op_log._cost_param_memory, Bytes):
+                op_log._cost_param_memory = Bytes(int(op_log._cost_param_memory))
+        if op_log._param_logs:
             layers_with_params_seen.add(op_log.layer_label)
         if update_param_usage:
             _attach_param_usage(trace, op_log, param_usage_membership)
-        layer_log = trace.layer_logs.get(op_log.layer_label)
-        layer_created = layer_log is None
-        if layer_log is None:
-            layer_log = Layer(op_log)
-        layer_log.ops[op_log.pass_index] = op_log
-        layer_log.call_labels.append(op_log.label)
-        if op_log.num_passes != 1:
-            layer_log.num_passes = op_log.num_passes
-        if layer_created:
-            if enrich_layer is not None:
-                enrich_layer(layer_log, op_log)
-            trace.layer_logs[op_log.layer_label] = layer_log
+        _attach_op_to_layer(trace, op_log, enrich_layer)
 
-    trace.num_ops = sum(
-        1
-        for op_log in trace.layer_list
-        if not (op_log.is_input or op_log.is_output or op_log.is_buffer)
-    )
+    trace._num_ops = _count_trace_ops(trace)
     if compute_input_output_distances is None:
-        compute_input_output_distances = bool(getattr(trace, "mark_layer_depths", False))
-    trace.mark_layer_depths = bool(compute_input_output_distances)
+        compute_input_output_distances = bool(trace._options_mark_layer_depths)
+    trace._options_mark_layer_depths = bool(compute_input_output_distances)
     if compute_input_output_distances:
         # The flood runs BEFORE the relabel epilogue: edges and the trace-side
         # input/output label lists are still uniformly raw here, so every seed
         # resolves to its exact op (a layer label would resolve to pass 1 and
         # mis-seed distances for outputs produced by a later pass).
         compute_preview_input_output_distances(trace)
+    # N5: always relabel, even when grouping did not run -- every op's final
+    # identity differs from its raw identity (the ``_raw`` capture sentinel
+    # is always stripped), not just multi-pass group members.
     _apply_recurrence_relabel_epilogue(trace, assignments, relabel_sidecar_labels)
     # The stored flag is the EFFECTIVE value: ``True`` only when the neutral
     # grouper actually ran over this graph, so an ungrouped finalize can never
     # claim grouping that never happened. (JAX finalizes through its own
     # recurrence-grouping path and keeps the request.)
-    trace.recurrence_detection = assignments is not None
-    trace.grouping_policy = build_grouping_policy_stamp(
-        ran_recurrence_grouping=assignments is not None,
-        requested=getattr(trace, "grouping", "structural"),
+    trace._options_recurrence_detection = assignments is not None
+    trace._options_grouping_policy = build_grouping_policy_stamp(
+        ran_recurrence_grouping=assignments is not None, requested=trace._options_grouping
     )
     if update_param_totals_from_layers:
         _update_param_totals_from_layers(trace)
     if count_layers_with_attached_params:
-        trace.num_layers_with_params = len(layers_with_params_seen)
+        trace._num_layers_with_params = len(layers_with_params_seen)
     trace._layers_logged = True
     trace._layers_saved = True
-    trace.has_backward_pass = False
-    trace.capture_end_time = time.time()
-    trace.backend = cast(BackendName, backend_name)
+    trace._autograd_has_backward_pass = False
+    trace._provenance_end_time = time.time()
+    trace._provenance_backend = cast(BackendName, backend_name)
     if finish_before_module_logs:
         trace._tracing_finished = True
         _set_per_op_tracing_finished(trace)
     if module_tree is None:
-        trace.module_identity_mode = "function_root"
+        trace._options_module_identity_mode = "function_root"
         attach_function_root_module(trace)
     else:
-        trace.module_identity_mode = "object_module"
+        trace._options_module_identity_mode = "object_module"
         attach_object_module_logs(trace, module_tree)
     if not finish_before_module_logs:
         trace._tracing_finished = True
         _set_per_op_tracing_finished(trace)
     compact_op_metadata(trace)
+    stamp_preview_graph_shape_hash(trace)
+
+
+def stamp_preview_graph_shape_hash(trace: Trace) -> None:
+    """Compute ``trace.provenance.fingerprint`` for a finalized preview trace.
+
+    Torch traces get the hash in postprocess Step 16.5; preview backends
+    finalize through this module and used to leave it ``None``. The hash
+    is backend-neutral: it reads only the finalized ``layer_list`` (op order,
+    function names, parent-edge order, container paths, module addresses).
+
+    Parameters
+    ----------
+    trace:
+        Finalized preview trace.
+    """
+
+    populate_normalized_layer_addresses(trace)
+    trace._provenance_fingerprint = compute_graph_shape_hash(trace, include_module_address=False)
 
 
 def _set_per_op_tracing_finished(trace: Trace) -> None:
@@ -195,19 +246,19 @@ def _set_per_op_tracing_finished(trace: Trace) -> None:
     Returns
     -------
     None
-        Every op reachable via ``trace.layer_dict_main_keys`` is mutated in place.
+        Every op reachable via ``trace._layer_dict_main_keys`` is mutated in place.
 
     Notes
     -----
-    Mirrors ``torchlens.postprocess.finalization._set_tracing_finished``, which
+    Mirrors ``torchlens._postprocess.finalization._set_tracing_finished``, which
     also flips this flag on every retained ``OpLog`` (not just the trace). Without
     this, preview-backend ops stay stuck on the "mid-capture" ``__str__``/repr
     branch, which assumes torch-only attributes (e.g. ``grad_fn``) and crashes
     on non-torch tensors.
     """
 
-    for layer_label in trace.layer_dict_main_keys:
-        op_log = trace.layer_dict_main_keys[layer_label]
+    for layer_label in trace._layer_dict_main_keys:
+        op_log = trace._layer_dict_main_keys[layer_label]
         op_log._tracing_finished = True
 
 
@@ -231,14 +282,20 @@ def attach_function_root_module(trace: Trace) -> None:
     trace._module_capture_ws.module_metadata = {
         "self": {
             "cls": None,
-            "class_name": trace.model_class_name,
-            "class_qualname": trace.model_class_qualname,
+            "class_name": trace._source_class_name,
+            "class_qualname": trace._source_class_qualname,
             "all_addresses": ["self"],
             "training": False,
         }
     }
     root = _build_root_module_log(trace, {}, mbd)
     trace._module_logs = ModuleAccessor({"self": root})
+    # The object-module path gets ``trace.buffers`` from
+    # ``rebuild_trace_accessors``; a function root must not leave it ``None``.
+    # Deferred: ``_io`` sits above ``backends`` in the layer map.
+    from .._io.accessor_rebuild import rebuild_buffer_accessor
+
+    rebuild_buffer_accessor(trace)
 
 
 def attach_object_module_logs(
@@ -292,7 +349,7 @@ def attach_object_module_logs(
         if metadata_top_level(address, metadata, metadata_by_address):
             mbd["top_level_modules"].append(address)
 
-    for param in trace.param_logs:
+    for param in trace._param_logs:
         owner = param.module_address
         mbd["module_nparams"][owner] += param.num_params
         if param.is_trainable:
@@ -338,7 +395,7 @@ def populate_object_module_build_data(
     seen_top_level_ops: set[str] = set()
     seen_pass_children: dict[str, set[str]] = defaultdict(set)
     seen_addresses = set(mbd["addresses"])
-    for op_log in trace.layer_list:
+    for op_log in trace._layer_list:
         normalized_calls = normalize_module_calls(op_log.modules)
         op_log.modules = [f"{address}:{call_index}" for address, call_index in normalized_calls]
         op_log.module = op_log.modules[-1] if op_log.modules else None
@@ -382,118 +439,6 @@ def populate_object_module_build_data(
             parent_call_label = call_label
 
 
-def compute_preview_input_output_distances(trace: Trace) -> None:
-    """Run torch's Step-4 depth flood over a finalized preview graph.
-
-    Parameters
-    ----------
-    trace:
-        Finalized preview trace whose ops carry label-based ``parents``/
-        ``children`` edges and populated ``input_layers``/``output_layers``.
-
-    Returns
-    -------
-    None
-        ``min/max_distance_from_input``, ``min/max_distance_to_output``,
-        ``input_ancestors``, and ``output_descendants`` are populated in place.
-
-    Notes
-    -----
-    This mirrors ``postprocess.graph_traversal._mark_layer_depths`` but
-    resolves labels through an explicit op index instead of
-    ``Trace.__getitem__`` (whose finished-mode lookup returns ``Layer``
-    objects, not the ops the flood must mutate). Lineage sets are normalized
-    first because backends may emit immutable placeholders (e.g. TF's
-    ``input_ancestors=()``).
-    """
-
-    ops_by_label: dict[str, Any] = {}
-    for op_log in trace.layer_list:
-        for field_name in ("input_ancestors", "output_descendants"):
-            value = getattr(op_log, field_name, None)
-            if not isinstance(value, set):
-                setattr(op_log, field_name, set(value or ()))
-        for key in (
-            getattr(op_log, "_label_raw", None),
-            getattr(op_log, "label", None),
-            getattr(op_log, "layer_label", None),
-        ):
-            if key is not None:
-                ops_by_label.setdefault(key, op_log)
-
-    ordered_ops = [
-        ops_by_label[label]
-        for label in trace._raw_graph_ws.raw_layer_labels_list
-        if label in ops_by_label
-    ]
-    for mode, starting_labels, min_field, max_field, marker_field, lineage_field, edge_field in (
-        (
-            "input",
-            trace.input_layers,
-            "min_distance_from_input",
-            "max_distance_from_input",
-            "has_input_ancestor",
-            "input_ancestors",
-            "children",
-        ),
-        (
-            "output",
-            trace.output_layers,
-            "min_distance_to_output",
-            "max_distance_to_output",
-            "has_output_descendant",
-            "output_descendants",
-            "parents",
-        ),
-    ):
-        traversal = ordered_ops if mode == "input" else list(reversed(ordered_ops))
-        for starting_label in starting_labels:
-            starting_op = ops_by_label.get(starting_label)
-            if starting_op is None:
-                continue
-            _update_distance(starting_op, min_field, max_field, 0)
-            setattr(starting_op, marker_field, True)
-            getattr(starting_op, lineage_field).add(starting_label)
-        for op_log in traversal:
-            current_min = getattr(op_log, min_field, None)
-            current_max = getattr(op_log, max_field, None)
-            if current_min is None or current_max is None:
-                continue
-            lineage = getattr(op_log, lineage_field)
-            for next_label in getattr(op_log, edge_field, ()) or ():
-                next_op = ops_by_label.get(next_label)
-                if next_op is None:
-                    continue
-                _update_distance(next_op, min_field, max_field, current_min + 1)
-                _update_distance(next_op, min_field, max_field, current_max + 1)
-                setattr(next_op, marker_field, True)
-                getattr(next_op, lineage_field).update(lineage)
-
-
-def _update_distance(op_log: Any, min_field: str, max_field: str, hops: int) -> None:
-    """Fold one candidate hop count into an op's min/max distance fields.
-
-    Parameters
-    ----------
-    op_log:
-        Op receiving the update.
-    min_field, max_field:
-        Distance attribute names for the active flood direction.
-    hops:
-        Candidate hop count from the flood frontier.
-
-    Returns
-    -------
-    None
-        The op's distance fields are widened in place.
-    """
-
-    current_min = getattr(op_log, min_field, None)
-    current_max = getattr(op_log, max_field, None)
-    setattr(op_log, min_field, hops if current_min is None else min(current_min, hops))
-    setattr(op_log, max_field, hops if current_max is None else max(current_max, hops))
-
-
 def _mint_preview_site_keys(trace: Trace) -> None:
     """Mint the policy-independent ``site_key_v1`` on every retained preview op.
 
@@ -501,7 +446,7 @@ def _mint_preview_site_keys(trace: Trace) -> None:
     facts from raw records, identical whether grouping runs or not -- P4), so
     the preview node builder copies the minted key into its
     ``RecurrenceNode`` and the ungrouped path carries keys all the same.
-    Orphan ops consume no ordinals and keep ``site_key=None`` (SF-63).
+    Orphan ops consume no ordinals and keep ``site_key=None``.
 
     Parameters
     ----------
@@ -512,9 +457,9 @@ def _mint_preview_site_keys(trace: Trace) -> None:
 
     minter = SiteKeyMinter()
     for op_log in trace._raw_graph_ws.raw_layer_dict.values():
-        if getattr(op_log, "is_orphan", False):
+        if record_member(op_log, "is_orphan", False):
             continue
-        op_log.site_key = minter.mint(
+        op_log._graph_site_key = minter.mint(
             getattr(op_log, "modules", None) or (),
             str(getattr(op_log, "type", "") or ""),
             (
@@ -546,15 +491,21 @@ def _finalize_single_op(
         Zero-based raw op index.
     assignment:
         Recurrence assignment for this op when grouping ran. ``None`` (and any
-        singleton assignment) produces a single-pass layout, with the capture
-        suffix removed from the public layer label and main lookup key. Multi-pass
+        singleton assignment) reproduces the historical single-pass layout:
+        the raw label, with its internal ``_raw`` capture sentinel stripped
+        (``strip_raw_label_suffix``), becomes the layer label; the RAW label
+        (``_raw`` suffix intact) stays the main lookup key. Multi-pass
         members become pass-qualified: ``label`` is ``layer_label:pass_index``,
-        and the main key is the pass label. The bare shared layer label lands
-        in ``layer_dict_all_keys`` as an INCIDENTAL raw-index artifact (each
-        pass overwrites it, so it resolves to the LAST pass, matching the
-        torch backend) — it is NOT a contract; bare-label addressing of
-        multi-pass layers refuses on every path that matters
-        (``multipass_bare_label_ambiguous``).
+        and the main key is the pass label. The bare shared layer label is
+        ALWAYS registered in ``layer_dict_all_keys`` too (torch parity:
+        ``postprocess/labeling.py::_add_lookup_keys_for_layer_entry``
+        unconditionally includes ``layer_entry.layer_label`` in every op's
+        lookup keys). For a single-pass op the bare key is unambiguous and
+        resolves exactly that op. For a multi-pass layer it stays an
+        INCIDENTAL raw-index artifact (each pass overwrites it, so it
+        resolves to the LAST pass, matching the torch backend) — it is NOT
+        a contract there; bare-label addressing of multi-pass layers refuses
+        on every path that matters (``multipass_bare_label_ambiguous``).
 
     Returns
     -------
@@ -562,35 +513,49 @@ def _finalize_single_op(
         ``op_log`` and trace lookup dictionaries are mutated in place.
     """
 
-    raw_layer_label = assignment.layer_label if assignment is not None else label
-    layer_label = raw_layer_label.removesuffix("_raw")
+    layer_label = strip_raw_label_suffix(
+        assignment.layer_label if assignment is not None else label
+    )
     pass_index = assignment.pass_index if assignment is not None else 1
     num_passes = assignment.num_passes if assignment is not None else 1
     pass_label = f"{layer_label}:{pass_index}"
     op_log._label_raw = label
-    op_log._layer_label_raw = raw_layer_label
+    op_log._layer_label_raw = layer_label
     op_log.label = pass_label
-    op_log.label_short = pass_label
+    op_log.short_label = pass_label
     op_log.layer_label = layer_label
-    op_log.layer_label_short = layer_label
-    op_log.lookup_keys = list(dict.fromkeys((label, pass_label, layer_label)))
-    op_log.pass_index = pass_index
+    op_log.short_layer_label = layer_label
+    op_log.lookup_keys = [label, pass_label]
+    op_log.pass_number = pass_index
     op_log.num_passes = num_passes
     if assignment is not None:
-        op_log.equivalence_class = assignment.equivalence_key
-    trace.layer_list.append(op_log)
-    trace.layer_dict_main_keys[layer_label if num_passes == 1 else pass_label] = op_log
-    trace.layer_dict_all_keys[label] = op_log
-    trace.layer_dict_all_keys[pass_label] = op_log
-    # For multi-pass layers this incidental bare-label binding is last-pass-wins.
-    trace.layer_dict_all_keys[layer_label] = op_log
+        op_log._graph_equivalence_class = assignment.equivalence_key
+    trace._layer_list.append(op_log)
+    # Torch parity: layer_dict_main_keys is ALWAYS keyed by the pass-qualified
+    # op.label (_postprocess/labeling.py's
+    # ``self._layer_dict_main_keys[layer_entry.label] = layer_entry``), never
+    # the raw backend label -- a single-pass op's raw label was never a valid
+    # main key, so any lookup of a relabeled (bare or pass-qualified) final
+    # label through this dict raised KeyError for every single-pass op.
+    trace._layer_dict_main_keys[pass_label] = op_log
+    trace._layer_dict_all_keys[label] = op_log
+    trace._layer_dict_all_keys[pass_label] = op_log
+    # Torch parity: always register the bare layer label (not just for
+    # multi-pass groups). Without this, single-pass ops -- the common case --
+    # were never resolvable by bare layer_label through layer_dict_all_keys,
+    # which silently starved module-hierarchy building
+    # (_postprocess/finalization.py::_build_module_logs looks each recorded
+    # layer up by its bare label via this exact dict) of every single-pass
+    # op, leaving Module.layer_labels empty for any module whose ops never
+    # recur and tripping the module_layer_containment invariant.
+    trace._layer_dict_all_keys[layer_label] = op_log
+    op_log.lookup_keys.append(layer_label)
     trace.op_labels.append(pass_label)
-    if layer_label not in trace.layer_num_calls:
+    if layer_label not in trace._layer_num_calls:
         trace.layer_labels.append(layer_label)
-    trace.layer_num_calls[layer_label] = num_passes
-    for lookup_key in op_log.lookup_keys:
-        trace._lookup_keys_to_layer_num_dict[lookup_key] = raw_index
-        trace._layer_num_to_lookup_keys_dict[raw_index].append(lookup_key)
+    trace._layer_num_calls[layer_label] = num_passes
+    trace._lookup_keys_to_layer_num_dict[label] = raw_index
+    trace._layer_num_to_lookup_keys_dict[raw_index].append(label)
 
 
 def _apply_recurrence_relabel_epilogue(
@@ -598,14 +563,15 @@ def _apply_recurrence_relabel_epilogue(
     assignments: dict[str, RecurrenceAssignment] | None,
     relabel_sidecar_labels: SidecarRelabelHook | None,
 ) -> None:
-    """Relabel graph metadata after recurrence assignments were applied.
+    """Relabel graph metadata after per-op final labels were assigned.
 
     Parameters
     ----------
     trace:
         Trace whose ops already carry final (possibly pass-qualified) labels.
     assignments:
-        Recurrence assignments keyed by raw label, or ``None`` for ungrouped capture.
+        Recurrence assignments keyed by raw label, or ``None`` when grouping
+        did not run (every op is its own singleton, single-pass "group").
     relabel_sidecar_labels:
         Backend hook receiving the complete raw-to-final label mapping so
         label-keyed sidecar state can be remapped atomically.
@@ -618,36 +584,64 @@ def _apply_recurrence_relabel_epilogue(
 
     Notes
     -----
-    Public relations always use final labels, including singleton ops and
-    captures without recurrence grouping. Raw labels remain private capture
-    identities and lookup aliases for backend validation sidecars.
+    N5: every op's final identity now differs from its raw identity (the raw
+    label's internal ``_raw`` capture sentinel is always stripped,
+    ``strip_raw_label_suffix``), not just multi-pass group members, so every
+    label-bearing edge (``parents``, ``children``, trace-side input/output
+    lists, backend sidecars) must be relabeled unconditionally -- this runs
+    whether or not recurrence grouping ran (``assignments`` may be ``None``).
+    Raw labels stay resolvable through ``lookup_keys`` either way.
+
+    TORCH PARITY: the torch backend (``postprocess/labeling.py``) relabels
+    graph-edge fields (``parents``, ``children``, the lineage sets) through
+    the CONDITIONAL mapping -- a referenced op's bare ``layer_label`` when
+    its layer has a single pass, its pass-qualified ``label`` only when the
+    layer is multi-pass (``_raw_to_final_layer_labels`` /
+    ``final_lookup_label``) -- never the unconditionally-qualified op label.
+    Torch's own ``input_layers``/``output_layers``/``buffer_layers`` rename
+    (``_rename_model_history_layer_names``) instead always uses the bare
+    ``layer_label`` unconditionally, but ONLY because torch always wraps the
+    real computation in single-pass input/output pseudo-ops, so the two
+    mappings coincide there in practice; torch never exercises the
+    multi-pass case for these fields. Previews do not always wrap this way
+    -- ``output_layers`` can name the real last-pass op of a multi-pass
+    layer directly -- and a bare label there would be ambiguous (multi-pass
+    bare-label lookups refuse typed), defeating the whole point of
+    ``output_layers`` as "the op that produced this output". So these
+    fields use the same CONDITIONAL mapping as ``parents``/``children``
+    here; ``internal_source_ops`` and the equivalence/recurrence groups
+    still always use the fully pass-qualified op label.
     """
 
     raw_dict = trace._raw_graph_ws.raw_layer_dict
-    raw_to_final = {label: raw_dict[label].label for label in raw_dict}
-    raw_to_layer = {label: op.layer_label for label, op in raw_dict.items()}
-    raw_to_endpoint = {
-        label: op.label if op.num_passes > 1 else op.layer_label for label, op in raw_dict.items()
+    raw_to_final_op = {label: raw_dict[label].label for label in raw_dict}
+    raw_to_final_layer = {
+        label: (op_log.layer_label if op_log.num_passes == 1 else op_log.label)
+        for label, op_log in raw_dict.items()
     }
-    changed = {label: final for label, final in raw_to_final.items() if label != final}
-    if changed:
-        for op_log in raw_dict.values():
-            relabel_edge_metadata(op_log, changed)
-        # Input/output inventories feed the Op accessors: a grouped endpoint
-        # must retain the exact producing pass, including a non-final pass.
-        for attr_name in (
-            "input_layers",
-            "output_layers",
-            "internal_source_layers",
-            "internal_source_ops",
-            "internal_sink_ops",
-            "buffer_layers",
+    changed_op = {label: final for label, final in raw_to_final_op.items() if final != label}
+    changed_layer = {label: final for label, final in raw_to_final_layer.items() if final != label}
+    if changed_op or changed_layer:
+        if changed_layer:
+            for op_log in raw_dict.values():
+                relabel_edge_metadata(op_log, changed_layer)
+        # Trace-side input/output/source lists speak OP space: each entry must
+        # resolve to the specific pass that produced the value (``output_ops``
+        # reads them through ``trace[label]``). ``internal_source_ops`` names
+        # grouped computational ops and is rewritten to the pass-qualified
+        # final label; ``input_layers``/``output_layers``/``buffer_layers``
+        # resolve through the same conditional mapping as ``parents``/
+        # ``children`` (see the torch-parity note above). The module-log
+        # builders map these to layer space at their own boundary.
+        for attr_name, mapping in (
+            ("input_layers", changed_layer),
+            ("output_layers", changed_layer),
+            ("internal_source_layers", changed_layer),
+            ("internal_source_ops", changed_op),
+            ("buffer_layers", changed_layer),
         ):
             labels = getattr(trace, attr_name, None)
             if isinstance(labels, list):
-                mapping = raw_to_final if attr_name.endswith("_ops") else raw_to_layer
-                if attr_name in ("input_layers", "output_layers"):
-                    mapping = raw_to_endpoint
                 setattr(
                     trace,
                     attr_name,
@@ -655,19 +649,21 @@ def _apply_recurrence_relabel_epilogue(
                 )
 
     equivalent_labels_by_key: dict[str, set[str]] = {}
-    for op_log in raw_dict.values():
-        equivalent_labels_by_key.setdefault(op_log.equivalence_class, set()).add(op_log.label)
+    for op in raw_dict.values():
+        equivalent_labels_by_key.setdefault(op._graph_equivalence_class, set()).add(op.label)
     for label, op_log in raw_dict.items():
-        op_log.equivalent_ops = equivalent_labels_by_key[op_log.equivalence_class]
-        members = assignments[label].recurrent_labels if assignments is not None else (label,)
-        op_log.recurrent_ops = [
-            raw_to_final[member] for member in members if member in raw_to_final
+        op_log._graph_equivalent_ops = equivalent_labels_by_key[op_log._graph_equivalence_class]
+        recurrent_labels = (
+            assignments[label].recurrent_labels if assignments is not None else (label,)
+        )
+        op_log._graph_recurrent_ops = [
+            raw_to_final_op[member] for member in recurrent_labels if member in raw_to_final_op
         ]
-    trace.op_equivalence_classes.clear()
-    trace.op_equivalence_classes.update(equivalent_labels_by_key)
+    trace._graph_op_equivalence_classes.clear()
+    trace._graph_op_equivalence_classes.update(equivalent_labels_by_key)
 
     if relabel_sidecar_labels is not None:
-        relabel_sidecar_labels(dict(raw_to_final))
+        relabel_sidecar_labels(dict(raw_to_final_op))
 
 
 def _attach_param_usage(
@@ -699,7 +695,7 @@ def _attach_param_usage(
 
     if membership_by_param is None:
         membership_by_param = {}
-    for param in getattr(op_log, "_param_logs", []):
+    for param in op_log._param_logs:
         membership = membership_by_param.get(id(param))
         if membership is None:
             membership = (
@@ -718,41 +714,6 @@ def _attach_param_usage(
         if op_log.layer_label not in layer_membership:
             trace.layers_with_params[param.barcode].append(op_log.layer_label)
             layer_membership.add(op_log.layer_label)
-
-
-def _update_param_totals_from_layers(trace: Trace) -> None:
-    """Recompute trace parameter totals from finalized single-pass layer logs.
-
-    Parameters
-    ----------
-    trace:
-        Trace whose layer logs already carry per-layer parameter counters.
-
-    Returns
-    -------
-    None
-        Trace-level parameter counters are updated when parameters are present.
-    """
-
-    seen_layers: set[str] = set()
-    num_param_tensors = 0
-    num_params = 0
-    num_params_trainable = 0
-    for op_log in trace.layer_list:
-        if op_log.layer_label in seen_layers:
-            continue
-        seen_layers.add(op_log.layer_label)
-        num_param_tensors += op_log.num_param_tensors
-        num_params += op_log.num_params
-        num_params_trainable += op_log.num_params_trainable
-    if trace.param_source != "none":
-        trace.num_param_tensors = num_param_tensors
-        trace.num_params = num_params
-        trace.num_params_trainable = num_params_trainable
-        trace.num_params_frozen = num_params - num_params_trainable
-        trace.num_layers_with_params = len(
-            {op.layer_label for op in trace.layer_list if op.uses_params}
-        )
 
 
 def numel_from_shape(shape: Any) -> int:
@@ -885,7 +846,7 @@ def stable_callable_name(fn: Callable[..., Any] | None) -> str | None:
 def mirror_param_derived_grads(trace: Trace, records: Any) -> None:
     """Mirror unambiguous param derived gradients onto param records.
 
-    The ONE five-backend implementation (R17-3): every backend records the
+    The ONE five-backend implementation: every backend records the
     full superset metadata -- payload, record path, ``has_grad``,
     ``grad_shape``, ``grad_dtype``, and ``gradient_memory``. (mlx/paddle/tf
     historically stopped at ``grad_shape``; that drift is exactly why this
@@ -913,13 +874,13 @@ def mirror_param_derived_grads(trace: Trace, records: Any) -> None:
         param.has_grad = True
         param.grad_shape = tuple(getattr(record.grad, "shape", ()))
         param.grad_dtype = cast(Any, str(getattr(record.grad, "dtype", "")))
-        param.gradient_memory = value_nbytes(record.grad) or 0
+        param.grad_memory = value_nbytes(record.grad) or 0
 
 
 def normalize_op_module_calls(value: Any) -> tuple[tuple[str, int], ...]:
     """Normalize an op's raw module-call records to ``(address, call_index)``.
 
-    The ONE five-backend normalizer (R17-6). Accepted spellings:
+    The ONE five-backend normalizer. Accepted spellings:
     ``(address, call_index)`` tuples, single-element tuples (call index
     defaults to ``1``), ``"address:index"`` strings, and bare address strings
     (legacy, call index ``1``). A string with a ``":"`` whose tail is not a
@@ -995,7 +956,13 @@ def nearest_metadata_parent(address: str, metadata: dict[str, dict[str, Any]]) -
     return "self" if "self" in metadata else None
 
 
-def mark_output_label(trace: Trace, label: str) -> None:
+def mark_output_label(
+    trace: Trace,
+    label: str,
+    *,
+    container_path: tuple[Any, ...] | None = None,
+    container_spec: ContainerSpec | None = None,
+) -> None:
     """Mark one resolved output label on a preview trace.
 
     The shared tail of every preview backend's output marking: append the
@@ -1009,6 +976,10 @@ def mark_output_label(trace: Trace, label: str) -> None:
         Trace with live capture events.
     label:
         Resolved raw producer label for one output tensor.
+    container_path:
+        Native output occurrence path, when the backend records containers.
+    container_spec:
+        Root output container schema paired with that occurrence.
 
     Returns
     -------
@@ -1020,9 +991,17 @@ def mark_output_label(trace: Trace, label: str) -> None:
     event = trace.capture_events.op_event_by_label_raw.get(label)
     if event is None:
         return
-    trace.capture_events.append_amendment(
-        amend_preview_output_parent_mark(event.seq, label, is_output_parent=True)
-    )
+    amendment = amend_preview_output_parent_mark(event.seq, label, is_output_parent=True)
+    if container_path is not None:
+        amendment = amend_preview_output_parent_rebind(
+            event.seq,
+            label,
+            is_output_parent=True,
+            output=replace(
+                event.output, container_path=container_path, container_spec=container_spec
+            ),
+        )
+    trace.capture_events.append_amendment(amendment)
 
 
 def attach_module_owned_op_params(
@@ -1057,7 +1036,7 @@ def attach_module_owned_op_params(
     owner = module_calls[-1][0]
     params = [
         param
-        for param in trace.param_logs
+        for param in trace._param_logs
         if param.module_address == owner and param.barcode not in seen_param_barcodes
     ]
     if not params:
@@ -1068,7 +1047,7 @@ def attach_module_owned_op_params(
     op_log.num_params = sum(param.num_params for param in params)
     op_log.num_params_trainable = sum(param.num_params for param in params if param.is_trainable)
     op_log.num_params_frozen = sum(param.num_params for param in params if not param.is_trainable)
-    op_log.param_memory = sum(int(param.param_memory) for param in params)
+    op_log._cost_param_memory = sum(int(param.param_memory) for param in params)
     seen_param_barcodes.update(param.barcode for param in params)
 
 
@@ -1085,7 +1064,7 @@ def new_preview_function_trace(
     save_raw_input: str | bool,
     batch_render: str,
     output_transform: object | None,
-    save_raw_output: str | bool,
+    save_transformed_output: str | bool,
     param_source: str,
     compute_input_output_distances: bool = True,
 ) -> Trace:
@@ -1119,7 +1098,7 @@ def new_preview_function_trace(
         Raw-input render policy.
     output_transform:
         Optional output transform.
-    save_raw_output:
+    save_transformed_output:
         Raw-output save policy.
     param_source:
         Backend parameter provenance (``"pytree-derived"``, ``"none"``, ...).
@@ -1136,38 +1115,40 @@ def new_preview_function_trace(
         model_class_name=getattr(model, "__name__", type(model).__name__),
         output_device="same",
         activation_transform=None,
-        grad_transform=None,
         save_raw_activations=True,
-        save_raw_gradients=True,
+        save_raw_grads=True,
         keep_orphans=keep_orphans,
-        save_arg_values=False,
+        save_args=False,
         save_grads=None,
         detach_saved_activations=False,
         mark_layer_depths=compute_input_output_distances,
-        num_context_lines=num_context_lines,
-        optimizer=None,
-        save_code_context=False,
-        save_rng_states=False,
+        source_context_lines=num_context_lines,
+        save_source_context=False,
+        save_rng=False,
         recurrence_detection=recurrence_detection,
         verbose=verbose,
         backward_ready=False,
-        module_filter=None,
         emit_nvtx=False,
-        transform=None,
-        raw_input=raw_input,
+        input_transform=None,
+        input=raw_input,
         save_raw_input=save_raw_input,
         batch_render=batch_render,
         output_transform=cast("Callable[[Any], Any] | None", output_transform),
-        save_raw_output=save_raw_output,
+        save_transformed_output=save_transformed_output,
         layer_visualizers=None,
         save_visualizations=False,
     )
-    trace.trace_label = name
-    trace.backend = cast(BackendName, backend_name)
-    trace.module_identity_mode = "function_root"
-    trace.param_source = cast("Literal['native-module', 'pytree-derived', 'none']", param_source)
-    trace.model_label = trace.model_class_name
-    trace.model_class_qualname = getattr(model, "__qualname__", trace.model_class_name)
+    fill_unset_declared_fields(trace)
+    trace.name = name
+    trace._provenance_backend = cast(BackendName, backend_name)
+    trace._options_module_identity_mode = "function_root"
+    trace._provenance_param_source = cast(_ParamSource, param_source)
+    trace.model_name = trace._source_class_name
+    trace._source_class_qualname = getattr(model, "__qualname__", trace._source_class_name)
+    # Root entry-point identity fact (C07X item (iv)): preview backends
+    # capture a function/module-like root under module_identity_mode
+    # "function_root", so the honest closed-kind token is function_call.
+    trace._provenance_root_entry_point = f"function_call:{trace._source_class_qualname}"
     trace._pre_forward_rng_states = None
     return trace
 

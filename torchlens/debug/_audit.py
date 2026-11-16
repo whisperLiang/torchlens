@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
-from ._common import _compute_ops
-from ._gradients import gradient_flow_audit
-from ._nan import _nonfinite_kind, bisect_nan, find_nan_in_trace
+from .._debug_report import Report, rows_of
+from .._utils._display_card import LIST_LIMIT, render_card
+from .._utils._display_constructor import clipped, display_guard
+from .._utils._display_numbers import plural
+from .._utils._record_group_table import record_member
+from ._common import _compute_ops, _nonfinite_kind
+from ._gradients import grad_health
+from ._nan import bisect_nan, find_nan_in_trace
 
 if TYPE_CHECKING:
-    from torchlens.data_classes.trace import Trace
-    from torchlens.partial import PartialTrace
+    from torchlens._data_classes.trace import Trace
+    from torchlens._partial import PartialTrace
 
 
 AuditSeverity = Literal["critical", "warning", "info"]
@@ -38,6 +43,9 @@ class AuditFinding:
         Offending module addresses.
     follow_up:
         Call users can run to inspect the issue further.
+    source_line:
+        ``"file:line"`` of the user code that ran the offending op, when the
+        finding names one op and its location was recorded.
     """
 
     severity: AuditSeverity
@@ -46,10 +54,11 @@ class AuditFinding:
     ops: tuple[str, ...]
     modules: tuple[str, ...]
     follow_up: str
+    source_line: str | None = None
 
 
 @dataclass(frozen=True)
-class TraceAudit:
+class HealthReport(Report):
     """Notebook-friendly report from trace-local health diagnostics.
 
     Parameters
@@ -60,12 +69,46 @@ class TraceAudit:
         Names of diagnostics that ran.
     skipped:
         ``(check, reason)`` entries for diagnostics not supported by the capture.
+
+    Examples
+    --------
+    >>> report = tl.trace(model, x).audit()
+    >>> isinstance(report, HealthReport), "find_nan" in report.checks_run
+    (True, True)
+    >>> ("compare", "requires a second trace") in report.skipped
+    True
     """
 
     findings: tuple[AuditFinding, ...]
     checks_run: tuple[str, ...]
     skipped: tuple[tuple[str, str], ...]
 
+    _prints_repr = True
+
+    def _report_status(self) -> str:
+        """The verdict token on the card's lead line."""
+
+        return f"{len(self.findings)} findings" if self.findings else "clean"
+
+    def _report_severity_counts(self) -> dict[str, int]:
+        """Finding counts by severity for the lead line."""
+
+        counts: dict[str, int] = {}
+        for finding in self.findings:
+            counts[str(finding.severity)] = counts.get(str(finding.severity), 0) + 1
+        return counts
+
+    def _report_findings(self) -> list[str]:
+        """One-line findings for the card, most severe first."""
+
+        return [f"[{item.severity}] {item.check}: {item.message}" for item in self.findings]
+
+    def _report_rows(self) -> list[dict[str, Any]] | None:
+        """The natural table rows behind ``to_pandas()``."""
+
+        return rows_of(self.findings)
+
+    @display_guard
     def __repr__(self) -> str:
         """Render a compact audit suitable for notebooks.
 
@@ -75,23 +118,27 @@ class TraceAudit:
             Health summary with findings and skipped-check reasons.
         """
 
-        heading = (
-            f"TraceAudit: {len(self.findings)} issue(s); {len(self.checks_run)} checks run, "
-            f"{len(self.skipped)} skipped"
+        return clipped(
+            f"HealthReport: {plural(len(self.findings), 'finding')}, "
+            f"{len(self.checks_run)} checks run, {len(self.skipped)} skipped"
         )
-        if not self.findings:
-            heading = (
-                f"TraceAudit: no issues found; {len(self.checks_run)} checks run, "
-                f"{len(self.skipped)} skipped"
-            )
-        lines = [heading]
-        lines.extend(
-            f"- [{finding.severity}] {finding.check}: {finding.message} "
-            f"Follow up: {finding.follow_up}"
-            for finding in self.findings
+
+    @display_guard
+    def __str__(self) -> str:
+        """Show a bounded set of findings and skipped checks."""
+
+        rows: list[tuple[str, str]] = [
+            (finding.severity, f"{finding.check}: {finding.message}; {finding.follow_up}")
+            for finding in self.findings[:LIST_LIMIT]
+        ]
+        if len(self.findings) > LIST_LIMIT:
+            rows.append(("findings", f"... and {len(self.findings) - LIST_LIMIT} more"))
+        rows.extend(("skipped", f"{check}: {reason}") for check, reason in self.skipped[:3])
+        if len(self.skipped) > 3:
+            rows.append(("skipped", f"... and {len(self.skipped) - 3} more"))
+        return render_card(
+            repr(self), rows, (".findings", ".skipped", ".to_pandas()", ".to_dict()")
         )
-        lines.extend(f"- skipped {check}: {reason}" for check, reason in self.skipped)
-        return "\n".join(lines)
 
 
 def _has_full_saved_activations(trace: Trace) -> bool:
@@ -126,16 +173,19 @@ def _has_saved_gradients(trace: Trace) -> tuple[bool, str | None]:
     """
 
     try:
-        if len(trace.backward_passes) == 0:
+        if len(trace.autograd.backward_passes) == 0:
             return False, "forward-only trace; no backward pass was captured"
         if len(trace.saved_grad_ops) == 0:
-            return False, "no saved gradients; re-trace with save_grads=True and log_backward()"
+            return (
+                False,
+                "no saved gradients; re-trace with save_grads=True and backward()",
+            )
     except ValueError as exc:
         return False, str(exc)
     return True, None
 
 
-def _audit_partial_trace(partial: PartialTrace) -> TraceAudit:
+def _audit_partial_trace(partial: PartialTrace) -> HealthReport:
     """Audit a failed partial capture without full-trace assumptions.
 
     Parameters
@@ -145,7 +195,7 @@ def _audit_partial_trace(partial: PartialTrace) -> TraceAudit:
 
     Returns
     -------
-    TraceAudit
+    HealthReport
         Evidence-backed exception/non-finite findings and explicit skipped scope.
     """
 
@@ -158,7 +208,7 @@ def _audit_partial_trace(partial: PartialTrace) -> TraceAudit:
     )
     modules = tuple(
         str(module)
-        for module in (getattr(last, "module_call_stack", ()) if last is not None else ())
+        for module in (record_member(last, "module_call_stack", ()) if last is not None else ())
     )
     exception = partial.original_exception
     findings = [
@@ -168,7 +218,7 @@ def _audit_partial_trace(partial: PartialTrace) -> TraceAudit:
             message=f"{type(exception).__name__}: {exception}",
             ops=(last_label,) if last is not None else (),
             modules=modules,
-            follow_up="tl.report.explain(partial, format='json')",
+            follow_up="partial.explain()",
         )
     ]
     nonfinite = partial.first_nonfinite()
@@ -195,7 +245,7 @@ def _audit_partial_trace(partial: PartialTrace) -> TraceAudit:
             else "unknown"
         )
         nonfinite_modules = tuple(
-            str(module) for module in getattr(nonfinite_op, "module_call_stack", ())
+            str(module) for module in record_member(nonfinite_op, "module_call_stack", ())
         )
         findings.append(
             AuditFinding(
@@ -216,7 +266,7 @@ def _audit_partial_trace(partial: PartialTrace) -> TraceAudit:
             "dead_neurons",
             "gradient_flow_audit",
             "hot_path",
-            "infer_input_shape",
+            "guess_input_shape",
             "lineage",
             "recompute_candidates",
         )
@@ -224,20 +274,20 @@ def _audit_partial_trace(partial: PartialTrace) -> TraceAudit:
     findings.sort(
         key=lambda finding: (_SEVERITY_ORDER[finding.severity], finding.check, finding.ops)
     )
-    return TraceAudit(tuple(findings), tuple(checks_run), skipped)
+    return HealthReport(tuple(findings), tuple(checks_run), skipped)
 
 
-def audit_trace(trace: Trace | PartialTrace) -> TraceAudit:
+def audit_trace(trace: Trace | PartialTrace) -> HealthReport:
     """Run every trace-local health diagnostic supported by one capture.
 
     Health checks that run and can contribute findings are ``find_nan``,
-    ``bisect_nan`` (full-coverage traces), ``dtype_range_audit``, and
-    ``gradient_flow_audit`` (exactly one captured backward pass). Every other
+    ``bisect_nan`` (full-coverage traces), ``dtype_range``, and
+    ``grad_health`` (exactly one captured backward pass). Every other
     diagnostic is listed in ``skipped`` with a reason and is NOT counted as a
     check that ran: ``compare`` (a second trace), ``lineage`` (a selected start
-    op), ``infer_input_shape`` (a fresh execution), ``dead_neurons`` (single-
+    op), ``guess_input_shape`` (a fresh execution), ``dead_neurons`` (single-
     trace inactivity is an insufficient sample, not a per-trace health verdict),
-    a multi-backward ``gradient_flow_audit`` (needs a ``bwd=`` pass selection),
+    a multi-backward ``grad_health`` (needs a ``bwd=`` pass selection),
     and the ``hot_path`` / ``recompute_candidates`` performance rankings (not
     health checks). Sparse traces run ``find_nan`` over their saved outputs and
     report its uncertainty zone; ``bisect_nan`` needs complete payload coverage
@@ -250,11 +300,11 @@ def audit_trace(trace: Trace | PartialTrace) -> TraceAudit:
 
     Returns
     -------
-    TraceAudit
+    HealthReport
         Severity-ordered findings, executed checks, and honest skip reasons.
     """
 
-    from torchlens.partial import PartialTrace
+    from torchlens._partial import PartialTrace
 
     if isinstance(trace, PartialTrace):
         return _audit_partial_trace(trace)
@@ -264,7 +314,7 @@ def audit_trace(trace: Trace | PartialTrace) -> TraceAudit:
     skipped: list[tuple[str, str]] = [
         ("compare", "requires a second trace"),
         ("lineage", "requires a selected starting operation"),
-        ("infer_input_shape", "requires a model and a new probe execution"),
+        ("guess_input_shape", "requires a model and a new probe execution"),
     ]
     # Op labels already reported non-finite, so a second non-finite check does
     # not double-report the same op.
@@ -326,9 +376,9 @@ def audit_trace(trace: Trace | PartialTrace) -> TraceAudit:
     # precision hazards over saved activations). It was previously neither run
     # nor listed as skipped -- the docstring's completeness claim was a lie.
     # Deferred import: _dtype_range imports this module.
-    from ._dtype_range import dtype_range_audit
+    from ._dtype_range import dtype_range  # deferred: cycle debug
 
-    dtype_result = dtype_range_audit(trace)
+    dtype_result = dtype_range(trace)
     checks_run.append("dtype_range_audit")
     for dtype_finding in dtype_result.findings:
         if dtype_finding.check == "dtype_nonfinite" and set(dtype_finding.ops) & flagged_nonfinite:
@@ -340,7 +390,7 @@ def audit_trace(trace: Trace | PartialTrace) -> TraceAudit:
     if not has_gradients:
         skipped.append(("gradient_flow_audit", gradient_reason or "saved gradients unavailable"))
     else:
-        num_backward = len(trace.backward_passes)
+        num_backward = len(trace.autograd.backward_passes)
         if num_backward > 1:
             # gradient_flow_audit refuses (empty frame) without a pass selection;
             # that is a skip, not a check that ran and validated health.
@@ -348,11 +398,18 @@ def audit_trace(trace: Trace | PartialTrace) -> TraceAudit:
                 (
                     "gradient_flow_audit",
                     f"{num_backward} backward passes captured; select one with "
-                    "tl.debug.gradient_flow_audit(trace, bwd=...)",
+                    "tl.debug.grad_health(trace, bwd=...)",
+                )
+            )
+            skipped.append(
+                (
+                    "bisect_nan_backward",
+                    f"{num_backward} backward passes captured; select one with "
+                    "tl.debug.bisect_nan_backward(trace, bwd=...)",
                 )
             )
         else:
-            frame = gradient_flow_audit(trace)
+            frame = grad_health(trace).to_pandas()
             checks_run.append("gradient_flow_audit")
             for _, row in frame[frame["severity"] > 0].iterrows():
                 findings.append(
@@ -362,7 +419,27 @@ def audit_trace(trace: Trace | PartialTrace) -> TraceAudit:
                         message=str(row["reason"] or "gradient-flow anomaly"),
                         ops=(str(row["op"]),),
                         modules=(),
-                        follow_up="tl.debug.gradient_flow_audit(trace)",
+                        follow_up="tl.debug.grad_health(trace)",
+                    )
+                )
+            # The backward NaN bisector runs automatically exactly here: ONE
+            # captured backward with saved gradient payloads is unambiguous
+            # (observe item 10). Its birth headline supersedes the carrier
+            # observations the flow audit reports for the same pass.
+            from ._nan_backward import bisect_nan_backward  # deferred: cycle debug
+
+            backward_bisect = bisect_nan_backward(trace)
+            checks_run.append("bisect_nan_backward")
+            if backward_bisect.found:
+                headline = backward_bisect.first_bad_thing
+                findings.append(
+                    AuditFinding(
+                        severity="critical",
+                        check="bisect_nan_backward",
+                        message=backward_bisect.message,
+                        ops=(headline.label,) if headline.label else (),
+                        modules=(headline.module,) if headline.module else (),
+                        follow_up="tl.debug.bisect_nan_backward(trace)",
                     )
                 )
 
@@ -381,4 +458,4 @@ def audit_trace(trace: Trace | PartialTrace) -> TraceAudit:
     findings.sort(
         key=lambda finding: (_SEVERITY_ORDER[finding.severity], finding.check, finding.ops)
     )
-    return TraceAudit(tuple(findings), tuple(checks_run), tuple(skipped))
+    return HealthReport(tuple(findings), tuple(checks_run), tuple(skipped))

@@ -14,7 +14,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.validation.invariants import check_metadata_invariants
+from torchlens.validation._invariants import check_metadata_invariants
 
 pytestmark = [pytest.mark.heavy, pytest.mark.optional]
 
@@ -200,27 +200,29 @@ def test_real_fast_tokenizer_text_routes_stay_offline(
     encoded = tokenizer(texts, padding=True, return_tensors="pt")
     with torch.no_grad():
         expected = model(**encoded).logits.detach().clone()
-    options = {"capture": tl.options.CaptureOptions(inference_only=True), "save_raw_input": True}
+    options = {"capture": tl.options.CaptureOptions(inference_only=True, save_raw_input=True)}
     if route == "explicit_tokenizer":
-        trace = tl.bridge.hf.trace_text(model, texts, tokenizer=tokenizer, **options)
+        trace = tl.bridge.transformers.trace_text(model, texts, tokenizer=tokenizer, **options)
     else:
         trace = tl.trace(model, texts, **options)
     assert len(trace.output_ops) == 1
     torch.testing.assert_close(trace.output_ops[0].out, expected, rtol=1e-5, atol=1e-6)
     assert check_metadata_invariants(trace) is True
-    assert trace.raw_input == texts
-    assert trace.input_preprocessor.source == "hf_auto_tokenizer"
-    assert trace.input_preprocessor.verified is (route == "autoroute")
-    assert trace.input_preprocessor.config["padding"] is True
-    assert trace.output_postprocessor.style == "hf_text"
-    expected_ids = expected.argmax(dim=-1).tolist()
-    assert trace.decoded_output == [
+    assert trace.input == texts
+    assert trace.provenance.input_preprocessor.source == "hf_auto_tokenizer"
+    assert trace.provenance.input_preprocessor.verified is (route == "autoroute")
+    assert trace.provenance.input_preprocessor.config["padding"] is True
+    assert trace.provenance.output_postprocessor.style == "hf_text"
+    probabilities, indices = expected[:, -1, :].float().softmax(dim=-1).topk(5, dim=-1)
+    assert trace.decode_output() == [
         {
-            "batch_item": index,
-            "rank": 1,
-            "text": tokenizer.decode(ids),
-            "token_ids": ids,
+            "batch_item": batch,
+            "rank": rank + 1,
+            "token_id": int(indices[batch, rank]),
+            "text": tokenizer.decode([int(indices[batch, rank])]),
+            "prob": float(probabilities[batch, rank]),
         }
-        for index, ids in enumerate(expected_ids)
+        for batch in range(len(texts))
+        for rank in range(5)
     ]
     assert not hasattr(model, "_torchlens_output_tokenizer")

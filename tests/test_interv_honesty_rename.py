@@ -1,0 +1,133 @@
+"""Intervention honesty: the ``resample_ablate`` -> ``scramble_elements``
+honest rename (edits memo row 1, decision D19; alias posture: hard rename,
+no alias, and since U00 "yes, renames are hard. clean break" no load alias
+either).
+
+The helper is an elementwise iid scramble -- a false friend of the field's
+"resampling ablation" (coherent donor patching). Same bytes, honest name:
+
+- ``scramble_elements`` is the only constructor; the ``resample_ablate``
+  spelling is gone from ``torchlens.intervention`` and the ``tl.*`` facade.
+- A saved spec naming ``resample_ablate`` refuses typed
+  (``intervention_helper_renamed``) with a remedy naming ``scramble_elements``;
+  it never loads silently under the new name.
+"""
+
+from __future__ import annotations
+
+import pytest
+import torch
+
+import torchlens as tl
+from torchlens.intervention import scramble_elements
+from torchlens.intervention._helpers import rebuild_builtin_helper
+
+
+def test_old_spelling_is_gone() -> None:
+    """Clean break: no alias survives in the helpers module, the package, or tl.*."""
+
+    import torchlens.intervention as intervention
+    from torchlens.intervention import _helpers as helpers
+
+    assert not hasattr(helpers, "resample_ablate")
+    assert not hasattr(intervention, "resample_ablate")
+    assert "resample_ablate" not in intervention.__all__
+    assert "resample_ablate" not in tl.__all__
+    assert "resample_ablate" not in dir(tl)
+
+
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
+@pytest.mark.parametrize(
+    "owner",
+    [
+        "intervention",
+    ],
+)
+def test_old_spelling_raises_typed_error_naming_the_replacement(owner: str) -> None:
+    """Every removed spelling raises facade_redirect naming scramble_elements."""
+
+    import torchlens.intervention as intervention
+    from torchlens._errors import FacadeTeachingError
+    from torchlens.intervention import _helpers as helpers
+
+    module = {"torchlens": tl, "intervention": intervention, "helpers": helpers}[owner]
+    with pytest.raises(FacadeTeachingError) as excinfo:
+        module.resample_ablate  # noqa: B018 - the attribute access IS the assertion
+    assert excinfo.value.fields["code"] == "facade_redirect"
+    assert "torchlens.intervention.scramble_elements" in str(excinfo.value)
+
+
+def test_seeded_draws_are_reproducible() -> None:
+    """Same seed, same draws (the rename changed no behavior)."""
+
+    source = torch.arange(12.0)
+    out = torch.zeros(2, 3)
+
+    first = scramble_elements(source, seed=7).factory()(out, ctx=None)
+    second = scramble_elements(source, seed=7).factory()(out, ctx=None)
+    assert torch.equal(first, second)
+    assert set(first.flatten().tolist()) <= set(source.tolist())
+
+
+def test_a_saved_spec_naming_the_old_helper_refuses_typed() -> None:
+    """No load alias: the old persisted name refuses, teaching the new one."""
+
+    from torchlens._errors import InvalidArgumentError
+
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        rebuild_builtin_helper("resample_ablate", (torch.ones(3),), {"seed": 3})
+    assert excinfo.value.fields["code"] == "intervention_helper_renamed"
+    assert excinfo.value.fields["renamed_to"] == "scramble_elements"
+    assert "torchlens.intervention.scramble_elements" in str(excinfo.value)
+
+
+def test_a_pickled_edit_naming_the_old_helper_refuses_typed() -> None:
+    """The pickle restore path shares the registry, so it refuses the same way."""
+
+    import pickle
+    from dataclasses import replace
+
+    from torchlens._errors import InvalidArgumentError
+
+    saved = replace(scramble_elements(torch.ones(3), seed=3), factory=None)
+    legacy = replace(saved, name="resample_ablate")
+    payload = pickle.dumps(legacy)
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        pickle.loads(payload)
+    assert excinfo.value.fields["code"] == "intervention_helper_renamed"
+
+
+def test_import_ref_to_the_retired_name_fails_closed_typed() -> None:
+    """An import ref ``torchlens.intervention._helpers:resample_ablate`` fails closed, teaching.
+
+    Built-in helpers persist by NAME (above), so only a hand-wrapped
+    import-ref helper saved before 2.35.0 could carry this path. Resolution
+    walks the module attribute, hits the helpers module's facade redirect,
+    and the resolver wraps that in ``ReplayPreconditionError``. The cause
+    must be the typed redirect naming ``scramble_elements``: without the
+    helpers-module redirect it would be a bare AttributeError.
+    """
+
+    from torchlens._errors import FacadeTeachingError
+    from torchlens.intervention import _helpers as helpers
+    from torchlens.intervention._resolver_registry import resolve_import_ref
+    from torchlens.intervention.errors import ReplayPreconditionError
+
+    current = resolve_import_ref("torchlens.intervention._helpers:scramble_elements")
+    assert current is helpers.scramble_elements
+    with pytest.raises(ReplayPreconditionError) as excinfo:
+        resolve_import_ref("torchlens.intervention._helpers:resample_ablate")
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, FacadeTeachingError)
+    assert cause.fields["code"] == "facade_redirect"
+    assert "torchlens.intervention.scramble_elements" in str(cause)
+
+
+def test_empty_source_refusal_names_the_honest_helper() -> None:
+    """Fire-time refusals teach the current name, not the retired one."""
+
+    from torchlens.intervention.errors import HookValueError
+
+    hook = scramble_elements(torch.ones(0), seed=1).factory()
+    with pytest.raises(HookValueError, match="scramble_elements"):
+        hook(torch.zeros(3), ctx=None)

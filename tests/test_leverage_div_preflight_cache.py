@@ -1,0 +1,137 @@
+"""B11 (cone preflight, exact-membership oracle) + B12 (generated cache key).
+
+B11's oracle is EXACT (memo D-12 / composition row "preflight x lane"):
+predicted replay membership EQUALS the engine's actual recomputed cone.
+B12 pins the generated-universe property the warm-cache key now has: every
+capture option is in the key or reviewed cache-irrelevant, and the reviewed
+ledgers cannot go stale.
+"""
+
+from __future__ import annotations
+
+from dataclasses import fields as dataclass_fields
+
+import torch
+from test_leverage_div_fixtures import ReusedReluNet
+
+import torchlens as tl
+from torchlens._capture.preflight import cone_preflight
+
+
+def _armed_trace():
+    torch.manual_seed(0)
+    model = ReusedReluNet()
+    x = torch.rand(1, 2, 3, 3)
+    return tl.trace(model, x, capture=tl.options.CaptureOptions(replayable=True))
+
+
+# ---------------------------------------------------------------------------
+# B11: cone preflight.
+# ---------------------------------------------------------------------------
+
+
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _capture/preflight.py, _ir/_selector_nodes.py, campaign mutant kills.
+def test_cone_preflight_membership_equals_actual_replay_cone():
+    """The exact oracle: predicted replay membership EQUALS actual."""
+
+    trace = _armed_trace()
+    # grouping rule row 28: the reused relu instance is one Layer with 2 passes,
+    # so the origin is its first pass, addressed pass-qualified.
+    plan = cone_preflight(trace, [trace["relu_1_2:1"]])
+    assert plan["replay_ready"]
+    fork = trace.fork()
+    fork.do("relu_1_2:1", tl.zero_ablate())
+    assert fork.last_run["engine"] == "replay"
+
+    # Replay disclosures spell single-pass ops bare; the preflight is
+    # pass-qualified throughout. Compare in pass-qualified space.
+    def _qualified(label: str) -> str:
+        return label if ":" in label else f"{label}:1"
+
+    planned = tuple(_qualified(label) for label in plan["planned_replay_labels"])
+    assert planned == tuple(_qualified(label) for label in fork.last_run["cone"])
+
+
+def test_cone_preflight_default_capture_reports_replay_ready():
+    """A default capture records argument templates, so it is replay-ready."""
+
+    torch.manual_seed(0)
+    model = ReusedReluNet()
+    trace = tl.trace(model, torch.rand(1, 2, 3, 3))
+    plan = cone_preflight(trace, trace.layers["relu_1_2"].ops)
+    assert plan["replay_ready"] is True
+
+
+def test_cone_preflight_predicate_recording_reports_not_replay_ready():
+    """A predicate recording keeps no argument templates, so it is not replay-ready."""
+
+    torch.manual_seed(0)
+    model = ReusedReluNet()
+    trace = tl.record(model, torch.rand(1, 2, 3, 3), save=tl.func("relu")).to_trace()
+    plan = cone_preflight(trace, trace.layers["relu_1_2"].ops)
+    assert plan["replay_ready"] is False
+
+
+# ---------------------------------------------------------------------------
+# B12: the warm-cache key is GENERATED from the options universe.
+# ---------------------------------------------------------------------------
+
+
+def test_cache_key_ledgers_never_go_stale():
+    """Every curated/neutral ledger name is a REAL CaptureOptions field."""
+
+    from torchlens._capture.prepare.cache import (
+        CAPTURE_CACHE_KEY_CURATED,
+        CAPTURE_CACHE_KEY_NEUTRAL,
+    )
+
+    option_names = {field.name for field in dataclass_fields(tl.options.CaptureOptions)}
+    trace_kwarg_ledger_names = {
+        # Curated/neutral rows may also name trace() kwargs that never became
+        # CaptureOptions fields; those are pinned here explicitly so a rename
+        # on either side goes red.
+        "cache",
+        "cache_dir",
+        "unwrap_when_done",
+        "verbose",
+        "batch_render",
+    }
+    for name in set(CAPTURE_CACHE_KEY_CURATED) | set(CAPTURE_CACHE_KEY_NEUTRAL):
+        assert name in option_names or name in trace_kwarg_ledger_names, (
+            f"stale cache-key ledger row {name!r}: it names neither a "
+            "CaptureOptions field nor a pinned trace() kwarg"
+        )
+
+
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _capture_fingerprint.py.
+def test_swept_option_change_misses_the_cache_key():
+    """Two configs differing in ONE swept semantic option produce different keys.
+
+    ``on_nonfinite`` is hand-curated into the key, so the swept field here is
+    ``measure_python_peak_memory``.
+    """
+
+    from torchlens._capture.prepare.cache import (
+        CAPTURE_CACHE_KEY_CURATED,
+        CAPTURE_CACHE_KEY_NEUTRAL,
+        _sweep_option_fields_into_cache_config,
+    )
+    from torchlens._capture_state_helpers import _capture_cache_key
+
+    model = torch.nn.Linear(2, 2)
+    x = torch.zeros(1, 2)
+
+    def key_for(options: tl.options.CaptureOptions) -> str:
+        config: dict[str, object] = {}
+        _sweep_option_fields_into_cache_config(
+            config,
+            options,
+            prefix="capture_option",
+            curated=CAPTURE_CACHE_KEY_CURATED,
+            neutral=CAPTURE_CACHE_KEY_NEUTRAL,
+        )
+        return _capture_cache_key(model, (x,), {}, config)
+
+    baseline = key_for(tl.options.CaptureOptions())
+    changed = key_for(tl.options.CaptureOptions(measure_python_peak_memory=True))
+    assert baseline != changed

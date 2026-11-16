@@ -19,7 +19,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
-from torchlens.validation.consolidated import _rss_high_water_bytes
+from torchlens.validation._consolidated import _rss_high_water_bytes
 
 pytestmark = pytest.mark.slow
 
@@ -283,7 +283,7 @@ def _run_capture_cells(
     def full_trace() -> tl.Trace:
         """Run exhaustive trace."""
 
-        return tl.trace(workload.model, list(workload.args), workload.kwargs or None)
+        return tl.trace(workload.model, list(workload.args), input_kwargs=workload.kwargs or None)
 
     wall, rss = _timed_median(full_trace, warmups=warmups, repeats=repeats)
     results.append(BenchResult(workload.name, "full trace", wall, rss))
@@ -294,7 +294,7 @@ def _run_capture_cells(
         return tl.record(
             workload.model,
             list(workload.args),
-            workload.kwargs or None,
+            input_kwargs=workload.kwargs or None,
             save=lambda ctx: ctx.kind == "op" and ctx.raw_index % 100 == 0,
         )
 
@@ -307,7 +307,7 @@ def _run_capture_cells(
         return tl.trace(
             workload.model,
             list(workload.args),
-            workload.kwargs or None,
+            input_kwargs=workload.kwargs or None,
             save=lambda ctx: ctx.kind == "op" and ctx.raw_index % 20 == 0,
         )
 
@@ -320,8 +320,8 @@ def _run_capture_cells(
         return tl.trace(
             workload.model,
             list(workload.args),
-            workload.kwargs or None,
-            layers_to_save=["relu"],
+            input_kwargs=workload.kwargs or None,
+            save=["relu"],
         )
 
     try:
@@ -342,6 +342,24 @@ def _run_capture_cells(
                 note=f"skipped: pre-existing two-pass limitation ({type(exc).__name__})",
             )
         )
+    except UserWarning as exc:
+        # The hardcoded "relu" name is a literal layer-label lookup, not a
+        # predicate: it zero-matches any workload with no ReLU-labeled op
+        # (e.g. a GELU-activated transformer/GPT stack in the matrix), and
+        # the zero-match tripwire (error::UserWarning:torchlens) promotes
+        # that disclosure to a hard failure here same as the lookback_payload
+        # cell's old relu-selector above. Record N/A for the same reason --
+        # this bench cell demonstrates the legacy layers_to_save= sugar, not
+        # ReLU specifically, and not every workload has one.
+        results.append(
+            BenchResult(
+                workload.name,
+                "legacy two-pass layers_to_save",
+                float("nan"),
+                float("nan"),
+                note=f"skipped: no relu-labeled layer in this workload ({exc})",
+            )
+        )
 
     def lookback_payload() -> tl.Trace:
         """Run retroactive save with detached lookback payloads."""
@@ -357,10 +375,9 @@ def _run_capture_cells(
         return tl.trace(
             workload.model,
             list(workload.args),
-            workload.kwargs or None,
+            input_kwargs=workload.kwargs or None,
             save=tl.func("linear"),
-            lookback=4,
-            lookback_payload_policy="detached_raw",
+            capture=tl.options.CaptureOptions(lookback=4, lookback_payload_policy="detached_raw"),
         )
 
     wall, rss = _timed_median(lookback_payload, warmups=warmups, repeats=repeats)
@@ -375,7 +392,7 @@ def _run_capture_cells(
             return tl.trace(
                 workload.model,
                 list(workload.args),
-                workload.kwargs or None,
+                input_kwargs=workload.kwargs or None,
                 save=lambda ctx: ctx.kind == "op" and ctx.raw_index % 20 == 0,
                 storage=tl.to_disk(bundle),
             )
@@ -472,13 +489,13 @@ def test_gradient_selector_deferred_retention_peak_memory(
             model,
             x,
             capture=tl.options.CaptureOptions(
-                layers_to_save="all",
                 save_grads=["linear"],
                 backward_ready=True,
             ),
+            save="all",
         )
         trace[trace.output_layers[0]].out.sum().backward()
-        assert any(op.has_grad and op.layer_type == "linear" for op in trace.layer_list)
+        assert any(op.has_grad and op.type == "linear" for op in trace._layer_list)
         model.zero_grad(set_to_none=True)
         trace.cleanup()
 

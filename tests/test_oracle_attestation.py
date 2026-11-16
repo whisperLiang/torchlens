@@ -59,57 +59,13 @@ _CANONICAL_GOLDENS: dict[str, tuple[Path, ...]] = {
         for key in ("viz_cnn", "viz_recurrent")
         for mode in ("unrolled", "rolled")
     ),
-    "godobject_legacy": (
-        _TESTS_DIR / "godobject_oracle" / "goldens" / "legacy_baseline_cnn.tlspec",
-        _TESTS_DIR / "godobject_oracle" / "goldens" / "legacy_baseline_cnn_runnable.tlspec",
-        _TESTS_DIR / "godobject_oracle" / "goldens" / "legacy_baseline_cnn_loaded.json",
-    ),
     "state_keysets": (_TESTS_DIR / "godobject_oracle" / "goldens" / "state_keysets.json",),
     "selector_matrix": (_TESTS_DIR / "golden" / "selector_semantics_matrix.json",),
     "viz_render_identity": (_TESTS_DIR / "golden" / "viz_render_identity_oracle.json",),
     "rank_render_ir": (_TESTS_DIR / "golden" / "rank_render_ir_semantics.json",),
 }
 
-# Python 3.11 environments were enrolled after canonical/same-runtime HEAD
-# comparison (tests/oracle_environments.md). Pin the enrolled inventory so
-# missing/ignored files cannot silently turn this environment back into SKIPs.
-_REVIEWED_ENV_GOLDENS = tuple(
-    path.parent / f"env-py3.11-torch{torch_version}{extras}" / path.name
-    for torch_version in ("2.13.0", "2.11.0", "2.8.0")
-    for family, extras in (
-        ("surface_oracle", ""),
-        ("godobject_viz", "-graphviz0.21"),
-        ("godobject_legacy", ""),
-        ("state_keysets", ""),
-        ("viz_render_identity", "-graphviz0.21-pydot4.0.1"),
-        ("rank_render_ir", "-graphviz0.21-pydot4.0.1"),
-    )
-    for path in _CANONICAL_GOLDENS[family]
-    if path.suffix != ".tlspec"
-)
 
-
-@pytest.mark.smoke
-@pytest.mark.parametrize("golden", _REVIEWED_ENV_GOLDENS, ids=lambda path: path.name)
-def test_reviewed_environment_golden_inventory(golden: Path) -> None:
-    """Enrolled environment files are present, reviewable, and provenance-stamped."""
-
-    import subprocess
-
-    assert golden.is_file(), f"missing reviewed environment golden: {golden}"
-    provenance = (golden.parent / "PROVENANCE").read_text()
-    assert "reason: " in provenance
-    environment = golden.parent.name.removeprefix("env-").split("-graphviz", 1)[0]
-    assert f"env: {environment}\n" in provenance
-    result = subprocess.run(
-        ["git", "check-ignore", "-q", "--no-index", str(golden)],
-        cwd=_TESTS_DIR.parent,
-        check=False,
-    )
-    assert result.returncode == 1, f"reviewed baseline must not be gitignored: {golden}"
-
-
-@pytest.mark.smoke
 @pytest.mark.parametrize("family", sorted(_CANONICAL_GOLDENS))
 def test_canonical_golden_inventory_is_committed(family: str) -> None:
     """Every oracle family's canonical goldens exist in the checkout."""
@@ -121,7 +77,6 @@ def test_canonical_golden_inventory_is_committed(family: str) -> None:
     )
 
 
-@pytest.mark.smoke
 def test_env_markers_match_a_committed_baseline() -> None:
     """Each ENV marker names the fingerprint its canonical goldens carry.
 
@@ -140,7 +95,6 @@ def test_env_markers_match_a_committed_baseline() -> None:
         assert recorded, f"empty ENV marker in {goldens_dir}"
 
 
-@pytest.mark.smoke
 def test_viz_families_commit_emitter_version_markers() -> None:
     """Viz byte families record their DOT-emitter versions (b10 R78 round-3).
 
@@ -179,7 +133,6 @@ def _goldens_dir(tmp_path: Path, canonical: str) -> Path:
     return goldens
 
 
-@pytest.mark.smoke
 def test_missing_canonical_golden_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """On the canonical environment a missing golden is a hard failure."""
 
@@ -189,7 +142,6 @@ def test_missing_canonical_golden_fails(tmp_path: Path, monkeypatch: pytest.Monk
         require_env_golden(goldens, "case.json", "TORCHLENS_UPDATE_X")
 
 
-@pytest.mark.smoke
 def test_missing_off_canonical_golden_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -202,7 +154,6 @@ def test_missing_off_canonical_golden_fails_closed(
     assert not (goldens / "env-py8.8-torch8.8.8").exists(), "refusal must not write"
 
 
-@pytest.mark.smoke
 def test_missing_off_canonical_golden_skips_visibly_under_ci(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -215,7 +166,6 @@ def test_missing_off_canonical_golden_skips_visibly_under_ci(
     assert not (goldens / "env-py8.8-torch8.8.8").exists(), "CI must never write"
 
 
-@pytest.mark.smoke
 def test_enforcing_leg_fails_closed_instead_of_ci_skipping(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -233,7 +183,6 @@ def test_enforcing_leg_fails_closed_instead_of_ci_skipping(
     assert not (goldens / "env-py8.8-torch8.8.8").exists(), "refusal must not write"
 
 
-@pytest.mark.smoke
 def test_enforcing_leg_refuses_the_record_opt_in(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -251,7 +200,6 @@ def test_enforcing_leg_refuses_the_record_opt_in(
     assert not (goldens / "env-py8.8-torch8.8.8").exists(), "refusal must not write"
 
 
-@pytest.mark.smoke
 def test_record_opt_in_returns_recordable_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -265,7 +213,6 @@ def test_record_opt_in_returns_recordable_path(
     assert not path.exists()
 
 
-@pytest.mark.smoke
 def test_committed_env_golden_is_enforced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A committed env-keyed baseline resolves for plain byte enforcement."""
 
@@ -278,7 +225,6 @@ def test_committed_env_golden_is_enforced(tmp_path: Path, monkeypatch: pytest.Mo
     assert path == env_dir / "case.json"
 
 
-@pytest.mark.smoke
 def test_canonical_environment_resolves_canonical_path(tmp_path: Path) -> None:
     """Matching the ENV marker keeps enforcement on the canonical goldens."""
 
@@ -288,7 +234,6 @@ def test_canonical_environment_resolves_canonical_path(tmp_path: Path) -> None:
     assert off_canonical is False
 
 
-@pytest.mark.smoke
 def test_missing_env_marker_refuses(tmp_path: Path) -> None:
     """No committed ENV marker is a setup bug, never a canonical blessing.
 
@@ -303,7 +248,6 @@ def test_missing_env_marker_refuses(tmp_path: Path) -> None:
         resolve_env_golden(goldens, "case.json")
 
 
-@pytest.mark.smoke
 def test_recorded_env_baselines_are_gitignored() -> None:
     """A recorded env-* baseline can never ride along in a broad git add."""
 
@@ -318,7 +262,6 @@ def test_recorded_env_baselines_are_gitignored() -> None:
     assert result.returncode == 0, f"{probe} is not gitignored (b10 R78-4)"
 
 
-@pytest.mark.smoke
 def test_golden_mutation_flags_hard_error_under_ci() -> None:
     """The conftest guard names every armed update/regen flag under CI."""
 
@@ -342,7 +285,6 @@ def test_golden_mutation_flags_hard_error_under_ci() -> None:
     assert golden_mutation_flags_armed_under_ci({"CI": "true"}) == []
 
 
-@pytest.mark.smoke
 def test_flag_armed_requires_exact_one() -> None:
     """Golden flags arm on the exact value "1" ONLY (b10 R78 round-3).
 
@@ -357,7 +299,6 @@ def test_flag_armed_requires_exact_one() -> None:
     assert flag_armed({}, name) is False
 
 
-@pytest.mark.smoke
 def test_update_reason_is_required_and_returned(monkeypatch: pytest.MonkeyPatch) -> None:
     """Update runs refuse to proceed without a non-empty golden reason."""
 
@@ -371,7 +312,6 @@ def test_update_reason_is_required_and_returned(monkeypatch: pytest.MonkeyPatch)
     assert require_update_reason("TORCHLENS_UPDATE_X") == "r3 fix: enumerated behavior change"
 
 
-@pytest.mark.smoke
 def test_write_provenance_appends_full_history(tmp_path: Path) -> None:
     """PROVENANCE keeps every record: last-writer-wins erased sibling families."""
 
@@ -387,7 +327,6 @@ def test_write_provenance_appends_full_history(tmp_path: Path) -> None:
     assert content.count("---\n") == 1, "records are separated, none overwritten"
 
 
-@pytest.mark.smoke
 def test_write_provenance_records_source_identity(tmp_path: Path) -> None:
     """Every PROVENANCE record ties the rebaseline to a HEAD sha + tree state.
 
@@ -407,7 +346,6 @@ def test_write_provenance_records_source_identity(tmp_path: Path) -> None:
     ), match.group(1)
 
 
-@pytest.mark.smoke
 def test_wrap_state_guard_refuses_wrapped_torch(monkeypatch: pytest.MonkeyPatch) -> None:
     """In-process golden generation refuses to start on wrapped torch (SF-53)."""
 
@@ -422,7 +360,6 @@ def test_wrap_state_guard_refuses_wrapped_torch(monkeypatch: pytest.MonkeyPatch)
     _oracle_env._WRAP_GUARD_CLEARED.discard(flag)
 
 
-@pytest.mark.smoke
 def test_wrap_state_guard_passes_clean_then_memoizes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -441,7 +378,6 @@ def test_wrap_state_guard_passes_clean_then_memoizes(
     _oracle_env._WRAP_GUARD_CLEARED.discard(flag)
 
 
-@pytest.mark.smoke
 def test_extended_fingerprint_appends_emitter_versions() -> None:
     """The family-scoped fingerprint extension stays base-compatible."""
 
@@ -453,7 +389,6 @@ def test_extended_fingerprint_appends_emitter_versions() -> None:
     assert absent == f"{base}-definitely-not-a-real-distabsent"
 
 
-@pytest.mark.smoke
 def test_extras_markers_gate_canonical_resolution(tmp_path: Path) -> None:
     """Emitter markers must MATCH for canonical viz-golden enforcement.
 

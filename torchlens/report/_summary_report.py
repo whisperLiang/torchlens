@@ -1,0 +1,596 @@
+"""The detached immutable summary report layer.
+
+The structural deliverable: typed ``SummaryRow`` / ``SummaryTotals`` /
+``CaptureFacts`` under a ``SummaryReport(str)`` result, built by a split
+builder (data from FactCore -> format -> render) so everything after
+renders FROM the data instead of minting numbers in f-strings.
+
+Binding laws carried here:
+
+- RAW-NUMBERS PIN: every numeric field is a plain
+  int or None -- ``format(raw_field, ',')`` yields digits; the
+  MACs-through-the-FLOPs-formatter disease cannot leak into user format
+  strings through a typed report.
+- DETACHED: the report retains neither the model nor the Trace and
+  survives cleanup and GC (pin: build report; del trace; to_dict() works).
+- ``SummaryReport`` subclasses ``str``. From ``summary()`` the text IS the
+  canonical byte-stable ASCII contract. A report assembled from
+  caller text (``summary``) carries no rebuilt payload, and
+  the rebuilt-only result methods refuse it typed.
+
+Spellings DOCUMENTED-UNSTABLE pending naming-session ratification.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+from .._errors import InvalidArgumentError
+from ._stats_table import StatsTable
+from ._summary_charset import degrade
+
+if TYPE_CHECKING:
+    from .._data_classes.trace import Trace
+
+#: The five-value evidence enum. Orthogonal
+#: to applicability; a mixed aggregate never upgrades past its weakest member.
+EVIDENCE_VALUES: tuple[str, ...] = (
+    "measured",
+    "formula_exact",
+    "estimated",
+    "hypothesis",
+    "unknown",
+)
+
+
+@dataclass(frozen=True)
+class SummaryRow:
+    """One typed accounting-unit row (op grain; families coincide there).
+
+    ``exclusive`` and ``subtree`` value families are both present so module
+    rollups extend the SAME row type; at op grain they
+    coincide. Every numeric field is a plain int or None.
+
+    Examples
+    --------
+    >>> report = tl.report.summary(tl.trace(model, x), "demo")
+    >>> row = report.rows[0]
+    >>> type(row).__name__
+    'SummaryRow'
+    >>> isinstance(row.evidence, str)
+    True
+    """
+
+    row_id: str
+    name: str
+    kind: str
+    site_key: str | None
+    shape: tuple[int, ...] | None
+    dtype: str | None
+    params_exclusive: int | None
+    params_subtree: int | None
+    flops_exclusive: int | None
+    flops_subtree: int | None
+    macs_exclusive: int | None
+    evidence: str
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class SummaryTotals:
+    """Headline totals read from FactCore (never re-summed here).
+
+    ``params_bytes`` is the unique parameters' storage; ``params_effective``
+    is set only on a pruned model (raw total minus mask zeros);
+    ``optimizer_state_*`` are set only when the capture was given an
+    optimizer, read from its live state at summary time.
+
+    Examples
+    --------
+    >>> report = tl.report.summary(tl.trace(model, x), "demo")
+    >>> report.totals.params_total
+    186
+    >>> report.totals.flops_forward_fma2 > 0
+    True
+    """
+
+    params_total: int | None
+    params_per_path_total: int | None
+    params_executed: int | None
+    params_unexecuted: int | None
+    params_trainable: int | None
+    params_frozen: int | None
+    flops_forward_fma2: int
+    macs_forward: int
+    captured_bytes: int
+    retained_bytes: int
+    compute_coverage: dict[str, int]
+    params_bytes: int | None = None
+    params_effective: int | None = None
+    optimizer_state_params: int | None = None
+    optimizer_state_bytes: int | None = None
+
+
+@dataclass(frozen=True)
+class CaptureFacts:
+    """Capture honesty facts the report carries detached.
+
+    Examples
+    --------
+    >>> report = tl.report.summary(tl.trace(model, x), "demo")
+    >>> report.capture.model_class_name
+    'Sequential'
+    >>> report.capture.is_structure_only
+    False
+    """
+
+    backend: str | None
+    model_class_name: str | None
+    outcome_status: str | None
+    is_verified: bool | None
+    is_structure_only: bool
+    health_verdict: str
+    capture_fingerprint: str
+    advisories: int
+
+
+class SummaryReport(str):
+    """The summary text WITH its typed, detached data.
+
+    A ``str`` subclass: the string payload is the canonical byte-stable
+    ASCII contract, while ``rows`` / ``totals`` / ``capture`` /
+    ``to_dict()`` serve the numbers as data. ``__repr__`` is ``__str__``
+    (bare display renders the designed form). Rebuilt-grammar
+    results additionally carry the render payload serving
+    ``render``/``print``/``to_pandas``/``to_markdown``/``to_html``/
+    ``details`` and the scalar conveniences; the report retains neither
+    the model nor the Trace and survives cleanup and GC.
+
+    Examples
+    --------
+    >>> report = tl.report.summary(tl.trace(model, x), "demo")
+    >>> isinstance(report, str)
+    True
+    >>> report.total_params
+    186
+    """
+
+    _rows: tuple[SummaryRow, ...]
+    _totals: SummaryTotals
+    _capture: CaptureFacts
+    _rebuilt: Any
+    _stats: Any
+    _stats_columns: tuple[str, ...]
+
+    def __new__(
+        cls,
+        text: str,
+        *,
+        rows: tuple[SummaryRow, ...],
+        totals: SummaryTotals,
+        capture: CaptureFacts,
+        rebuilt: Any = None,
+    ) -> SummaryReport:
+        """Build the report around the rendered text."""
+
+        # The payload is the canonical ASCII contract on every build path
+        # a non-ASCII name degrades one character per character.
+        report = super().__new__(cls, degrade(text))
+        report._rows = rows
+        report._totals = totals
+        report._capture = capture
+        report._rebuilt = rebuilt
+        report._stats = None
+        report._stats_columns = ()
+        return report
+
+    @classmethod
+    def _with_stats(
+        cls,
+        text: str,
+        *,
+        data: tuple[tuple[SummaryRow, ...], SummaryTotals, CaptureFacts],
+        stats: Any,
+        stats_columns: tuple[str, ...],
+    ) -> SummaryReport:
+        """Build a ``view="stats"`` report around its typed observation table.
+
+        ``data`` is ``build_summary_data``'s ``(rows, totals, capture)``;
+        ``stats`` then serves ``rows`` and ``to_pandas()``.
+        """
+
+        rows, totals, capture = data
+        report = cls(text, rows=rows, totals=totals, capture=capture)
+        report._stats = stats
+        report._stats_columns = stats_columns
+        return report
+
+    def __repr__(self) -> str:
+        """Bare display renders the designed table, never a str-repr quote."""
+
+        return str(self)
+
+    # ------------------------------------------------------------------
+    # Result API. Heavy logic lives in _summary_result.
+
+    def _rebuilt_or_refuse(self, method: str) -> Any:
+        """The rebuilt payload, or a typed teaching refusal when there is none."""
+
+        if self._rebuilt is None:
+            raise InvalidArgumentError(
+                f"{method}() serves rebuilt-grammar summaries; this report "
+                "carries no rebuilt-grammar payload (it was assembled from text).",
+                code="summary_result_legacy",
+                remedy="call summary() with the rebuilt grammar (bare call, "
+                "level=, view=, depth=, ...)",
+            )
+        return self._rebuilt
+
+    def render(self, style: str = "ascii") -> str:
+        """Re-render from data: 'ascii' (canonical), 'unicode', or 'html'."""
+
+        if style == "ascii":
+            return str(self)
+        if self._stats is not None and style in ("unicode", "html"):
+            return str(self) if style == "unicode" else self._stats_html()
+        payload = self._rebuilt_or_refuse("render")
+        if style == "unicode":
+            return str(payload.unicode_text)
+        if style == "html":
+            from ._summary_result import render_result_html  # deferred: cycle report
+
+            return render_result_html(payload)
+
+        raise InvalidArgumentError(
+            f"render() style must be 'ascii', 'unicode', or 'html'; got {style!r}.",
+            code="summary_option_invalid",
+            remedy="pass style='ascii' (canonical), 'unicode', or 'html'",
+        )
+
+    def print(self, style: str = "auto", file: Any = None) -> None:
+        """Print with charset resolved at THIS display boundary."""
+
+        import sys
+
+        from ._summary_charset import detect_style  # deferred: cycle report
+
+        stream = file if file is not None else sys.stdout
+        resolved = detect_style(stream) if style == "auto" else style
+        if resolved not in ("ascii", "unicode"):
+            raise InvalidArgumentError(
+                f"print() style must be 'auto', 'ascii', or 'unicode'; got {style!r}.",
+                code="summary_option_invalid",
+                remedy="pass style='auto' (detected), 'ascii', or 'unicode'",
+            )
+        if resolved == "unicode" and self._rebuilt is None:
+            resolved = "ascii"
+        text = str(self) if resolved == "ascii" else str(self._rebuilt.unicode_text)
+        print(text, file=stream)
+
+    def details(self) -> str:
+        """Capture facts as text (the relocated preamble's result-side face)."""
+
+        from ._summary_result import result_details  # deferred: cycle report
+
+        return result_details(self)
+
+    def to_pandas(self, scope: str = "display") -> Any:
+        """Typed DataFrame projection ('display' rows or 'all' op grain)."""
+
+        if self._stats is not None:
+            return self._stats.to_pandas()
+        from ._summary_result import result_to_pandas  # deferred: cycle report
+
+        return result_to_pandas(self, scope)
+
+    def to_markdown(self) -> str:
+        """GitHub-flavored markdown table of the rendered rows."""
+
+        if self._stats is not None:
+            from ._stats_view import stats_rows_markdown  # deferred: cycle report
+
+            return stats_rows_markdown(self._stats, self._stats_columns)
+        from ._summary_result import result_to_markdown  # deferred: cycle report
+
+        return result_to_markdown(self)
+
+    def to_html(self) -> str:
+        """The dependency-free escaped HTML fragment."""
+
+        if self._stats is not None:
+            return self._stats_html()
+        payload = self._rebuilt_or_refuse("to_html")
+        from ._summary_result import render_result_html  # deferred: cycle report
+
+        return render_result_html(payload)
+
+    # Scalar conveniences (raw ints or None; the raw-numbers pin).
+
+    @property
+    def total_params(self) -> int | None:
+        """Declared parameter total under torch's own identity rule."""
+
+        return self._totals.params_total
+
+    @property
+    def executed_params(self) -> int | None:
+        """Parameters that participated in the captured forward."""
+
+        return self._totals.params_executed
+
+    @property
+    def unexecuted_params(self) -> int | None:
+        """Declared-but-never-ran parameters (A3)."""
+
+        return self._totals.params_unexecuted
+
+    @property
+    def trainable_params(self) -> int | None:
+        """Trainable parameter total."""
+
+        return self._totals.params_trainable
+
+    @property
+    def frozen_params(self) -> int | None:
+        """Frozen parameter total."""
+
+        return self._totals.params_frozen
+
+    @property
+    def total_flops_forward(self) -> int:
+        """Forward FLOPs under the stored fma=2 convention."""
+
+        return self._totals.flops_forward_fma2
+
+    @property
+    def total_macs_forward(self) -> int:
+        """True multiply-accumulate count (never flops//2)."""
+
+        return self._totals.macs_forward
+
+    @property
+    def unknown_flop_ops(self) -> int:
+        """Ops whose compute is unknown (totals are lower bounds when > 0)."""
+
+        return int(self._totals.compute_coverage.get("unknown", 0))
+
+    @property
+    def capture_status(self) -> str | None:
+        """The capture outcome status this report was built from."""
+
+        return self._capture.outcome_status
+
+    @property
+    def rows(self) -> tuple[Any, ...]:
+        """Typed rows: the stats rows of a ``view="stats"`` report, else the summary rows."""
+
+        if self._stats is not None:
+            return tuple(self._stats.rows)
+        return self._rows
+
+    @property
+    def table(self) -> StatsTable:
+        """The typed observation table behind a ``view="stats"`` report.
+
+        ``sort_rows``, ``fold_same_as_parent`` and ``ok_rows`` live on it; the
+        report's text is one rendering of it. A report built with any other
+        view carries no table and refuses typed.
+
+        Raises
+        ------
+        InvalidArgumentError
+            ``summary_table_unavailable`` when this report is not a stats view.
+        """
+
+        if self._stats is None:
+            raise InvalidArgumentError(
+                'report.table serves view="stats" summaries; this report carries no '
+                "observation table.",
+                code="summary_table_unavailable",
+                remedy='call trace.summary(view="stats") and read .table on that report',
+            )
+        return self._stats
+
+    def _stats_html(self) -> str:
+        """The stats table as an escaped preformatted block."""
+
+        import html
+
+        return "<pre>" + html.escape(str(self)) + "</pre>"
+
+    @property
+    def totals(self) -> SummaryTotals:
+        """Headline totals (plain ints; the raw-numbers pin)."""
+
+        return self._totals
+
+    @property
+    def capture(self) -> CaptureFacts:
+        """Detached capture honesty facts."""
+
+        return self._capture
+
+    @property
+    def sections(self) -> tuple[str, ...]:
+        """Stable section IDs of the data payload."""
+
+        return ("capture", "totals", "rows")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Bounded JSON-safe projection of the data payload."""
+
+        return {
+            "schema": "torchlens.summary_report.v1",
+            "capture": dict(self._capture.__dict__),
+            "totals": {
+                key: (dict(value) if isinstance(value, dict) else value)
+                for key, value in self._totals.__dict__.items()
+            },
+            "rows": self._dict_rows(),
+        }
+
+    def _dict_rows(self) -> list[dict[str, Any]]:
+        """JSON-safe rows: stats rows carry their rendered cells, summary rows their fields."""
+
+        if self._stats is None:
+            return [dict(row.__dict__) for row in self._rows]
+        from ._stats_view import STATS_COLUMNS, _cell  # deferred: cycle report
+
+        return [
+            {"row_id": row.row_id, **{column: _cell(row, column) for column in STATS_COLUMNS}}
+            for row in self._stats.rows
+        ]
+
+    def _repr_html_(self) -> str:
+        """Dependency-free escaped HTML table (the renderer when rebuilt)."""
+
+        if self._stats is not None:
+            return self._stats_html()
+        if self._rebuilt is not None:
+            from ._summary_result import render_result_html  # deferred: cycle report
+
+            return render_result_html(self._rebuilt)
+        import html
+
+        head = (
+            "<table><thead><tr><th>Row</th><th>Kind</th><th>Shape</th>"
+            "<th>Params</th><th>Fwd FLOPs</th></tr></thead><tbody>"
+        )
+        body = []
+        for row in self._rows[:200]:
+            shape = "" if row.shape is None else "x".join(str(dim) for dim in row.shape)
+            body.append(
+                "<tr>"
+                f"<td>{html.escape(row.name)}</td>"
+                f"<td>{html.escape(row.kind)}</td>"
+                f"<td>{html.escape(shape)}</td>"
+                f"<td>{'' if row.params_exclusive is None else row.params_exclusive:}</td>"
+                f"<td>{'' if row.flops_exclusive is None else row.flops_exclusive:}</td>"
+                "</tr>"
+            )
+        truncated = (
+            f"<tr><td colspan='5'>... {len(self._rows) - 200} more rows</td></tr>"
+            if len(self._rows) > 200
+            else ""
+        )
+        totals = self._totals
+        footer = (
+            f"<p>params={totals.params_total} "
+            f"fwd_flops(fma2)={totals.flops_forward_fma2} "
+            f"macs={totals.macs_forward} "
+            f"health={html.escape(self._capture.health_verdict)}</p>"
+        )
+        return head + "".join(body) + truncated + "</tbody></table>" + footer
+
+
+def _summary_rows(trace: Trace) -> tuple[SummaryRow, ...]:
+    """DATA stage: op-grain typed rows from the canonical compute face."""
+
+    from ._compute_truth import compute_aggregation  # deferred: cycle report
+
+    rows: list[SummaryRow] = []
+    params_by_label: dict[str, int | None] = {}
+    shapes_by_label: dict[str, tuple[int, ...] | None] = {}
+    for op in trace._layer_list or ():
+        label = str(getattr(op, "layer_label", "?"))
+        num_params = getattr(op, "num_params", None)
+        params_by_label[label] = None if num_params is None else int(num_params)
+        shape = getattr(op, "shape", None)
+        shapes_by_label[label] = None if shape is None else tuple(int(dim) for dim in shape)
+    for row in compute_aggregation(trace).rows:
+        params = params_by_label.get(row.label) if row.kind == "op" else None
+        rows.append(
+            SummaryRow(
+                row_id=row.row_id,
+                name=row.label,
+                kind=row.kind,
+                site_key=row.site_key,
+                shape=shapes_by_label.get(row.label),
+                dtype=row.dtype,
+                params_exclusive=params,
+                params_subtree=params,
+                flops_exclusive=row.flops_fma2,
+                flops_subtree=row.flops_fma2,
+                macs_exclusive=row.fma_macs,
+                evidence=row.evidence,
+                reason=row.reason,
+            )
+        )
+    return tuple(rows)
+
+
+def summary(trace: Trace, text: str) -> SummaryReport:
+    """Attach the detached typed data to one rendered summary text.
+
+    The builder split (data / format / render): the DATA stage reads
+    FactCore; the caller produced ``text``; this assembler never re-sums
+    anything. The result carries no rebuilt payload, so the rebuilt-only
+    result methods refuse it typed (``summary_result_legacy``).
+
+    Examples
+    --------
+    >>> report = tl.report.summary(tl.trace(model, x), "demo text")
+    >>> str(report)
+    'demo text'
+    >>> report.sections
+    ('capture', 'totals', 'rows')
+    """
+
+    rows, totals, capture = build_summary_data(trace)
+    return SummaryReport(text, rows=rows, totals=totals, capture=capture)
+
+
+def build_summary_data(
+    trace: Trace,
+) -> tuple[tuple[SummaryRow, ...], SummaryTotals, CaptureFacts]:
+    """The DATA stage alone: typed rows, totals, and capture facts."""
+
+    from ._factcore import factcore  # deferred: cycle report
+    from ._health import health_facts  # deferred: cycle report
+    from ._summary_columns import optimizer_state_facts  # deferred: cycle report
+
+    core = factcore(trace)
+    facts = health_facts(trace)
+    pruned = core.params.pruned
+    optimizer = optimizer_state_facts(trace)
+    totals = SummaryTotals(
+        params_total=core.params.total,
+        params_per_path_total=core.params.per_path_total,
+        params_executed=core.params.executed,
+        params_unexecuted=core.params.unexecuted,
+        params_trainable=core.params.trainable,
+        params_frozen=core.params.frozen,
+        flops_forward_fma2=int(core.compute.partition_total),
+        macs_forward=int(core.compute.macs_total),
+        captured_bytes=core.memory.captured_bytes,
+        retained_bytes=core.memory.retained_bytes,
+        compute_coverage={
+            "known": core.compute.coverage.known,
+            "zero_by_rule": core.compute.coverage.zero_by_rule,
+            "not_applicable": core.compute.coverage.not_applicable,
+            "unknown": core.compute.coverage.unknown,
+        },
+        params_bytes=core.params.nbytes,
+        params_effective=(
+            core.params.total - pruned.masked
+            if pruned is not None and pruned.masked is not None and core.params.total is not None
+            else None
+        ),
+        optimizer_state_params=optimizer.state_params if optimizer is not None else None,
+        optimizer_state_bytes=optimizer.state_bytes if optimizer is not None else None,
+    )
+    outcome = getattr(trace, "outcome", None)
+    capture = CaptureFacts(
+        backend=trace._provenance_backend,
+        model_class_name=trace._source_class_name,
+        outcome_status=getattr(getattr(outcome, "status", None), "value", None),
+        is_verified=trace._provenance_verified,
+        is_structure_only=bool(trace._options_structure_only),
+        health_verdict=facts.verdict,
+        capture_fingerprint=core.capture_fingerprint,
+        advisories=len(
+            (getattr(trace, "annotations", {}) or {}).get("capture_advisories", []) or []
+        ),
+    )
+    return _summary_rows(trace), totals, capture

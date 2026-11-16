@@ -1,9 +1,8 @@
 """Functional-collective (funcol) boundary capture + plane-W completion authority.
 
-Merge-ranks rung C2, recording slice (design-merge-ranks-c v5, 5.2 planes S/W;
-L8 census plan sec 1.1/2). The pinned wave-0 census finding this module closes:
-``torch.distributed._functional_collectives`` calls were INVISIBLE to the
-shipped C1 python-wrap capture -- a captured forward issuing
+Recording slice of the merge-ranks work (planes S and W). This module closes
+a census finding: ``torch.distributed._functional_collectives`` calls were
+INVISIBLE to the python-wrap capture of the c10d API -- a captured forward issuing
 ``funcol.all_reduce`` completed with no boundary record and only a
 provenance-warning escape. Two cooperating layers close the gap:
 
@@ -11,30 +10,30 @@ provenance-warning escape. Two cooperating layers close the gap:
   wrapped at arm time exactly like the c10d python API
   (:mod:`.collectives`): each captured call becomes a first-class boundary op
   node emitted through the ordinary producer, ticks the issue-time seq counter
-  on the same ``(group_uid, "coll")`` channel space (v5 1.2: implicit/funcol
+  on the same ``(group_uid, "coll")`` channel space (implicit/funcol
   collectives are not nested inside a public c10d call and tick normally), and
   journals a portable payload into ``annotations["distributed"]["boundaries"]``
   beside the c10d entries. The payload schema is
   ``functional_collective_boundary_v0`` -- a DOCUMENTED-UNSTABLE sibling of the
   frozen ``collective_boundary_v1``, deliberately distinct so no consumer keyed
-  on the frozen v1 vocabulary ever reads v0 fields, and the frozen C1 merge
+  on the frozen v1 vocabulary ever reads v0 fields, and the frozen merge
   contract is untouched (the merge evidence extractor refuses v0-bearing cores
-  typed; see ``merged/_evidence.py``). The funcol event mapping applies
-  (v5 1.4b): issue IS launch, completion is the OBSERVED wait.
+  typed; see ``merged/_evidence.py``). The funcol event mapping is:
+  issue IS launch, completion is the OBSERVED wait.
 
 * **Plane W (mode-independent completion authority).** funcol returns
   :class:`~torch.distributed._functional_collectives.AsyncCollectiveTensor`
-  (ACT), whose wait fires below every python mode (probe P2: a
+  (ACT), whose wait fires below every python mode (a
   ``TorchDispatchMode`` provably cannot see an ACT-triggered ``wait_tensor``).
   A CAPTURE-SCOPED dispatcher interposition -- ``torch.library.Library
   ("_c10d_functional", "IMPL")`` at the CPU key, redispatching below itself
-  (probe P3a) -- observes every ``wait_tensor`` regardless of mode-stack state
+  -- observes every ``wait_tensor`` regardless of mode-stack state
   and binds it to the pending boundary by destination identity. Honesty never
   depends on the interposition succeeding: an unobserved completion keeps
   ``completion_binding="unobserved"`` plus the typed disclosures; observation
-  is a quality upgrade, not a soundness precondition (v5 1.4c).
+  is a quality upgrade, not a soundness precondition.
 
-ACT discipline (v5 1.4c, binding): an unwaited ACT is NEVER materialized by
+ACT discipline (binding): an unwaited ACT is NEVER materialized by
 this module. Metadata reads go through the plain inner ``.elem`` tensor; the
 boundary node's logged copy is taken from the inner tensor pre-completion and
 carries the ``read_of_inflight_destination`` disclosure; digest witnesses of
@@ -59,14 +58,28 @@ import threading
 import time
 import weakref
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any
 
 import torch
 
-from ...errors._base import CompatibilityError
+from torchlens._distributed._lifecycle import (
+    armed_state,
+    capture_armed_state,
+    next_seq,
+    resolve_group_identity,
+    restore_wrapped_attr,
+)
+
+from ..._utils._torch_compat import (
+    get_async_collective_tensor_type,
+    get_funcol_group_resolvers,
+    get_funcol_module,
+    get_funcol_wait_redispatch,
+)
+from ..._utils.rng import log_current_autocast_state, log_current_rng_states
+from ...errors._base import CompatibilityError, transparent_contextmanager
 from .collectives import (
     COLLECTIVE_BOUNDARY_FASTLOG_UNSUPPORTED,
     _BoundaryScope,
@@ -88,13 +101,13 @@ __all__ = [
 ]
 
 FUNCOL_BOUNDARY_SCHEMA = "functional_collective_boundary_v0"
-"""Schema tag on funcol boundary payloads (DOCUMENTED-UNSTABLE, pre-S2)."""
+"""Schema tag on funcol boundary payloads (DOCUMENTED-UNSTABLE)."""
 
 _FUNCOL_MODULE = "torch.distributed._functional_collectives"
 
 #: Completion-binding values inside the v0 payload (DOCUMENTED-UNSTABLE; the
 #: frozen v1 vocabulary in ``merged/_evidence.py`` is deliberately NOT edited
-#: -- new closed vocabulary rides an S2 amendment, never a build lane).
+#: -- new closed vocabulary rides an amendment, never a build lane).
 _FUNCOL_COMPLETION_OBSERVED = "observed_wait"
 _FUNCOL_COMPLETION_UNOBSERVED = "unobserved"
 
@@ -219,8 +232,6 @@ def _act_type() -> type[Any] | None:
     absence flips ``HAS_ASYNC_COLLECTIVE_TENSOR`` there.
     """
 
-    from ...utils._torch_compat import get_async_collective_tensor_type
-
     return get_async_collective_tensor_type()
 
 
@@ -325,7 +336,7 @@ class _PendingFuncolCompletion:
                 "destination_digests", [None] * len(self.destinations)
             )
             # Post-completion read: the redispatched wait returned, so the
-            # destination bytes are final and a digest is legal (v5 payload
+            # destination bytes are final and a digest is legal (payload
             # policy: copies only after observed completion).
             digests[index] = _digest_tensor(self.destinations[index])
             if all(digest is not None for digest in digests):
@@ -426,8 +437,6 @@ class _FuncolCaptureSession:
         completion disclosure.
         """
 
-        from ...utils._torch_compat import get_funcol_wait_redispatch
-
         redispatch = get_funcol_wait_redispatch()
         if redispatch is None:
             self.interposition_status = "unavailable: HAS_FUNCOL_WAIT_INTERPOSITION is False"
@@ -524,7 +533,7 @@ class _FuncolCaptureSession:
 
         Runs once at capture close, after the forward completed and the
         interposition tore down: never-waited destinations gain the typed
-        ``async_unwaited_output_unwitnessed`` disclosure (v5 1.4b), and each
+        ``async_unwaited_output_unwitnessed`` disclosure, and each
         op-record annotation copy is refreshed from its settled master so the
         persisted per-op disclosure and the trace journal cannot diverge.
         """
@@ -576,12 +585,13 @@ def active_funcol_session() -> _FuncolCaptureSession | None:
     return _ACTIVE_FUNCOL_SESSION
 
 
-@contextmanager
+@transparent_contextmanager
 def distributed_recording_session(trace: Any) -> Iterator[None]:
     """Install the plane-W completion authority around one armed capture.
 
-    A no-op context for unarmed captures (zero-interference: the plain dense
-    path is untouched). For armed captures it registers the capture-scoped
+    A no-op context for unarmed captures and for armed captures with no
+    initialized process group (zero-interference: the plain dense path is
+    untouched). For armed captures it registers the capture-scoped
     ``wait_tensor`` interposition, publishes the session for the funcol wraps,
     and settles every pending boundary on exit -- teardown and settlement run
     on the failure path too, so an aborted forward never leaks a dispatcher
@@ -598,10 +608,8 @@ def distributed_recording_session(trace: Any) -> Iterator[None]:
         The capture runs with the completion authority installed.
     """
 
-    from torchlens.distributed._lifecycle import armed_state
-
     global _ACTIVE_FUNCOL_SESSION
-    if armed_state() is None:
+    if capture_armed_state() is None:
         yield
         return
     session = _FuncolCaptureSession(trace)
@@ -633,8 +641,6 @@ def _resolve_funcol_process_group(group: Any, tag: str) -> Any | None:
         The live ProcessGroup, or ``None`` when resolution is impossible
         (missing capability, unknown name, malformed spelling).
     """
-
-    from ...utils._torch_compat import get_funcol_group_resolvers
 
     resolvers = get_funcol_group_resolvers()
     if resolvers is None:
@@ -675,11 +681,11 @@ def _build_funcol_payload(
     bound:
         Bound call arguments.
     identity:
-        Resolved :class:`~torchlens.distributed._lifecycle.GroupIdentity`.
+        Resolved :class:`~torchlens._distributed._lifecycle.GroupIdentity`.
     seq:
         Issue-time seq on the ``(group_uid, "coll")`` channel.
     arming:
-        The armed state's :class:`~torchlens.distributed._lifecycle.ArmingRecord`.
+        The armed state's :class:`~torchlens._distributed._lifecycle.ArmingRecord`.
     contributions:
         This rank's contribution tensors (possibly ACTs from chained funcol).
     inner_destinations:
@@ -688,7 +694,7 @@ def _build_funcol_payload(
         Digest witnesses of the contributions, when taken.
     contribution_witness_blocked:
         Whether a contribution digest was withheld because taking it would
-        have forced an unwaited ACT's completion (v5 1.4c).
+        have forced an unwaited ACT's completion.
     witness_policy:
         Resolved ``distributed_witness`` level.
     interposition_status:
@@ -812,8 +818,6 @@ def _make_funcol_wrap(site: FuncolSite, original: Callable[..., Any]) -> Callabl
         raise its own ``TypeError`` anyway).
         """
 
-        from torchlens.distributed._lifecycle import armed_state, next_seq, resolve_group_identity
-
         state = armed_state()
         if state is None or _inside_boundary():
             with _BoundaryScope():
@@ -883,8 +887,8 @@ def _make_funcol_wrap(site: FuncolSite, original: Callable[..., Any]) -> Callabl
             with _BoundaryScope():
                 return original(*args, **kwargs)
 
-        trace = active_trace
-        if getattr(trace, "capture_mode", None) == "predicate":
+        trace: Any = active_trace  # non-None: ``capturing`` checked it
+        if trace._options_mode == "predicate":
             raise CompatibilityError(
                 "Fastlog cannot represent collective boundary journals; refusing before "
                 "the collective executes instead of returning a Recording that omits it.",
@@ -895,9 +899,7 @@ def _make_funcol_wrap(site: FuncolSite, original: Callable[..., Any]) -> Callabl
         contributions = _contribution_tensors(bound.get(site.tensor_arg))
         witness_policy = str(getattr(trace, "distributed_witness", "none") or "none")
 
-        from ...utils.rng import log_current_autocast_state, log_current_rng_states
-
-        save_rng = getattr(trace, "save_rng_states", False)
+        save_rng = trace._options_save_rng
         rng_states = log_current_rng_states(torch_only=True) if save_rng else {}
         autocast_state = log_current_autocast_state()
         session = active_funcol_session()
@@ -910,7 +912,7 @@ def _make_funcol_wrap(site: FuncolSite, original: Callable[..., Any]) -> Callabl
         with _BoundaryScope(), _state.pause_logging():
             if witness_policy == "digest":
                 if any(_is_unwaited_act(tensor) for tensor in contributions):
-                    # v5 1.4c: digesting an unwaited ACT would force its wait;
+                    # Digesting an unwaited ACT would force its wait;
                     # the witness records not_present instead of perturbing.
                     contribution_witness_blocked = True
                 else:
@@ -977,7 +979,6 @@ def install_funcol_wraps(originals: dict[tuple[Any, str], Any]) -> None:
 
     if not torch.distributed.is_available():
         return
-    from ...utils._torch_compat import get_funcol_module
 
     funcol_module = get_funcol_module()
     if funcol_module is None:
@@ -998,10 +999,6 @@ def remove_funcol_wraps(originals: dict[tuple[Any, str], Any]) -> None:
     originals:
         The armed state's original-function registry.
     """
-
-    from torchlens.distributed._lifecycle import restore_wrapped_attr
-
-    from ...utils._torch_compat import get_funcol_module
 
     funcol_module = get_funcol_module()
     if funcol_module is None:

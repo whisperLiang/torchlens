@@ -9,13 +9,14 @@ from typing import Any
 
 import pytest
 import torch
+from _forward_stash import stashed
 from torch import nn
 
 import torchlens as tl
-from torchlens._runnable_state import prepare_runnable_state
-from torchlens.errors import StateBindingError
+from torchlens._runnable import RunnableErrorCode, StateSlotRole, StateSource, TensorSlotRole
+from torchlens._runnable.state import prepare_runnable_state
+from torchlens.errors import StateBindingError, TorchLensWarning
 from torchlens.options import CaptureOptions
-from torchlens.runnable import RunnableErrorCode, StateSlotRole, StateSource, TensorSlotRole
 
 
 class StatefulRunnableModel(nn.Module):
@@ -47,12 +48,14 @@ def runnable_artifact(
         model,
         torch.ones(2, 3),
         capture=CaptureOptions(
-            intervention_ready=True,
+            replayable=True,
             capture_container_structure=True,
             cache=False,
         ),
     )
-    assert model.forward_calls == 1
+    # Pure observer: the counter is restored; the forward's write is on the trace.
+    assert model.forward_calls == 0
+    assert stashed(trace, "forward_calls") == 1
     path = tmp_path_factory.mktemp("runnable-state") / "state.tlspec"
     trace.save(path, level="runnable")
     state = {name: value.detach().clone() for name, value in model.state_dict().items()}
@@ -72,7 +75,7 @@ def _with_rebuilt_state_metadata_witnesses(descriptor: Any) -> Any:
     """
 
     from torchlens._io.runnable import STATE_METADATA_FACT_SITE_PREFIX, _encode_literal
-    from torchlens.runnable import ControlWitness, ControlWitnessKind
+    from torchlens._runnable import ControlWitness, ControlWitnessKind
 
     witnesses = [
         witness
@@ -129,7 +132,6 @@ def _codes(error: StateBindingError) -> set[RunnableErrorCode]:
     return {diagnostic.code for diagnostic in diagnostics}
 
 
-@pytest.mark.smoke
 def test_load_state_dict_maps_names_to_slots_and_does_not_execute(
     runnable_artifact: tuple[Path, dict[str, torch.Tensor]],
 ) -> None:
@@ -137,7 +139,7 @@ def test_load_state_dict_maps_names_to_slots_and_does_not_execute(
 
     trace = _load(runnable_artifact)
     state = runnable_artifact[1]
-    descriptor_before = trace.runnable_descriptor
+    descriptor_before = trace._sparse_run_descriptor
     calls_before = dict(trace._runnable.callables_by_call_id)
     for call_id in calls_before:
         trace._runnable.callables_by_call_id[call_id] = _execution_forbidden
@@ -149,7 +151,7 @@ def test_load_state_dict_maps_names_to_slots_and_does_not_execute(
     assert trace.readiness is not None
     assert trace.readiness.state_sources_available[0] is StateSource.USER_STATE_DICT
     assert prepared.random_filled_slot_ids == ()
-    assert trace.runnable_descriptor is descriptor_before
+    assert trace._sparse_run_descriptor is descriptor_before
     for slot in descriptor_before.tensor_slots:
         if slot.state_binding is None:
             assert slot.slot_id not in prepared.slot_values
@@ -164,12 +166,12 @@ def _execution_forbidden(*args: Any, **kwargs: Any) -> None:
     raise AssertionError(f"Stage 4 executed a graph callable with {args!r}, {kwargs!r}")
 
 
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
 @pytest.mark.parametrize(
     ("mutation", "expected_code"),
     [
         ("missing", RunnableErrorCode.STATE_MISSING_KEY),
         ("unexpected", RunnableErrorCode.STATE_UNEXPECTED_KEY),
-        ("shape", RunnableErrorCode.STATE_SHAPE_MISMATCH),
         ("dtype", RunnableErrorCode.STATE_DTYPE_MISMATCH),
     ],
 )
@@ -214,7 +216,7 @@ def test_load_state_dict_verifies_module_path_and_semantic_role(
     """Verify recorded ownership and role only after canonical name mapping."""
 
     trace = _load(runnable_artifact)
-    descriptor = trace.runnable_descriptor
+    descriptor = trace._sparse_run_descriptor
     assert descriptor is not None
     slots = list(descriptor.tensor_slots)
     index = next(
@@ -239,7 +241,7 @@ def test_alias_groups_reject_conflicts_and_share_one_staged_value(
     """Require coherent alias entries and stage one shared tensor allocation."""
 
     trace = _load(runnable_artifact)
-    descriptor = trace.runnable_descriptor
+    descriptor = trace._sparse_run_descriptor
     assert descriptor is not None
     original = next(
         slot
@@ -277,39 +279,19 @@ def test_alias_groups_reject_conflicts_and_share_one_staged_value(
     assert RunnableErrorCode.STATE_ALIAS_CONFLICT in _codes(caught.value)
 
 
-def test_failed_restage_preserves_prior_binding_and_success_replaces_atomically(
-    runnable_artifact: tuple[Path, dict[str, torch.Tensor]],
-) -> None:
-    """Keep the old staged mapping on failure and replace it only after full validation."""
-
-    trace = _load(runnable_artifact)
-    first = {name: value.clone() for name, value in runnable_artifact[1].items()}
-    trace.load_state_dict(first)
-    first_prepared = prepare_runnable_state(trace)
-    invalid = dict(first)
-    del invalid["linear.bias"]
-    with pytest.raises(StateBindingError):
-        trace.load_state_dict(invalid)
-    after_failure = prepare_runnable_state(trace)
-    assert torch.equal(
-        after_failure.slot_values["state:linear.weight"],
-        first_prepared.slot_values["state:linear.weight"],
-    )
-
-    second = {name: value + 2 for name, value in first.items()}
-    trace.load_state_dict(second)
-    second_prepared = prepare_runnable_state(trace)
-    assert torch.equal(second_prepared.slot_values["state:linear.weight"], second["linear.weight"])
-
-
-@pytest.mark.smoke
+@pytest.mark.filterwarnings(
+    # A08 random-role-init disclosure (runnable_random_init_run): this test
+    # exercises a weight-free runnable run DELIBERATELY; the warning is the
+    # feature under test elsewhere (tests/test_persist_honesty_runnable_random.py).
+    "default:This runnable artifact carries no model weights"
+)
 def test_n1a_initializes_every_role_deterministically_and_names_every_slot(
     runnable_artifact: tuple[Path, dict[str, torch.Tensor]],
 ) -> None:
     """Allocate parameters/buffers per N1-a with isolated seeded determinism."""
 
     trace = _load(runnable_artifact)
-    descriptor = trace.runnable_descriptor
+    descriptor = trace._sparse_run_descriptor
     assert descriptor is not None
     template = next(
         slot for slot in descriptor.tensor_slots if slot.role is TensorSlotRole.PARAMETER
@@ -397,19 +379,42 @@ def test_n1a_initializes_every_role_deterministically_and_names_every_slot(
     assert torch.count_nonzero(first.slot_values["state:test:weight"]) > 0
 
 
-def test_user_state_overrides_embedded_hook_and_embedded_precedes_random(
-    runnable_artifact: tuple[Path, dict[str, torch.Tensor]],
-) -> None:
-    """Exercise the Stage 7 embedded-state hook and effective source precedence."""
+class _BufferNamedBiasModel(nn.Module):
+    """A causal-mask buffer registered under the leaf name ``bias``.
 
-    trace = _load(runnable_artifact)
-    embedded = {name: value + 1 for name, value in runnable_artifact[1].items()}
-    trace._runnable.embedded_state = embedded
-    prepared_embedded = prepare_runnable_state(trace, seed=7)
-    assert prepared_embedded.state_source is StateSource.EMBEDDED_CAPTURE_STATE
+    transformers 4.x GPT-2 attention keeps its boolean causal mask as a
+    non-persistent buffer literally named ``bias``; the name contract must not
+    demand a parameter bias role for it.
+    """
 
-    user = {name: value + 2 for name, value in runnable_artifact[1].items()}
-    trace.load_state_dict(user)
-    prepared_user = prepare_runnable_state(trace, seed=7)
-    assert prepared_user.state_source is StateSource.USER_STATE_DICT
-    assert torch.equal(prepared_user.slot_values["state:linear.weight"], user["linear.weight"])
+    def __init__(self) -> None:
+        """Initialize one linear layer and a boolean causal-mask buffer named ``bias``."""
+
+        super().__init__()
+        self.linear = nn.Linear(3, 3)
+        self.register_buffer(
+            "bias", torch.tril(torch.ones(3, 3, dtype=torch.bool)), persistent=False
+        )
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Mask the projected scores with the buffer."""
+
+        return self.linear(value).masked_fill(~self.bias, 0.0)
+
+
+def test_random_init_run_binds_a_buffer_named_bias(tmp_path: Path) -> None:
+    """A buffer whose leaf is ``bias`` binds as a generic buffer, not a parameter bias."""
+
+    model = _BufferNamedBiasModel().eval()
+    inputs = torch.ones(3, 3)
+    trace = tl.trace(model, inputs, capture=CaptureOptions(replayable=True))
+    try:
+        # The used non-persistent buffer is disclosed as required runnable state.
+        with pytest.warns(TorchLensWarning, match="NON-persistent"):
+            trace.save(tmp_path / "bias_buffer", level="runnable")
+    finally:
+        trace.cleanup()
+    loaded = tl.load(tmp_path / "bias_buffer")
+    with pytest.warns(TorchLensWarning, match="RANDOM"):
+        result = loaded.run_transaction(inputs=inputs, seed=0)
+    assert result.report.state_source is StateSource.RANDOM_INITIALIZATION

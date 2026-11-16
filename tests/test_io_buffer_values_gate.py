@@ -7,7 +7,7 @@ flag, no warning, and no manifest row (b8/R62: custom attributes got exactly
 this gate+warn in a prior round; buffers were the sibling channel left open).
 Buffer values are training-data-derived state (running statistics, counters),
 so the fix mirrors the custom-attributes belt: ``include_buffer_values=`` on
-``tl.save`` and ``tl.to_disk`` defaulting to ``True`` (historical behavior
+``Trace.save`` and ``tl.to_disk`` defaulting to ``True`` (historical behavior
 preserved), a ``buffer_values_disclosure`` manifest entry on every save, a
 save-time warning when values actually embed, and NEVER rewriting values.
 These canaries plant a distinctive buffer value the forward overwrites and
@@ -26,8 +26,6 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.errors._base import TorchLensWarning
-
-pytestmark = pytest.mark.smoke
 
 _CANARY_A = 13571.0
 _CANARY_B = 24680.0
@@ -60,6 +58,24 @@ def _canary_bytes() -> bytes:
     return struct.pack("<f", _CANARY_A)
 
 
+def _buffer_value_refs(bundle_path: Path) -> list[dict]:
+    """Return the tensor references the trace record's buffer-value field holds."""
+
+    fields = json.loads((bundle_path / "records" / "trace.json").read_text())["fields"]
+    found: list[dict] = []
+    stack = [fields.get("_buffer_initial_values")]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            if item.get("$tl") == "tensor":
+                found.append(item)
+                continue
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return found
+
+
 def _manifest_disclosure(bundle_path: Path) -> dict:
     manifest = json.loads((bundle_path / "manifest.json").read_text())
     assert "buffer_values_disclosure" in manifest, (
@@ -75,12 +91,14 @@ def test_default_save_ships_values_warns_and_discloses(tmp_path: Path) -> None:
     assert "canary" in trace._buffer_initial_values
     bundle = tmp_path / "with_buffers"
     with pytest.warns(TorchLensWarning, match="forward-overwritten buffer"):
-        tl.save(trace, bundle, overwrite=True)
+        trace.save(bundle, overwrite=True)
 
     assert _canary_bytes() in _bundle_bytes(bundle)
     manifest = json.loads((bundle / "manifest.json").read_text())
-    kinds = {entry["kind"] for entry in manifest["tensors"]}
-    assert "buffer_initial_value" in kinds
+    assert manifest["payload_policy"]["include_buffer_values"] is True
+    refs = _buffer_value_refs(bundle)
+    assert len(refs) == 1, "the buffer value must ship as one listed tensor reference"
+    assert refs[0]["blob"] in manifest["files"]
 
     disclosure = _manifest_disclosure(bundle)
     assert disclosure["included"] is True
@@ -97,94 +115,11 @@ def test_audit_level_is_gated_too(tmp_path: Path) -> None:
 
     trace = _capture()
     bundle = tmp_path / "audit_held"
-    tl.save(trace, bundle, level="audit", overwrite=True, include_buffer_values=False)
+    trace.save(bundle, level="audit", overwrite=True, include_buffer_values=False)
 
     assert _canary_bytes() not in _bundle_bytes(bundle)
     manifest = json.loads((bundle / "manifest.json").read_text())
-    kinds = {entry["kind"] for entry in manifest["tensors"]}
-    assert "buffer_initial_value" not in kinds
+    assert manifest["payload_policy"]["include_buffer_values"] is False
+    assert _buffer_value_refs(bundle) == []
     disclosure = _manifest_disclosure(bundle)
     assert disclosure["included"] is False
-
-
-def test_include_false_drops_channel_and_still_names_it(tmp_path: Path) -> None:
-    """``include_buffer_values=False`` drops the values; the disclosure still names them."""
-
-    trace = _capture()
-    bundle = tmp_path / "without_buffers"
-    tl.save(trace, bundle, overwrite=True, include_buffer_values=False)
-
-    manifest = json.loads((bundle / "manifest.json").read_text())
-    kinds = {entry["kind"] for entry in manifest["tensors"]}
-    assert "buffer_initial_value" not in kinds
-
-    disclosure = _manifest_disclosure(bundle)
-    assert disclosure["included"] is False
-    # The disclosure still NAMES the withheld channel (count + names), so a
-    # recipient can see what a re-save with the default would add.
-    assert disclosure["buffer_count"] == 1
-    assert disclosure["buffer_names"] == ["canary"]
-
-    loaded = tl.load(bundle)
-    assert not loaded._buffer_initial_values
-
-
-def test_include_false_does_not_mutate_live_trace(tmp_path: Path) -> None:
-    """The gate scrubs the ARTIFACT only; the live trace keeps its values."""
-
-    trace = _capture()
-    tl.save(trace, tmp_path / "b", overwrite=True, include_buffer_values=False)
-    assert trace._buffer_initial_values["canary"].tolist() == [_CANARY_A, _CANARY_B]
-
-
-def test_bufferless_save_stays_silent_and_discloses_empty(tmp_path: Path) -> None:
-    """The common eval-mode capture has an empty channel: no warning, honest row."""
-
-    import warnings as _warnings
-
-    trace = tl.trace(nn.Sequential(nn.Linear(4, 3)).eval(), torch.randn(2, 4))
-    bundle = tmp_path / "no_buffers"
-    with _warnings.catch_warnings():
-        _warnings.simplefilter("error", TorchLensWarning)
-        tl.save(trace, bundle, overwrite=True)
-
-    disclosure = _manifest_disclosure(bundle)
-    assert disclosure["included"] is True
-    assert disclosure["buffer_count"] == 0
-    assert disclosure["buffer_names"] == []
-
-
-def test_streaming_save_warns_and_discloses(tmp_path: Path) -> None:
-    """Streaming to_disk goes through the same belt as tl.save."""
-
-    bundle = tmp_path / "streamed.tl"
-    with pytest.warns(TorchLensWarning, match="forward-overwritten buffer"):
-        tl.trace(_BufferModel().eval(), torch.randn(2, 4), storage=tl.to_disk(bundle))
-
-    disclosure = _manifest_disclosure(bundle)
-    assert disclosure["included"] is True
-    assert disclosure["buffer_names"] == ["canary"]
-    assert _canary_bytes() in _bundle_bytes(bundle)
-
-
-def test_streaming_optout_withholds_values(tmp_path: Path) -> None:
-    """``to_disk(..., include_buffer_values=False)`` withholds the channel."""
-
-    bundle = tmp_path / "held.tl"
-    tl.trace(
-        _BufferModel().eval(),
-        torch.randn(2, 4),
-        storage=tl.to_disk(bundle, include_buffer_values=False),
-    )
-
-    # Channel-specific assertion (not whole-bundle byte absence): the streamed
-    # bundle legitimately retains captured op ARGS, and the op that consumed
-    # the buffer carries its pre-forward value through that separate,
-    # save_arg_values-gated channel. The gate under test is
-    # _buffer_initial_values only.
-    manifest = json.loads((bundle / "manifest.json").read_text())
-    kinds = {entry["kind"] for entry in manifest["tensors"]}
-    assert "buffer_initial_value" not in kinds
-    disclosure = _manifest_disclosure(bundle)
-    assert disclosure["included"] is False
-    assert disclosure["buffer_names"] == ["canary"]

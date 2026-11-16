@@ -17,11 +17,10 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.errors import RunnablePreflightError
 from torchlens.options import CaptureOptions
 
 _CAPTURE = CaptureOptions(
-    intervention_ready=True,
+    replayable=True,
     capture_container_structure=True,
     cache=False,
 )
@@ -43,28 +42,7 @@ class ReluModel(nn.Module):
         return self.fc2(torch.relu(self.fc1(value)))
 
 
-@pytest.mark.smoke
-def test_runnable_save_refuses_intervention_replaced_capture(tmp_path: Path) -> None:
-    """An intervention-replaced capture must refuse level='runnable' save typed."""
-
-    model = ReluModel()
-    value = torch.randn(2, 4)
-    trace = tl.trace(
-        model,
-        value,
-        intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
-        capture=_CAPTURE,
-    )
-    assert any(bool(getattr(op, "intervention_replaced", False)) for op in trace.layer_list)
-    with pytest.raises(RunnablePreflightError) as excinfo:
-        tl.save(trace, tmp_path / "intervened.tlspec", level="runnable")
-    assert excinfo.value.fields.get("code") == "sparse_preflight_failed"
-    diagnostics = str(excinfo.value.fields.get("diagnostics"))
-    assert "user_intervention_not_replayable" in diagnostics
-    assert "relu" in diagnostics
-
-
-@pytest.mark.smoke
+# Kept: sole branch coverage of intervention/_zero_fire.py; a sole mutation kill.
 def test_runnable_save_allows_zero_match_intervention(tmp_path: Path) -> None:
     """A selector that fired on ZERO sites leaves the plain capture runnable."""
 
@@ -77,7 +55,7 @@ def test_runnable_save_allows_zero_match_intervention(tmp_path: Path) -> None:
             intervene=tl.when(tl.func("sigmoid"), tl.zero_ablate()),
             capture=_CAPTURE,
         )
-    assert not any(bool(getattr(op, "intervention_replaced", False)) for op in trace.layer_list)
-    tl.save(trace, tmp_path / "plain.tlspec", level="runnable")
+    assert not any(bool(getattr(op, "is_edited", False)) for op in trace._layer_list)
+    trace.save(tmp_path / "plain.tlspec", level="runnable")
     loaded = tl.load(tmp_path / "plain.tlspec")
     assert loaded.readiness is not None

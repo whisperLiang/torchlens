@@ -102,7 +102,6 @@ def _segment(monkeypatch: pytest.MonkeyPatch, rewrite: Any) -> Any:
     return segment
 
 
-@pytest.mark.smoke
 @pytest.mark.parametrize(
     ("op_type", "input_index", "integer", "shape"),
     [
@@ -146,7 +145,6 @@ def test_tf_nonshape_operands_never_read_payloads(
     assert tensor.reads == 0
 
 
-@pytest.mark.smoke
 @pytest.mark.parametrize(
     ("op_type", "input_index"), [("Reshape", 1), ("Fill", 0), ("BroadcastTo", 1)]
 )
@@ -174,7 +172,6 @@ def test_tf_shape_operands_remain_readable_and_rewritable(
     assert tensor.reads == 2
 
 
-@pytest.mark.smoke
 def test_shape_literal_suffix_scan_is_linear(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mixed lists retain their integer suffix without testing every suffix."""
 

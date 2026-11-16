@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from torchlens.backends import get_backend_spec
+from torchlens.backends.registry import get_backend_spec
 from torchlens.split.adapters import resolve_split_adapter
 
 

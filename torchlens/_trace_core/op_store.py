@@ -1,13 +1,10 @@
-"""Columnar row store backing the ``Op`` facade (the M5 seam).
-
+"""Columnar row store backing the ``Op`` facade (the seam).
 One ``OpRowStore`` per captured trace holds every stored ``Op`` field cell;
 ``Op`` itself is a two-word ``(_core, _row)`` facade whose generated data
 descriptors read and write cells here. ``DetachedOpStore`` is the single-row
-twin used by ``Op.copy()``, pickle restoration, fork shells, and preview
+twin used by ``Op._copy_with_shallow_fields()``, pickle restoration, fork shells, and preview
 backends that construct ops outside the event-materialize ingress.
-
 Storage phases:
-
 * BUILDING (postprocess steps 0-20): rows are plain Python lists (one
   ``[_MISSING] * n_fields`` allocation per op), so cell reads/writes are
   list indexing and the per-op footprint matches the former slot layout.
@@ -18,7 +15,6 @@ Storage phases:
   their exact public type); everything else stays an object column. Later
   writes land in a sparse overlay; deletes on object columns release the
   cell value in place so op removal keeps freeing payloads.
-
 An unset cell is ``_MISSING`` (never ``None`` -- ``None`` is a real stored
 value); facade descriptors translate ``_MISSING`` into the exact
 ``AttributeError`` an unset ``__slots__`` member raised.
@@ -34,19 +30,28 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
+from ._content_fingerprint import _cell_content_fingerprint, _value_fingerprint
+from ._fork_copy import (
+    _COW_ATOMIC,
+    _contains_mutable_container,
+    _eager_copy,
+    _needs_eager_isolation,
+    cow_copy_value,
+)
+from .eviction_walk import _evict_payloads_in_list, _evict_payloads_in_mapping, _EvictTypes
 from .groups import GroupRef, MembershipGroups
 
 #: Unset-cell sentinel; distinct from None (a real storable value).
 _MISSING = object()
 
-#: CSR-backed relation cell sentinel (M6): the value lives in the store's
+#: CSR-backed relation cell sentinel: the value lives in the store's
 #: dataflow edge table; the facade descriptor rematerializes an immutable
 #: tuple view on first access and caches it back through ``cell_set``.
 #: Distinct from ``_MISSING`` so present/absent semantics stay exact —
 #: ``cell_del`` on a ``_CSR`` cell clears to genuinely absent.
 _CSR = object()
 
-#: Shared-fact cell sentinel (M7): the value lives in the store's fact
+#: Shared-fact cell sentinel: the value lives in the store's fact
 #: blocks (the FunctionCall / ParamAlias group tables); the facade
 #: descriptor hydrates the exact public container type for the row on first
 #: access and caches it back. Same present/absent semantics as ``_CSR``.
@@ -60,76 +65,6 @@ _NO_OVERLAY = object()
 #: packing win, so small sealed stores keep their row-major cells (write and
 #: delete semantics are identical either way; ``new_row`` refuses once sealed).
 _TRANSPOSE_MIN_ROWS = 512
-
-# Depth ceiling for the nested-container payload eviction walk (r8 R37).
-_EVICT_WALK_DEPTH_CEILING = 8
-
-
-def _evict_payloads_in_cell(
-    value: Any,
-    tensor_cls: type,
-    depth: int = 0,
-    seen: set[int] | None = None,
-) -> Any:
-    """Return ``value`` with every reachable tensor replaced by ``None``.
-
-    Bounded to builtin containers (list/tuple/dict/set/frozenset): a direct
-    tensor becomes ``None`` (the payload-absent spelling), mutable containers
-    evict in place, tuples/frozensets rebuild only when a member changed
-    (named tuples reconstruct through their own type, falling back to the
-    unchanged original -- keeping a pin -- rather than corrupting the
-    container type). Tensors inside non-builtin custom objects remain the
-    disclosed residual; cyclic containers terminate through the seen set.
-    """
-
-    if isinstance(value, tensor_cls):
-        return None
-    if depth >= _EVICT_WALK_DEPTH_CEILING:
-        return value
-    if isinstance(value, list):
-        if seen is None:
-            seen = set()
-        if id(value) in seen:
-            return value
-        seen.add(id(value))
-        for index, item in enumerate(value):
-            value[index] = _evict_payloads_in_cell(item, tensor_cls, depth + 1, seen)
-        return value
-    if isinstance(value, tuple):
-        rebuilt = [_evict_payloads_in_cell(item, tensor_cls, depth + 1, seen) for item in value]
-        if all(new is old for new, old in zip(rebuilt, value, strict=True)):
-            return value
-        if type(value) is tuple:
-            return tuple(rebuilt)
-        try:
-            # Named tuples and tuple subclasses reconstruct through their own
-            # type; an unreconstructable subclass keeps the original (a
-            # retained pin beats a corrupted container).
-            return type(value)(*rebuilt)
-        except Exception:
-            try:
-                return type(value)(rebuilt)
-            except Exception:
-                return value
-    if isinstance(value, dict):
-        if seen is None:
-            seen = set()
-        if id(value) in seen:
-            return value
-        seen.add(id(value))
-        for key in list(value):
-            value[key] = _evict_payloads_in_cell(value[key], tensor_cls, depth + 1, seen)
-        return value
-    if isinstance(value, (set, frozenset)):
-        if not any(isinstance(item, tensor_cls) for item in value):
-            return value
-        survivors = {item for item in value if not isinstance(item, tensor_cls)}
-        survivors.add(None)
-        try:
-            return type(value)(survivors)
-        except Exception:
-            return value
-    return value
 
 
 class OpStoreLayout:
@@ -209,9 +144,11 @@ class OpRowStore:
         "_columns",
         "_compacted_singletons",
         "_cow_shared",
+        "_label_share",
         "_mutable_keys",
         "_n_rows",
         "_overlay",
+        "_payload_finalizers",
         "_payload_owner_count",
         "_payload_views",
         "_sweep_plan",
@@ -222,6 +159,7 @@ class OpRowStore:
         "layout",
         "ref_labels",
     )
+    _label_share: list[Any]  # set lazily by ``label_cells.shared_entry``
 
     def __init__(self, layout: OpStoreLayout) -> None:
         """Create an empty building-phase store."""
@@ -233,13 +171,13 @@ class OpRowStore:
         self._n_rows = 0
         self._sealed = False
         # Sticky flag set by the first OpStoreView taken over this store
-        # (M11 COW fork). Once shared, deletes must stop releasing object
+        # (copy-on-write fork). Once shared, deletes must stop releasing object
         # column cells IN PLACE — a fork reads the same column backing —
         # and tombstone through the overlay instead. Memory-only effect:
         # a removed op's payloads on a forked-from trace are released with
         # the store rather than at removal time.
         self._cow_shared = False
-        # Fork-isolation index (M11/F4): ``fid -> rows`` (tuple once
+        # Fork-isolation index: ``fid -> rows`` (tuple once
         # columnar, set while sealed row-major) of cells whose values may
         # need eager fork-time isolation (exact builtin mutable containers,
         # and immutable containers transitively nesting one).
@@ -250,7 +188,7 @@ class OpRowStore:
         # ``_SealedRowMajorOpRowStore`` at freeze so post-seal container
         # writes register here.
         self._mutable_keys: dict[int, Any] | None = None
-        # Cached per-store sweep plan derived from ``_mutable_keys`` (F4/F11):
+        # Cached per-store sweep plan derived from ``_mutable_keys``:
         # flat parallel arrays of pre-resolved (key, allocation/copy) work so
         # the per-fork sweep is a tight guard+copy loop with no per-cell
         # backing fetch or classification. Built lazily with the index;
@@ -260,16 +198,16 @@ class OpRowStore:
         # no hook on either seal shape, so plan entries alias the observed
         # values and execution re-checks them (``_build_sweep_plan``).
         self._sweep_plan: tuple[Any, ...] | None = None
-        # The M6 dataflow family: bound at the freeze-time relation
+        # The dataflow family: bound at the freeze-time relation
         # conversion (same EdgeTable object registered in the owning
         # TraceCore's edge registry) together with the row -> reference-label
         # table the facade descriptors use to rematerialize views.
         self.dataflow_edges: Any = None
         self.ref_labels: dict[int, str] | None = None
-        # The M7 shared-fact blocks (FunctionCall / ParamAlias group
+        # The shared-fact blocks (FunctionCall / ParamAlias group
         # tables), bound by the same freeze-time conversion.
         self.fact_blocks: Any = None
-        # M14 singleton-label compaction registry (kind tables only):
+        # Singleton-label compaction registry (kind tables only):
         # ``row * n_fields + fid -> the exact str object`` the freeze-seam
         # compaction stored in place of a one-element label list. Decode is
         # gated on OBJECT IDENTITY (``registry[key] is cell_value``), so a
@@ -284,6 +222,10 @@ class OpRowStore:
         # ``Op`` facade -- which holds this store strongly -- keeps its
         # metadata readable without pinning every captured activation.
         self._payload_owner_count = 0
+        # One live finalizer per owning core (keyed by the core's id while it
+        # is alive), so an owner known to be discarded can release its pin at
+        # a chosen point instead of whenever the cyclic collector frees it.
+        self._payload_finalizers: dict[int, weakref.finalize] = {}
         # Weak references to every OpStoreView over this base: row-major
         # views SNAPSHOT the row lists (and every view has private
         # overlays), so last-owner payload eviction must sweep surviving
@@ -307,11 +249,36 @@ class OpRowStore:
         """
 
         self._payload_owner_count += 1
-        weakref.finalize(owner, self._release_payload_owner)
+        key = id(owner)
+        self._payload_finalizers[key] = weakref.finalize(owner, self._release_payload_owner, key)
 
-    def _release_payload_owner(self) -> None:
+    def release_payload_owner(self, owner: Any) -> None:
+        """Release ``owner``'s payload pin now rather than at its collection.
+
+        For an owner the caller has discarded (a rerun's own capture after a
+        fast refresh): such an owner usually sits in reference cycles, so the
+        cyclic collector frees it at an arbitrary later point and the
+        last-owner eviction walk runs inside whatever executes then. Running
+        the owner's finalizer here pays that cost at a known point; the
+        finalizer runs once either way, and eviction still happens only when
+        no other owner holds the store.
+
+        Parameters
+        ----------
+        owner:
+            A core previously registered through ``adopt_payload_owner``.
+        """
+
+        finalizer = self._payload_finalizers.get(id(owner))
+        registered = None if finalizer is None else finalizer.peek()
+        if finalizer is not None and registered is not None and registered[0] is owner:
+            finalizer()
+
+    def _release_payload_owner(self, key: int | None = None) -> None:
         """Drop one owner; evict tensor payloads when the last owner dies."""
 
+        if key is not None:
+            self._payload_finalizers.pop(key, None)
         self._payload_owner_count -= 1
         if self._payload_owner_count == 0 and self._sealed:
             self._evict_tensor_payloads()
@@ -326,8 +293,8 @@ class OpRowStore:
         replaced with ``None`` -- the existing "no payload retained"
         spelling -- while every metadata cell stays readable. Tensors nested
         inside builtin CONTAINER cells (``saved_args`` trees and friends)
-        are evicted through a bounded walk too (r8 R37, sol repro: a tensor
-        inside a saved-args tuple survived Trace death via any retained Op);
+        are evicted through a bounded walk too (so a tensor
+        inside a saved-args tuple does not survive Trace death via a retained Op);
         tensors inside non-builtin custom objects remain the disclosed
         residual. Keep the source Trace alive (or clone the tensor) to keep
         payloads past the trace's lifetime.
@@ -336,23 +303,22 @@ class OpRowStore:
         import torch
 
         tensor_cls = torch.Tensor
-        evict = _evict_payloads_in_cell
+        evict_cells = _evict_payloads_in_list
+        evict_overlay = _evict_payloads_in_mapping
+        # One learned-opaque-type set for the whole sweep: each record type
+        # pays one per-value call, then every later instance is skipped.
+        inert = _EvictTypes()
         rows = self._rows
         if rows is not None:
             for row_cells in rows:
-                for fid, value in enumerate(row_cells):
-                    row_cells[fid] = evict(value, tensor_cls)
+                evict_cells(row_cells, tensor_cls, 0, None, inert)
         columns = self._columns
         if columns is not None:
             for column in columns:
                 if column.packed:
                     continue
-                values = column.values
-                for index, value in enumerate(values):
-                    values[index] = evict(value, tensor_cls)
-        overlay = self._overlay
-        for key, value in overlay.items():
-            overlay[key] = evict(value, tensor_cls)
+                evict_cells(column.values, tensor_cls, 0, None, inert)
+        evict_overlay(self._overlay, tensor_cls, 0, None, inert)
         # Surviving views (reachable only through retained fork Ops now that
         # every owning core is dead) read their own snapshot surfaces, so
         # they are swept too. Shared snapshot lists (fork chains) evict
@@ -364,11 +330,9 @@ class OpRowStore:
             snapshot_rows = view._base_rows
             if snapshot_rows is not None:
                 for row_cells in snapshot_rows:
-                    for fid, value in enumerate(row_cells):
-                        row_cells[fid] = evict(value, tensor_cls)
-            for view_overlay in (view._base_overlay, view._overlay):
-                for key, value in view_overlay.items():
-                    view_overlay[key] = evict(value, tensor_cls)
+                    evict_cells(row_cells, tensor_cls, 0, None, inert)
+            evict_overlay(view._base_overlay, tensor_cls, 0, None, inert)
+            evict_overlay(view._overlay, tensor_cls, 0, None, inert)
 
     def __len__(self) -> int:
         """Return the number of rows ever appended (removed rows included)."""
@@ -459,6 +423,43 @@ class OpRowStore:
             self._overlay.pop(key, None)
             column.clear(row)
         return True
+
+    def release_row(self, row: int) -> None:
+        """Delete every set cell of one row (op removal husking).
+
+        Exactly ``cell_del`` for every field id in layout order, without the
+        facade: no descriptor dispatch and no read of the cell values, so a
+        ``PooledCell`` (or a shared-fact / CSR sentinel) is dropped as stored
+        instead of being hydrated first only to be deleted. The audited twins
+        inherit this method unchanged: their ``cell_del`` never records a
+        delete on a row already marked released, which is every caller's
+        precondition (``mark_op_row_released`` runs first).
+        """
+
+        rows = self._rows
+        if rows is not None:
+            row_cells = rows[row]
+            row_cells[:] = [_MISSING] * len(row_cells)
+            return
+        overlay = self._overlay
+        columns = self._columns
+        assert columns is not None
+        cow_shared = self._cow_shared
+        key = row * self.layout.n_fields
+        for column in columns:
+            value = overlay.get(key, _NO_OVERLAY) if overlay else _NO_OVERLAY
+            if value is _NO_OVERLAY:
+                present = column.present
+                is_set = present is None or bool(present[row])
+            else:
+                is_set = value is not _MISSING
+            if is_set:
+                if column.packed or cow_shared:
+                    overlay[key] = _MISSING
+                else:
+                    overlay.pop(key, None)
+                    column.clear(row)
+            key += 1
 
     def register_compacted_singleton(self, row: int, fid: int, element: str) -> None:
         """Record one singleton-label compaction (freeze-seam pass only)."""
@@ -616,38 +617,6 @@ def _freeze_column(column_values: list[Any]) -> _FrozenColumn:
     return _FrozenColumn(object_values, present, False)
 
 
-def _contains_mutable_container(value: Any) -> bool:
-    """Return whether a tuple/frozenset transitively nests a dict/list/set."""
-
-    for item in value:
-        cls = item.__class__
-        if cls is dict or cls is list or cls is set:
-            return True
-        if (cls is tuple or cls is frozenset) and _contains_mutable_container(item):
-            return True
-    return False
-
-
-def _needs_eager_isolation(value: Any) -> bool:
-    """Return whether a cell value must be copied at fork time.
-
-    This is the minimal leak-closure set for the parent->fork direction:
-    exact builtin mutable containers (a parent in-place mutation after the
-    fork would otherwise be visible through the fork's copy-on-first-read
-    window) and exact immutable containers transitively nesting one. Every
-    other translation concern (record facades, ``GroupRef`` cells, interned
-    immutable views of atomics) stays lazy on first read — translation is
-    not mutation, so deferring it cannot leak parent state.
-    """
-
-    cls = value.__class__
-    if cls is dict or cls is list or cls is set:
-        return True
-    if cls is tuple or cls is frozenset:
-        return _contains_mutable_container(value)
-    return False
-
-
 def _build_mutable_key_index(store: OpRowStore) -> dict[int, Any]:
     """Scan a sealed base store once for its fork-isolation candidate cells.
 
@@ -702,10 +671,10 @@ def _build_sweep_plan(store: OpRowStore) -> tuple[Any, ...]:
     Returns ``(alloc_entries, copy_entries)`` — two sequences of small
     RECORD tuples (``(key, cls, value)`` and ``(key, value, deep)``) so
     ``isolate_mutable_cells`` runs a tight guard+copy loop with no per-cell
-    backing fetch, key arithmetic, or classification (the F11 small-trace
+    backing fetch, key arithmetic, or classification (the small-trace
     fork constant). Records, not positionally-correlated parallel arrays: a
     one-sided append cannot silently truncate the sweep and leave tail fork
-    cells sharing mutable containers with their parent (R23-5). Empty
+    cells sharing mutable containers with their parent. Empty
     mutable containers (the census-dominant case, ~11/op) become bare class
     allocations; non-empty dict/list/set cells use ``_eager_copy``; nesting
     tuples/frozensets use the generic translating copier.
@@ -750,63 +719,10 @@ def _build_sweep_plan(store: OpRowStore) -> tuple[Any, ...]:
     return (tuple(alloc_entries), tuple(copy_entries))
 
 
-def _eager_copy(value: Any, translate: Callable[[Any], Any] | None) -> Any:
-    """Copy one mutable container for the eager fork sweep.
-
-    Same result as ``cow_copy_value``, restructured for the sweep's value
-    population: empty containers and containers of exact atomics copy at C
-    speed (the overwhelmingly common case — the F8 census counts ~11 empty
-    plus ~16 small flat containers per op), atomic members skip the
-    per-item call entirely, and nested mutable containers recurse through
-    the same fast paths. Only tuples/frozensets and non-container members
-    fall through to the generic translating copier (which owns the
-    identity-sharing rules).
-    """
-
-    atomic = _COW_ATOMIC
-    cls = value.__class__
-    if cls is dict:
-        for key, item in value.items():
-            if key.__class__ not in atomic or item.__class__ not in atomic:
-                return {
-                    (key if key.__class__ in atomic else _eager_item(key, translate)): (
-                        item if item.__class__ in atomic else _eager_item(item, translate)
-                    )
-                    for key, item in value.items()
-                }
-        return value.copy()
-    if cls is list:
-        for item in value:
-            if item.__class__ not in atomic:
-                return [
-                    item if item.__class__ in atomic else _eager_item(item, translate)
-                    for item in value
-                ]
-        return value.copy()
-    if cls is set:
-        for item in value:
-            if item.__class__ not in atomic:
-                return {
-                    item if item.__class__ in atomic else _eager_item(item, translate)
-                    for item in value
-                }
-        return value.copy()
-    return cow_copy_value(value, translate)
-
-
-def _eager_item(item: Any, translate: Callable[[Any], Any] | None) -> Any:
-    """Copy one non-atomic container member for ``_eager_copy``."""
-
-    cls = item.__class__
-    if cls is dict or cls is list or cls is set:
-        return _eager_copy(item, translate)
-    return cow_copy_value(item, translate)
-
-
 class PooledCell:
     """Shared canonical cell for pooled duplicate/empty mutable containers.
 
-    The M14 memory slice: the freeze-seam compaction replaces exact builtin
+    The memory slice: the freeze-seam compaction replaces exact builtin
     mutable-container cells (``dict``/``list``/``set``/top-level
     ``defaultdict``) whose full content is provably immutable AND either
     empty or repeated across cells with ONE shared ``PooledCell`` per
@@ -919,8 +835,27 @@ class _SealedRowMajorOpRowStore(OpRowStore):
                     self._sweep_plan = None
         return result
 
+    def release_row(self, row: int) -> None:
+        """Clear one row in place, dropping the cached sweep plan if it changed.
 
-#: Live write-audit collectors keyed by audited store id (M10 step
+        The per-cell ``cell_del`` drops the plan only for a deleted cell the
+        fork-isolation index lists; the facade husk it replaces also hydrated
+        pooled containers through ``cell_set`` first, which drops the plan for
+        any container. Dropping the plan whenever a set cell is cleared covers
+        both (the plan is a cache rebuilt from the maintained index on the
+        next fork).
+        """
+
+        rows = self._rows
+        assert rows is not None
+        row_cells = rows[row]
+        had_cells = any(value is not _MISSING for value in row_cells)
+        row_cells[:] = [_MISSING] * len(row_cells)
+        if had_cells:
+            self._sweep_plan = None
+
+
+#: Live write-audit collectors keyed by audited store id (postprocess step
 #: contracts). Populated only while a postprocess step audit is active.
 _AUDIT_COLLECTORS: dict[int, set[int]] = {}
 
@@ -932,7 +867,7 @@ _AUDIT_COLLECTORS: dict[int, set[int]] = {}
 _AUDIT_READS: dict[int, set[int]] = {}
 
 #: Reads made inside a ``row_clone_scope`` — the mechanical row-clone access
-#: kind (design-ppdag-v3 §2.4d). ``Op.copy()`` reads every schema column via
+#: kind (design-ppdag-v3 §2.4d). ``Op._copy_with_shallow_fields()`` reads every schema column via
 #: ``getattr``; recorded naively those would drown the findings report in
 #: phantom per-column dependencies. Clone reads are legal iff the step's
 #: ``row_effects`` contains ``"creates"`` and generate NO per-column edges
@@ -986,72 +921,6 @@ def mark_op_row_released(store: Any, row: int) -> None:
     releases = _AUDIT_ROW_RELEASES.get(id(store))
     if releases is not None:
         releases.add(row)
-
-
-def _value_fingerprint(value: Any) -> int:
-    """Order-canonical recursive content fingerprint for audit snapshots.
-
-    Unordered containers (``set``/``frozenset``/``dict``) hash their
-    element fingerprints SORTED, so equal content always fingerprints
-    equal regardless of iteration order — a ``hash(repr(...))`` snapshot
-    was iteration-order sensitive (a mutate-and-revert that resized a
-    set's table, or reordered equal dict keys, false-positively read as a
-    write of the column). Ordered containers stay positional. Leaves keep
-    the ``repr`` basis (in-place mutation anywhere inside still changes
-    the fingerprint); mutables nested in NON-builtin custom objects remain
-    the audit's disclosed residual. Env-gated enforcement-leg cost only:
-    comparable to the former full-``repr`` walk (it recurses the same
-    content, minus container string building; leaf ``repr`` — including
-    tensor and record cells — still dominates).
-    """
-
-    cls = value.__class__
-    if cls is dict:
-        return hash(
-            (
-                1,
-                tuple(
-                    sorted(
-                        hash((_value_fingerprint(key), _value_fingerprint(item)))
-                        for key, item in value.items()
-                    )
-                ),
-            )
-        )
-    if cls is list:
-        return hash((2, tuple(_value_fingerprint(item) for item in value)))
-    if cls is set or cls is frozenset:
-        return hash((3, tuple(sorted(_value_fingerprint(item) for item in value))))
-    if cls is tuple:
-        return hash((4, tuple(_value_fingerprint(item) for item in value)))
-    try:
-        return hash((0, repr(value)))
-    except Exception:
-        # Fail CLOSED (R22-8): a shared sentinel here made every pair of
-        # fingerprint-refusing values compare EQUAL, collapsing a real write
-        # to "no effective write" and laundering the downstream read. The
-        # object id keeps same-object comparisons stable within the audit
-        # window while distinct refusing objects read as changed -- a false
-        # alarm at worst, never a laundering pass.
-        return id(value)
-
-
-def _cell_content_fingerprint(value: Any) -> int | None:
-    """Content fingerprint for one exact builtin mutable-container cell.
-
-    Non-container values (and immutable views) return ``None`` — cell
-    REPLACEMENT is already caught by the write interception. Containers
-    whose content cannot be fingerprinted (cycles) conservatively
-    fingerprint as their length so at least size changes are visible.
-    """
-
-    cls = value.__class__
-    if cls is dict or cls is list or cls is set:
-        try:
-            return _value_fingerprint(value)
-        except Exception:
-            return len(value)
-    return None
 
 
 class _AuditedOpRowStore(OpRowStore):
@@ -1129,7 +998,7 @@ def _write_is_content_effective(old: Any, new: Any) -> bool:
         try:
             return _value_fingerprint(old) != _value_fingerprint(new)
         except Exception:
-            # Fail CLOSED (R22-8): fingerprint machinery failure must read
+            # Fail CLOSED: fingerprint machinery failure must read
             # as an EFFECTIVE write, never collapse to "no-op" -- a no-op
             # classification here would let the write discharge nothing
             # while hiding the step's real effect from the audit.
@@ -1208,7 +1077,7 @@ class _CombinedAuditOpRowStore(OpRowStore):
 def row_clone_scope(store: Any) -> Iterator[None]:
     """Tag reads inside the scope as row-clone reads (category d).
 
-    Free when unarmed (review note N7): ``Op.copy()`` also runs on pickle,
+    Free when unarmed (review note N7): ``Op._copy_with_shallow_fields()`` also runs on pickle,
     fork-fallback, and preview paths where no audit exists — the fast path
     is one dict lookup. Detached stores and fork views are never audited,
     so their ids simply miss.
@@ -1242,7 +1111,7 @@ class StepAuditResult(NamedTuple):
 def begin_cell_write_audit(store: OpRowStore, *, record_reads: bool = False) -> None:
     """Start recording column writes (and optionally reads) on ``store``.
 
-    Ordering is load-bearing (design-ppdag-v3 §2.5, Opus 5): the
+    Ordering is load-bearing (design-ppdag-v3 §2.5, review 5): the
     mutable-container fingerprint sweep runs arbitrary ``__repr__`` code at
     the leaves, so the snapshot is built FIRST and the class swap happens
     LAST — arming before fingerprinting would let any repr path reaching
@@ -1392,6 +1261,12 @@ class DetachedOpStore:
         cells[fid] = _MISSING
         return True
 
+    def release_row(self, row: int) -> None:
+        """Delete every set cell of the single row (op removal husking)."""
+
+        cells = self._cells
+        cells[:] = [_MISSING] * len(cells)
+
     def items(self, row: int) -> Iterator[tuple[str, Any]]:
         """Yield ``(field_name, value)`` for every set cell in layout order."""
 
@@ -1420,46 +1295,6 @@ class DetachedOpStore:
 
 
 #: Exact types returned uncopied (and untranslated) by the COW copier.
-_COW_ATOMIC = frozenset({str, int, float, bool, bytes, complex, type(None)})
-
-
-def cow_copy_value(value: Any, translate: Callable[[Any], Any] | None) -> Any:
-    """Structurally copy one COW-read value for fork-side isolation.
-
-    Exact builtin containers are rebuilt (so fork-side in-place mutation can
-    never reach the shared base); ``translate`` maps parent record facades to
-    their fork facades (returning ``None`` for non-records); every other
-    object — tensors, callables, interned immutables, quantity subclasses —
-    is returned by identity, preserving the fork's payload-sharing contract.
-    All-identity tuples/frozensets return the original object so interned
-    immutable views stay shared.
-    """
-
-    cls = value.__class__
-    if cls in _COW_ATOMIC:
-        return value
-    if cls is dict:
-        return {
-            cow_copy_value(key, translate): cow_copy_value(item, translate)
-            for key, item in value.items()
-        }
-    if cls is list:
-        return [cow_copy_value(item, translate) for item in value]
-    if cls is set:
-        return {cow_copy_value(item, translate) for item in value}
-    if cls is tuple or cls is frozenset:
-        copied = [cow_copy_value(item, translate) for item in value]
-        for original, item_copy in zip(value, copied, strict=True):
-            if original is not item_copy:
-                return cls(copied)
-        return value
-    if translate is not None:
-        mapped = translate(value)
-        if mapped is not None:
-            return mapped
-    return value
-
-
 class _ViewFactBlocks:
     """Fact-block adapter isolating hydrated containers for one fork view."""
 
@@ -1478,7 +1313,7 @@ class _ViewFactBlocks:
 
 
 class OpStoreView:
-    """Per-fork COW view over one sealed base store (the M11 fork substrate).
+    """Per-fork COW view over one sealed base store (the fork substrate).
 
     The view shares the base's frozen storage and isolates everything mutable:
 
@@ -1693,7 +1528,18 @@ class OpStoreView:
             else:
                 columns = self.base._columns
                 assert columns is not None
-                value = columns[fid].get(row)
+                # ``_FrozenColumn.get`` inline: this is the fork copy path's
+                # per-cell read.
+                column = columns[fid]
+                present = column.present
+                if present is not None and not present[row]:
+                    return _MISSING
+                value = column.values[row]
+                if column.packed:
+                    return value.item()
+        if value.__class__ in _COW_ATOMIC or value is _MISSING:
+            # What ``_isolate`` returns for these, without the call.
+            return value
         return self._isolate(key, value)
 
     def cell_set(self, row: int, fid: int, value: Any) -> None:
@@ -1708,6 +1554,18 @@ class OpStoreView:
             return False
         self._overlay[row * self.base.layout.n_fields + fid] = _MISSING
         return True
+
+    def release_row(self, row: int) -> None:
+        """Tombstone every set cell of one row through ``cell_del``.
+
+        Fork views keep the per-cell path (its presence probe runs the
+        fork-side isolation, whose group and record translation caches the
+        facade husk always populated); only the facade dispatch is skipped.
+        """
+
+        cell_del = self.cell_del
+        for fid in range(self.base.layout.n_fields):
+            cell_del(row, fid)
 
     def compacted_singleton(self, row: int, fid: int, value: Any) -> bool:
         """Delegate to the base registry (identity keeps view writes exact).
@@ -1748,9 +1606,9 @@ class OpStoreView:
         deepcopy fork's snapshot semantics in both directions (fork writes
         were already overlay-isolated).
 
-        The sweep is SPARSE (sol closure review, F4 perf): it visits only
+        The sweep is SPARSE: it visits only
         the base store's cached mutable-cell index — pre-flattened into a
-        per-store sweep PLAN (``_build_sweep_plan``, F11 small-trace
+        per-store sweep PLAN (``_build_sweep_plan``, a small-trace
         constant) so the per-fork loop does no backing fetch or per-cell
         classification — plus this view's base-overlay snapshot, and copies
         only the minimal leak-closure set (``_needs_eager_isolation``).

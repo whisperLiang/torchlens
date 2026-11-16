@@ -9,7 +9,7 @@ from types import BuiltinFunctionType
 from typing import Any
 
 from ..backends.registry import MLX_BACKEND_NAME, PADDLE_BACKEND_NAME, TORCH_BACKEND_NAME
-from ..intervention.types import CapturedArgTemplate, LiteralTensor, LiteralValue
+from ..intervention._types import CapturedArgTemplate, LiteralTensor, LiteralValue
 from .errors import SplitErrorContext, SplitRequestError, SplitUnsupportedError
 from .frontier import (
     boundary_key_for_node,
@@ -99,7 +99,10 @@ def _boundary_metadata(
         node = node_by_id[node_id]
         key = boundary_key_for_node(node.canonical_id, node.output_container_path)
         if key in bindings:
-            raise SplitRequestError("Split boundary contains duplicate canonical value bindings.")
+            raise SplitRequestError(
+                "Split boundary contains duplicate canonical value bindings.",
+                code=SplitRequestError.code,
+            )
         bindings[key] = node_id
         role = classify_boundary_role(
             is_source=node.is_input or node.is_buffer,
@@ -134,7 +137,8 @@ def _validate_replay_dependencies(graph: SplitTraceGraph) -> None:
         if missing:
             raise SplitRequestError(
                 f"Replay node {node.canonical_id!r} has untracked canonical dependencies "
-                f"{tuple(sorted(missing))!r}."
+                f"{tuple(sorted(missing))!r}.",
+                code=SplitRequestError.code,
             )
 
 
@@ -173,6 +177,7 @@ def _partition_refusal(
             op_type=None if node is None else node.op_type,
             layer_label=None if node is None else node.label,
         ),
+        code=SplitUnsupportedError.code,
     )
     if graph.backend == TORCH_BACKEND_NAME and isinstance(spec.partition, GraphPartition):
         from ._effects import _partition_diagnostic
@@ -324,6 +329,7 @@ class _MutationTargets:
     permutations: frozenset[Any]
     out_writes: frozenset[Any]
     out_allocations: frozenset[Any]
+    isolated_functionals: frozenset[Any] = frozenset()
 
 
 @dataclass
@@ -369,6 +375,7 @@ def _torch_mutation_targets() -> _MutationTargets:
             torch.Tensor.__iadd__,
             torch.nn.functional.relu,
             torch.nn.functional.silu,
+            torch.nn.functional.hardswish,
             torch.embedding_renorm_,
             *native_silu_writes,
         )
@@ -415,7 +422,44 @@ def _torch_mutation_targets() -> _MutationTargets:
     )
     out_writes = targets((torch.arange,))
     out_allocations = targets((torch.Tensor.new_full,))
-    return _MutationTargets(writes, fresh, batchnorm, permutations, out_writes, out_allocations)
+    return _MutationTargets(
+        writes,
+        fresh,
+        batchnorm,
+        permutations,
+        out_writes,
+        out_allocations,
+        targets((torch.nn.functional.hardswish,)),
+    )
+
+
+def _isolatable_functional_input(
+    graph: SplitTraceGraph,
+    node: SplitTraceNode,
+    producer: SplitTraceNode,
+    targets: _MutationTargets,
+) -> bool:
+    """Prove a functional write can consume one isolated fresh training frontier.
+
+    Upstream captures positional ``inplace`` flags on functional boundaries.
+    Only a declared native function and a fresh producer consumed exclusively
+    by that call qualify. A pre-existing view, second reader, model output or
+    state source therefore cannot lose a storage alias at the boundary. The
+    training executor supplies a cloned nonleaf and returns its root VJP.
+    """
+
+    return (
+        node.target in targets.isolated_functionals
+        and producer.target in targets.fresh
+        and not _node_mutates(producer, *_partition_call_arguments(producer))
+        and not (producer.is_input or producer.is_buffer or producer.is_param_source)
+        and producer.output_shape is not None
+        and producer.dtype is not None
+        and producer.output_shape == node.output_shape
+        and producer.dtype == node.dtype
+        and bool(producer.children)
+        and set(producer.children) == {node.canonical_id}
+    )
 
 
 def _certify_source_write(
@@ -524,6 +568,11 @@ def _certify_local_write(
             and (
                 (not proof.training and not proof.heterogeneous)
                 or any(kind in producer.dtype for kind in ("int", "bool"))
+                or (
+                    proof.training
+                    and not in_prefix
+                    and _isolatable_functional_input(graph, node, producer, targets)
+                )
             )
         )
     if has_out and not _out_initialization_matches(graph, node, producer, targets.out_allocations):
@@ -636,6 +685,8 @@ def _partition_colocations(
             if not isinstance(argument, ReplayValueRef) or argument.value_id not in owners:
                 continue
             producer = graph.node_by_id[argument.value_id]
+            if training and _isolatable_functional_input(graph, node, producer, targets):
+                continue
             if not has_out and producer.dtype and any(t in producer.dtype for t in ("int", "bool")):
                 continue
             members = {
@@ -809,7 +860,7 @@ def _validate_partition_target(
 
     if graph.backend != TORCH_BACKEND_NAME or node.target is None:
         return
-    from ..utils.display import identity
+    from .._utils.display import identity
 
     if node.target is identity:
         return
@@ -957,6 +1008,7 @@ def plan_partition(graph: SplitTraceGraph, spec: SplitRequest) -> SplitPlan:
         node.canonical_id
         for node in graph.compute_nodes
         if node.canonical_id in ordered_mutations
+        and not spec.trainable
         and node.canonical_id in suffix_node_ids
         and getattr(node.target, "__name__", "") != "batch_norm"
         and isinstance((arguments := _partition_call_arguments(node)[0]), tuple)
@@ -978,4 +1030,4 @@ def plan_partition(graph: SplitTraceGraph, spec: SplitRequest) -> SplitPlan:
     )
 
 
-__all__ = ["SplitPlan", "plan_partition"]
+__all__ = ("SplitPlan", "plan_partition")

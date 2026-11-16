@@ -11,11 +11,13 @@ from torch import nn
 
 import torchlens as tl
 import torchlens.validation as tl_validation
-import torchlens.validation.backward as backward_validation
-import torchlens.validation.consolidated as consolidated_validation
-from torchlens.data_classes.grad_fn import GradFn
-from torchlens.ir.events import BackwardPassStart, OpGradObserved
-from torchlens.options import CaptureOptions, SaveOptions
+import torchlens.validation._backward as backward_validation
+import torchlens.validation._consolidated as consolidated_validation
+from torchlens._data_classes.grad_fn import GradFn
+from torchlens._ir.events import BackwardPassStart, OpGradObserved
+from torchlens.options import CaptureOptions
+from torchlens.validation import last_validation_failure
+from torchlens.validation._diagnostics import CHECK_BACKWARD
 
 _NO_GRAD_AUTOGRAD_ERROR = "element 0 of tensors does not require grad and does not have a grad_fn"
 
@@ -155,7 +157,8 @@ def _logged_model(
     trace = tl.trace(
         model,
         x,
-        capture=CaptureOptions(layers_to_save=layers_to_save, save_grads=save_grads),
+        capture=CaptureOptions(save_grads=save_grads),
+        save=layers_to_save,
     )
     return model, x, trace
 
@@ -172,11 +175,20 @@ def _saved_relu(trace: tl.Trace) -> torch.Tensor:
 
 
 def test_detached_saved_activation_backward_names_backward_ready_remedy() -> None:
-    """A TorchLens-detached retained activation gives targeted backward guidance."""
+    """A TorchLens-detached retained activation gives targeted backward guidance.
+
+    The trace opts into detaching (a default trace keeps selector saves
+    graph-connected; ``tl.record`` and ``tl.extract`` detach by default).
+    """
 
     model = _TinyBackwardModel()
     x = torch.randn(2, 3, requires_grad=True)
-    trace = tl.trace(model, x, save=tl.func("relu"))
+    trace = tl.trace(
+        model,
+        x,
+        save=tl.func("relu"),
+        capture=CaptureOptions(detach_saved_activations=True),
+    )
     saved = _saved_relu(trace)
 
     with pytest.raises(RuntimeError, match=r"Re-trace with backward_ready=True") as exc_info:
@@ -185,6 +197,19 @@ def test_detached_saved_activation_backward_names_backward_ready_remedy() -> Non
     assert type(exc_info.value) is RuntimeError
     assert str(exc_info.value).startswith(_NO_GRAD_AUTOGRAD_ERROR)
     assert x.grad is None
+
+
+def test_default_trace_selector_save_keeps_the_graph_for_backward() -> None:
+    """A default-trace selector save keeps the graph, so backward reaches the input."""
+
+    model = _TinyBackwardModel()
+    x = torch.randn(2, 3, requires_grad=True)
+    trace = tl.trace(model, x, save=tl.func("relu"))
+    saved = _saved_relu(trace)
+
+    assert saved.grad_fn is not None
+    saved.sum().backward()
+    assert x.grad is not None
 
 
 def test_unrelated_detached_tensor_backward_keeps_native_error() -> None:
@@ -227,20 +252,20 @@ def test_connected_output_and_backward_ready_saved_activation_are_unchanged() ->
         ready_model,
         ready_x,
         save=tl.func("relu"),
-        backward_ready=True,
+        capture=tl.options.CaptureOptions(backward_ready=True),
     )
     ready_saved = _saved_relu(ready_trace)
     ready_saved.sum().backward()
     assert ready_x.grad is not None
 
 
-def test_detached_log_backward_does_not_poison_later_capture() -> None:
+def test_detached_backward_does_not_poison_later_capture() -> None:
     """Reject detached losses without leaking capture state or a start event."""
     model = nn.Linear(2, 1)
     trace = tl.trace(model, torch.ones(1, 2))
 
     with pytest.raises(ValueError, match="loss has no grad_fn / is detached"):
-        trace.log_backward(torch.tensor(1.0))
+        trace.backward(torch.tensor(1.0))
 
     assert not any(isinstance(event, BackwardPassStart) for event in trace.backward_events)
     fresh_trace = tl.trace(model, torch.ones(1, 2))
@@ -253,31 +278,29 @@ def test_detached_log_backward_does_not_poison_later_capture() -> None:
     assert detached_output.grad_fn is None
 
     with pytest.raises(ValueError, match="loss has no grad_fn / is detached"):
-        sparse_trace.log_backward(detached_output)
+        sparse_trace.backward(detached_output)
 
     assert not any(isinstance(event, BackwardPassStart) for event in sparse_trace.backward_events)
     assert tl.trace(model, torch.ones(1, 2)).output_layers
 
 
-@pytest.mark.smoke
-def test_log_backward_captures_per_layer_grads() -> None:
-    """log_backward captures saved per-layer grads."""
+def test_backward_captures_per_layer_grads() -> None:
+    """backward captures saved per-layer grads."""
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
-    assert trace.has_gradients
+    trace.backward(_output_loss(trace))
+    assert trace.autograd.has_grads
     assert len(trace.saved_grad_ops) > 0
     assert all(trace[label].grad is not None for label in trace.saved_grad_ops.keys())
 
 
-@pytest.mark.smoke
 def test_recording_backward_context_manager() -> None:
     """recording_backward accumulates multiple backward calls."""
     _model, _x, trace = _logged_model()
     loss = _output_loss(trace)
-    with trace.recording_backward():
+    with trace.capture_backward():
         loss.backward(retain_graph=True)
         (loss * 2).backward()
-    assert trace.num_backward_passes == 2
+    assert len(trace.autograd.backward_passes) == 2
 
 
 def _backward_projection_snapshot(trace: tl.Trace) -> dict:
@@ -300,11 +323,11 @@ def _backward_projection_snapshot(trace: tl.Trace) -> dict:
             list(grad_fn.next_grad_fn_ids),
             sorted(grad_fn.calls),
         )
-        for object_id, grad_fn in trace.grad_fn_logs.items()
+        for object_id, grad_fn in trace._grad_fn_logs.items()
     }
     calls = {
-        (object_id, ordinal): (call.label, call.backward_pass_index)
-        for object_id, grad_fn in trace.grad_fn_logs.items()
+        (object_id, ordinal): (call.grad_fn_label, call.backward_pass_number)
+        for object_id, grad_fn in trace._grad_fn_logs.items()
         for ordinal, call in grad_fn.calls.items()
     }
     passes = {
@@ -315,25 +338,25 @@ def _backward_projection_snapshot(trace: tl.Trace) -> dict:
             len(record.grad_fn_calls),
             record.order_attribution_coverage,
         )
-        for pass_index, record in trace.backward_pass_logs.items()
+        for pass_index, record in trace._backward_pass_logs.items()
     }
     op_grads = {
         op.layer_label: (
             [
-                (record.backward_pass_index, record.grad is not None, record.shape)
+                (record.backward_pass_number, record.grad is not None, record.shape)
                 for record in op._slot("_grad_records")
             ],
             int(op.gradient_memory),
         )
-        for op in trace.layer_list
+        for op in trace._layer_list
         if getattr(op, "has_grad", False)
     }
     param_grads = {
         address: [
-            (record.ordinal, record.backward_pass_index, record.shape, record.memory)
+            (record.ordinal, record.backward_pass_number, record.shape, record.memory)
             for record in param_log._grad_records
         ]
-        for address, param_log in trace.param_logs.items()
+        for address, param_log in trace._param_logs.items()
         if param_log._grad_records
     }
     return {
@@ -342,17 +365,16 @@ def _backward_projection_snapshot(trace: tl.Trace) -> dict:
         "passes": passes,
         "op_grads": op_grads,
         "param_grads": param_grads,
-        "order": list(trace.grad_fn_order),
-        "num_passes": trace.num_backward_passes,
-        "num_calls": trace.num_saved_grad_fn_calls,
-        "num_fns": trace.num_saved_grad_fns,
+        "order": list(trace.autograd.grad_fn_order),
+        "num_passes": len(trace.autograd.backward_passes),
+        "num_calls": len(trace.autograd.saved_grad_fn_calls),
+        "num_fns": len(trace.autograd.saved_grad_fns),
         "saved_labels": set(trace._saved_grad_labels),
-        "total_grad_mem": int(trace.total_gradient_memory),
-        "total_bwd_mem": int(trace.total_backward_memory),
+        "total_grad_mem": int(trace.cost.total_grad_memory),
+        "total_bwd_mem": int(trace.cost.total_backward_memory),
     }
 
 
-@pytest.mark.smoke
 def test_backward_reprojection_folds_incrementally() -> None:
     """Repeated passes over an unchanged graph fold O(tail), not full rebuilds."""
     from torchlens.backends.torch import backward as backward_mod
@@ -367,11 +389,11 @@ def test_backward_reprojection_folds_incrementally() -> None:
         real_impl(trace_arg, events, stream=stream)
 
     with mock.patch.object(backward_mod, "_materialize_backward_projections_impl", counting_impl):
-        with trace.recording_backward():
+        with trace.capture_backward():
             loss.backward(retain_graph=True)
             loss.backward(retain_graph=True)
             loss.backward()
-    assert trace.num_backward_passes == 3
+    assert len(trace.autograd.backward_passes) == 3
     assert len(full_rebuild_sizes) == 1, (
         f"later same-graph passes must fold incrementally, not rebuild: {full_rebuild_sizes}"
     )
@@ -384,14 +406,13 @@ def test_backward_reprojection_folds_incrementally() -> None:
     assert _backward_projection_snapshot(trace) == incremental_snapshot
 
 
-@pytest.mark.smoke
 def test_backward_events_share_one_monotonic_seq_domain() -> None:
     """Every backward event kind carries one writer-stamped monotonic seq."""
+    from torchlens._ir.events import BackwardPassEnd as _End
     from torchlens.backends.torch.backward import _ensure_backward_event_stream
-    from torchlens.ir.events import BackwardPassEnd as _End
 
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
+    trace.backward(_output_loss(trace))
     events = _ensure_backward_event_stream(trace).backward_events
     seqs = [event.seq for event in events]
     assert seqs == sorted(seqs)
@@ -407,20 +428,21 @@ def test_backward_events_share_one_monotonic_seq_domain() -> None:
 
 def _invariant_check(trace: tl.Trace) -> None:
     """Run the backward event-flow invariant directly."""
-    from torchlens.validation.invariants import _check_backward_event_flow_invariants
+    from torchlens.validation._invariants_backward_flow import (
+        _check_backward_event_flow_invariants,
+    )
 
     _check_backward_event_flow_invariants(trace, "backward_graph_invariants")
 
 
-@pytest.mark.smoke
 def test_backward_seq_invariants_fire_on_planted_mutations() -> None:
     """Each rewritten exact-seq assertion still fails on a planted misorder."""
+    from torchlens._ir.events import BackwardPassEnd as _End
     from torchlens.backends.torch.backward import _ensure_backward_event_stream
-    from torchlens.ir.events import BackwardPassEnd as _End
-    from torchlens.validation.invariants import MetadataInvariantError
+    from torchlens.validation._invariants import MetadataInvariantError
 
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
+    trace.backward(_output_loss(trace))
     events = _ensure_backward_event_stream(trace).backward_events
     _invariant_check(trace)  # positive control: the real stream passes
 
@@ -464,12 +486,11 @@ def test_backward_seq_invariants_fire_on_planted_mutations() -> None:
     with pytest.raises(MetadataInvariantError, match="follows its pass"):
         _invariant_check(trace)
     events[:] = original_order
-    for original_seq, event in zip(original_seqs, events, strict=True):
+    for original_seq, event in zip(original_seqs, events):
         object.__setattr__(event, "seq", original_seq)
     _invariant_check(trace)
 
 
-@pytest.mark.smoke
 def test_backward_capture_refuses_missing_event_stream() -> None:
     """A trace that lost its event stream gets a typed refusal, not a silent buffer."""
     from torchlens._errors import BackwardStreamUnavailableError
@@ -482,16 +503,15 @@ def test_backward_capture_refuses_missing_event_stream() -> None:
     with pytest.raises(BackwardStreamUnavailableError):
         _ensure_backward_event_stream(trace)
     with pytest.raises(BackwardStreamUnavailableError):
-        trace.log_backward(loss)
+        trace.backward(loss)
 
 
-@pytest.mark.smoke
 def test_param_gradients_enter_the_backward_event_stream() -> None:
     """Every recorded AccumulateGrad increment has a ParamGradObserved event."""
-    from torchlens.ir.events import ParamGradObserved
+    from torchlens._ir.events import ParamGradObserved
 
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
+    trace.backward(_output_loss(trace))
 
     param_events = [
         event for event in trace.backward_events if isinstance(event, ParamGradObserved)
@@ -499,8 +519,8 @@ def test_param_gradients_enter_the_backward_event_stream() -> None:
     assert param_events
     event_records = {(event.param_address, event.pass_index) for event in param_events}
     projected_records = {
-        (address, record.backward_pass_index)
-        for address, param_log in trace.param_logs.items()
+        (address, record.backward_pass_number)
+        for address, param_log in trace._param_logs.items()
         for record in param_log._grad_records
     }
     assert projected_records
@@ -514,26 +534,28 @@ def test_param_gradients_enter_the_backward_event_stream() -> None:
 
 def test_param_gradient_payloads_honor_per_call_retention_policy() -> None:
     """Per-call ``save_grads=False`` keeps param-grad facts but drops payloads."""
-    from torchlens.ir.events import ParamGradObserved
+    from torchlens._ir.events import ParamGradObserved
 
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace), save_grads=False)
+    trace.backward(_output_loss(trace), save_grads=False)
 
     param_events = [
         event for event in trace.backward_events if isinstance(event, ParamGradObserved)
     ]
     assert param_events
     assert all(event.payload_ref is None for event in param_events)
-    assert all(record.grad is None for param in trace.param_logs.values() for record in param.grads)
+    assert all(
+        record.grad is None for param in trace._param_logs.values() for record in param.grads
+    )
 
 
 def test_param_gradient_payloads_use_trace_save_mode() -> None:
     """Parameter gradients route through the shared save-mode copy chokepoint."""
     _model, _x, trace = _logged_model()
-    trace.save_mode = "reference"
-    trace.log_backward(_output_loss(trace))
+    trace._options_save_mode = "reference"
+    trace.backward(_output_loss(trace))
 
-    payloads = [record.grad for param in trace.param_logs.values() for record in param.grads]
+    payloads = [record.grad for param in trace._param_logs.values() for record in param.grads]
     assert payloads
     assert all(payload is not None for payload in payloads)
     assert all(payload.grad_fn is None for payload in payloads)
@@ -542,11 +564,11 @@ def test_param_gradient_payloads_use_trace_save_mode() -> None:
 def test_grad_fn_event_payloads_are_detached_snapshots() -> None:
     """Projection rebuild never exposes graph-connected autograd hook buffers."""
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace), create_graph=True)
+    trace.backward(_output_loss(trace), create_graph=True)
 
     tensors = [
         tensor
-        for grad_fn in trace.grad_fns
+        for grad_fn in trace.autograd.grad_fns
         for call in grad_fn.calls.values()
         for payload in (call.grad_inputs, call.grad_outputs)
         for tensor in (payload or ())
@@ -561,12 +583,12 @@ def test_per_call_grad_policy_does_not_mutate_trace_selection() -> None:
     _model, _x, trace = _logged_model(save_grads=None)
     selection_before = trace._grad_op_nums_to_save
 
-    trace.log_backward(_output_loss(trace), save_grads=False)
+    trace.backward(_output_loss(trace), save_grads=False)
 
     assert trace._grad_op_nums_to_save == selection_before
     assert all(
         call.grad_inputs is None and call.grad_outputs is None
-        for grad_fn in trace.grad_fns
+        for grad_fn in trace.autograd.grad_fns
         for call in grad_fn.calls.values()
     )
 
@@ -581,8 +603,8 @@ def test_backward_tail_failure_restores_globals_and_closes_journal(
 ) -> None:
     """Tail finalizer failures cannot strand globals or a start-only pass."""
     from torchlens import _state
+    from torchlens._ir.events import BackwardPassEnd
     from torchlens.backends.torch import backward
-    from torchlens.ir.events import BackwardPassEnd
 
     _model, _x, trace = _logged_model()
 
@@ -592,13 +614,13 @@ def test_backward_tail_failure_restores_globals_and_closes_journal(
 
     monkeypatch.setattr(backward, failure_site, fail_tail)
     with pytest.raises(RuntimeError, match=failure_site):
-        trace.log_backward(_output_loss(trace))
+        trace.backward(_output_loss(trace))
 
     assert _state._active_trace is None
     assert _state._active_hook_plan is None
     assert _state._active_intervention_spec is None
     assert "_tl_active_backward_bracket" not in trace.__dict__
-    assert "_active_backward_pass_index" not in trace.__dict__
+    assert "_active_backward_pass_number" not in trace.__dict__
     assert "_active_save_grads_policy" not in trace.__dict__
     assert any(isinstance(event, BackwardPassEnd) for event in trace.backward_events)
 
@@ -630,7 +652,7 @@ def test_backward_walk_failure_removes_partial_hooks_and_disarms(
 
     monkeypatch.setattr(backward, "_walk_and_hook_backward_graph", fail_walk)
     with pytest.raises(KeyboardInterrupt):
-        trace.log_backward(_output_loss(trace))
+        trace.backward(_output_loss(trace))
 
     assert handle.removed is True
     assert trace._tl_backward_triggers_disarmed is True
@@ -681,10 +703,10 @@ def test_rewalk_failure_removes_hooks_and_clears_refs(
     monkeypatch.setattr(backward, "_walk_and_hook_backward_graph", spy_walk)
     monkeypatch.setattr(backward, "_rewalk_higher_order_grad_fns", fail_rewalk)
     with pytest.raises(RuntimeError, match="injected rewalk failure"):
-        trace.log_backward(_output_loss(trace))
+        trace.backward(_output_loss(trace))
 
     assert handle.removed is True
-    assert all(layer.grad_fn_handle is None for layer in trace.layer_list)
+    assert all(layer.autograd.grad_fn_handle is None for layer in trace._layer_list)
 
 
 def test_ordinary_tail_pending_clear_failure_still_removes_hooks(
@@ -734,15 +756,15 @@ def test_ordinary_tail_pending_clear_failure_still_removes_hooks(
     monkeypatch.setattr(backward, "_walk_and_hook_backward_graph", spy_walk)
     monkeypatch.setattr(backward, "_clear_pending_accumulate_grad_records", fail_pending_clear)
     with pytest.raises(RuntimeError, match="injected pending-clear failure"):
-        trace.log_backward(_output_loss(trace))
+        trace.backward(_output_loss(trace))
 
     assert handle.removed is True, "pending-clear failure stranded grad-fn hooks"
-    assert all(layer.grad_fn_handle is None for layer in trace.layer_list), (
+    assert all(layer.autograd.grad_fn_handle is None for layer in trace._layer_list), (
         "pending-clear failure stranded strong forward grad-fn refs"
     )
 
 
-@pytest.mark.parametrize("entrypoint", ["log_backward", "recording_backward"])
+@pytest.mark.parametrize("entrypoint", ["backward", "recording_backward"])
 def test_backward_entrypoints_finalize_streaming_on_exception(
     monkeypatch: pytest.MonkeyPatch,
     entrypoint: str,
@@ -758,7 +780,7 @@ def test_backward_entrypoints_finalize_streaming_on_exception(
         finalized.append(finalized_trace)
 
     monkeypatch.setattr(backward, "_finalize_grad_streaming", record_finalize)
-    if entrypoint == "log_backward":
+    if entrypoint == "backward":
 
         def fail_capture(*_args: object, **_kwargs: object) -> None:
             """Inject a backward-capture failure."""
@@ -766,10 +788,10 @@ def test_backward_entrypoints_finalize_streaming_on_exception(
 
         monkeypatch.setattr(backward, "_run_backward_with_capture", fail_capture)
         with pytest.raises(RuntimeError, match="injected backward failure"):
-            trace.log_backward(_output_loss(trace))
+            trace.backward(_output_loss(trace))
     else:
         with pytest.raises(RuntimeError, match="injected block failure"):
-            with trace.recording_backward():
+            with trace.capture_backward():
                 raise RuntimeError("injected block failure")
 
     assert finalized == [trace]
@@ -778,8 +800,8 @@ def test_backward_entrypoints_finalize_streaming_on_exception(
 @pytest.mark.slow
 def test_separate_unmanaged_engine_calls_get_separate_implicit_passes() -> None:
     """Graph-task identity prevents adjacent unmanaged backwards from merging."""
+    from torchlens._ir.events import BackwardPassStart
     from torchlens.backends.torch import backward
-    from torchlens.ir.events import BackwardPassStart
 
     if not hasattr(torch._C, "_current_graph_task_id"):
         pytest.skip("torch build does not expose autograd graph-task identity")
@@ -800,7 +822,7 @@ def test_separate_unmanaged_engine_calls_get_separate_implicit_passes() -> None:
     assert [event.pass_index for event in starts] == [1, 2]
 
 
-@pytest.mark.smoke
+@pytest.mark.usefixtures("root_edits_in_place")  # D.12: edits a root log in place on purpose
 def test_replay_fork_does_not_inherit_gradient_state() -> None:
     """A replay fork starts with no captured gradient state; the source keeps its own."""
     model = _TinyBackwardModel()
@@ -808,32 +830,35 @@ def test_replay_fork_does_not_inherit_gradient_state() -> None:
     trace = tl.trace(
         model,
         x,
-        capture=CaptureOptions(layers_to_save="all", save_grads="all"),
-        intervention_ready=True,
-        backward_ready=True,
+        capture=CaptureOptions(save_grads="all", replayable=True, backward_ready=True),
+        save="all",
     )
-    trace.log_backward(_output_loss(trace))
-    assert trace.has_gradients
+    trace.backward(_output_loss(trace))
+    assert trace.autograd.has_grads
     assert trace._saved_grad_labels
-    assert any(param_log._grad_records for param_log in trace.param_logs.values())
+    assert any(param_log._grad_records for param_log in trace._param_logs.values())
 
-    def _identity_hook(out: torch.Tensor, *, hook: object) -> torch.Tensor:
+    def _identity_hook(out: torch.Tensor, *, ctx: object) -> torch.Tensor:
         return out
 
-    fork = trace.replay(hooks={tl.func("relu"): _identity_hook}, differentiable=True)
+    fork = trace.do(
+        tl.func("relu"),
+        _identity_hook,
+        intervention=tl.options.InterventionOptions(differentiable=True),
+    )
 
-    assert fork.has_gradients is False
+    assert fork.autograd.has_grads is False
     assert fork._saved_grad_labels == set()
-    assert not any(param_log._grad_records for param_log in fork.param_logs.values())
-    assert int(fork.total_param_gradient_memory) == 0
-    assert fork.num_backward_passes == 0
+    assert not any(param_log._grad_records for param_log in fork._param_logs.values())
+    assert int(fork.cost.total_param_grad_memory) == 0
+    assert len(fork.autograd.backward_passes) == 0
 
-    assert trace.has_gradients
+    assert trace.autograd.has_grads
     assert trace._saved_grad_labels
-    assert any(param_log._grad_records for param_log in trace.param_logs.values())
+    assert any(param_log._grad_records for param_log in trace._param_logs.values())
 
 
-@pytest.mark.smoke
+@pytest.mark.usefixtures("root_edits_in_place")  # D.12: edits a root log in place on purpose
 def test_replay_fork_cannot_resurrect_has_grad_from_derived_payload() -> None:
     """A seeded ``_derived_grad_payload`` never survives onto a replay fork.
 
@@ -848,37 +873,39 @@ def test_replay_fork_cannot_resurrect_has_grad_from_derived_payload() -> None:
     trace = tl.trace(
         model,
         x,
-        capture=CaptureOptions(layers_to_save="all"),
-        intervention_ready=True,
-        backward_ready=True,
+        capture=CaptureOptions(replayable=True, backward_ready=True),
+        save="all",
     )
-    address, param_log = next(iter(trace.param_logs.items()))
+    address, param_log = next(iter(trace._param_logs.items()))
     param_log._derived_grad_payload = torch.ones(1)
     assert param_log.has_grad is True  # positive control: the seed arms the channel
 
-    def _identity_hook(out: torch.Tensor, *, hook: object) -> torch.Tensor:
+    def _identity_hook(out: torch.Tensor, *, ctx: object) -> torch.Tensor:
         return out
 
-    fork = trace.replay(hooks={tl.func("relu"): _identity_hook}, differentiable=True)
+    fork = trace.do(
+        tl.func("relu"),
+        _identity_hook,
+        intervention=tl.options.InterventionOptions(differentiable=True),
+    )
 
-    fork_param = fork.param_logs[address]
+    fork_param = fork._param_logs[address]
     assert fork_param._derived_grad_payload is None
     assert fork_param.has_grad is False
     # The source keeps its own (seeded) state untouched.
     assert param_log._derived_grad_payload is not None
 
 
-@pytest.mark.smoke
 def test_backward_reprojection_guard_survives_count_preserving_mutation() -> None:
     """A count-preserving event mutation still triggers reprojection."""
     from dataclasses import replace as dataclass_replace
 
+    from torchlens._ir.events import BackwardPassEnd
     from torchlens.backends.torch.backward import _ensure_backward_event_stream
-    from torchlens.ir.events import BackwardPassEnd
 
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
-    assert trace.backward_pass_logs[1].status == "ok"
+    trace.backward(_output_loss(trace))
+    assert trace._backward_pass_logs[1].status == "ok"
 
     stream = _ensure_backward_event_stream(trace)
     old_end = stream.backward_events[-1]
@@ -888,38 +915,36 @@ def test_backward_reprojection_guard_survives_count_preserving_mutation() -> Non
     stream.append_backward(dataclass_replace(old_end, status="error"))
 
     trace._sync_backward_projection_if_needed()
-    assert trace.backward_pass_logs[1].status == "error"
+    assert trace._backward_pass_logs[1].status == "error"
 
 
-@pytest.mark.smoke
 def test_recording_backward_delegates_foreign_graphs() -> None:
     """A backward on an unrelated graph inside the context never enters the trace."""
     _model, _x, trace = _logged_model()
     loss = _output_loss(trace)
     foreign = torch.randn(3, 3, requires_grad=True)
-    with trace.recording_backward():
+    with trace.capture_backward():
         (foreign * 2).sum().backward()
         loss.backward()
     assert foreign.grad is not None
-    assert trace.num_backward_passes == 1
+    assert len(trace.autograd.backward_passes) == 1
 
     control_model, _control_x, control_trace = _logged_model()
     control_loss = _output_loss(control_trace)
-    with control_trace.recording_backward():
+    with control_trace.capture_backward():
         control_loss.backward()
-    trace_labels = sorted(grad_fn.label for grad_fn in trace.grad_fn_logs.values())
-    control_labels = sorted(grad_fn.label for grad_fn in control_trace.grad_fn_logs.values())
+    trace_labels = sorted(grad_fn.label for grad_fn in trace._grad_fn_logs.values())
+    control_labels = sorted(grad_fn.label for grad_fn in control_trace._grad_fn_logs.values())
     assert trace_labels == control_labels
 
 
-@pytest.mark.smoke
 def test_recording_backward_foreign_only_block_stays_empty() -> None:
     """A foreign-only block records no passes and warns once, not silently."""
     _model, _x, trace = _logged_model()
     foreign = torch.randn(2, 2, requires_grad=True)
     with warnings.catch_warnings(record=True) as warning_records:
         warnings.simplefilter("always")
-        with trace.recording_backward():
+        with trace.capture_backward():
             (foreign * foreign).sum().backward()
             (foreign * 2.0).sum().backward()
     unmatched_warnings = [
@@ -930,11 +955,10 @@ def test_recording_backward_foreign_only_block_stays_empty() -> None:
     ]
     assert len(unmatched_warnings) == 1, "unmatched-backward warning must fire exactly once"
     assert foreign.grad is not None
-    assert trace.num_backward_passes == 0
-    assert len(trace.grad_fn_logs) == 0
+    assert len(trace.autograd.backward_passes) == 0
+    assert len(trace._grad_fn_logs) == 0
 
 
-@pytest.mark.smoke
 def test_recording_backward_exit_preserves_interleaved_patch() -> None:
     """__exit__ never clobbers a Tensor.backward patch installed inside the block."""
     _model, _x, trace = _logged_model()
@@ -942,7 +966,7 @@ def test_recording_backward_exit_preserves_interleaved_patch() -> None:
     def interloper_backward(tensor_self: torch.Tensor, *args: object, **kwargs: object) -> None:
         raise AssertionError("interloper should never run in this test")
 
-    context = trace.recording_backward()
+    context = trace.capture_backward()
     context.__enter__()
     try:
         torch.Tensor.backward = interloper_backward  # type: ignore[assignment, method-assign]
@@ -953,12 +977,11 @@ def test_recording_backward_exit_preserves_interleaved_patch() -> None:
         torch.Tensor.backward = context._original_backward  # type: ignore[assignment, method-assign]
 
 
-@pytest.mark.smoke
 def test_backward_graph_walk_includes_intervening_grad_fns() -> None:
     """The backward DAG includes grad_fns without forward Layer matches."""
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
-    assert any(not grad_fn_handle.has_op for grad_fn_handle in trace.grad_fn_logs.values())
+    trace.backward(_output_loss(trace))
+    assert any(not grad_fn_handle.has_op for grad_fn_handle in trace._grad_fn_logs.values())
 
 
 def test_has_op_storage_field() -> None:
@@ -979,63 +1002,57 @@ def test_has_op_storage_field() -> None:
     assert grad_fn_handle.has_op is True
 
 
-@pytest.mark.smoke
 def test_grad_fn_log_back_pointer() -> None:
     """Forward LayerLogs link to corresponding GradFnLogs by identity."""
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
-    assert any(layer.grad_fn is not None for layer in trace.layer_list)
+    trace.backward(_output_loss(trace))
+    assert any(layer.autograd.grad_fn is not None for layer in trace._layer_list)
     assert any(
-        grad_fn_handle.op is not None and grad_fn_handle.op.grad_fn is grad_fn_handle
-        for grad_fn_handle in trace.grad_fns
+        grad_fn_handle.op is not None and grad_fn_handle.op.autograd.grad_fn is grad_fn_handle
+        for grad_fn_handle in trace.autograd.grad_fns
     )
 
 
-@pytest.mark.smoke
 def test_grad_fn_naming_and_indexing() -> None:
     """GradFn labels and accessor indexing mirror layer lookup patterns."""
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
-    first_grad_fn = trace.grad_fns[0]
+    trace.backward(_output_loss(trace))
+    first_grad_fn = trace.autograd.grad_fns[0]
     assert "_back_" in first_grad_fn.label
     assert first_grad_fn.label == first_grad_fn.label.lower()
-    assert trace.grad_fns[first_grad_fn.label] is first_grad_fn
-    assert trace.grad_fns[first_grad_fn.type] is first_grad_fn
+    assert trace.autograd.grad_fns[first_grad_fn.label] is first_grad_fn
+    assert trace.autograd.grad_fns[first_grad_fn.type] is first_grad_fn
     if first_grad_fn.num_calls:
-        assert trace.grad_fns[f"{first_grad_fn.label}:1"] is first_grad_fn
-        assert trace.grad_fn_calls[f"{first_grad_fn.label}:1"] is first_grad_fn.calls[0]
-    assert list(trace.grad_fns)
+        assert trace.autograd.grad_fns[f"{first_grad_fn.label}:1"] is first_grad_fn
+        assert trace.autograd.grad_fn_calls[f"{first_grad_fn.label}:1"] is first_grad_fn.calls[0]
+    assert list(trace.autograd.grad_fns)
 
 
-@pytest.mark.smoke
 def test_save_grads_true_captures_all_grads() -> None:
     """save_grads=True captures all gradients independent of layers_to_save."""
     model = _TinyBackwardModel()
     x = torch.randn(2, 3, requires_grad=True)
-    trace = tl.trace(model, x, capture=CaptureOptions(layers_to_save=["relu"], save_grads=True))
-    trace.log_backward(_output_loss(trace))
+    trace = tl.trace(model, x, capture=CaptureOptions(save_grads=True), save=["relu"])
+    trace.backward(_output_loss(trace))
     assert trace.saved_grad_ops
     assert any("relu" in label for label in trace.saved_grad_ops.keys())
     assert any("linear" in label for label in trace.saved_grad_ops.keys())
 
 
-@pytest.mark.smoke
 def test_grads_to_save_independent_override() -> None:
     """save_grads selectors are independent from layers_to_save."""
     _model, _x, trace = _logged_model(layers_to_save="all", save_grads=["relu"])
-    trace.log_backward(_output_loss(trace))
+    trace.backward(_output_loss(trace))
     assert trace.saved_grad_ops
     assert all("relu" in label for label in trace.saved_grad_ops.keys())
 
 
-@pytest.mark.smoke
 def test_auto_train_mode_when_backward_opted_in() -> None:
     """Explicit save_grads selectors auto-enable backward_ready."""
     _model, _x, trace = _logged_model()
-    assert trace.backward_ready is True
+    assert trace.options.backward_ready is True
 
 
-@pytest.mark.smoke
 def test_auto_train_mode_conflict_with_explicit_false() -> None:
     """Explicit backward_ready=False conflicts with backward capture."""
     model = _TinyBackwardModel()
@@ -1044,7 +1061,6 @@ def test_auto_train_mode_conflict_with_explicit_false() -> None:
         tl.trace(model, x, capture=CaptureOptions(save_grads="all", backward_ready=False))
 
 
-@pytest.mark.smoke
 def test_grad_transform_applied() -> None:
     """grad_transform writes transformed grads separately."""
     model = _TinyBackwardModel()
@@ -1052,82 +1068,78 @@ def test_grad_transform_applied() -> None:
     trace = tl.trace(
         model,
         x,
-        capture=CaptureOptions(save_grads="all"),
-        save=SaveOptions(grad_transform=lambda grad: torch.zeros_like(grad)),
+        capture=CaptureOptions(
+            save_grads="all", grad_transform=lambda grad: torch.zeros_like(grad)
+        ),
     )
-    trace.log_backward(_output_loss(trace))
+    trace.backward(_output_loss(trace))
     assert all(
         torch.equal(
-            trace[label].transformed_grad,
+            trace[label].payload.transformed_grad,
             torch.zeros_like(trace[label].grad),
         )
         for label in trace.saved_grad_ops.keys()
     )
 
 
-@pytest.mark.smoke
 def test_flat_transform_kwargs_populate_transformed_payloads() -> None:
     """Flat activation_transform and grad_transform kwargs are applied."""
 
     model = _TinyBackwardModel()
     x = torch.randn(2, 3, requires_grad=True)
-    with pytest.warns(DeprecationWarning):
-        trace = tl.trace(
-            model,
-            x,
-            activation_transform=lambda out: out.half(),
-            grad_transform=lambda grad: grad.half(),
+    trace = tl.trace(
+        model,
+        x,
+        capture=tl.options.CaptureOptions(
             save_grads=True,
             backward_ready=True,
-        )
+            grad_transform=lambda grad: grad.half(),
+            activation_transform=lambda out: out.half(),
+        ),
+    )
     relu_op = next(op for op in trace.ops if op.func_name == "relu")
 
-    trace.log_backward(_output_loss(trace), retain_graph=True)
+    trace.backward(_output_loss(trace), retain_graph=True)
 
-    assert relu_op.transformed_out is not None
-    assert relu_op.transformed_out.dtype == torch.float16
-    assert relu_op.transformed_grad is not None
-    assert relu_op.transformed_grad.dtype == torch.float16
+    assert relu_op.payload.transformed_out is not None
+    assert relu_op.payload.transformed_out.dtype == torch.float16
+    assert relu_op.payload.transformed_grad is not None
+    assert relu_op.payload.transformed_grad.dtype == torch.float16
 
 
-@pytest.mark.smoke
 def test_module_log_grad_aggregation() -> None:
     """Module exposes aggregated grads for contained layers."""
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
+    trace.backward(_output_loss(trace))
     assert trace.modules["fc2"].grad is not None
 
 
-@pytest.mark.smoke
 def test_input_layer_grad_access() -> None:
     """Input layers expose saved grads after backward."""
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
+    trace.backward(_output_loss(trace))
     assert trace[trace.input_layers[0]].grad is not None
 
 
-@pytest.mark.smoke
 def test_param_layer_grad_access() -> None:
     """Param grad metadata still works through the existing hook path."""
     model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
+    trace.backward(_output_loss(trace))
     assert any(param_log.has_grad for param_log in trace.params)
     assert any(parameter.grad is not None for parameter in model.parameters())
 
 
-@pytest.mark.smoke
 def test_custom_autograd_function_captured_with_is_custom_flag() -> None:
     """Custom autograd.Function grad_fns are captured and flagged."""
     model = _CustomModel()
     x = torch.randn(2, 3, requires_grad=True)
     trace = tl.trace(model, x, capture=CaptureOptions(save_grads="all"))
-    trace.log_backward(_output_loss(trace))
-    assert any(grad_fn_handle.is_custom for grad_fn_handle in trace.grad_fn_logs.values())
+    trace.backward(_output_loss(trace))
+    assert any(grad_fn_handle.is_custom for grad_fn_handle in trace._grad_fn_logs.values())
 
 
-@pytest.mark.smoke
 def test_implicit_hook_firing_preserved() -> None:
-    """Calling backward outside log_backward still populates Layer grads."""
+    """Calling backward outside backward still populates Layer grads."""
     model = _TinyBackwardModel()
     x = torch.randn(2, 3, requires_grad=True)
     trace = tl.trace(model, x, capture=CaptureOptions(save_grads=True))
@@ -1135,7 +1147,6 @@ def test_implicit_hook_firing_preserved() -> None:
     assert trace.saved_grad_ops
 
 
-@pytest.mark.smoke
 @pytest.mark.filterwarnings("ignore:`layers_to_save` is deprecated:DeprecationWarning")
 @pytest.mark.filterwarnings("ignore:`random_seed` is deprecated:DeprecationWarning")
 @pytest.mark.filterwarnings("ignore:`save_grads` is deprecated:DeprecationWarning")
@@ -1151,60 +1162,57 @@ def test_validate_backward_default_detects_corrupted_captured_op_grad(
 ) -> None:
     """Default backward validation must read captured ``Op.grad`` payloads."""
 
-    original_log_backward = tl.Trace.log_backward
+    original_backward = tl.Trace.backward
     corrupted_labels: list[str] = []
 
     def corrupt_captured_grad(trace: tl.Trace, *args: object, **kwargs: object) -> object:
         """Corrupt one captured module-output grad after backward logging."""
 
-        result = original_log_backward(trace, *args, **kwargs)
-        for op in trace.layer_list:
+        result = original_backward(trace, *args, **kwargs)
+        for op in trace._layer_list:
             grad = getattr(op, "grad", None)
             if not isinstance(grad, torch.Tensor) or not getattr(op, "modules", None):
                 continue
-            record = op.grads.for_pass(1)
+            record = op.autograd.grads.for_pass(1)
             record.grad = torch.full_like(grad, 12345.0)
             corrupted_labels.append(op.label)
             break
         return result
 
-    monkeypatch.setattr(tl.Trace, "log_backward", corrupt_captured_grad)
+    monkeypatch.setattr(tl.Trace, "backward", corrupt_captured_grad)
 
     model = _TinyBackwardModel()
     x = torch.randn(2, 3, requires_grad=True)
-    assert not tl_validation.validate_backward_pass(model, x, random_seed=42)
+    assert not tl_validation.validate_backward_pass(model, x, seed=42)
     assert corrupted_labels
 
 
 def test_validate_backward_pass_random_seed_kwarg_public_wrapper() -> None:
-    """The public backward wrapper forwards ``random_seed`` into the dispatcher."""
-
-    model = _TinyBackwardModel()
-    x = torch.randn(2, 3, requires_grad=True)
-    with (
-        mock.patch(
-            "torchlens.validation.consolidated.validate_backward_pass",
-            wraps=consolidated_validation.validate_backward_pass,
-        ) as validator,
-        pytest.warns(DeprecationWarning),
-    ):
-        assert tl.validate_backward_pass(model, x, random_seed=42)
-    assert validator.call_args is not None
-    assert validator.call_args.kwargs["random_seed"] == 42
-
-
-def test_validation_validate_backward_pass_random_seed_kwarg_user_funcs_path() -> None:
-    """The validation subpackage path forwards ``random_seed`` to the source validator."""
+    """The public backward wrapper forwards ``seed`` into the dispatcher."""
 
     model = _TinyBackwardModel()
     x = torch.randn(2, 3, requires_grad=True)
     with mock.patch(
-        "torchlens.validation.backward.validate_backward_pass",
+        "torchlens.validation._consolidated.validate_backward_pass",
+        wraps=consolidated_validation.validate_backward_pass,
+    ) as validator:
+        assert tl.validate(model, x, scope="backward", seed=42)
+    assert validator.call_args is not None
+    assert validator.call_args.kwargs["seed"] == 42
+
+
+def test_validation_validate_backward_pass_random_seed_kwarg_user_funcs_path() -> None:
+    """The validation subpackage path forwards ``seed`` to the source validator."""
+
+    model = _TinyBackwardModel()
+    x = torch.randn(2, 3, requires_grad=True)
+    with mock.patch(
+        "torchlens.validation._backward.validate_backward_pass",
         wraps=backward_validation.validate_backward_pass,
     ) as validator:
-        assert tl_validation.validate_backward_pass(model, x, random_seed=42)
+        assert tl_validation.validate_backward_pass(model, x, seed=42)
     assert validator.call_args is not None
-    assert validator.call_args.kwargs["random_seed"] == 42
+    assert validator.call_args.kwargs["seed"] == 42
 
 
 def test_validate_backward_random_seed_deterministic() -> None:
@@ -1213,8 +1221,8 @@ def test_validate_backward_random_seed_deterministic() -> None:
     torch.manual_seed(0)
     model = _DropoutBackwardModel().train()
     x = torch.randn(6, 3, requires_grad=True)
-    first = tl_validation.validate_backward_pass(model, x, random_seed=42)
-    second = tl_validation.validate_backward_pass(model, x, random_seed=42)
+    first = tl_validation.validate_backward_pass(model, x, seed=42)
+    second = tl_validation.validate_backward_pass(model, x, seed=42)
     assert first is True
     assert second is first
 
@@ -1234,7 +1242,7 @@ def test_validate_backward_zero_grad_between_passes() -> None:
         original_zero_grad(set_to_none=set_to_none)
 
     model.zero_grad = MethodType(counted_zero_grad, model)
-    assert tl_validation.validate_backward_pass(model, x, random_seed=42)
+    assert tl_validation.validate_backward_pass(model, x, seed=42)
     assert calls == [True, True, True]
 
 
@@ -1244,7 +1252,7 @@ def test_validate_backward_dropout_train_mode_reproducible() -> None:
     torch.manual_seed(0)
     model = _DropoutBackwardModel().train()
     x = torch.randn(6, 3, requires_grad=True)
-    assert tl_validation.validate_backward_pass(model, x, random_seed=42)
+    assert tl_validation.validate_backward_pass(model, x, seed=42)
 
 
 def test_validate_backward_batchnorm_train_mode_state_restored() -> None:
@@ -1256,7 +1264,7 @@ def test_validate_backward_batchnorm_train_mode_state_restored() -> None:
     running_mean = model.bn.running_mean.detach().clone()
     running_var = model.bn.running_var.detach().clone()
 
-    assert tl_validation.validate_backward_pass(model, x, random_seed=42)
+    assert tl_validation.validate_backward_pass(model, x, seed=42)
     assert torch.equal(model.bn.running_mean, running_mean)
     assert torch.equal(model.bn.running_var, running_var)
 
@@ -1268,7 +1276,7 @@ def test_validate_backward_train_mode_audit() -> None:
     x = torch.randn(2, 3, requires_grad=True)
     for training in (True, False):
         model.train(training)
-        assert tl_validation.validate_backward_pass(model, x, random_seed=42)
+        assert tl_validation.validate_backward_pass(model, x, seed=42)
         assert model.training is training
 
 
@@ -1278,7 +1286,7 @@ def test_validate_backward_multipass_weight_tied() -> None:
     torch.manual_seed(0)
     model = _WeightTiedModel()
     x = torch.randn(2, 3, requires_grad=True)
-    assert tl_validation.validate_backward_pass(model, x, random_seed=42)
+    assert tl_validation.validate_backward_pass(model, x, seed=42)
 
 
 def test_validate_backward_custom_autograd_function() -> None:
@@ -1287,7 +1295,7 @@ def test_validate_backward_custom_autograd_function() -> None:
     torch.manual_seed(0)
     model = _CustomParamModel()
     x = torch.randn(2, 3, requires_grad=True)
-    assert tl_validation.validate_backward_pass(model, x, random_seed=42)
+    assert tl_validation.validate_backward_pass(model, x, seed=42)
 
 
 def test_validate_backward_hygiene_data_parallel() -> None:
@@ -1296,7 +1304,7 @@ def test_validate_backward_hygiene_data_parallel() -> None:
     model = nn.DataParallel(_TinyBackwardModel())
     model.module.cpu()
     x = torch.randn(2, 3, requires_grad=True)
-    assert backward_validation.validate_backward_pass(model, x, random_seed=42)
+    assert backward_validation.validate_backward_pass(model, x, seed=42)
 
 
 def test_validate_backward_hygiene_opaque_wrapper() -> None:
@@ -1305,7 +1313,7 @@ def test_validate_backward_hygiene_opaque_wrapper() -> None:
     model = torch.jit.trace(_TinyBackwardModel(), torch.randn(2, 3))
     x = torch.randn(2, 3, requires_grad=True)
     with pytest.raises(RuntimeError, match="torch.jit"):
-        backward_validation.validate_backward_pass(model, x, random_seed=42)
+        backward_validation.validate_backward_pass(model, x, seed=42)
 
 
 def test_accumulategrad_labels_deterministic_across_captures() -> None:
@@ -1314,20 +1322,20 @@ def test_accumulategrad_labels_deterministic_across_captures() -> None:
     torch.manual_seed(0)
     model = _TinyBackwardModel()
     x = torch.randn(2, 3, requires_grad=True)
-    trace1 = tl.trace(model, x, capture=CaptureOptions(save_grads="all", random_seed=42))
-    trace1.log_backward(_output_loss(trace1))
+    trace1 = tl.trace(model, x, capture=CaptureOptions(save_grads="all", seed=42))
+    trace1.backward(_output_loss(trace1))
     labels1 = {
         grad_fn_handle.label
-        for grad_fn_handle in trace1.grad_fn_logs.values()
+        for grad_fn_handle in trace1._grad_fn_logs.values()
         if grad_fn_handle.type == "accumulategrad"
     }
     trace1.cleanup()
 
-    trace2 = tl.trace(model, x, capture=CaptureOptions(save_grads="all", random_seed=42))
-    trace2.log_backward(_output_loss(trace2))
+    trace2 = tl.trace(model, x, capture=CaptureOptions(save_grads="all", seed=42))
+    trace2.backward(_output_loss(trace2))
     labels2 = {
         grad_fn_handle.label
-        for grad_fn_handle in trace2.grad_fn_logs.values()
+        for grad_fn_handle in trace2._grad_fn_logs.values()
         if grad_fn_handle.type == "accumulategrad"
     }
     trace2.cleanup()
@@ -1335,35 +1343,33 @@ def test_accumulategrad_labels_deterministic_across_captures() -> None:
     assert labels1 == labels2
 
 
-@pytest.mark.smoke
-@pytest.mark.filterwarnings("ignore:`layers_to_save` is deprecated:DeprecationWarning")
-@pytest.mark.filterwarnings("ignore:`random_seed` is deprecated:DeprecationWarning")
-@pytest.mark.filterwarnings("ignore:`save_grads` is deprecated:DeprecationWarning")
-def test_validate_backward_pass_perturbed() -> None:
-    """The inert saved-grad perturbation option is loudly unsupported."""
+def test_validate_backward_pass_perturb_kwarg_removed() -> None:
+    """The inert saved-grad perturbation kwarg is deleted outright."""
     model = _TinyBackwardModel()
     x = torch.randn(2, 3, requires_grad=True)
-    with pytest.warns(DeprecationWarning, match="perturb_saved_grads"):
-        with pytest.raises(ValueError, match="unsupported"):
-            tl_validation.validate_backward_pass(model, x, perturb_saved_grads=True)
+    with pytest.raises(TypeError):
+        tl_validation.validate_backward_pass(model, x, perturb_saved_grads=True)
 
 
-@pytest.mark.smoke
 def test_peak_memory_tracking_populated() -> None:
     """Trace stores flat backward peak-memory tracking metadata."""
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
-    assert trace.has_backward_pass
-    assert isinstance(trace.backward_peak_memory, int)
-    assert trace.backward_memory_backend in {"cpu", "cuda", "mps"}
+    trace.backward(_output_loss(trace))
+    assert trace.autograd.has_backward_pass
+    assert trace.provenance.backward_memory_backend in {"cpu", "cuda", "mps"}
+    if trace.provenance.backward_memory_backend == "cpu":
+        # measure.2: the CPU peak is opt-in; the default reads None with the reason.
+        assert trace.cost.backward_peak_memory is None
+        assert "measure_host_peak_memory=True" in trace.backward_peak_memory_reason
+    else:
+        assert isinstance(trace.cost.backward_peak_memory, int)
 
 
-@pytest.mark.smoke
 def test_higher_order_grads_basic_support() -> None:
     """create_graph=True backward calls run through capture."""
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace), create_graph=True)
-    assert trace.num_backward_passes == 1
+    trace.backward(_output_loss(trace), create_graph=True)
+    assert len(trace.autograd.backward_passes) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1372,32 +1378,31 @@ def test_higher_order_grads_basic_support() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.smoke
 def test_param_grad_records_rebuild_from_event_spine() -> None:
     """A forced scratch rebuild reconstructs Param._grad_records from events."""
     from torchlens.backends.torch import backward as backward_mod
 
     _model, _x, trace = _logged_model()
     loss = _output_loss(trace)
-    with trace.recording_backward():
+    with trace.capture_backward():
         loss.backward(retain_graph=True)
         loss.backward()
 
     before = {
         address: [
-            (record.ordinal, record.backward_pass_index, record.shape, record.memory)
+            (record.ordinal, record.backward_pass_number, record.shape, record.memory)
             for record in param_log._grad_records
         ]
-        for address, param_log in trace.param_logs.items()
+        for address, param_log in trace._param_logs.items()
     }
     payloads_before = {
         address: [record.grad for record in param_log._grad_records]
-        for address, param_log in trace.param_logs.items()
+        for address, param_log in trace._param_logs.items()
     }
     assert any(before.values()), "expected captured param gradient records"
     assert all(len(records) == 2 for records in before.values() if records)
 
-    for param_log in trace.param_logs.values():
+    for param_log in trace._param_logs.values():
         param_log._grad_records = []
     trace.__dict__.pop("_backward_projection_fold_state", None)
     trace.__dict__.pop("_backward_projection_revision", None)
@@ -1406,25 +1411,24 @@ def test_param_grad_records_rebuild_from_event_spine() -> None:
 
     after = {
         address: [
-            (record.ordinal, record.backward_pass_index, record.shape, record.memory)
+            (record.ordinal, record.backward_pass_number, record.shape, record.memory)
             for record in param_log._grad_records
         ]
-        for address, param_log in trace.param_logs.items()
+        for address, param_log in trace._param_logs.items()
     }
     assert after == before
-    for address, param_log in trace.param_logs.items():
-        for record, payload in zip(param_log._grad_records, payloads_before[address], strict=True):
+    for address, param_log in trace._param_logs.items():
+        for record, payload in zip(param_log._grad_records, payloads_before[address]):
             assert record.grad is payload, "rebuild must reuse the event-held payload"
 
 
-@pytest.mark.smoke
 def test_param_grad_incremental_fold_matches_scratch_rebuild() -> None:
     """The param-inclusive snapshot proves fold == scratch across passes."""
     from torchlens.backends.torch import backward as backward_mod
 
     _model, _x, trace = _logged_model()
     loss = _output_loss(trace)
-    with trace.recording_backward():
+    with trace.capture_backward():
         loss.backward(retain_graph=True)
         loss.backward(retain_graph=True)
         loss.backward()
@@ -1436,7 +1440,7 @@ def test_param_grad_incremental_fold_matches_scratch_rebuild() -> None:
     # re-deriving the records from the ParamGradObserved event spine. Under
     # direct-write param capture (no event folding) the cleared records never
     # come back and this comparison fails.
-    for param_log in trace.param_logs.values():
+    for param_log in trace._param_logs.values():
         param_log._grad_records = []
     trace.__dict__.pop("_backward_projection_fold_state", None)
     trace.__dict__.pop("_backward_projection_revision", None)
@@ -1445,17 +1449,16 @@ def test_param_grad_incremental_fold_matches_scratch_rebuild() -> None:
     assert _backward_projection_snapshot(trace) == incremental_snapshot
 
 
-@pytest.mark.smoke
 def test_param_grad_reconciliation_counts_multiplicity() -> None:
     """Duplicating one projected param record now fails reconciliation."""
-    from torchlens.validation.invariants import MetadataInvariantError
+    from torchlens.validation._invariants import MetadataInvariantError
 
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
+    trace.backward(_output_loss(trace))
     _invariant_check(trace)  # positive control
 
     param_log = next(
-        param_log for param_log in trace.param_logs.values() if param_log._grad_records
+        param_log for param_log in trace._param_logs.values() if param_log._grad_records
     )
     duplicated = param_log._grad_records[0]
     param_log._grad_records.append(duplicated)
@@ -1465,16 +1468,15 @@ def test_param_grad_reconciliation_counts_multiplicity() -> None:
     _invariant_check(trace)
 
 
-@pytest.mark.smoke
 def test_op_grad_reconciliation_counts_multiplicity() -> None:
     """Duplicating one projected op record now fails reconciliation."""
-    from torchlens.validation.invariants import MetadataInvariantError
+    from torchlens.validation._invariants import MetadataInvariantError
 
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
+    trace.backward(_output_loss(trace))
     _invariant_check(trace)  # positive control
 
-    victim = next(op for op in trace.layer_list if op._slot("_grad_records"))
+    victim = next(op for op in trace._layer_list if op._slot("_grad_records"))
     records = victim._slot("_grad_records")
     records.append(records[0])
     with pytest.raises(MetadataInvariantError, match="by multiplicity"):
@@ -1483,14 +1485,13 @@ def test_op_grad_reconciliation_counts_multiplicity() -> None:
     _invariant_check(trace)
 
 
-@pytest.mark.smoke
 def test_grad_fn_discovered_source_is_frozen_by_the_writer() -> None:
     """In-place mutation of GradFnDiscovered.source raises instead of biting."""
+    from torchlens._ir.events import GradFnDiscovered
     from torchlens.backends.torch.backward import _ensure_backward_event_stream
-    from torchlens.ir.events import GradFnDiscovered
 
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
+    trace.backward(_output_loss(trace))
     events = _ensure_backward_event_stream(trace).backward_events
     discovered = next(event for event in events if isinstance(event, GradFnDiscovered))
     with pytest.raises(TypeError):
@@ -1498,12 +1499,11 @@ def test_grad_fn_discovered_source_is_frozen_by_the_writer() -> None:
     assert dict(discovered.source) is not discovered.source  # copies still work
 
 
-@pytest.mark.smoke
 def test_higher_order_discovery_bracketing_is_armed() -> None:
     """A created_in_pass discovery moved past its pass end fails the invariant."""
+    from torchlens._ir.events import BackwardPassEnd, GradFnDiscovered
     from torchlens.backends.torch.backward import _ensure_backward_event_stream
-    from torchlens.ir.events import BackwardPassEnd, GradFnDiscovered
-    from torchlens.validation.invariants import MetadataInvariantError
+    from torchlens.validation._invariants import MetadataInvariantError
 
     class _HigherOrderModel(nn.Module):
         """Tiny nonlinear model with differentiable first gradients."""
@@ -1515,7 +1515,7 @@ def test_higher_order_discovery_bracketing_is_armed() -> None:
 
     torch.manual_seed(0)
     x = torch.randn(3, requires_grad=True)
-    trace = tl.trace(_HigherOrderModel(), x, save_grads="all")
+    trace = tl.trace(_HigherOrderModel(), x, capture=tl.options.CaptureOptions(save_grads="all"))
     loss = trace[trace.output_layers[0]].out
     first_grad = torch.autograd.grad(loss, x, create_graph=True, retain_graph=True)[0]
     torch.autograd.grad(first_grad.sum(), x, retain_graph=True)
@@ -1547,21 +1547,20 @@ def test_higher_order_discovery_bracketing_is_armed() -> None:
     with pytest.raises(MetadataInvariantError, match="higher-order GradFnDiscovered"):
         _invariant_check(trace)
     events[:] = original_order
-    for original_seq, event in zip(original_seqs, events, strict=True):
+    for original_seq, event in zip(original_seqs, events):
         object.__setattr__(event, "seq", original_seq)
     _invariant_check(trace)
 
 
-@pytest.mark.smoke
 def test_pass_brackets_reject_partial_interleaving() -> None:
     """Two pass brackets that partially overlap fail the invariant."""
+    from torchlens._ir.events import BackwardPassEnd
     from torchlens.backends.torch.backward import _ensure_backward_event_stream
-    from torchlens.ir.events import BackwardPassEnd
-    from torchlens.validation.invariants import MetadataInvariantError
+    from torchlens.validation._invariants import MetadataInvariantError
 
     _model, _x, trace = _logged_model()
     loss = _output_loss(trace)
-    with trace.recording_backward():
+    with trace.capture_backward():
         loss.backward(retain_graph=True)
         loss.backward()
     events = _ensure_backward_event_stream(trace).backward_events
@@ -1586,12 +1585,11 @@ def test_pass_brackets_reject_partial_interleaving() -> None:
     with pytest.raises(MetadataInvariantError, match="partially overlaps"):
         _invariant_check(trace)
     events[:] = original_order
-    for original_seq, event in zip(original_seqs, events, strict=True):
+    for original_seq, event in zip(original_seqs, events):
         object.__setattr__(event, "seq", original_seq)
     _invariant_check(trace)
 
 
-@pytest.mark.smoke
 def test_restored_trace_supports_backward_capture() -> None:
     """A pickled-and-restored trace records a fresh backward correctly."""
     import pickle
@@ -1601,8 +1599,7 @@ def test_restored_trace_supports_backward_capture() -> None:
     trace = tl.trace(
         model,
         x,
-        capture=CaptureOptions(backward_ready=True, save_grads="all"),
-        save_mode="reference",
+        capture=CaptureOptions(backward_ready=True, save_grads="all", save_mode="reference"),
     )
     loss = _output_loss(trace)
     restored = pickle.loads(pickle.dumps(trace))
@@ -1610,20 +1607,19 @@ def test_restored_trace_supports_backward_capture() -> None:
     assert "_backward_projection_revision" not in restored.__dict__
     assert "_backward_projection_fold_state" not in restored.__dict__
 
-    restored.log_backward(loss)
-    assert restored.num_backward_passes == 1
-    assert restored.grad_fn_logs
-    assert restored.backward_pass_logs[1].status == "ok"
+    restored.backward(loss)
+    assert len(restored.autograd.backward_passes) == 1
+    assert restored._grad_fn_logs
+    assert restored._backward_pass_logs[1].status == "ok"
     _invariant_check(restored)
 
 
-@pytest.mark.smoke
 def test_double_restore_replaces_stale_stream() -> None:
     """__setstate__ replaces a reused object's stream based on incoming state."""
     import pickle
 
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
+    trace.backward(_output_loss(trace))
     assert trace._capture_events.backward_events
 
     pickled_state = pickle.dumps(trace)
@@ -1649,13 +1645,13 @@ def _assert_pass_one_calls_survive_rebase(trace, pass_one_call_snapshot) -> None
     pass's call tuples.
     """
     for object_id, snapshot in pass_one_call_snapshot.items():
-        record = trace.grad_fn_logs[object_id]
+        record = trace._grad_fn_logs[object_id]
         merged_calls = dict(record.calls._dict)
         for call_ordinal, pass_one_call in snapshot.items():
             assert merged_calls.get(call_ordinal) is pass_one_call
-            assert pass_one_call.backward_pass_index == 1
+            assert pass_one_call.backward_pass_number == 1
         if snapshot:
-            call_passes = sorted(call.backward_pass_index for call in merged_calls.values())
+            call_passes = sorted(call.backward_pass_number for call in merged_calls.values())
             assert call_passes == [1, 2], (
                 f"grad-fn {record.label} call passes {call_passes}: the retained "
                 "pass-1 call must survive next to the new pass-2 call"
@@ -1669,15 +1665,14 @@ def _assert_pass_record_calls_owned(trace, pass_record) -> None:
     record still owns — the two projections must never diverge.
     """
     owned_call_ids = {
-        id(call) for record in trace.grad_fn_logs.values() for call in record.calls._dict.values()
+        id(call) for record in trace._grad_fn_logs.values() for call in record.calls._dict.values()
     }
     assert pass_record.grad_fn_calls
     for call in pass_record.grad_fn_calls:
         assert id(call) in owned_call_ids
-        assert call.backward_pass_index == pass_record.pass_index
+        assert call.backward_pass_number == pass_record.pass_number
 
 
-@pytest.mark.smoke
 def test_restored_trace_with_prior_backward_extends_pass_numbering() -> None:
     """A post-restore backward numbers itself after the preserved pass.
 
@@ -1690,41 +1685,41 @@ def test_restored_trace_with_prior_backward_extends_pass_numbering() -> None:
 
     _model, _x, trace = _logged_model()
     loss = _output_loss(trace)
-    trace.log_backward(loss, retain_graph=True)
-    assert trace.num_backward_passes == 1
+    trace.backward(loss, retain_graph=True)
+    assert len(trace.autograd.backward_passes) == 1
 
     restored = pickle.loads(pickle.dumps(trace))
     assert restored._capture_events.pass_index_base == 1
-    pass_one_record = restored.backward_pass_logs[1]
-    preserved_grad_fn_ids = set(restored.grad_fn_logs)
+    pass_one_record = restored._backward_pass_logs[1]
+    preserved_grad_fn_ids = set(restored._grad_fn_logs)
     assert preserved_grad_fn_ids
     # Full pass-1 projection content, not just ID presence: the exact
     # GradFnCall objects each grad-fn record holds before the rebase.
     pass_one_call_snapshot = {
-        object_id: dict(record.calls._dict) for object_id, record in restored.grad_fn_logs.items()
+        object_id: dict(record.calls._dict) for object_id, record in restored._grad_fn_logs.items()
     }
     assert any(pass_one_call_snapshot.values())
     pass_one_param_counts = {
-        address: len(param_log._grad_records) for address, param_log in restored.param_logs.items()
+        address: len(param_log._grad_records) for address, param_log in restored._param_logs.items()
     }
     assert any(pass_one_param_counts.values())
 
-    restored.log_backward(loss, retain_graph=True)
+    restored.backward(loss, retain_graph=True)
 
-    assert restored.num_backward_passes == 2
-    assert set(restored.backward_pass_logs) == {1, 2}
+    assert len(restored.autograd.backward_passes) == 2
+    assert set(restored._backward_pass_logs) == {1, 2}
     # The earlier pass's projection is intact — the SAME preserved record,
     # not a lookalike rebuilt from a stream that never saw pass 1.
-    assert restored.backward_pass_logs[1] is pass_one_record
-    assert preserved_grad_fn_ids <= set(restored.grad_fn_logs)
+    assert restored._backward_pass_logs[1] is pass_one_record
+    assert preserved_grad_fn_ids <= set(restored._grad_fn_logs)
     _assert_pass_one_calls_survive_rebase(restored, pass_one_call_snapshot)
     # And the retained pass record agrees with the grad-fn records: every
     # call it lists is one the merged grad-fn projection still owns.
     _assert_pass_record_calls_owned(restored, pass_one_record)
-    all_labels = [record.label for record in restored.grad_fn_logs.values()]
+    all_labels = [record.label for record in restored._grad_fn_logs.values()]
     assert len(all_labels) == len(set(all_labels)), "merged grad-fn labels must stay unique"
-    for address, param_log in restored.param_logs.items():
-        pass_indices = sorted(record.backward_pass_index for record in param_log._grad_records)
+    for address, param_log in restored._param_logs.items():
+        pass_indices = sorted(record.backward_pass_number for record in param_log._grad_records)
         preserved = [index for index in pass_indices if index == 1]
         assert len(preserved) == pass_one_param_counts[address]
         if pass_one_param_counts[address]:
@@ -1739,14 +1734,14 @@ def test_restored_trace_with_prior_backward_extends_pass_numbering() -> None:
     assert restored_again._capture_events.pass_index_base == 2
     two_pass_call_snapshot = {
         object_id: dict(record.calls._dict)
-        for object_id, record in restored_again.grad_fn_logs.items()
+        for object_id, record in restored_again._grad_fn_logs.items()
     }
     assert any(two_pass_call_snapshot.values())
-    restored_again.log_backward(loss)
-    assert restored_again.num_backward_passes == 3
-    assert set(restored_again.backward_pass_logs) == {1, 2, 3}
+    restored_again.backward(loss)
+    assert len(restored_again.autograd.backward_passes) == 3
+    assert set(restored_again._backward_pass_logs) == {1, 2, 3}
     for object_id, snapshot in two_pass_call_snapshot.items():
-        record = restored_again.grad_fn_logs[object_id]
+        record = restored_again._grad_fn_logs[object_id]
         merged_calls = dict(record.calls._dict)
         for call_ordinal, prior_call in snapshot.items():
             assert merged_calls.get(call_ordinal) is prior_call
@@ -1756,12 +1751,11 @@ def test_restored_trace_with_prior_backward_extends_pass_numbering() -> None:
                 "must stay contiguous across a repeat rebuild"
             )
             assert [
-                merged_calls[ordinal].backward_pass_index for ordinal in sorted(merged_calls)
+                merged_calls[ordinal].backward_pass_number for ordinal in sorted(merged_calls)
             ] == [1, 2, 3]
     _invariant_check(restored_again)
 
 
-@pytest.mark.smoke
 def test_fork_after_backward_gets_detached_event_stream() -> None:
     """``Trace.fork()`` never shares the parent's backward event stream.
 
@@ -1772,7 +1766,7 @@ def test_fork_after_backward_gets_detached_event_stream() -> None:
     """
     _model, _x, trace = _logged_model()
     loss = _output_loss(trace)
-    trace.log_backward(loss, retain_graph=True)
+    trace.backward(loss, retain_graph=True)
 
     fork = trace.fork()
     assert fork._capture_events is not trace._capture_events
@@ -1785,23 +1779,23 @@ def test_fork_after_backward_gets_detached_event_stream() -> None:
 
     parent_event_count = len(trace._capture_events.backward_events)
     parent_revision = trace._capture_events.backward_revision
-    fork_pass_one_record = fork.backward_pass_logs[1]
+    fork_pass_one_record = fork._backward_pass_logs[1]
     fork_pass_one_call_snapshot = {
-        object_id: dict(record.calls._dict) for object_id, record in fork.grad_fn_logs.items()
+        object_id: dict(record.calls._dict) for object_id, record in fork._grad_fn_logs.items()
     }
     assert any(fork_pass_one_call_snapshot.values())
     with warnings.catch_warnings():
         # The parent's tensor hooks must stand down for the fork's managed
         # pass — an implicit-pass warning here means the parent absorbed it.
         warnings.simplefilter("error")
-        fork.log_backward(loss, retain_graph=True)
+        fork.backward(loss, retain_graph=True)
 
     assert len(trace._capture_events.backward_events) == parent_event_count
     assert trace._capture_events.backward_revision == parent_revision
-    assert trace.num_backward_passes == 1
-    assert set(trace.backward_pass_logs) == {1}
-    assert fork.num_backward_passes == 2
-    assert set(fork.backward_pass_logs) == {1, 2}
+    assert len(trace.autograd.backward_passes) == 1
+    assert set(trace._backward_pass_logs) == {1}
+    assert len(fork.autograd.backward_passes) == 2
+    assert set(fork._backward_pass_logs) == {1, 2}
     # The parent's persistent tensor hooks redirect their observations to the
     # bracket-holding fork (shared label space), so the fork's pass records
     # op gradients instead of silently losing them.
@@ -1813,14 +1807,13 @@ def test_fork_after_backward_gets_detached_event_stream() -> None:
     assert fork_op_grad_passes == {2}
     # The detached-fork rebuild preserves the inherited pass's projection
     # content the same way the pickle-restore path does.
-    assert fork.backward_pass_logs[1] is fork_pass_one_record
+    assert fork._backward_pass_logs[1] is fork_pass_one_record
     _assert_pass_one_calls_survive_rebase(fork, fork_pass_one_call_snapshot)
     _assert_pass_record_calls_owned(fork, fork_pass_one_record)
     _invariant_check(trace)
     _invariant_check(fork)
 
 
-@pytest.mark.smoke
 def test_grad_fn_discovered_source_snapshot_defeats_caller_proxy() -> None:
     """The writer re-snapshots an already-proxied source's backing dict.
 
@@ -1830,8 +1823,8 @@ def test_grad_fn_discovered_source_snapshot_defeats_caller_proxy() -> None:
     """
     from types import MappingProxyType
 
-    from torchlens.ir.capture_events import CaptureEvents
-    from torchlens.ir.events import GradFnDiscovered
+    from torchlens._ir.capture_events import CaptureEvents
+    from torchlens._ir.events import GradFnDiscovered
 
     backing = {
         "class_source_file": "/original/source.py",
@@ -1855,7 +1848,6 @@ def test_grad_fn_discovered_source_snapshot_defeats_caller_proxy() -> None:
     assert event.source["class_source_file"] == "/original/source.py"
 
 
-@pytest.mark.smoke
 def test_fork_deep_copy_debug_mode_rethrows(monkeypatch: pytest.MonkeyPatch) -> None:
     """TORCHLENS_DEBUG_FORK_COPY=1 surfaces silently-degraded fork copies.
 
@@ -1867,7 +1859,7 @@ def test_fork_deep_copy_debug_mode_rethrows(monkeypatch: pytest.MonkeyPatch) -> 
     """
     import copy
 
-    from torchlens.data_classes import _trace_intervention as trace_intervention
+    from torchlens._data_classes import _trace_fork as trace_intervention
 
     class _PoisonDeepCopy:
         """Object whose deepcopy always fails (shallow copy still works)."""
@@ -1892,7 +1884,6 @@ def test_fork_deep_copy_debug_mode_rethrows(monkeypatch: pytest.MonkeyPatch) -> 
     assert isinstance(fork.__dict__.get("_tl_test_poison"), _PoisonDeepCopy)
 
 
-@pytest.mark.smoke
 def test_cleanup_disarms_backward_triggers() -> None:
     """A user backward after cleanup() must not raise from lingering hooks."""
     model = _TinyBackwardModel()
@@ -1900,11 +1891,10 @@ def test_cleanup_disarms_backward_triggers() -> None:
     trace = tl.trace(
         model,
         x,
-        capture=CaptureOptions(backward_ready=True),
-        save_mode="reference",
+        capture=CaptureOptions(backward_ready=True, save_mode="reference"),
     )
     out = trace[trace.output_layers[0]].out
-    trace.log_backward(out.sum(), retain_graph=True)
+    trace.backward(out.sum(), retain_graph=True)
     trace.cleanup()
 
     # The tensor hooks and grad_fn hooks registered on the user's still-live
@@ -1913,13 +1903,12 @@ def test_cleanup_disarms_backward_triggers() -> None:
     assert x.grad is not None
 
 
-@pytest.mark.smoke
 def test_journal_seq_spans_forward_and_backward_lanes() -> None:
     """Every retained lane is writer-stamped from ONE run-monotonic counter."""
     from torchlens.backends.torch.backward import _ensure_backward_event_stream
 
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
+    trace.backward(_output_loss(trace))
     stream = _ensure_backward_event_stream(trace)
     lanes = (
         stream.op_events,
@@ -1943,17 +1932,16 @@ def test_journal_seq_spans_forward_and_backward_lanes() -> None:
     assert all(event.seq > max_op_seq for event in stream.backward_events)
 
 
-@pytest.mark.smoke
 def test_journal_seq_invariant_fires_on_planted_mutations() -> None:
     """The journal-wide seq invariant is independently armed per failure mode."""
     from torchlens.backends.torch.backward import _ensure_backward_event_stream
-    from torchlens.validation.invariants import (
-        MetadataInvariantError,
+    from torchlens.validation._invariants import MetadataInvariantError
+    from torchlens.validation._invariants_backward_domain import (
         _check_journal_seq_invariants,
     )
 
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
+    trace.backward(_output_loss(trace))
     stream = _ensure_backward_event_stream(trace)
 
     def check() -> None:
@@ -2011,7 +1999,6 @@ def test_journal_seq_invariant_fires_on_planted_mutations() -> None:
     check()
 
 
-@pytest.mark.smoke
 def test_journal_seq_invariant_fires_on_event_deletion() -> None:
     """FINDING B1-08: DELETING an event used to pass every journal check.
 
@@ -2025,14 +2012,16 @@ def test_journal_seq_invariant_fires_on_event_deletion() -> None:
     """
 
     from torchlens.backends.torch.backward import _ensure_backward_event_stream
-    from torchlens.validation.invariants import (
+    from torchlens.validation._invariants import (
         MetadataInvariantError,
-        _check_journal_seq_invariants,
         check_metadata_invariants,
+    )
+    from torchlens.validation._invariants_backward_domain import (
+        _check_journal_seq_invariants,
     )
 
     _model, _x, trace = _logged_model()
-    trace.log_backward(_output_loss(trace))
+    trace.backward(_output_loss(trace))
     stream = _ensure_backward_event_stream(trace)
 
     def check() -> None:
@@ -2041,7 +2030,7 @@ def test_journal_seq_invariant_fires_on_event_deletion() -> None:
     check()  # positive control
     check_metadata_invariants(trace)
 
-    # Sol's exact repro: pop one op event out of the middle of the lane.
+    # The review's exact repro: pop one op event out of the middle of the lane.
     popped_op = stream.op_events.pop(1)
     with pytest.raises(MetadataInvariantError, match="not retained by any lane"):
         check()
@@ -2070,7 +2059,6 @@ def test_journal_seq_invariant_fires_on_event_deletion() -> None:
     check()
 
 
-@pytest.mark.smoke
 def test_amendment_lane_deletion_is_visible_to_the_journal_invariant() -> None:
     """The amendment lane rides its own counter and is checked the same way.
 
@@ -2080,9 +2068,9 @@ def test_amendment_lane_deletion_is_visible_to_the_journal_invariant() -> None:
     amendment, or a start offset the seal watermark does not explain is red.
     """
 
-    from torchlens.ir.capture_events import CaptureEvents
-    from torchlens.validation.invariants import (
-        MetadataInvariantError,
+    from torchlens._ir.capture_events import CaptureEvents
+    from torchlens.validation._invariants import MetadataInvariantError
+    from torchlens.validation._invariants_backward_domain import (
         _check_journal_seq_invariants,
     )
 
@@ -2147,7 +2135,6 @@ def test_amendment_lane_deletion_is_visible_to_the_journal_invariant() -> None:
     assert isinstance(stream, CaptureEvents)
 
 
-@pytest.mark.smoke
 def test_aliased_label_registrations_emit_one_grad_event_per_pass() -> None:
     """One logical op output emits exactly ONE OpGradObserved per pass.
 
@@ -2160,9 +2147,9 @@ def test_aliased_label_registrations_emit_one_grad_event_per_pass() -> None:
     """
     import collections
 
+    from torchlens._ir.events import OpGradObserved
     from torchlens.backends.torch.backward import _ensure_backward_event_stream
-    from torchlens.ir.events import OpGradObserved
-    from torchlens.validation.invariants import check_metadata_invariants
+    from torchlens.validation._invariants import check_metadata_invariants
 
     class IdentityWrapper(nn.Module):
         def __init__(self) -> None:
@@ -2177,7 +2164,8 @@ def test_aliased_label_registrations_emit_one_grad_event_per_pass() -> None:
     trace = tl.trace(
         IdentityWrapper(),
         torch.randn(2, 3),
-        capture=CaptureOptions(layers_to_save="all", save_grads="all", random_seed=42),
+        capture=CaptureOptions(save_grads="all", seed=42),
+        save="all",
     )
     # Arming proof for the owner rule itself: the identity label is owned by
     # exactly one hooked tensor even though two registrations happened.
@@ -2185,7 +2173,7 @@ def test_aliased_label_registrations_emit_one_grad_event_per_pass() -> None:
     identity_labels = [label for label in owners if label.startswith("identity")]
     assert identity_labels, "identity op label must be gradient-hooked"
 
-    trace.log_backward(trace[trace.output_layers[0]].out.sum())
+    trace.backward(trace[trace.output_layers[0]].out.sum())
     events = _ensure_backward_event_stream(trace).backward_events
     op_grad_counts = collections.Counter(
         (event.op_label, event.pass_index) for event in events if isinstance(event, OpGradObserved)
@@ -2197,13 +2185,12 @@ def test_aliased_label_registrations_emit_one_grad_event_per_pass() -> None:
     check_metadata_invariants(trace)
 
 
-@pytest.mark.smoke
 def test_failed_backward_walk_keeps_start_and_gains_failed_end() -> None:
     """A failed graph walk is evidence: Start stays, a failed End closes it."""
+    from torchlens._ir.events import BackwardPassEnd as _End
     from torchlens.backends.torch import backward as backward_mod
     from torchlens.backends.torch.backward import _ensure_backward_event_stream
-    from torchlens.ir.events import BackwardPassEnd as _End
-    from torchlens.validation.invariants import check_metadata_invariants
+    from torchlens.validation._invariants import check_metadata_invariants
 
     _model, _x, trace = _logged_model()
     loss = _output_loss(trace)
@@ -2216,7 +2203,7 @@ def test_failed_backward_walk_keeps_start_and_gains_failed_end() -> None:
         ),
         pytest.raises(RuntimeError, match="planted walk failure"),
     ):
-        trace.log_backward(loss)
+        trace.backward(loss)
 
     events = _ensure_backward_event_stream(trace).backward_events
     starts = [e for e in events if isinstance(e, BackwardPassStart)]
@@ -2224,23 +2211,22 @@ def test_failed_backward_walk_keeps_start_and_gains_failed_end() -> None:
     assert [s.pass_index for s in starts] == [1], "the attempted pass keeps its start"
     assert [e.pass_index for e in ends] == [1], "the attempted pass gains a terminal end"
     assert ends[0].status == "error"
-    assert trace.num_backward_passes == 1
+    assert len(trace.autograd.backward_passes) == 1
     check_metadata_invariants(trace)
 
     # A later real backward numbers itself after the failed attempt and the
     # whole stream still satisfies the exact bracketing invariants.
-    trace.log_backward(_output_loss(trace))
-    assert trace.num_backward_passes == 2
+    trace.backward(_output_loss(trace))
+    assert len(trace.autograd.backward_passes) == 2
     check_metadata_invariants(trace)
 
 
-@pytest.mark.smoke
 def test_hook_registration_failure_records_typed_coverage_gap() -> None:
     """A registration skip is a typed BackwardCoverageGap, and validation fails closed."""
+    from torchlens._ir.events import BackwardCoverageGap
     from torchlens.backends.torch import backward as backward_mod
     from torchlens.backends.torch.backward import _ensure_backward_event_stream
-    from torchlens.ir.events import BackwardCoverageGap
-    from torchlens.validation.invariants import check_metadata_invariants
+    from torchlens.validation._invariants import check_metadata_invariants
 
     _model, _x, trace = _logged_model()
     with mock.patch.object(
@@ -2248,7 +2234,7 @@ def test_hook_registration_failure_records_typed_coverage_gap() -> None:
         "_make_grad_fn_hook",
         side_effect=RuntimeError("planted registration failure"),
     ):
-        trace.log_backward(_output_loss(trace))
+        trace.backward(_output_loss(trace))
 
     events = _ensure_backward_event_stream(trace).backward_events
     gaps = [e for e in events if isinstance(e, BackwardCoverageGap)]
@@ -2262,11 +2248,10 @@ def test_hook_registration_failure_records_typed_coverage_gap() -> None:
     check_metadata_invariants(trace)
 
 
-@pytest.mark.smoke
 def test_validate_backward_fails_closed_on_coverage_gaps() -> None:
     """validate_backward_pass returns False when any unexplained gap exists."""
     from torchlens.backends.torch import backward as backward_mod
-    from torchlens.validation import backward as backward_validation
+    from torchlens.validation import _backward as backward_validation
 
     model = _TinyBackwardModel()
     x = torch.randn(2, 3)
@@ -2282,9 +2267,12 @@ def test_validate_backward_fails_closed_on_coverage_gaps() -> None:
             model,
             x,
             loss_fn=lambda output: output.sum(),
-            random_seed=11,
+            seed=11,
         )
     assert passed is False
+    failure = last_validation_failure()
+    assert failure is not None and failure.check_name == CHECK_BACKWARD
+    assert failure.extra["reason"] == "backward_coverage_gap"
 
 
 class _ForeachInplaceModel(nn.Module):
@@ -2313,10 +2301,11 @@ def test_foreach_inplace_live_member_owns_its_gradient() -> None:
     trace = tl.trace(
         model,
         x,
-        capture=CaptureOptions(layers_to_save="all", save_grads="all", random_seed=4),
+        capture=CaptureOptions(save_grads="all", seed=4),
+        save="all",
     )
-    layer = next(op for op in trace.layer_list if "_foreach_add_" in str(op.func_name))
-    trace.log_backward(trace[trace.output_layers[0]].out.sum())
+    layer = next(op for op in trace._layer_list if "_foreach_add_" in str(op.func_name))
+    trace.backward(trace[trace.output_layers[0]].out.sum())
 
     observed = [
         event
@@ -2359,12 +2348,13 @@ def test_refresh_projection_with_inplace_op_keeps_one_grad_owner_per_label() -> 
     trace = tl.trace(
         model,
         torch.randn(2, 3, requires_grad=True),
-        capture=CaptureOptions(layers_to_save="all", save_grads="all", random_seed=0),
+        capture=CaptureOptions(save_grads="all", seed=0),
+        save="all",
     )
-    trace.save_new_outs(model, torch.randn(2, 3, requires_grad=True), random_seed=1)
-    trace.log_backward(trace[trace.output_layers[0]].out.sum())
+    trace._save_new_outs(model, torch.randn(2, 3, requires_grad=True), seed=1)
+    trace.backward(trace[trace.output_layers[0]].out.sum())
 
-    pass_index = trace.num_backward_passes
+    pass_index = len(trace.autograd.backward_passes)
     per_label = Counter(
         event.op_label
         for event in trace._capture_events.backward_events
@@ -2405,14 +2395,14 @@ def test_backward_validation_nan_bearing_grads_do_not_false_fail() -> None:
 
     model = _NaNGradParamModel().eval()
     x = torch.randn(2, 4)
-    assert backward_validation.validate_backward_pass(model, (x,), random_seed=0) is True
+    assert backward_validation.validate_backward_pass(model, (x,), seed=0) is True
 
 
 def test_gradient_validation_tolerances_are_named_constants() -> None:
     """The grad tolerance pairs are spelled ONCE and shared by every consumer.
 
     Two backward checks of one capture used to disagree 10x via bare literals
-    in three files; the pairs now live in torchlens.utils.tensor_utils with a
+    in three files; the pairs now live in torchlens._utils.tensor_utils with a
     documented error model (param grads = batch/position reductions, layer
     grads and RF adjoint probes = elementwise comparisons).
 
@@ -2426,14 +2416,14 @@ def test_gradient_validation_tolerances_are_named_constants() -> None:
 
     import inspect
 
-    from torchlens.receptive_field import verify as rf_verify
-    from torchlens.utils.tensor_utils import (
+    from torchlens._utils.tensor_utils import (
         LAYER_GRAD_VALIDATION_ATOL,
         LAYER_GRAD_VALIDATION_RTOL,
         PARAM_GRAD_VALIDATION_ATOL,
         PARAM_GRAD_VALIDATION_RTOL,
         derive_float_tolerances,
     )
+    from torchlens.receptive_field import verify as rf_verify
     from torchlens.validation._layer_grad_report import _compare_module_output_grads
 
     # New contract: every tolerance param defaults to the dtype-aware sentinel
@@ -2471,7 +2461,7 @@ def test_success_path_handle_removal_never_swallows_keyboard_interrupt(
     ``cleanup_error`` and re-raises the FIRST at the end -- except the
     hook-handle removal loop, which used ``suppress(BaseException)`` and
     discarded a KeyboardInterrupt delivered during handle removal after a
-    SUCCESSFUL backward: ``log_backward`` returned normally and the interrupt
+    SUCCESSFUL backward: ``backward`` returned normally and the interrupt
     vanished. There is no primary exception on this path whose precedence
     could justify the swallow.
     """
@@ -2501,7 +2491,7 @@ def test_success_path_handle_removal_never_swallows_keyboard_interrupt(
 
     monkeypatch.setattr(backward, "_walk_and_hook_backward_graph", walk_then_plant)
     with pytest.raises(KeyboardInterrupt):
-        trace.log_backward(_output_loss(trace))
+        trace.backward(_output_loss(trace))
 
     assert hostile.fired is True
     assert _state._active_trace is None

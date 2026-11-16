@@ -1,6 +1,6 @@
 """Exact gradient-inside-geometric receptive-field validation.
 
-Oracle scope (R74/75-7): the empirical gradients probed here flow through the
+Oracle scope: the empirical gradients probed here flow through the
 autograd graph recorded during the wrapped capture forward — the same root the
 geometric solution was derived from. The cross-check is independent of the
 geometric derivation (TL indexing/sampling/rule bugs fail it) but is
@@ -19,7 +19,9 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 
-from ..backends import BackendUnsupportedError
+from torchlens.backends.registry import BackendUnsupportedError
+
+from .._runnable import refuse_poisoned_trace
 from . import _engine
 from ._engine_forward import solve_projective
 from ._errors import (
@@ -31,9 +33,9 @@ from ._forward_query import box_for_source_unit
 from ._gradient import gradient_for_unit
 from ._gradient_forward import _select_targets, projective_gradient_for_unit
 from ._path import resolve_graph_point
-from ._query import _windowed_axes_in_unit_order, box_for_unit
+from ._query import _shared_query_scope, _windowed_axes_in_unit_order, box_for_unit
 from ._types import (
-    GradientReceptiveField,
+    GradReceptiveField,
     ReceptiveField,
     ReceptiveFieldAlignment,
     ReceptiveFieldBox,
@@ -47,8 +49,8 @@ from ._types import (
 from ._view import ReceptiveFieldView
 
 if TYPE_CHECKING:
-    from ..data_classes.op import Op
-    from ..data_classes.trace import Trace
+    from .._data_classes.op import Op
+    from .._data_classes.trace import Trace
 
 
 _TAINTED_STATUSES = {
@@ -68,8 +70,6 @@ def _refuse_poisoned_rf_verification(trace: Trace) -> None:
         Trace whose geometry/gradient agreement would otherwise be reported as
         a receptive-field validation verdict.
     """
-
-    from ..runnable import refuse_poisoned_trace
 
     refuse_poisoned_trace(trace, "receptive field verification")
 
@@ -176,7 +176,7 @@ def _box_for_descriptor(
                 cast(Any, solution),
                 owner,
                 windowed,
-                input=None if endpoint is not None else descriptor.io_role,
+                input_op=None if endpoint is not None else descriptor.io_role,
                 source=endpoint,
                 clip=True,
                 complete_unit=complete_unit,
@@ -215,7 +215,9 @@ def _box_for_descriptor(
         empty=False,
         covers_input=all(axis.kind in {"pointwise", "full"} for axis in axes),
         direction=direction,
-        unit_shape=tuple(owner.shape),
+        # ``shape`` is legitimately ``None`` for a non-tensor-valued op (see
+        # the identical note in ``_indeterminate_unit``).
+        unit_shape=tuple(owner.shape) if owner.shape is not None else (),
     )
 
 
@@ -263,7 +265,7 @@ def _allowed_bounds(
 
 
 def _role_violations(
-    gradient: GradientReceptiveField,
+    gradient: GradReceptiveField,
     descriptor: ReceptiveField,
     box: ReceptiveFieldBox,
     complete_unit: tuple[int, ...],
@@ -395,11 +397,11 @@ def _box_membership_contains(box: ReceptiveFieldBox, unit: tuple[int, ...]) -> b
     Any axis with concrete clipped bounds must contain the coordinate;
     pointwise and unbounded axes are treated as containing, so an upper-bound
     or partially-unbounded reverse box can never produce a false violation.
-    Non-windowed axes joined the comparison in the disputed-r2 b6/R20-3
-    strengthening: walk-narrowed full axes (for example a scalar-selected
-    getitem axis) carry sound over-approximate bounds, so a coordinate outside
-    them is truly outside the influence set — the historical windowed-only
-    test made over-approximated non-windowed axes tripwire-blind.
+    Non-windowed axes take part in the comparison too: walk-narrowed full axes
+    (for example a scalar-selected getitem axis) carry sound over-approximate
+    bounds, so a coordinate outside them is truly outside the influence set.
+    Comparing windowed axes only would leave over-approximated non-windowed
+    axes unchecked.
     """
 
     if box.empty:
@@ -510,7 +512,7 @@ def _exact_box_adjoint_violations(
     saturating-model slack battery in tests. Reverse queries that refuse with
     a typed error are skipped: the check only ever adds failure power.
 
-    Non-windowed axes join the corner enumeration (grind-p3 T7): when every
+    Non-windowed axes join the corner enumeration: when every
     axis of the box yields a claimed source coordinate — windowed hull
     endpoints, concrete-bounded FULL-axis endpoints, and the POINTWISE
     same-index coordinate — corners are seeded as COMPLETE far-grid units
@@ -548,7 +550,7 @@ def _exact_box_adjoint_violations(
     if not windowed_bounds or len(windowed_bounds) > 3:
         return ()
     trace = owner.source_trace
-    far = next((op for op in trace.layer_list if op.label == descriptor.input_op_label), None)
+    far = next((op for op in trace._layer_list if op.label == descriptor.input_op_label), None)
     if far is None:
         return ()
 
@@ -573,7 +575,7 @@ def _exact_box_adjoint_violations(
                     cast(Any, reverse_solution),
                     far,
                     corner,
-                    input=owner,
+                    input_op=owner,
                     clip=True,
                     complete_unit=far_unit,
                 )
@@ -667,7 +669,7 @@ def _validation_result(
     unit: tuple[int, ...],
     descriptors: Mapping[str, ReceptiveField],
     geometric: dict[str, ReceptiveFieldBox],
-    gradients: Mapping[str, GradientReceptiveField],
+    gradients: Mapping[str, GradReceptiveField],
     gradient_error: str | None,
     direction: ReceptiveFieldDirection,
     adjoint_violations: tuple[ReceptiveFieldViolation, ...] = (),
@@ -705,14 +707,14 @@ def _validation_result(
         gradient = gradients.get(role)
         if descriptor.status in _TAINTED_STATUSES or descriptor.axes is None:
             indeterminate_roles.append(role)
-            nonfinite = nonfinite or (gradient is not None and gradient.nonfinite_count > 0)
+            nonfinite = nonfinite or (gradient is not None and gradient.num_nonfinite > 0)
             continue
         geometric_batch = geometric_batch or descriptor.batch_coupled
         box = geometric.get(role)
         if gradient is None or box is None:
             indeterminate_roles.append(role)
             continue
-        nonfinite = nonfinite or gradient.nonfinite_count > 0
+        nonfinite = nonfinite or gradient.num_nonfinite > 0
         undeclared_batch = undeclared_batch or (
             gradient.cross_batch_influence and not descriptor.batch_coupled
         )
@@ -771,9 +773,9 @@ def _validation_result(
         op_label=target.label,
         unit=unit,
         geometric=MappingProxyType(geometric),
-        gradient=MappingProxyType(dict(gradients)),
+        grad=MappingProxyType(dict(gradients)),
         violations=tuple(listed),
-        n_violations=n_violations,
+        num_violations=n_violations,
         per_axis_excess=per_axis_excess,
         slack_per_axis=slack_per_axis,
         cross_batch=cross_batch,
@@ -788,7 +790,7 @@ def _check_for_unit(
     target: Op,
     unit: Sequence[int],
     *,
-    input: Op | str | None,
+    input_op: Op | str | None,
     source: object | None,
     direction: ReceptiveFieldDirection | str,
     result_target: object | None,
@@ -809,20 +811,20 @@ def _check_for_unit(
     if normalized_direction is ReceptiveFieldDirection.RECEPTIVE and result_target is not None:
         raise TypeError("target= is only valid with direction='projective'.")
     if normalized_direction is ReceptiveFieldDirection.PROJECTIVE and (
-        input is not None or source is not None
+        input_op is not None or source is not None
     ):
-        raise TypeError("input= and source= are only valid with direction='receptive'.")
+        raise TypeError("input_op= and source= are only valid with direction='receptive'.")
     complete_unit = _normalize_complete_unit(target, unit)
     endpoint: Op | None = None
     solution: Any
     try:
         if normalized_direction is ReceptiveFieldDirection.RECEPTIVE:
-            if input is not None and source is not None:
-                raise TypeError("input= and source= cannot be used together.")
+            if input_op is not None and source is not None:
+                raise TypeError("input_op= and source= cannot be used together.")
             if source is None:
                 solution = _engine.solve(target.source_trace)
                 view = ReceptiveFieldView(target, solution)
-                descriptors = _selected_descriptors(view, input)
+                descriptors = _selected_descriptors(view, input_op)
             else:
                 endpoint = resolve_graph_point(target.source_trace, source)
                 solution = _engine.solve_from(target.source_trace, endpoint)
@@ -880,13 +882,13 @@ def _check_for_unit(
                 )
             )
     gradient_error: str | None = None
-    gradients: Mapping[str, GradientReceptiveField]
+    gradients: Mapping[str, GradReceptiveField]
     try:
         if normalized_direction is ReceptiveFieldDirection.RECEPTIVE:
             probed = gradient_for_unit(
                 target,
                 complete_unit,
-                input=input,
+                input_op=input_op,
                 source=source,
                 atol=0.0,
                 rtol=0.0,
@@ -901,7 +903,7 @@ def _check_for_unit(
                 rtol=0.0,
                 retain_graph=retain_graph,
             )
-        if isinstance(probed, GradientReceptiveField):
+        if isinstance(probed, GradReceptiveField):
             gradients = MappingProxyType({probed.io_role: probed})
         else:
             gradients = probed
@@ -924,7 +926,7 @@ def check_for_unit(
     owner: Op,
     unit: Sequence[int],
     *,
-    input: Op | str | None = None,
+    input_op: Op | str | None = None,
     source: object | None = None,
     direction: ReceptiveFieldDirection | str = ReceptiveFieldDirection.RECEPTIVE,
     target: object | None = None,
@@ -938,7 +940,7 @@ def check_for_unit(
     ----------
     owner, unit:
         Seed-owner operation and complete output-element index.
-    input:
+    input_op:
         Optional model-input operation or exact IO role.
     source:
         Optional receptive-direction ancestor graph point.
@@ -953,7 +955,7 @@ def check_for_unit(
         Keep the armed autograd graph alive after the check. The default
         ``False`` FREES the graph -- disclosed here and on ``rf.check`` --
         so a later ``gradient(..., retain_graph=True)`` on the same armed
-        capture needs ``retain_graph=True`` here first (b3 R14-N1).
+        capture needs ``retain_graph=True`` here first.
 
     Returns
     -------
@@ -967,7 +969,7 @@ def check_for_unit(
     return _check_for_unit(
         owner,
         unit,
-        input=input,
+        input_op=input_op,
         source=source,
         direction=direction,
         result_target=target,
@@ -981,7 +983,7 @@ def check(
     view: ReceptiveFieldView,
     unit: Sequence[int],
     *,
-    input: Op | str | None = None,
+    input_op: Op | str | None = None,
     source: object | None = None,
     direction: ReceptiveFieldDirection | str = ReceptiveFieldDirection.RECEPTIVE,
     target: object | None = None,
@@ -995,7 +997,7 @@ def check(
     ----------
     view, unit:
         Receptive-field view and complete output-element index.
-    input:
+    input_op:
         Optional model-input operation or exact IO role.
     source:
         Optional receptive-direction ancestor graph point.
@@ -1008,7 +1010,7 @@ def check(
         finite nonzero gradient support.
     retain_graph:
         Keep the armed autograd graph alive after the check (default frees
-        it, like ``gradient()``'s default; b3 R14-N1).
+        it, like ``gradient()``'s default).
 
     Returns
     -------
@@ -1019,7 +1021,7 @@ def check(
     return check_for_unit(
         view._op,
         unit,
-        input=input,
+        input_op=input_op,
         source=source,
         direction=direction,
         target=target,
@@ -1042,7 +1044,7 @@ def _resolve_ops(
             if not isinstance(selected, str):
                 resolved.append(selected)
                 continue
-            matches = [op for op in trace.layer_list if selected in {op.label, op.layer_label}]
+            matches = [op for op in trace._layer_list if selected in {op.label, op.layer_label}]
             if len(matches) != 1:
                 raise ReceptiveFieldError(
                     f"Operation selector {selected!r} resolved to {len(matches)} operations."
@@ -1052,7 +1054,7 @@ def _resolve_ops(
     solution = _engine.solve(trace)
     return tuple(
         op
-        for op in trace.layer_list
+        for op in trace._layer_list
         if (direction is ReceptiveFieldDirection.PROJECTIVE or not op.is_input)
         and not op.is_output
         and (op.is_input or op.has_saved_activation)
@@ -1122,8 +1124,12 @@ def _selectors(value: object | Sequence[object] | None) -> tuple[object | None, 
 def _indeterminate_unit(owner: Op, batch_index: int) -> tuple[int, ...]:
     """Return a deterministic complete unit when grid metadata is unavailable."""
 
-    unit = [int(extent) // 2 for extent in owner.shape]
-    if unit and 0 <= batch_index < int(owner.shape[0]):
+    # ``shape`` is legitimately ``None`` for a non-tensor-valued op (e.g. a
+    # JAX while/cond decision pseudo-op); treat it as the op.py-documented
+    # shapeless default (``()``) instead of crashing on an empty iteration.
+    owner_shape: tuple[int, ...] = owner.shape if owner.shape is not None else ()
+    unit = [int(extent) // 2 for extent in owner_shape]
+    if unit and 0 <= batch_index < int(owner_shape[0]):
         unit[0] = batch_index
     return tuple(unit)
 
@@ -1149,7 +1155,16 @@ def _check_solution_metadata(
 ) -> None:
     """Check cheap descriptor and box invariants for one directional solution."""
 
-    ops_by_label = {op.label: op for op in trace.layer_list}
+    ops_by_label = {op.label: op for op in trace._layer_list}
+    with _shared_query_scope():
+        _check_descriptors(solution, ops_by_label, direction)
+
+
+def _check_descriptors(
+    solution: Any, ops_by_label: dict[str, Op], direction: ReceptiveFieldDirection
+) -> None:
+    """Check every descriptor of one solution; see :func:`_check_solution_metadata`."""
+
     for (op_label, role), descriptor in solution.descriptors.items():
         state = solution.states[(op_label, role)]
         if state.taint is not None:
@@ -1317,7 +1332,7 @@ def validate_receptive_field_trace(
                 result = _check_for_unit(
                     owner,
                     unit,
-                    input=cast("Op | str | None", selected_input),
+                    input_op=cast("Op | str | None", selected_input),
                     source=selected_source,
                     direction=normalized_direction,
                     result_target=(
@@ -1379,6 +1394,15 @@ def cross_validate(
     -------
     list[ReceptiveFieldValidation]
         One tri-state result per operation, unit, and explicit input selector.
+
+    Examples
+    --------
+    >>> net = nn.Conv2d(1, 1, 3, padding=1)
+    >>> armed = tl.trace(net, torch.randn(1, 1, 6, 6, requires_grad=True),
+    ...     capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"))
+    >>> results = cross_validate(armed, units="center")
+    >>> (len(results) > 0, all(result.passed for result in results))
+    (True, True)
     """
 
     _refuse_poisoned_rf_verification(trace)

@@ -20,7 +20,10 @@ def boundary_overlay(boundary: ReplayBoundary, plan: SplitPlan) -> dict[str, Any
     if missing:
         from ..errors import SplitBoundaryError
 
-        raise SplitBoundaryError(f"Boundary is missing canonical values for keys {missing!r}.")
+        raise SplitBoundaryError(
+            f"Boundary is missing canonical values for keys {missing!r}.",
+            code=SplitBoundaryError.code,
+        )
     return {node_id: boundary.tensors[key] for key, node_id in plan.boundary_bindings.items()}
 
 
@@ -199,7 +202,7 @@ class SplitBackendAdapter(TensorOps, ReplayExecutor, Protocol):
         ...
 
 
-__all__ = [
+__all__ = (
     "ReplayExecutor",
     "ReplayLowerer",
     "SegmentBundle",
@@ -207,4 +210,4 @@ __all__ = [
     "SplitBackendAdapter",
     "TensorOps",
     "boundary_overlay",
-]
+)

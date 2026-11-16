@@ -1,0 +1,211 @@
+file	source	owner
+benchmarks/split_graph_partition.py	actual = runtime.replay(x)	SplitRuntime.replay
+benchmarks/split_graph_partition.py	finite_close(runtime.replay(x), expected)	SplitRuntime.replay
+benchmarks/split_memory.py	actual = replay.replay(replay_input)	SplitRuntime.replay
+benchmarks/split_runtime_overhead.py	torch.testing.assert_close(runtime.replay(x), model(x), atol=1e-5, rtol=1e-4)	SplitRuntime.replay
+benchmarks/split_training_compact.py	actual = runtime.replay(inputs)	SplitRuntime.replay
+benchmarks/split_training_compact.py	runtime.replay(inputs)	SplitRuntime.replay
+docs/reference/split_memory.md	torch.testing.assert_close(new_runtime.replay(x), model(x))	SplitRuntime.replay
+docs/reference/split_memory.md	torch.testing.assert_close(runtime.replay(x), model(x))	SplitRuntime.replay
+docs/reference/split_native_runtime.md	torch.testing.assert_close(new_runtime.replay(x), model(x))	SplitRuntime.replay
+docs/reference/split_native_runtime.md	torch.testing.assert_close(runtime.replay(x), model(x))	SplitRuntime.replay
+examples/split_native_partition.py	torch.testing.assert_close(runtime.replay(inputs), reference(inputs))	SplitRuntime.replay
+examples/split_upstream3.py	torch.testing.assert_close(runtime.replay(inputs), model(inputs), atol=1e-8, rtol=1e-7)	SplitRuntime.replay
+tests/split/test_partition_benchmark.py	runtime.replay(torch.ones(2, 4))	SplitRuntime.replay
+tests/split/test_partition_effect_dependencies.py	actual = runtime.replay(x)	SplitRuntime.replay
+tests/split/test_split_analysis_cache.py	torch.testing.assert_close(runtime.replay(x), model(x))	SplitRuntime.replay
+tests/split/test_split_api_surface.py	torch.testing.assert_close(runtime.replay(inputs), model(inputs))	SplitRuntime.replay
+tests/split/test_split_batch_polymorphism.py	replayed = placed.replay(x)	SplitRuntime.replay
+tests/split/test_split_batch_polymorphism.py	replayed = runtime.replay(torch.randn(32, 4))	SplitRuntime.replay
+tests/split/test_split_batch_polymorphism.py	replayed = runtime.replay(x)	SplitRuntime.replay
+tests/split/test_split_batch_polymorphism.py	runtime.replay(x),	SplitRuntime.replay
+tests/split/test_split_batch_polymorphism.py	torch.testing.assert_close(runtime.replay(x), model(x), atol=1e-5, rtol=1e-4)	SplitRuntime.replay
+tests/split/test_split_batch_probe.py	derived.replay(torch.ones(8, 4))	SplitRuntime.replay
+tests/split/test_split_batch_probe.py	runtime.replay(torch.ones(2, 4))	SplitRuntime.replay
+tests/split/test_split_batch_probe.py	runtime.replay(torch.ones(3, 4))	SplitRuntime.replay
+tests/split/test_split_batch_probe.py	runtime.replay(torch.ones(8, 4))	SplitRuntime.replay
+tests/split/test_split_batch_probe.py	torch.testing.assert_close(runtime.replay(torch.ones(1, 4)), model(torch.ones(1, 4)))	SplitRuntime.replay
+tests/split/test_split_batch_probe.py	torch.testing.assert_close(runtime.replay(torch.ones(2, 4)), model(torch.ones(2, 4)))	SplitRuntime.replay
+tests/split/test_split_canonical_batch.py	actual = runtimes[0].replay(x)	SplitRuntime.replay
+tests/split/test_split_canonical_batch.py	restricted.replay(make(np.ones((2, 4), dtype=np.float32)))	SplitRuntime.replay
+tests/split/test_split_canonical_batch.py	restricted.replay(singleton), branch_model(singleton), atol=1e-5, rtol=1e-5	SplitRuntime.replay
+tests/split/test_split_canonical_batch.py	static.replay(static_input), model(static_input), atol=1e-5, rtol=1e-4	SplitRuntime.replay
+tests/split/test_split_capture_projection.py	actual = runtime.replay(x)	SplitRuntime.replay
+tests/split/test_split_compact_graph.py	actual = runtime.replay(x)	SplitRuntime.replay
+tests/split/test_split_compact_runtime.py	actual = changed.replay(x)	SplitRuntime.replay
+tests/split/test_split_compact_runtime.py	actual = placed.replay(x)	SplitRuntime.replay
+tests/split/test_split_compact_runtime.py	actual = runtime.repartition(partition).replay(actual_input)	SplitRuntime.replay
+tests/split/test_split_compact_runtime.py	actual = runtime.replay(x)	SplitRuntime.replay
+tests/split/test_split_compact_runtime.py	assert_output(actual, reference.replay(actual_input))	SplitRuntime.replay
+tests/split/test_split_compact_runtime.py	assert_output(runtime.replay(actual_input), expected)	SplitRuntime.replay
+tests/split/test_split_compact_runtime.py	expected = runtime.replay(inputs)	SplitRuntime.replay
+tests/split/test_split_compact_runtime.py	runtime.replay(inputs)	SplitRuntime.replay
+tests/split/test_split_compact_runtime.py	torch.testing.assert_close(changed.replay(x), expected)	SplitRuntime.replay
+tests/split/test_split_compact_runtime.py	torch.testing.assert_close(recut.replay(inputs), expected)	SplitRuntime.replay
+tests/split/test_split_compact_runtime.py	torch.testing.assert_close(recut.replay(x), model(x))	SplitRuntime.replay
+tests/split/test_split_compact_runtime.py	torch.testing.assert_close(runtime.repartition(partition).replay(x), expected)	SplitRuntime.replay
+tests/split/test_split_compact_runtime.py	torch.testing.assert_close(runtime.replay(inputs), expected)	SplitRuntime.replay
+tests/split/test_split_compact_runtime.py	torch.testing.assert_close(runtime.replay(inputs), model(inputs))	SplitRuntime.replay
+tests/split/test_split_compact_runtime.py	torch.testing.assert_close(runtime.replay(x), model(x))	SplitRuntime.replay
+tests/split/test_split_compute_dag.py	branch_graph.materialize(analysis).replay(torch.ones(2, 4)),	SplitRuntime.replay
+tests/split/test_split_compute_dag.py	graph.materialize(graph.analyze(partition)).replay(inputs), LocalMutation()(inputs)	SplitRuntime.replay
+tests/split/test_split_compute_dag.py	runtime.replay(torch.ones(2, 4), torch.zeros(2, 4)),	SplitRuntime.replay
+tests/split/test_split_compute_dag.py	torch.testing.assert_close(graph.materialize(graph.analyze(partition)).replay(x), Chunks()(x))	SplitRuntime.replay
+tests/split/test_split_compute_dag.py	torch.testing.assert_close(runtime.replay(inputs), Anchors()(inputs))	SplitRuntime.replay
+tests/split/test_split_dataclass_inputs.py	np.testing.assert_allclose(runtime.replay(params, x), model(params, x), atol=1e-6)	SplitRuntime.replay
+tests/split/test_split_dynamic_operands.py	torch.testing.assert_close(runtime.replay(x.detach()), expected.detach())	SplitRuntime.replay
+tests/split/test_split_factory_placement.py	output = runtime.replay(x)	SplitRuntime.replay
+tests/split/test_split_federated_contracts.py	actual = runtime.replay(inputs)	SplitRuntime.replay
+tests/split/test_split_flatten.py	actual = runtime.replay(values)	SplitRuntime.replay
+tests/split/test_split_graph_partition.py	torch.testing.assert_close(cut.replay(x), model(x))	SplitRuntime.replay
+tests/split/test_split_graph_partition.py	torch.testing.assert_close(cut.replay(x), runtime.replay(x))	SplitRuntime.replay
+tests/split/test_split_held_functions.py	actual = runtime.replay(values)	SplitRuntime.replay
+tests/split/test_split_input_aliases.py	actual = runtime.replay(value, value.view_as(value))	SplitRuntime.replay
+tests/split/test_split_jax_matmul.py	np.testing.assert_allclose(runtime.replay(x), model(x), rtol=1e-5, atol=1e-6)	SplitRuntime.replay
+tests/split/test_split_jax_output_contract.py	runtime.replay(jnp.ones((1, 3)))	SplitRuntime.replay
+tests/split/test_split_memory_lifetime.py	actual = runtime.replay(x)	SplitRuntime.replay
+tests/split/test_split_memory_lifetime.py	assert runtime.replay(torch.ones(1, 8)).shape == (1, 8)	SplitRuntime.replay
+tests/split/test_split_memory_lifetime.py	runtime.replay(torch.ones(3, 8))	SplitRuntime.replay
+tests/split/test_split_memory_lifetime.py	torch.testing.assert_close(runtime.replay(torch.ones(3, 8)), Chain()(torch.ones(3, 8)))	SplitRuntime.replay
+tests/split/test_split_memory_real_models.py	torch.testing.assert_close(runtime.replay(inputs), expected_output, atol=1e-4, rtol=1e-3)	SplitRuntime.replay
+tests/split/test_split_mlx.py	replayed, expected = runtime.replay(pair, input_kwargs=kwargs), model(pair, **kwargs)	SplitRuntime.replay
+tests/split/test_split_mlx.py	replayed, expected = runtime.replay(x), _split_merge(x)	SplitRuntime.replay
+tests/split/test_split_mlx.py	replayed, expected = runtime.replay(x), model(x)	SplitRuntime.replay
+tests/split/test_split_mlx.py	replayed, expected = runtime.replay(x, x), model(x, x)	SplitRuntime.replay
+tests/split/test_split_mlx.py	runtime.replay(x, mx.add(x, 1))	SplitRuntime.replay
+tests/split/test_split_mlx_microbatch.py	_close(runtime.replay(x), reference(x))	SplitRuntime.replay
+tests/split/test_split_mlx_placement.py	assert bool(mx.allclose(runtime.replay(x), model(x), atol=1e-4, rtol=1e-4))	SplitRuntime.replay
+tests/split/test_split_mlx_placement.py	output, expected = runtime.replay(x), _model(x)	SplitRuntime.replay
+tests/split/test_split_mlx_placement.py	output, expected = runtime.replay(x), model(x)	SplitRuntime.replay
+tests/split/test_split_mlx_placement.py	result = runtime.replay(mx.ones((5, 4)))	SplitRuntime.replay
+tests/split/test_split_mlx_placement.py	runtime.replay(mx.ones((2, 4)))	SplitRuntime.replay
+tests/split/test_split_mlx_review_regressions.py	_close(runtime.replay(x), reference(x))	SplitRuntime.replay
+tests/split/test_split_mlx_state_io.py	assert bool(mx.allclose(runtime.replay(_inputs()), reference(_inputs()), atol=3e-5))	SplitRuntime.replay
+tests/split/test_split_mlx_state_io.py	assert bool(mx.allclose(updated.replay(_inputs()), reference(_inputs()), atol=3e-5))	SplitRuntime.replay
+tests/split/test_split_mlx_state_io.py	runtime.replay(_inputs())	SplitRuntime.replay
+tests/split/test_split_mlx_stateful.py	_close(recut.replay(_input()), reference(_input()))	SplitRuntime.replay
+tests/split/test_split_mlx_stateful.py	_close(runtime.replay(_input()), reference(_input()))	SplitRuntime.replay
+tests/split/test_split_mlx_training.py	_assert_close(migrated.replay(x), reference(x))	SplitRuntime.replay
+tests/split/test_split_mlx_training.py	_assert_close(recut.replay(x), reference(x))	SplitRuntime.replay
+tests/split/test_split_mlx_training.py	_assert_close(runtime.replay(x), reference(x))	SplitRuntime.replay
+tests/split/test_split_native_backends_replay.py	actual = runtime.replay(replay_x)	SplitRuntime.replay
+tests/split/test_split_native_backends_replay.py	assert _flatten_numbers(runtime.replay(replay_x).tolist()) == pytest.approx(	SplitRuntime.replay
+tests/split/test_split_native_backends_replay.py	assert bool(jnp.allclose(runtime.replay(replay_x), model(replay_x)))	SplitRuntime.replay
+tests/split/test_split_native_backends_replay.py	assert runtime.replay(singleton).tolist() == model(singleton).tolist()	SplitRuntime.replay
+tests/split/test_split_native_backends_replay.py	assert runtime.replay(x).tolist() == model(x).tolist() == [14.0, 26.0]	SplitRuntime.replay
+tests/split/test_split_native_backends_replay.py	diff = tf.abs(runtime.replay(replay_x) - model(replay_x))	SplitRuntime.replay
+tests/split/test_split_native_backends_replay.py	output = runtime.replay(replay_x)	SplitRuntime.replay
+tests/split/test_split_native_backends_replay.py	output = runtime.replay(x)	SplitRuntime.replay
+tests/split/test_split_native_backends_replay.py	runtime.replay(tinygrad.Tensor.ones(2, 3, 2).realize())	SplitRuntime.replay
+tests/split/test_split_native_backends_replay.py	runtime.replay(tinygrad.Tensor.ones(2, 4, 2).realize())	SplitRuntime.replay
+tests/split/test_split_optional_backends.py	replayed = runtime.replay(x)	SplitRuntime.replay
+tests/split/test_split_output_contract.py	runtime.replay(x)	SplitRuntime.replay
+tests/split/test_split_paddle_cuda_context.py	runtime.replay(x)	SplitRuntime.replay
+tests/split/test_split_paddle_replay.py	assert bool(paddle.allclose(runtime.replay(x), model(x), atol=1e-8, rtol=1e-7))	SplitRuntime.replay
+tests/split/test_split_paddle_replay.py	assert_close(runtime.replay(replay_x), model(replay_x))	SplitRuntime.replay
+tests/split/test_split_paddle_replay.py	assert_close(runtime.replay(x), model(x))	SplitRuntime.replay
+tests/split/test_split_paddle_state_bindings.py	assert_close(runtime.replay(x), reference(native_x))	SplitRuntime.replay
+tests/split/test_split_paddle_state_bindings.py	assert_close(updated.replay(x), model(x))	SplitRuntime.replay
+tests/split/test_split_paddle_state_bindings.py	runtime.replay(paddle.ones([1, 4]) * 5)	SplitRuntime.replay
+tests/split/test_split_partition_alias_audit.py	torch.testing.assert_close(cut.replay(x), model(x))	SplitRuntime.replay
+tests/split/test_split_partition_alias_audit.py	torch.testing.assert_close(cut.replay(x.clone()), model(x.clone()))	SplitRuntime.replay
+tests/split/test_split_partition_analysis.py	torch.testing.assert_close(explicit.replay(x), model(x))	SplitRuntime.replay
+tests/split/test_split_partition_analysis.py	torch.testing.assert_close(runtime.replay(x), model(x))	SplitRuntime.replay
+tests/split/test_split_partition_cross_device.py	actual_output = runtime.replay(split_x.detach())	SplitRuntime.replay
+tests/split/test_split_partition_cross_device.py	runtime.replay(split_x.detach()).cpu(), reference(x.detach()).detach()	SplitRuntime.replay
+tests/split/test_split_partition_mutations.py	runtime.replay(x)	SplitRuntime.replay
+tests/split/test_split_partition_mutations.py	runtime.replay(x.as_subclass(Subclass))	SplitRuntime.replay
+tests/split/test_split_partition_mutations.py	torch.testing.assert_close(cut.replay(x), Interleaved()(x))	SplitRuntime.replay
+tests/split/test_split_partition_mutations.py	torch.testing.assert_close(cut.replay(x), ViewWrite()(x))	SplitRuntime.replay
+tests/split/test_split_partition_mutations.py	torch.testing.assert_close(cut.replay(x), model(x))	SplitRuntime.replay
+tests/split/test_split_partition_out_initialization.py	torch.testing.assert_close(runtime.replay(x), reference(expected_x))	SplitRuntime.replay
+tests/split/test_split_partition_runtime.py	torch.testing.assert_close(runtime.replay(split_x.detach()), reference(x.detach()))	SplitRuntime.replay
+tests/split/test_split_phase1_lifetime.py	torch.testing.assert_close(runtime.replay(inputs), model(inputs))	SplitRuntime.replay
+tests/split/test_split_placement_parameters.py	torch.testing.assert_close(runtime.replay(x), reference(x), atol=1e-5, rtol=1e-4)	SplitRuntime.replay
+tests/split/test_split_probe_rng.py	assert runtime.replay(torch.ones(batch, 16)).shape == (batch, 16)	SplitRuntime.replay
+tests/split/test_split_real_models.py	assert_same(cpu_runtime.replay(cpu_inputs[batch]), cpu_expected[batch])	SplitRuntime.replay
+tests/split/test_split_real_models.py	assert_same(gpu_runtime.replay(gpu_inputs[batch]), gpu_expected[batch])	SplitRuntime.replay
+tests/split/test_split_real_models.py	assert_same(runtime.replay(full_input), detector(full_input))	SplitRuntime.replay
+tests/split/test_split_real_models.py	assert_same(runtime.replay(replay_input), backbone(replay_input))	SplitRuntime.replay
+tests/split/test_split_real_models.py	cpu_actual = cpu_runtime.replay(cpu_inputs[batch])	SplitRuntime.replay
+tests/split/test_split_real_models.py	gpu_actual = gpu_runtime.replay(gpu_inputs[batch])	SplitRuntime.replay
+tests/split/test_split_real_models.py	split_output = runtime.replay(replay_x)	SplitRuntime.replay
+tests/split/test_split_real_models_jax.py	assert bool(jnp.allclose(runtime.replay(params, replay_x), model(params, replay_x)))	SplitRuntime.replay
+tests/split/test_split_real_models_jax.py	assert_same(runtime.replay(params, replay_x), model(params, replay_x))	SplitRuntime.replay
+tests/split/test_split_real_models_jax.py	assert_same(runtime.replay(params, trace_x), model(params, trace_x))	SplitRuntime.replay
+tests/split/test_split_real_models_paddle.py	actual = runtime.replay(replay_x)	SplitRuntime.replay
+tests/split/test_split_real_models_paddle.py	actual = runtime.replay(trace_x)	SplitRuntime.replay
+tests/split/test_split_real_models_paddle.py	assert_close(runtime.replay(replay_x), model(replay_x))	SplitRuntime.replay
+tests/split/test_split_real_models_paddle.py	diff = paddle.max(paddle.abs(runtime.replay(replay_x) - model(replay_x)))	SplitRuntime.replay
+tests/split/test_split_real_models_tf.py	assert_same(runtime.replay(replay_x), compact_model(replay_x))	SplitRuntime.replay
+tests/split/test_split_real_models_tf.py	assert_same(runtime.replay(replay_x), official_model(replay_x))	SplitRuntime.replay
+tests/split/test_split_real_models_tf.py	diff = tf.reduce_max(tf.abs(runtime.replay(replay_x) - expected[batch]))	SplitRuntime.replay
+tests/split/test_split_real_models_tf.py	diff = tf.reduce_max(tf.abs(runtime.replay(replay_x) - model(replay_x)))	SplitRuntime.replay
+tests/split/test_split_real_models_tinygrad.py	assert_same(runtime.replay(replay_x), expected)	SplitRuntime.replay
+tests/split/test_split_real_models_tinygrad.py	assert_same(runtime.replay(trace_x), expected_trace)	SplitRuntime.replay
+tests/split/test_split_real_models_tinygrad.py	diff = max_abs_diff(runtime.replay(replay_x).realize(), conv_model(replay_x).realize())	SplitRuntime.replay
+tests/split/test_split_real_models_tinygrad.py	diff = max_abs_diff(runtime.replay(replay_x).realize(), model(replay_x).realize())	SplitRuntime.replay
+tests/split/test_split_real_models_tinygrad.py	runtime.replay(replay_tokens).realize(), token_model(replay_tokens).realize()	SplitRuntime.replay
+tests/split/test_split_repeat_factors.py	runtime.replay(torch.randn(batch, 4))	SplitRuntime.replay
+tests/split/test_split_repeat_factors.py	torch.testing.assert_close(runtime.replay(x), model(x))	SplitRuntime.replay
+tests/split/test_split_shape_program.py	output = runtime.replay(values)	SplitRuntime.replay
+tests/split/test_split_shape_program.py	runtime.replay(replay_left, replay_right),	SplitRuntime.replay
+tests/split/test_split_shape_program.py	"runtime.replay(replay_values, input_kwargs={""mask"": replay_mask}),"	SplitRuntime.replay
+tests/split/test_split_shape_program.py	"runtime.replay(replay_values, input_kwargs={""mask"": torch.ones(3, 3, 4)})"	SplitRuntime.replay
+tests/split/test_split_shape_program.py	runtime.replay(torch.ones(3, 4, 4))	SplitRuntime.replay
+tests/split/test_split_shape_program.py	torch.testing.assert_close(runtime.replay(values), model(values))	SplitRuntime.replay
+tests/split/test_split_state_dedup.py	actual = runtime.replay(inputs)	SplitRuntime.replay
+tests/split/test_split_state_dedup.py	runtime.replay(inputs)	SplitRuntime.replay
+tests/split/test_split_state_dedup.py	torch.testing.assert_close(runtime.replay(inputs).cpu(), model(inputs))	SplitRuntime.replay
+tests/split/test_split_state_migration.py	expected = runtime.replay(inputs)	SplitRuntime.replay
+tests/split/test_split_state_migration.py	expected = runtime.replay(inputs).detach()	SplitRuntime.replay
+tests/split/test_split_state_migration.py	expected = runtime.replay(inputs).detach().cpu()	SplitRuntime.replay
+tests/split/test_split_state_migration.py	expected_inference = runtime.replay(inputs).detach()	SplitRuntime.replay
+tests/split/test_split_state_migration.py	torch.testing.assert_close(moved.replay(inputs), expected)	SplitRuntime.replay
+tests/split/test_split_state_migration.py	torch.testing.assert_close(rebound.replay(inputs).cpu(), expected)	SplitRuntime.replay
+tests/split/test_split_state_migration.py	torch.testing.assert_close(rebuilt.replay(inputs), expected_inference)	SplitRuntime.replay
+tests/split/test_split_state_migration.py	torch.testing.assert_close(recut.replay(inputs), expected)	SplitRuntime.replay
+tests/split/test_split_state_migration.py	torch.testing.assert_close(recut.replay(inputs), expected_inference)	SplitRuntime.replay
+tests/split/test_split_state_migration.py	torch.testing.assert_close(recut.replay(inputs).cpu(), expected)	SplitRuntime.replay
+tests/split/test_split_state_migration.py	torch.testing.assert_close(runtime.replay(inputs), expected)	SplitRuntime.replay
+tests/split/test_split_state_migration.py	torch.testing.assert_close(runtime.replay(inputs), expected_inference)	SplitRuntime.replay
+tests/split/test_split_state_migration.py	torch.testing.assert_close(runtime.run_suffix(boundary), runtime.replay(inputs))	SplitRuntime.replay
+tests/split/test_split_state_migration.py	torch.testing.assert_close(same_cut.replay(inputs), expected)	SplitRuntime.replay
+tests/split/test_split_task_coverage.py	_assert_close(runtime.replay(x), model(x))	SplitRuntime.replay
+tests/split/test_split_task_coverage.py	_nested_allclose(runtime.replay(x), model(x), atol=2e-3)	SplitRuntime.replay
+tests/split/test_split_task_coverage.py	replayed = runtime.replay(x)	SplitRuntime.replay
+tests/split/test_split_task_coverage.py	"split_out = runtime.replay(ids, input_kwargs={""attention_mask"": mask})"	SplitRuntime.replay
+tests/split/test_split_task_coverage.py	split_out = runtime.replay(x)	SplitRuntime.replay
+tests/split/test_split_tf_residual.py	tf.debugging.assert_equal(runtime.replay(value), model(value))	SplitRuntime.replay
+tests/split/test_split_tf_residual.py	tf.debugging.assert_near(runtime.replay(x), model(x))	SplitRuntime.replay
+tests/split/test_split_tf_shape_literals.py	actual = runtime.replay(values)	SplitRuntime.replay
+tests/split/test_split_tinygrad_functions.py	np.testing.assert_allclose(runtime.replay(replay_input).numpy(), 4 * np.maximum(values, 0))	SplitRuntime.replay
+tests/split/test_split_tinygrad_shape_binding.py	actual = runtime.replay(x).realize()	SplitRuntime.replay
+tests/split/test_split_tinygrad_shape_binding.py	np.testing.assert_allclose(runtime.replay(dynamic).numpy(), model(dynamic).numpy())	SplitRuntime.replay
+tests/split/test_split_tinygrad_shape_binding.py	np.testing.assert_allclose(runtime.replay(fixed).numpy(), model(fixed).numpy())	SplitRuntime.replay
+tests/split/test_split_tinygrad_shape_binding.py	np.testing.assert_allclose(selected.replay(x).numpy(), expected)	SplitRuntime.replay
+tests/split/test_split_tinygrad_shape_binding.py	"runtime.replay(Tensor.ones(1, 5, 4, device=""CPU"").realize())"	SplitRuntime.replay
+tests/split/test_split_torch_dynamic_shape.py	actual = runtime.replay(value)	SplitRuntime.replay
+tests/split/test_split_torch_dynamic_shape.py	actual_concat, actual_slice = runtime.replay(value)	SplitRuntime.replay
+tests/split/test_split_torch_dynamic_shape.py	actual_heads, actual_repeated = runtime.replay(x)	SplitRuntime.replay
+tests/split/test_split_torch_dynamic_shape.py	actual_stack, actual_sum = runtime.replay(value)	SplitRuntime.replay
+tests/split/test_split_torch_dynamic_shape.py	assert torch.allclose(runtime.replay(x), model(x), atol=1e-5, rtol=1e-4)	SplitRuntime.replay
+tests/split/test_split_torch_dynamic_shape.py	torch.testing.assert_close(runtime.replay(captured_input), model(captured_input))	SplitRuntime.replay
+tests/split/test_split_torch_dynamic_shape.py	torch.testing.assert_close(runtime.replay(value), model(value))	SplitRuntime.replay
+tests/split/test_split_torch_replay.py	_assert_close(runtime.replay(example), model(example))	SplitRuntime.replay
+tests/split/test_split_torch_replay.py	_assert_close(runtime.replay(replay_x), model(replay_x))	SplitRuntime.replay
+tests/split/test_split_torch_replay.py	_assert_close(runtime.replay(x), model(x))	SplitRuntime.replay
+tests/split/test_split_torch_replay.py	actual = runtime.replay(inputs)	SplitRuntime.replay
+tests/split/test_split_torch_replay.py	runtime.replay(inputs)	SplitRuntime.replay
+tests/split/test_split_torch_replay.py	torch.testing.assert_close(runtime.replay(inputs), model(inputs), atol=0, rtol=0)	SplitRuntime.replay
+tests/split/test_split_unbatched.py	assert runtime.replay(value).shape == (3,)	SplitRuntime.replay
+tests/split/test_split_unbatched.py	torch.testing.assert_close(runtime.replay(example), model(example))	SplitRuntime.replay
+tests/split/test_split_unbatched.py	torch.testing.assert_close(runtime.replay(torch.tensor(4.0)), model(torch.tensor(4.0)))	SplitRuntime.replay
+tests/split/test_split_unbatched.py	torch.testing.assert_close(runtime.replay(value), model(value))	SplitRuntime.replay
+tests/split/test_split_v2_contract.py	replayed = runtime.replay(torch.randn(4, 4))	SplitRuntime.replay
+torchlens/split/_mlx_validation.py	"actual = runtime.replay(*inputs, input_kwargs=options[""input_kwargs""])"	SplitRuntime.replay
+torchlens/split/adapters/paddle.py	replay_output = runtime.replay(*inputs, input_kwargs=input_kwargs)	SplitRuntime.replay
+torchlens/split/api.py	>>> runtime.replay(torch.ones(2, 3)).shape	SplitRuntime.replay
+torchlens/split/api.py	>>> runtime.replay(torch.ones(4, 3)).shape	SplitRuntime.replay
+torchlens/split/runtime.py	>>> runtime.replay(torch.ones(4, 3)).shape	SplitRuntime.replay
+torchlens/split/runtime.py	replay_output = self.replay(*inputs, input_kwargs=runtime_kwargs)	SplitRuntime.replay

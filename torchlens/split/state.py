@@ -254,6 +254,7 @@ class SegmentState:
                         split_point="",
                         reason="divergent segment state replicas",
                     ),
+                    code=SplitUnsupportedError.code,
                 )
             if candidate.ownership == "owned":
                 selected = candidate
@@ -351,4 +352,4 @@ def _normalize_device_text(text: str) -> str:
     return lowered
 
 
-__all__ = ["SegmentState", "StateEntry", "StateOwnership"]
+__all__ = ("SegmentState", "StateEntry", "StateOwnership")

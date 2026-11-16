@@ -166,7 +166,7 @@ recorded: 2026-08-17T10:55:17.426084+00:00
 ---
 generator: tests/surface_oracle
 flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
-reason: facet-cache persistence fix: ModuleCall/Module _facets_cache declared FieldPolicy.DROP, so a public .facets read no longer poisons tl.save; the tlspec stage stops pinning the TorchLensIOError refusal and now pins a real v8 round-trip surface for the first time
+reason: facet-cache persistence fix: ModuleCall/Module _facets_cache declared FieldPolicy.DROP, so a public .facets read no longer poisons Trace.save; the tlspec stage stops pinning the ArtifactError refusal and now pins a real v8 round-trip surface for the first time
 env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 3d3fe9b0f01c15239e22447c14a4629d2b6e713c (clean)
@@ -174,7 +174,7 @@ recorded: 2026-08-17T18:35:19.763203+00:00
 ---
 generator: tests/surface_oracle
 flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
-reason: facet-cache persistence fix: ModuleCall/Module _facets_cache declared FieldPolicy.DROP, so a public .facets read no longer poisons tl.save; the tlspec stage stops pinning the TorchLensIOError refusal and now pins a real v8 round-trip surface for the first time
+reason: facet-cache persistence fix: ModuleCall/Module _facets_cache declared FieldPolicy.DROP, so a public .facets read no longer poisons Trace.save; the tlspec stage stops pinning the ArtifactError refusal and now pins a real v8 round-trip surface for the first time
 env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 3d3fe9b0f01c15239e22447c14a4629d2b6e713c (clean)
@@ -182,7 +182,7 @@ recorded: 2026-08-17T18:35:19.785583+00:00
 ---
 generator: tests/surface_oracle
 flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
-reason: facet-cache persistence fix: ModuleCall/Module _facets_cache declared FieldPolicy.DROP, so a public .facets read no longer poisons tl.save; the tlspec stage stops pinning the TorchLensIOError refusal and now pins a real v8 round-trip surface for the first time
+reason: facet-cache persistence fix: ModuleCall/Module _facets_cache declared FieldPolicy.DROP, so a public .facets read no longer poisons Trace.save; the tlspec stage stops pinning the ArtifactError refusal and now pins a real v8 round-trip surface for the first time
 env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 3d3fe9b0f01c15239e22447c14a4629d2b6e713c (clean)
@@ -190,7 +190,7 @@ recorded: 2026-08-17T18:35:19.804356+00:00
 ---
 generator: tests/surface_oracle
 flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
-reason: facet-cache persistence fix: ModuleCall/Module _facets_cache declared FieldPolicy.DROP, so a public .facets read no longer poisons tl.save; the tlspec stage stops pinning the TorchLensIOError refusal and now pins a real v8 round-trip surface for the first time
+reason: facet-cache persistence fix: ModuleCall/Module _facets_cache declared FieldPolicy.DROP, so a public .facets read no longer poisons Trace.save; the tlspec stage stops pinning the ArtifactError refusal and now pins a real v8 round-trip surface for the first time
 env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 3d3fe9b0f01c15239e22447c14a4629d2b6e713c (clean)
@@ -198,7 +198,7 @@ recorded: 2026-08-17T18:35:25.319377+00:00
 ---
 generator: tests/surface_oracle
 flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
-reason: facet-cache persistence fix: ModuleCall/Module _facets_cache declared FieldPolicy.DROP, so a public .facets read no longer poisons tl.save; the tlspec stage stops pinning the TorchLensIOError refusal and now pins a real v8 round-trip surface for the first time
+reason: facet-cache persistence fix: ModuleCall/Module _facets_cache declared FieldPolicy.DROP, so a public .facets read no longer poisons Trace.save; the tlspec stage stops pinning the ArtifactError refusal and now pins a real v8 round-trip surface for the first time
 env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 3d3fe9b0f01c15239e22447c14a4629d2b6e713c (clean)
@@ -206,7 +206,7 @@ recorded: 2026-08-17T18:35:25.338707+00:00
 ---
 generator: tests/surface_oracle
 flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
-reason: facet-cache persistence fix: ModuleCall/Module _facets_cache declared FieldPolicy.DROP, so a public .facets read no longer poisons tl.save; the tlspec stage stops pinning the TorchLensIOError refusal and now pins a real v8 round-trip surface for the first time
+reason: facet-cache persistence fix: ModuleCall/Module _facets_cache declared FieldPolicy.DROP, so a public .facets read no longer poisons Trace.save; the tlspec stage stops pinning the ArtifactError refusal and now pins a real v8 round-trip surface for the first time
 env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: 3d3fe9b0f01c15239e22447c14a4629d2b6e713c (clean)
@@ -259,3 +259,2040 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cu130
 source: fa9e0ca23397954e4238d0823e95fecf0a748251 (clean)
 recorded: 2026-08-19T15:49:11.834311+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: shim-removal lane 2026-08-19: the deprecated trace-level conditional_then/elif/else_entry_edges alias properties are deleted (decided, interim phase), removing them from the public record surface
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 5bde32f0919538c641645bad9d75fee841d116f2 (dirty)
+recorded: 2026-08-20T01:11:43.083650+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: shim-removal lane 2026-08-19: the deprecated trace-level conditional_then/elif/else_entry_edges alias properties are deleted (decided, interim phase), removing them from the public record surface
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 5bde32f0919538c641645bad9d75fee841d116f2 (dirty)
+recorded: 2026-08-20T01:11:43.102900+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: shim-removal lane 2026-08-19: the deprecated trace-level conditional_then/elif/else_entry_edges alias properties are deleted (decided, interim phase), removing them from the public record surface
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 5bde32f0919538c641645bad9d75fee841d116f2 (dirty)
+recorded: 2026-08-20T01:11:43.120512+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: shim-removal lane 2026-08-19: the deprecated trace-level conditional_then/elif/else_entry_edges alias properties are deleted (decided, interim phase), removing them from the public record surface
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 5bde32f0919538c641645bad9d75fee841d116f2 (dirty)
+recorded: 2026-08-20T01:11:43.141313+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: shim-removal lane 2026-08-19: the deprecated trace-level conditional_then/elif/else_entry_edges alias properties are deleted (decided, interim phase), removing them from the public record surface
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 5bde32f0919538c641645bad9d75fee841d116f2 (dirty)
+recorded: 2026-08-20T01:11:43.159230+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: shim-removal lane 2026-08-19: the deprecated trace-level conditional_then/elif/else_entry_edges alias properties are deleted (decided, interim phase), removing them from the public record surface
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 5bde32f0919538c641645bad9d75fee841d116f2 (dirty)
+recorded: 2026-08-20T01:11:48.449827+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: F42 attested coupling adds the Trace.episode_coupling read accessor (None on plain captures); every surface golden gains the one name
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 74f296c2d0d308c2d5c539451d70c853070dd576 (dirty)
+recorded: 2026-08-29T22:15:45.193603+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: F42 attested coupling adds the Trace.episode_coupling read accessor (None on plain captures); every surface golden gains the one name
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 74f296c2d0d308c2d5c539451d70c853070dd576 (dirty)
+recorded: 2026-08-29T22:15:45.226746+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: F42 attested coupling adds the Trace.episode_coupling read accessor (None on plain captures); every surface golden gains the one name
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 74f296c2d0d308c2d5c539451d70c853070dd576 (dirty)
+recorded: 2026-08-29T22:15:45.249047+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: F42 attested coupling adds the Trace.episode_coupling read accessor (None on plain captures); every surface golden gains the one name
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 74f296c2d0d308c2d5c539451d70c853070dd576 (dirty)
+recorded: 2026-08-29T22:15:51.149461+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: F42 attested coupling adds the Trace.episode_coupling read accessor (None on plain captures); every surface golden gains the one name
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 74f296c2d0d308c2d5c539451d70c853070dd576 (dirty)
+recorded: 2026-08-29T22:15:51.171005+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: F42 attested coupling adds the Trace.episode_coupling read accessor (None on plain captures); every surface golden gains the one name
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 74f296c2d0d308c2d5c539451d70c853070dd576 (dirty)
+recorded: 2026-08-29T22:15:51.192142+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: D04 integration closure over the assembled package (three merged-lane changes the goldens predate): F24 observe item 15 flipped unmeasured bytes_delta_at_call from fabricated 0 to honest None on default captures; F20 added the forward_peak_memory_pair field (additive, measured-normalized); F11 collapse rework changed derived collapse_score values on tiny_transformer
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 88d59b16cdbda283f83de8238629fd8d059d12a3 (dirty)
+recorded: 2026-09-01T07:08:02.752954+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: D04 integration closure over the assembled package (three merged-lane changes the goldens predate): F24 observe item 15 flipped unmeasured bytes_delta_at_call from fabricated 0 to honest None on default captures; F20 added the forward_peak_memory_pair field (additive, measured-normalized); F11 collapse rework changed derived collapse_score values on tiny_transformer
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 88d59b16cdbda283f83de8238629fd8d059d12a3 (dirty)
+recorded: 2026-09-01T07:08:02.775941+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: D04 integration closure over the assembled package (three merged-lane changes the goldens predate): F24 observe item 15 flipped unmeasured bytes_delta_at_call from fabricated 0 to honest None on default captures; F20 added the forward_peak_memory_pair field (additive, measured-normalized); F11 collapse rework changed derived collapse_score values on tiny_transformer
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 88d59b16cdbda283f83de8238629fd8d059d12a3 (dirty)
+recorded: 2026-09-01T07:08:02.797491+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: D04 integration closure over the assembled package (three merged-lane changes the goldens predate): F24 observe item 15 flipped unmeasured bytes_delta_at_call from fabricated 0 to honest None on default captures; F20 added the forward_peak_memory_pair field (additive, measured-normalized); F11 collapse rework changed derived collapse_score values on tiny_transformer
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 88d59b16cdbda283f83de8238629fd8d059d12a3 (dirty)
+recorded: 2026-09-01T07:08:08.858415+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: D04 integration closure over the assembled package (three merged-lane changes the goldens predate): F24 observe item 15 flipped unmeasured bytes_delta_at_call from fabricated 0 to honest None on default captures; F20 added the forward_peak_memory_pair field (additive, measured-normalized); F11 collapse rework changed derived collapse_score values on tiny_transformer
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 88d59b16cdbda283f83de8238629fd8d059d12a3 (dirty)
+recorded: 2026-09-01T07:08:08.888825+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: D04 integration closure over the assembled package (three merged-lane changes the goldens predate): F24 observe item 15 flipped unmeasured bytes_delta_at_call from fabricated 0 to honest None on default captures; F20 added the forward_peak_memory_pair field (additive, measured-normalized); F11 collapse rework changed derived collapse_score values on tiny_transformer
+env: py3.10-torch2.13.0
+torch: 2.13.0+cu130
+source: 88d59b16cdbda283f83de8238629fd8d059d12a3 (dirty)
+recorded: 2026-09-01T07:08:08.910751+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: F2: Trace.__getstate__ (trace.py:3002-3008, sprint integration fix) now serializes facet_registry_snapshot as None at the pickle boundary by design, pinned by tests/test_fw2b_pickle_recipe_globals.py (test_plain_pickle_carries_no_recipe_function_globals, test_deepcopy_follows_the_same_pickle_boundary). The golden was recorded 2026-09-01, before that fix landed; only the pickle-stage facet_registry_snapshot diverges (single-line diff per model, confirmed on job torchlens-l8-oracle-f2-1).
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: baad948e186c57ddc930c346b71e77bc32d51f0d (dirty)
+recorded: 2026-10-01T10:47:20.700715+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: F2: Trace.__getstate__ (trace.py:3002-3008, sprint integration fix) now serializes facet_registry_snapshot as None at the pickle boundary by design, pinned by tests/test_fw2b_pickle_recipe_globals.py (test_plain_pickle_carries_no_recipe_function_globals, test_deepcopy_follows_the_same_pickle_boundary). The golden was recorded 2026-09-01, before that fix landed; only the pickle-stage facet_registry_snapshot diverges (single-line diff per model, confirmed on job torchlens-l8-oracle-f2-1).
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: baad948e186c57ddc930c346b71e77bc32d51f0d (dirty)
+recorded: 2026-10-01T10:47:20.737278+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: F2: Trace.__getstate__ (trace.py:3002-3008, sprint integration fix) now serializes facet_registry_snapshot as None at the pickle boundary by design, pinned by tests/test_fw2b_pickle_recipe_globals.py (test_plain_pickle_carries_no_recipe_function_globals, test_deepcopy_follows_the_same_pickle_boundary). The golden was recorded 2026-09-01, before that fix landed; only the pickle-stage facet_registry_snapshot diverges (single-line diff per model, confirmed on job torchlens-l8-oracle-f2-1).
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: baad948e186c57ddc930c346b71e77bc32d51f0d (dirty)
+recorded: 2026-10-01T10:47:20.790649+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: F2: Trace.__getstate__ (trace.py:3002-3008, sprint integration fix) now serializes facet_registry_snapshot as None at the pickle boundary by design, pinned by tests/test_fw2b_pickle_recipe_globals.py (test_plain_pickle_carries_no_recipe_function_globals, test_deepcopy_follows_the_same_pickle_boundary). The golden was recorded 2026-09-01, before that fix landed; only the pickle-stage facet_registry_snapshot diverges (single-line diff per model, confirmed on job torchlens-l8-oracle-f2-1).
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: baad948e186c57ddc930c346b71e77bc32d51f0d (dirty)
+recorded: 2026-10-01T10:47:20.830670+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: F2: Trace.__getstate__ (trace.py:3002-3008, sprint integration fix) now serializes facet_registry_snapshot as None at the pickle boundary by design, pinned by tests/test_fw2b_pickle_recipe_globals.py (test_plain_pickle_carries_no_recipe_function_globals, test_deepcopy_follows_the_same_pickle_boundary). The golden was recorded 2026-09-01, before that fix landed; only the pickle-stage facet_registry_snapshot diverges (single-line diff per model, confirmed on job torchlens-l8-oracle-f2-1).
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: baad948e186c57ddc930c346b71e77bc32d51f0d (dirty)
+recorded: 2026-10-01T10:47:20.872341+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: F2: Trace.__getstate__ (trace.py:3002-3008, sprint integration fix) now serializes facet_registry_snapshot as None at the pickle boundary by design, pinned by tests/test_fw2b_pickle_recipe_globals.py (test_plain_pickle_carries_no_recipe_function_globals, test_deepcopy_follows_the_same_pickle_boundary). The golden was recorded 2026-09-01, before that fix landed; only the pickle-stage facet_registry_snapshot diverges (single-line diff per model, confirmed on job torchlens-l8-oracle-f2-1).
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: baad948e186c57ddc930c346b71e77bc32d51f0d (dirty)
+recorded: 2026-10-01T10:47:20.929493+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: surface-oracle CPU-kernel pin (ATEN avx2, MKL_CBWR COMPATIBLE, oneDNN off in the worker): goldens recorded on AVX-512 Xeons failed the enforcing Tests row on GitHub runners with identical inputs and code (activation sha256 drift, plain_cnn and tiny_transformer); base a8d043cf1 reproduces the old goldens on the recording-class host, so only tensor float bytes change
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ec79963b8419b5b0c88b716df35b12a905a6aa6f (clean)
+recorded: 2026-10-03T05:57:43.386197+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: surface-oracle CPU-kernel pin (ATEN avx2, MKL_CBWR COMPATIBLE, oneDNN off in the worker): goldens recorded on AVX-512 Xeons failed the enforcing Tests row on GitHub runners with identical inputs and code (activation sha256 drift, plain_cnn and tiny_transformer); base a8d043cf1 reproduces the old goldens on the recording-class host, so only tensor float bytes change
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ec79963b8419b5b0c88b716df35b12a905a6aa6f (clean)
+recorded: 2026-10-03T05:57:43.415539+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: surface-oracle CPU-kernel pin (ATEN avx2, MKL_CBWR COMPATIBLE, oneDNN off in the worker): goldens recorded on AVX-512 Xeons failed the enforcing Tests row on GitHub runners with identical inputs and code (activation sha256 drift, plain_cnn and tiny_transformer); base a8d043cf1 reproduces the old goldens on the recording-class host, so only tensor float bytes change
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ec79963b8419b5b0c88b716df35b12a905a6aa6f (clean)
+recorded: 2026-10-03T05:57:43.447072+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: surface-oracle CPU-kernel pin (ATEN avx2, MKL_CBWR COMPATIBLE, oneDNN off in the worker): goldens recorded on AVX-512 Xeons failed the enforcing Tests row on GitHub runners with identical inputs and code (activation sha256 drift, plain_cnn and tiny_transformer); base a8d043cf1 reproduces the old goldens on the recording-class host, so only tensor float bytes change
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ec79963b8419b5b0c88b716df35b12a905a6aa6f (clean)
+recorded: 2026-10-03T05:57:43.486650+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: surface-oracle CPU-kernel pin (ATEN avx2, MKL_CBWR COMPATIBLE, oneDNN off in the worker): goldens recorded on AVX-512 Xeons failed the enforcing Tests row on GitHub runners with identical inputs and code (activation sha256 drift, plain_cnn and tiny_transformer); base a8d043cf1 reproduces the old goldens on the recording-class host, so only tensor float bytes change
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ec79963b8419b5b0c88b716df35b12a905a6aa6f (clean)
+recorded: 2026-10-03T05:57:43.523863+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: surface-oracle CPU-kernel pin (ATEN avx2, MKL_CBWR COMPATIBLE, oneDNN off in the worker): goldens recorded on AVX-512 Xeons failed the enforcing Tests row on GitHub runners with identical inputs and code (activation sha256 drift, plain_cnn and tiny_transformer); base a8d043cf1 reproduces the old goldens on the recording-class host, so only tensor float bytes change
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ec79963b8419b5b0c88b716df35b12a905a6aa6f (clean)
+recorded: 2026-10-03T05:57:43.579255+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: held-ref rebind (abc4fdf75 and parents): nn.TransformerEncoderLayer's default activation, the pristine F.relu bound at torch import, is now rebound to its wrapper for each capture, so the held call gets the same outer F.relu / inner torch.relu nesting as a direct F.relu(x) call; func_call_ids after it shift by 2, graph unchanged
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: dff88e2bd554ad92bb67cefd5d2b7011f46d974c (dirty)
+recorded: 2026-10-06T04:21:55.190803+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: next-release integration: 8255fc571 (fast-rerun) pauses TorchLens's own per-output register_hook install, so it no longer takes a wrapped-call id; only func_call_id changes (184 lines), and the previous goldens pass exactly with 8255fc571 alone reverted
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 5d479d095e720c44b25ad80039ce75fee783401c (dirty)
+recorded: 2026-10-09T18:48:53.493777+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: next-release integration: 8255fc571 (fast-rerun) pauses TorchLens's own per-output register_hook install, so it no longer takes a wrapped-call id; only func_call_id changes (184 lines), and the previous goldens pass exactly with 8255fc571 alone reverted
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 5d479d095e720c44b25ad80039ce75fee783401c (dirty)
+recorded: 2026-10-09T18:48:53.540981+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: next-release integration: 8255fc571 (fast-rerun) pauses TorchLens's own per-output register_hook install, so it no longer takes a wrapped-call id; only func_call_id changes (184 lines), and the previous goldens pass exactly with 8255fc571 alone reverted
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 5d479d095e720c44b25ad80039ce75fee783401c (dirty)
+recorded: 2026-10-09T18:48:53.574839+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: next-release integration: 8255fc571 (fast-rerun) pauses TorchLens's own per-output register_hook install, so it no longer takes a wrapped-call id; only func_call_id changes (184 lines), and the previous goldens pass exactly with 8255fc571 alone reverted
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 5d479d095e720c44b25ad80039ce75fee783401c (dirty)
+recorded: 2026-10-09T18:48:53.612826+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: next-release integration: 8255fc571 (fast-rerun) pauses TorchLens's own per-output register_hook install, so it no longer takes a wrapped-call id; only func_call_id changes (184 lines), and the previous goldens pass exactly with 8255fc571 alone reverted
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 5d479d095e720c44b25ad80039ce75fee783401c (dirty)
+recorded: 2026-10-09T18:48:53.652687+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: next-release integration: 8255fc571 (fast-rerun) pauses TorchLens's own per-output register_hook install, so it no longer takes a wrapped-call id; only func_call_id changes (184 lines), and the previous goldens pass exactly with 8255fc571 alone reverted
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 5d479d095e720c44b25ad80039ce75fee783401c (dirty)
+recorded: 2026-10-09T18:48:53.710192+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: R2-05 with R2-38: tlspec v10 stamp
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: e9ca3adf7a2b8ee8390300a323cd8c149c515b7c (dirty)
+recorded: 2026-10-12T19:28:51.080471+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: R2-05 with R2-38: tlspec v10 stamp
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: e9ca3adf7a2b8ee8390300a323cd8c149c515b7c (dirty)
+recorded: 2026-10-12T19:28:51.116064+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: R2-05 with R2-38: tlspec v10 stamp
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: e9ca3adf7a2b8ee8390300a323cd8c149c515b7c (dirty)
+recorded: 2026-10-12T19:28:51.142597+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: R2-05 with R2-38: tlspec v10 stamp
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: e9ca3adf7a2b8ee8390300a323cd8c149c515b7c (dirty)
+recorded: 2026-10-12T19:28:51.172463+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: R2-05 with R2-38: tlspec v10 stamp
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: e9ca3adf7a2b8ee8390300a323cd8c149c515b7c (dirty)
+recorded: 2026-10-12T19:28:51.197714+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: R2-05 with R2-38: tlspec v10 stamp
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: e9ca3adf7a2b8ee8390300a323cd8c149c515b7c (dirty)
+recorded: 2026-10-12T19:28:51.234925+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: R2-37 (RUN-B phase 1 landed through SCHEMA): Trace.pinned_autograd_memory joins the public Trace surface
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: cdd5c2f9ac0cff9f94420085613f0d9f6e2f50c9 (dirty)
+recorded: 2026-10-12T23:34:20.982687+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: R2-37 (RUN-B phase 1 landed through SCHEMA): Trace.pinned_autograd_memory joins the public Trace surface
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: cdd5c2f9ac0cff9f94420085613f0d9f6e2f50c9 (dirty)
+recorded: 2026-10-12T23:34:21.013463+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: R2-37 (RUN-B phase 1 landed through SCHEMA): Trace.pinned_autograd_memory joins the public Trace surface
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: cdd5c2f9ac0cff9f94420085613f0d9f6e2f50c9 (dirty)
+recorded: 2026-10-12T23:34:21.037599+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: R2-37 (RUN-B phase 1 landed through SCHEMA): Trace.pinned_autograd_memory joins the public Trace surface
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: cdd5c2f9ac0cff9f94420085613f0d9f6e2f50c9 (dirty)
+recorded: 2026-10-12T23:34:21.064936+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: R2-37 (RUN-B phase 1 landed through SCHEMA): Trace.pinned_autograd_memory joins the public Trace surface
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: cdd5c2f9ac0cff9f94420085613f0d9f6e2f50c9 (dirty)
+recorded: 2026-10-12T23:34:21.088444+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: R2-37 (RUN-B phase 1 landed through SCHEMA): Trace.pinned_autograd_memory joins the public Trace surface
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: cdd5c2f9ac0cff9f94420085613f0d9f6e2f50c9 (dirty)
+recorded: 2026-10-12T23:34:21.117982+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: U40.1 and U26.3 bug 7: a default capture restores buffers (live-handle buffer reads show the restored values) and train-mode BatchNorm now runs through trace.run() (the run section records the run instead of the D18 refusal)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: b91826ab7d78f9eebc69ad36ff53e1e4646f79fe (clean)
+recorded: 2026-10-12T22:32:37.134745+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: U26.1 (JMT ruling 2026-10-11, batch-2 lane SEL): a model-output alias node no longer re-claims the module-exit lookup keys of the op it aliases, so modules whose output is a model output resolve to their own op; output nodes lose those duplicate keys
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 20c14e9e35d94b7d037c46e2904fd8e5ac95401c (dirty)
+recorded: 2026-10-12T22:50:07.981109+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: U26.1 (JMT ruling 2026-10-11, batch-2 lane SEL): a model-output alias node no longer re-claims the module-exit lookup keys of the op it aliases, so modules whose output is a model output resolve to their own op; output nodes lose those duplicate keys
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 20c14e9e35d94b7d037c46e2904fd8e5ac95401c (dirty)
+recorded: 2026-10-12T22:50:08.022703+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: U26.1 (JMT ruling 2026-10-11, batch-2 lane SEL): a model-output alias node no longer re-claims the module-exit lookup keys of the op it aliases, so modules whose output is a model output resolve to their own op; output nodes lose those duplicate keys
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 20c14e9e35d94b7d037c46e2904fd8e5ac95401c (dirty)
+recorded: 2026-10-12T22:50:08.061729+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: U26.1 (JMT ruling 2026-10-11, batch-2 lane SEL): a model-output alias node no longer re-claims the module-exit lookup keys of the op it aliases, so modules whose output is a model output resolve to their own op; output nodes lose those duplicate keys
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 20c14e9e35d94b7d037c46e2904fd8e5ac95401c (dirty)
+recorded: 2026-10-12T22:50:08.106295+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: U26.1 (JMT ruling 2026-10-11, batch-2 lane SEL): a model-output alias node no longer re-claims the module-exit lookup keys of the op it aliases, so modules whose output is a model output resolve to their own op; output nodes lose those duplicate keys
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 20c14e9e35d94b7d037c46e2904fd8e5ac95401c (dirty)
+recorded: 2026-10-12T22:50:08.156365+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: U26.1 (JMT ruling 2026-10-11, batch-2 lane SEL): a model-output alias node no longer re-claims the module-exit lookup keys of the op it aliases, so modules whose output is a model output resolve to their own op; output nodes lose those duplicate keys
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 20c14e9e35d94b7d037c46e2904fd8e5ac95401c (dirty)
+recorded: 2026-10-12T22:50:08.208134+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: batch-2 integration (LAND1): the run section RUN-A recorded (U40.1, U26.3 bug 7) meets the train's tlspec v10 stamp (R2-05 with R2-38) and Trace.pinned_autograd_memory (R2-37); the text merge kept RUN-A's pre-v10 run section
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 1d6e2af8000c5aa36b9a778720d9be0411dd2037 (clean)
+recorded: 2026-10-13T04:11:46.935761+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362: root module call counted among saved module calls; written buffer versions with a producer are not internal sources
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 470f77239fc0da496b0048f25219f1480225a7bf (clean)
+recorded: 2026-10-13T04:48:09.439412+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362: root module call counted among saved module calls; written buffer versions with a producer are not internal sources
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 470f77239fc0da496b0048f25219f1480225a7bf (clean)
+recorded: 2026-10-13T04:48:09.477044+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362: root module call counted among saved module calls; written buffer versions with a producer are not internal sources
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 470f77239fc0da496b0048f25219f1480225a7bf (clean)
+recorded: 2026-10-13T04:48:09.518961+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362: root module call counted among saved module calls; written buffer versions with a producer are not internal sources
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 470f77239fc0da496b0048f25219f1480225a7bf (clean)
+recorded: 2026-10-13T04:48:09.557603+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362: root module call counted among saved module calls; written buffer versions with a producer are not internal sources
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 470f77239fc0da496b0048f25219f1480225a7bf (clean)
+recorded: 2026-10-13T04:48:09.600921+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362: root module call counted among saved module calls; written buffer versions with a producer are not internal sources
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 470f77239fc0da496b0048f25219f1480225a7bf (clean)
+recorded: 2026-10-13T04:48:09.644454+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2360 (JMT ruling 2026-10-12, batch-2 lane OBSERVER): Module records gain the session-time attribute_writes field (DROP, never persisted)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 3abe59625acdb0f1b6aea4fe9fc71e2ed30ccc36 (clean)
+recorded: 2026-10-13T05:59:36.409075+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2360 (JMT ruling 2026-10-12, batch-2 lane OBSERVER): Module records gain the session-time attribute_writes field (DROP, never persisted)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 3abe59625acdb0f1b6aea4fe9fc71e2ed30ccc36 (clean)
+recorded: 2026-10-13T05:59:36.439328+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2360 (JMT ruling 2026-10-12, batch-2 lane OBSERVER): Module records gain the session-time attribute_writes field (DROP, never persisted)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 3abe59625acdb0f1b6aea4fe9fc71e2ed30ccc36 (clean)
+recorded: 2026-10-13T05:59:36.467394+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2360 (JMT ruling 2026-10-12, batch-2 lane OBSERVER): Module records gain the session-time attribute_writes field (DROP, never persisted)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 3abe59625acdb0f1b6aea4fe9fc71e2ed30ccc36 (clean)
+recorded: 2026-10-13T05:59:36.494118+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2360 (JMT ruling 2026-10-12, batch-2 lane OBSERVER): Module records gain the session-time attribute_writes field (DROP, never persisted)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 3abe59625acdb0f1b6aea4fe9fc71e2ed30ccc36 (clean)
+recorded: 2026-10-13T05:59:36.520055+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2360 (JMT ruling 2026-10-12, batch-2 lane OBSERVER): Module records gain the session-time attribute_writes field (DROP, never persisted)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 3abe59625acdb0f1b6aea4fe9fc71e2ed30ccc36 (clean)
+recorded: 2026-10-13T05:59:36.552600+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 (REAL-2B1): Module total FLOPs and MACs count every pass of a multi-call module; backward FLOPs are zero on outputs with no autograd node
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: d7077dc55fcaf91793308c414cdae280361dbd8e (clean)
+recorded: 2026-10-13T10:16:30.478119+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 (REAL-2B1): Module total FLOPs and MACs count every pass of a multi-call module; backward FLOPs are zero on outputs with no autograd node
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: d7077dc55fcaf91793308c414cdae280361dbd8e (clean)
+recorded: 2026-10-13T10:16:30.514307+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 (REAL-2B1): Module total FLOPs and MACs count every pass of a multi-call module; backward FLOPs are zero on outputs with no autograd node
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: d7077dc55fcaf91793308c414cdae280361dbd8e (clean)
+recorded: 2026-10-13T10:16:30.545843+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 (REAL-2B1): Module total FLOPs and MACs count every pass of a multi-call module; backward FLOPs are zero on outputs with no autograd node
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: d7077dc55fcaf91793308c414cdae280361dbd8e (clean)
+recorded: 2026-10-13T10:16:30.578295+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 (REAL-2B2 d32f00213): Module.recursive_params counts never-called descendants (MultiheadAttention out_proj)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: d7077dc55fcaf91793308c414cdae280361dbd8e (clean)
+recorded: 2026-10-13T10:16:42.812566+00:00
+reason: forks.13 (JMT 2026-10-12 1:01 AM PT, RULINGS-2B.md:22; batch-2 lane REPORT, SCHEMA-REQUESTS rows 7-8): Trace.forward_peak_memory retyped to Bytes or None and Trace.forward_peak_memory_reason added (KEEP)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c9e40cb2956d3d75ce296ed99e760a529b3b294d (dirty)
+recorded: 2026-10-13T10:33:17.744426+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: forks.13 (JMT 2026-10-12 1:01 AM PT, RULINGS-2B.md:22; batch-2 lane REPORT, SCHEMA-REQUESTS rows 7-8): Trace.forward_peak_memory retyped to Bytes or None and Trace.forward_peak_memory_reason added (KEEP)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c9e40cb2956d3d75ce296ed99e760a529b3b294d (dirty)
+recorded: 2026-10-13T10:33:17.772375+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: forks.13 (JMT 2026-10-12 1:01 AM PT, RULINGS-2B.md:22; batch-2 lane REPORT, SCHEMA-REQUESTS rows 7-8): Trace.forward_peak_memory retyped to Bytes or None and Trace.forward_peak_memory_reason added (KEEP)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c9e40cb2956d3d75ce296ed99e760a529b3b294d (dirty)
+recorded: 2026-10-13T10:33:17.798645+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: forks.13 (JMT 2026-10-12 1:01 AM PT, RULINGS-2B.md:22; batch-2 lane REPORT, SCHEMA-REQUESTS rows 7-8): Trace.forward_peak_memory retyped to Bytes or None and Trace.forward_peak_memory_reason added (KEEP)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c9e40cb2956d3d75ce296ed99e760a529b3b294d (dirty)
+recorded: 2026-10-13T10:33:17.824689+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: forks.13 (JMT 2026-10-12 1:01 AM PT, RULINGS-2B.md:22; batch-2 lane REPORT, SCHEMA-REQUESTS rows 7-8): Trace.forward_peak_memory retyped to Bytes or None and Trace.forward_peak_memory_reason added (KEEP)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c9e40cb2956d3d75ce296ed99e760a529b3b294d (dirty)
+recorded: 2026-10-13T10:33:17.850795+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: forks.13 (JMT 2026-10-12 1:01 AM PT, RULINGS-2B.md:22; batch-2 lane REPORT, SCHEMA-REQUESTS rows 7-8): Trace.forward_peak_memory retyped to Bytes or None and Trace.forward_peak_memory_reason added (KEEP)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c9e40cb2956d3d75ce296ed99e760a529b3b294d (dirty)
+recorded: 2026-10-13T10:33:17.881279+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 REAL-2B2: root ModuleCall lists pass-qualified Ops and its forward arguments; ModuleCall.num_layers counts distinct Layers; Param.num_calls counts the Ops that used it; num_buffer_layers counts distinct buffer Layers; tied-module parameter aliases; Layer conditional roles; uncalled modules recorded at capture end; the loader refreshes num_saved_module_calls
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 711308c2b55233e51cfd4224a6b71985649a73a9 (dirty)
+recorded: 2026-10-13T10:39:36.490182+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 REAL-2B2: root ModuleCall lists pass-qualified Ops and its forward arguments; ModuleCall.num_layers counts distinct Layers; Param.num_calls counts the Ops that used it; num_buffer_layers counts distinct buffer Layers; tied-module parameter aliases; Layer conditional roles; uncalled modules recorded at capture end; the loader refreshes num_saved_module_calls
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 711308c2b55233e51cfd4224a6b71985649a73a9 (dirty)
+recorded: 2026-10-13T10:39:36.522697+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 REAL-2B2: root ModuleCall lists pass-qualified Ops and its forward arguments; ModuleCall.num_layers counts distinct Layers; Param.num_calls counts the Ops that used it; num_buffer_layers counts distinct buffer Layers; tied-module parameter aliases; Layer conditional roles; uncalled modules recorded at capture end; the loader refreshes num_saved_module_calls
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 711308c2b55233e51cfd4224a6b71985649a73a9 (dirty)
+recorded: 2026-10-13T10:39:36.546638+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 REAL-2B2: root ModuleCall lists pass-qualified Ops and its forward arguments; ModuleCall.num_layers counts distinct Layers; Param.num_calls counts the Ops that used it; num_buffer_layers counts distinct buffer Layers; tied-module parameter aliases; Layer conditional roles; uncalled modules recorded at capture end; the loader refreshes num_saved_module_calls
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 711308c2b55233e51cfd4224a6b71985649a73a9 (dirty)
+recorded: 2026-10-13T10:39:36.572757+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 REAL-2B2: root ModuleCall lists pass-qualified Ops and its forward arguments; ModuleCall.num_layers counts distinct Layers; Param.num_calls counts the Ops that used it; num_buffer_layers counts distinct buffer Layers; tied-module parameter aliases; Layer conditional roles; uncalled modules recorded at capture end; the loader refreshes num_saved_module_calls
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 711308c2b55233e51cfd4224a6b71985649a73a9 (dirty)
+recorded: 2026-10-13T10:39:36.598278+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 REAL-2B2: root ModuleCall lists pass-qualified Ops and its forward arguments; ModuleCall.num_layers counts distinct Layers; Param.num_calls counts the Ops that used it; num_buffer_layers counts distinct buffer Layers; tied-module parameter aliases; Layer conditional roles; uncalled modules recorded at capture end; the loader refreshes num_saved_module_calls
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 711308c2b55233e51cfd4224a6b71985649a73a9 (dirty)
+recorded: 2026-10-13T10:39:36.634811+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: forks.13 (JMT 2026-10-12, RULINGS-2B.md:22; lane REPORT, SCHEMA-REQUESTS rows 7-8) merged with REAL-2B2 row 9 (AGT-2362): regenerate on the combined train for Trace.forward_peak_memory_reason (KEEP) beside Trace._uncalled_module_addresses (DROP)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ee78dd35000f9b63fa9c3b437046c226789c7d3b (dirty)
+recorded: 2026-10-13T12:47:34.254443+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: forks.13 (JMT 2026-10-12, RULINGS-2B.md:22; lane REPORT, SCHEMA-REQUESTS rows 7-8) merged with REAL-2B2 row 9 (AGT-2362): regenerate on the combined train for Trace.forward_peak_memory_reason (KEEP) beside Trace._uncalled_module_addresses (DROP)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ee78dd35000f9b63fa9c3b437046c226789c7d3b (dirty)
+recorded: 2026-10-13T12:47:34.294296+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: forks.13 (JMT 2026-10-12, RULINGS-2B.md:22; lane REPORT, SCHEMA-REQUESTS rows 7-8) merged with REAL-2B2 row 9 (AGT-2362): regenerate on the combined train for Trace.forward_peak_memory_reason (KEEP) beside Trace._uncalled_module_addresses (DROP)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ee78dd35000f9b63fa9c3b437046c226789c7d3b (dirty)
+recorded: 2026-10-13T12:47:34.330536+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: forks.13 (JMT 2026-10-12, RULINGS-2B.md:22; lane REPORT, SCHEMA-REQUESTS rows 7-8) merged with REAL-2B2 row 9 (AGT-2362): regenerate on the combined train for Trace.forward_peak_memory_reason (KEEP) beside Trace._uncalled_module_addresses (DROP)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ee78dd35000f9b63fa9c3b437046c226789c7d3b (dirty)
+recorded: 2026-10-13T12:47:34.380319+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: forks.13 (JMT 2026-10-12, RULINGS-2B.md:22; lane REPORT, SCHEMA-REQUESTS rows 7-8) merged with REAL-2B2 row 9 (AGT-2362): regenerate on the combined train for Trace.forward_peak_memory_reason (KEEP) beside Trace._uncalled_module_addresses (DROP)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ee78dd35000f9b63fa9c3b437046c226789c7d3b (dirty)
+recorded: 2026-10-13T12:47:34.424053+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: forks.13 (JMT 2026-10-12, RULINGS-2B.md:22; lane REPORT, SCHEMA-REQUESTS rows 7-8) merged with REAL-2B2 row 9 (AGT-2362): regenerate on the combined train for Trace.forward_peak_memory_reason (KEEP) beside Trace._uncalled_module_addresses (DROP)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ee78dd35000f9b63fa9c3b437046c226789c7d3b (dirty)
+recorded: 2026-10-13T12:47:34.478834+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 RED5: collapse_score/module_collapse_order are the eligibility priority; buffer_layers lists each buffer Layer once
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 3bc02f75bbc1098212c6af1bd2cdecd3996dbe57 (dirty)
+recorded: 2026-10-14T02:55:34.691952+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 RED5: collapse_score/module_collapse_order are the eligibility priority; buffer_layers lists each buffer Layer once
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 3bc02f75bbc1098212c6af1bd2cdecd3996dbe57 (dirty)
+recorded: 2026-10-14T02:55:34.765658+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 RED5: collapse_score/module_collapse_order are the eligibility priority; buffer_layers lists each buffer Layer once
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 3bc02f75bbc1098212c6af1bd2cdecd3996dbe57 (dirty)
+recorded: 2026-10-14T02:55:34.867059+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 RED5: collapse_score/module_collapse_order are the eligibility priority; buffer_layers lists each buffer Layer once
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 3bc02f75bbc1098212c6af1bd2cdecd3996dbe57 (dirty)
+recorded: 2026-10-14T02:55:34.931578+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 RED5: collapse_score/module_collapse_order are the eligibility priority; buffer_layers lists each buffer Layer once
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 3bc02f75bbc1098212c6af1bd2cdecd3996dbe57 (dirty)
+recorded: 2026-10-14T02:55:35.028179+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: AGT-2362 RED5: collapse_score/module_collapse_order are the eligibility priority; buffer_layers lists each buffer Layer once
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 3bc02f75bbc1098212c6af1bd2cdecd3996dbe57 (dirty)
+recorded: 2026-10-14T02:55:35.116782+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: Trace.pristine: new derived public property
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9e0017f4030d09249e73524885c34e9efa56f638 (dirty)
+recorded: 2026-10-14T23:07:41.366124+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: Trace.pristine: new derived public property
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9e0017f4030d09249e73524885c34e9efa56f638 (dirty)
+recorded: 2026-10-14T23:07:41.409163+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: Trace.pristine: new derived public property
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9e0017f4030d09249e73524885c34e9efa56f638 (dirty)
+recorded: 2026-10-14T23:07:41.439078+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: Trace.pristine: new derived public property
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9e0017f4030d09249e73524885c34e9efa56f638 (dirty)
+recorded: 2026-10-14T23:07:41.468707+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: Trace.pristine: new derived public property
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9e0017f4030d09249e73524885c34e9efa56f638 (dirty)
+recorded: 2026-10-14T23:07:41.497599+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: Trace.pristine: new derived public property
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 9e0017f4030d09249e73524885c34e9efa56f638 (dirty)
+recorded: 2026-10-14T23:07:41.535855+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: the capture-oracle models (tests/capture_oracle/_models.py) now also tally their side effects outside the module, so their source text and line numbers moved; the surface snapshot embeds that source. Every changed line was diffed: only the models' source blobs and source line/location fields change, no TorchLens surface field.
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 5b91ab39b1c0903f6cf5dd2312dae05d925d5bc7 (dirty)
+recorded: 2026-10-16T03:59:24.408993+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: the capture-oracle models (tests/capture_oracle/_models.py) now also tally their side effects outside the module, so their source text and line numbers moved; the surface snapshot embeds that source. Every changed line was diffed: only the models' source blobs and source line/location fields change, no TorchLens surface field.
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 5b91ab39b1c0903f6cf5dd2312dae05d925d5bc7 (dirty)
+recorded: 2026-10-16T03:59:24.433965+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: the capture-oracle models (tests/capture_oracle/_models.py) now also tally their side effects outside the module, so their source text and line numbers moved; the surface snapshot embeds that source. Every changed line was diffed: only the models' source blobs and source line/location fields change, no TorchLens surface field.
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 5b91ab39b1c0903f6cf5dd2312dae05d925d5bc7 (dirty)
+recorded: 2026-10-16T03:59:24.458125+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: the capture-oracle models (tests/capture_oracle/_models.py) now also tally their side effects outside the module, so their source text and line numbers moved; the surface snapshot embeds that source. Every changed line was diffed: only the models' source blobs and source line/location fields change, no TorchLens surface field.
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 5b91ab39b1c0903f6cf5dd2312dae05d925d5bc7 (dirty)
+recorded: 2026-10-16T03:59:24.482283+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: the capture-oracle models (tests/capture_oracle/_models.py) now also tally their side effects outside the module, so their source text and line numbers moved; the surface snapshot embeds that source. Every changed line was diffed: only the models' source blobs and source line/location fields change, no TorchLens surface field.
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 5b91ab39b1c0903f6cf5dd2312dae05d925d5bc7 (dirty)
+recorded: 2026-10-16T03:59:24.505473+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: the capture-oracle models (tests/capture_oracle/_models.py) now also tally their side effects outside the module, so their source text and line numbers moved; the surface snapshot embeds that source. Every changed line was diffed: only the models' source blobs and source line/location fields change, no TorchLens surface field.
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 5b91ab39b1c0903f6cf5dd2312dae05d925d5bc7 (dirty)
+recorded: 2026-10-16T03:59:24.532276+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: measure.2 (JMT 28 Oct 2026): CPU peaks opt-in; backward_peak_memory_reason and measure_host_peak_memory fields
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 1d9c79ae26462f829e7254ce975faad23b1442a6 (dirty)
+recorded: 2026-10-29T07:10:13.208483+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: measure.2 (JMT 28 Oct 2026): CPU peaks opt-in; backward_peak_memory_reason and measure_host_peak_memory fields
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 1d9c79ae26462f829e7254ce975faad23b1442a6 (dirty)
+recorded: 2026-10-29T07:10:13.231760+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: measure.2 (JMT 28 Oct 2026): CPU peaks opt-in; backward_peak_memory_reason and measure_host_peak_memory fields
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 1d9c79ae26462f829e7254ce975faad23b1442a6 (dirty)
+recorded: 2026-10-29T07:10:13.253597+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: measure.2 (JMT 28 Oct 2026): CPU peaks opt-in; backward_peak_memory_reason and measure_host_peak_memory fields
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 1d9c79ae26462f829e7254ce975faad23b1442a6 (dirty)
+recorded: 2026-10-29T07:10:13.275979+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: measure.2 (JMT 28 Oct 2026): CPU peaks opt-in; backward_peak_memory_reason and measure_host_peak_memory fields
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 1d9c79ae26462f829e7254ce975faad23b1442a6 (dirty)
+recorded: 2026-10-29T07:10:13.295349+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: measure.2 (JMT 28 Oct 2026): CPU peaks opt-in; backward_peak_memory_reason and measure_host_peak_memory fields
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 1d9c79ae26462f829e7254ce975faad23b1442a6 (dirty)
+recorded: 2026-10-29T07:10:13.321222+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: call-site grouping (callsite_v1) changes layer grouping by design; grouping quad-lab 2026-10-29
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f400ccafa38c4dd184aef1dd4a7d98b80586ca7e (dirty)
+recorded: 2026-10-30T02:17:40.088693+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: call-site grouping (callsite_v1) changes layer grouping by design; grouping quad-lab 2026-10-29
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f400ccafa38c4dd184aef1dd4a7d98b80586ca7e (dirty)
+recorded: 2026-10-30T02:17:40.111481+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: call-site grouping (callsite_v1) changes layer grouping by design; grouping quad-lab 2026-10-29
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f400ccafa38c4dd184aef1dd4a7d98b80586ca7e (dirty)
+recorded: 2026-10-30T02:17:40.140659+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: call-site grouping (callsite_v1) changes layer grouping by design; grouping quad-lab 2026-10-29
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f400ccafa38c4dd184aef1dd4a7d98b80586ca7e (dirty)
+recorded: 2026-10-30T02:17:40.168373+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: call-site grouping (callsite_v1) changes layer grouping by design; grouping quad-lab 2026-10-29
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f400ccafa38c4dd184aef1dd4a7d98b80586ca7e (dirty)
+recorded: 2026-10-30T02:17:40.194865+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: call-site grouping (callsite_v1) changes layer grouping by design; grouping quad-lab 2026-10-29
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f400ccafa38c4dd184aef1dd4a7d98b80586ca7e (dirty)
+recorded: 2026-10-30T02:17:40.231500+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: call-site grouping (callsite_v1) changes layer grouping by design; grouping quad-lab 2026-10-29
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 72b8140ae019ac73c372ec2627bf5b81fc04c6f5 (dirty)
+recorded: 2026-10-30T02:30:23.967729+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: call-site grouping (callsite_v1) changes layer grouping by design; grouping quad-lab 2026-10-29
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 72b8140ae019ac73c372ec2627bf5b81fc04c6f5 (dirty)
+recorded: 2026-10-30T02:30:24.003061+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: call-site grouping (callsite_v1) changes layer grouping by design; grouping quad-lab 2026-10-29
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 72b8140ae019ac73c372ec2627bf5b81fc04c6f5 (dirty)
+recorded: 2026-10-30T02:30:24.036893+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: call-site grouping (callsite_v1) changes layer grouping by design; grouping quad-lab 2026-10-29
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 72b8140ae019ac73c372ec2627bf5b81fc04c6f5 (dirty)
+recorded: 2026-10-30T02:30:24.070066+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: call-site grouping (callsite_v1) changes layer grouping by design; grouping quad-lab 2026-10-29
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 72b8140ae019ac73c372ec2627bf5b81fc04c6f5 (dirty)
+recorded: 2026-10-30T02:30:24.108248+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: call-site grouping (callsite_v1) changes layer grouping by design; grouping quad-lab 2026-10-29
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 72b8140ae019ac73c372ec2627bf5b81fc04c6f5 (dirty)
+recorded: 2026-10-30T02:30:24.174664+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rename codemod lane E: runnable contract module is private (torchlens._runnable); Trace.save and load_state_dict signatures; divergence policy strings; removed persistence doors
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 470e66967913f671642d4b4eda641ea407ee8124 (dirty)
+recorded: 2026-10-31T03:20:14.448814+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rename codemod lane E: runnable contract module is private (torchlens._runnable); Trace.save and load_state_dict signatures; divergence policy strings; removed persistence doors
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 470e66967913f671642d4b4eda641ea407ee8124 (dirty)
+recorded: 2026-10-31T03:20:14.478379+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rename codemod lane E: runnable contract module is private (torchlens._runnable); Trace.save and load_state_dict signatures; divergence policy strings; removed persistence doors
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 470e66967913f671642d4b4eda641ea407ee8124 (dirty)
+recorded: 2026-10-31T03:20:16.841390+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rename codemod lane E: runnable contract module is private (torchlens._runnable); Trace.save and load_state_dict signatures; divergence policy strings; removed persistence doors
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 470e66967913f671642d4b4eda641ea407ee8124 (dirty)
+recorded: 2026-10-31T03:20:16.882262+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rename codemod lane E: runnable contract module is private (torchlens._runnable); Trace.save and load_state_dict signatures; divergence policy strings; removed persistence doors
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 470e66967913f671642d4b4eda641ea407ee8124 (dirty)
+recorded: 2026-10-31T03:20:16.909013+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rename codemod lane E: runnable contract module is private (torchlens._runnable); Trace.save and load_state_dict signatures; divergence policy strings; removed persistence doors
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 470e66967913f671642d4b4eda641ea407ee8124 (dirty)
+recorded: 2026-10-31T03:20:16.945363+00:00
+reason: rename codemod: node member renames and removals
+source: 6feeb682bade32f973994317293f3688f2474920 (dirty)
+recorded: 2026-10-31T02:32:28.713991+00:00
+reason: rename codemod: node member renames and removals
+source: 6feeb682bade32f973994317293f3688f2474920 (dirty)
+recorded: 2026-10-31T02:32:28.735525+00:00
+reason: rename codemod: node member renames and removals
+source: 6feeb682bade32f973994317293f3688f2474920 (dirty)
+recorded: 2026-10-31T02:32:28.755046+00:00
+reason: rename codemod: node member renames and removals
+source: 6feeb682bade32f973994317293f3688f2474920 (dirty)
+recorded: 2026-10-31T02:32:28.775354+00:00
+reason: rename codemod: node member renames and removals
+source: 6feeb682bade32f973994317293f3688f2474920 (dirty)
+recorded: 2026-10-31T02:32:28.793097+00:00
+reason: rename codemod: node member renames and removals
+source: 6feeb682bade32f973994317293f3688f2474920 (dirty)
+recorded: 2026-10-31T02:32:28.820376+00:00
+reason: rename codemod: node member renames and removals
+source: ede64522994a5b8d05da9bf627a18ed197bf3c3a (dirty)
+recorded: 2026-10-31T02:56:22.102784+00:00
+reason: rename codemod: node member renames and removals
+source: ede64522994a5b8d05da9bf627a18ed197bf3c3a (dirty)
+recorded: 2026-10-31T02:56:22.124050+00:00
+reason: rename codemod: node member renames and removals
+source: ede64522994a5b8d05da9bf627a18ed197bf3c3a (dirty)
+recorded: 2026-10-31T02:56:22.146249+00:00
+reason: rename codemod: node member renames and removals
+source: ede64522994a5b8d05da9bf627a18ed197bf3c3a (dirty)
+recorded: 2026-10-31T02:56:22.168684+00:00
+reason: rename codemod: node member renames and removals
+source: ede64522994a5b8d05da9bf627a18ed197bf3c3a (dirty)
+recorded: 2026-10-31T02:56:22.188133+00:00
+reason: rename codemod: node member renames and removals
+source: ede64522994a5b8d05da9bf627a18ed197bf3c3a (dirty)
+recorded: 2026-10-31T02:56:22.213248+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rename codemod integration: ten area lanes merged; debugging tools in tl.debug; private packages; removed root names
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 0016e94e0baac17ed568f1ef454c1156a02accc2 (dirty)
+recorded: 2026-10-31T06:36:41.208769+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rename codemod integration: ten area lanes merged; debugging tools in tl.debug; private packages; removed root names
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 0016e94e0baac17ed568f1ef454c1156a02accc2 (dirty)
+recorded: 2026-10-31T06:36:41.239383+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rename codemod integration: ten area lanes merged; debugging tools in tl.debug; private packages; removed root names
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 0016e94e0baac17ed568f1ef454c1156a02accc2 (dirty)
+recorded: 2026-10-31T06:36:41.415964+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rename codemod integration: ten area lanes merged; debugging tools in tl.debug; private packages; removed root names
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 0016e94e0baac17ed568f1ef454c1156a02accc2 (dirty)
+recorded: 2026-10-31T06:36:41.450158+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rename codemod integration: ten area lanes merged; debugging tools in tl.debug; private packages; removed root names
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 0016e94e0baac17ed568f1ef454c1156a02accc2 (dirty)
+recorded: 2026-10-31T06:36:42.265218+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rename codemod integration: ten area lanes merged; debugging tools in tl.debug; private packages; removed root names
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 0016e94e0baac17ed568f1ef454c1156a02accc2 (dirty)
+recorded: 2026-10-31T06:36:42.304192+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: restore the v10-persisted Buffer, Param, Module and ModuleCall fields at their v10 spelling
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8177837d997276f26f111c962696c132320687bb (dirty)
+recorded: 2026-10-31T09:22:49.185593+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: restore the v10-persisted Buffer, Param, Module and ModuleCall fields at their v10 spelling
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8177837d997276f26f111c962696c132320687bb (dirty)
+recorded: 2026-10-31T09:22:49.213170+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: restore the v10-persisted Buffer, Param, Module and ModuleCall fields at their v10 spelling
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8177837d997276f26f111c962696c132320687bb (dirty)
+recorded: 2026-10-31T09:22:49.237343+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: restore the v10-persisted Buffer, Param, Module and ModuleCall fields at their v10 spelling
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8177837d997276f26f111c962696c132320687bb (dirty)
+recorded: 2026-10-31T09:22:49.262101+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: restore the v10-persisted Buffer, Param, Module and ModuleCall fields at their v10 spelling
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8177837d997276f26f111c962696c132320687bb (dirty)
+recorded: 2026-10-31T09:22:49.286941+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: restore the v10-persisted Buffer, Param, Module and ModuleCall fields at their v10 spelling
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8177837d997276f26f111c962696c132320687bb (dirty)
+recorded: 2026-10-31T09:22:49.314756+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: gradient-site integration (P5): Trace.armed_edits (SPEC ARMED_PROP) joins the public surface; producer sites for the gradient settle rows
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6e1129926b3a8c4e2c100dc5fb0bfa29f08eb527 (dirty)
+recorded: 2026-11-01T04:17:26.254942+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: gradient-site integration (P5): Trace.armed_edits (SPEC ARMED_PROP) joins the public surface; producer sites for the gradient settle rows
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6e1129926b3a8c4e2c100dc5fb0bfa29f08eb527 (dirty)
+recorded: 2026-11-01T04:17:26.283701+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: gradient-site integration (P5): Trace.armed_edits (SPEC ARMED_PROP) joins the public surface; producer sites for the gradient settle rows
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6e1129926b3a8c4e2c100dc5fb0bfa29f08eb527 (dirty)
+recorded: 2026-11-01T04:17:26.317436+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: gradient-site integration (P5): Trace.armed_edits (SPEC ARMED_PROP) joins the public surface; producer sites for the gradient settle rows
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6e1129926b3a8c4e2c100dc5fb0bfa29f08eb527 (dirty)
+recorded: 2026-11-01T04:17:26.349402+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: gradient-site integration (P5): Trace.armed_edits (SPEC ARMED_PROP) joins the public surface; producer sites for the gradient settle rows
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6e1129926b3a8c4e2c100dc5fb0bfa29f08eb527 (dirty)
+recorded: 2026-11-01T04:17:26.379772+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: gradient-site integration (P5): Trace.armed_edits (SPEC ARMED_PROP) joins the public surface; producer sites for the gradient settle rows
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6e1129926b3a8c4e2c100dc5fb0bfa29f08eb527 (dirty)
+recorded: 2026-11-01T04:17:26.416121+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: runnable package move: module path of RunnableTraceState
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6b118317bf9aa539c6ef8d381d2958c65e356cc2 (dirty)
+recorded: 2026-11-01T12:28:19.531533+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: runnable package move: module path of RunnableTraceState
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6b118317bf9aa539c6ef8d381d2958c65e356cc2 (dirty)
+recorded: 2026-11-01T12:28:19.582542+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: runnable package move: module path of RunnableTraceState
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6b118317bf9aa539c6ef8d381d2958c65e356cc2 (dirty)
+recorded: 2026-11-01T12:28:19.641870+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: runnable package move: module path of RunnableTraceState
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6b118317bf9aa539c6ef8d381d2958c65e356cc2 (dirty)
+recorded: 2026-11-01T12:28:19.702493+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: runnable package move: module path of RunnableTraceState
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6b118317bf9aa539c6ef8d381d2958c65e356cc2 (dirty)
+recorded: 2026-11-01T12:28:19.758575+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: runnable package move: module path of RunnableTraceState
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6b118317bf9aa539c6ef8d381d2958c65e356cc2 (dirty)
+recorded: 2026-11-01T12:28:19.831904+00:00
+reason: v11 saved format: group branch onto the batch D head (lane v11-group)
+source: 33ee54600749ac22c6fb19d7b812cbd05b26db5b (dirty)
+recorded: 2026-11-01T11:30:18.317755+00:00
+reason: v11 saved format: group branch onto the batch D head (lane v11-group)
+source: 33ee54600749ac22c6fb19d7b812cbd05b26db5b (dirty)
+recorded: 2026-11-01T11:30:18.352915+00:00
+reason: v11 saved format: group branch onto the batch D head (lane v11-group)
+source: 33ee54600749ac22c6fb19d7b812cbd05b26db5b (dirty)
+recorded: 2026-11-01T11:30:18.386859+00:00
+reason: v11 saved format: group branch onto the batch D head (lane v11-group)
+source: 33ee54600749ac22c6fb19d7b812cbd05b26db5b (dirty)
+recorded: 2026-11-01T11:30:18.421882+00:00
+reason: v11 saved format: group branch onto the batch D head (lane v11-group)
+source: 33ee54600749ac22c6fb19d7b812cbd05b26db5b (dirty)
+recorded: 2026-11-01T11:30:18.457132+00:00
+reason: v11 saved format: group branch onto the batch D head (lane v11-group)
+source: 33ee54600749ac22c6fb19d7b812cbd05b26db5b (dirty)
+recorded: 2026-11-01T11:30:18.495655+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: the fused attention fast-path hold records a fused_attention_fastpath_held_off capture advisory on attention models (sfm-capture, carried by the frozen-grad stack)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c5378f30b2f4daf196e3214e94795ee67a04ff31 (dirty)
+recorded: 2026-11-02T09:21:43.227877+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: the fused attention fast-path hold records a fused_attention_fastpath_held_off capture advisory on attention models (sfm-capture, carried by the frozen-grad stack)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c5378f30b2f4daf196e3214e94795ee67a04ff31 (dirty)
+recorded: 2026-11-02T09:21:43.467544+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: the fused attention fast-path hold records a fused_attention_fastpath_held_off capture advisory on attention models (sfm-capture, carried by the frozen-grad stack)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c5378f30b2f4daf196e3214e94795ee67a04ff31 (dirty)
+recorded: 2026-11-02T09:21:43.686708+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: the fused attention fast-path hold records a fused_attention_fastpath_held_off capture advisory on attention models (sfm-capture, carried by the frozen-grad stack)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c5378f30b2f4daf196e3214e94795ee67a04ff31 (dirty)
+recorded: 2026-11-02T09:21:43.920178+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: the fused attention fast-path hold records a fused_attention_fastpath_held_off capture advisory on attention models (sfm-capture, carried by the frozen-grad stack)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c5378f30b2f4daf196e3214e94795ee67a04ff31 (dirty)
+recorded: 2026-11-02T09:21:44.156643+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: the fused attention fast-path hold records a fused_attention_fastpath_held_off capture advisory on attention models (sfm-capture, carried by the frozen-grad stack)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c5378f30b2f4daf196e3214e94795ee67a04ff31 (dirty)
+recorded: 2026-11-02T09:21:44.399468+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: public ATen operation recording adds Op.aten_ops, Trace.aten_ops, Trace.has_aten_ops and Trace.aten_gaps
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: bc7f5da8eff1a1bb46b269e64e2e7f19c08de980 (clean)
+recorded: 2026-11-03T01:32:50.168632+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: public ATen operation recording adds Op.aten_ops, Trace.aten_ops, Trace.has_aten_ops and Trace.aten_gaps
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: bc7f5da8eff1a1bb46b269e64e2e7f19c08de980 (clean)
+recorded: 2026-11-03T01:32:50.416988+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: public ATen operation recording adds Op.aten_ops, Trace.aten_ops, Trace.has_aten_ops and Trace.aten_gaps
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: bc7f5da8eff1a1bb46b269e64e2e7f19c08de980 (clean)
+recorded: 2026-11-03T01:32:50.663991+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: public ATen operation recording adds Op.aten_ops, Trace.aten_ops, Trace.has_aten_ops and Trace.aten_gaps
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: bc7f5da8eff1a1bb46b269e64e2e7f19c08de980 (clean)
+recorded: 2026-11-03T01:32:50.912099+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: public ATen operation recording adds Op.aten_ops, Trace.aten_ops, Trace.has_aten_ops and Trace.aten_gaps
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: bc7f5da8eff1a1bb46b269e64e2e7f19c08de980 (clean)
+recorded: 2026-11-03T01:32:51.160226+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: public ATen operation recording adds Op.aten_ops, Trace.aten_ops, Trace.has_aten_ops and Trace.aten_gaps
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: bc7f5da8eff1a1bb46b269e64e2e7f19c08de980 (clean)
+recorded: 2026-11-03T01:32:51.411524+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: every eager capture now records per-op argument templates, so forward_args_template and related fields are populated on default captures
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8b5d4688514d3610db9f0620d266e4db8a30c93a (clean)
+recorded: 2026-11-03T07:27:51.131971+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: every eager capture now records per-op argument templates, so forward_args_template and related fields are populated on default captures
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8b5d4688514d3610db9f0620d266e4db8a30c93a (clean)
+recorded: 2026-11-03T07:27:51.162446+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: every eager capture now records per-op argument templates, so forward_args_template and related fields are populated on default captures
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8b5d4688514d3610db9f0620d266e4db8a30c93a (clean)
+recorded: 2026-11-03T07:27:51.192312+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: every eager capture now records per-op argument templates, so forward_args_template and related fields are populated on default captures
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8b5d4688514d3610db9f0620d266e4db8a30c93a (clean)
+recorded: 2026-11-03T07:27:51.221137+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: every eager capture now records per-op argument templates, so forward_args_template and related fields are populated on default captures
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8b5d4688514d3610db9f0620d266e4db8a30c93a (clean)
+recorded: 2026-11-03T07:27:51.252664+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: every eager capture now records per-op argument templates, so forward_args_template and related fields are populated on default captures
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8b5d4688514d3610db9f0620d266e4db8a30c93a (clean)
+recorded: 2026-11-03T07:27:51.283273+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: default captures record argument templates for in-process replay; a pickled non-replayable op drops them and func_id stays recorded only for replayable or save_args captures
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8c10f7b1775e15fd2066b3cab2cbbfa50ffafc22 (clean)
+recorded: 2026-11-03T08:19:04.253015+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: default captures record argument templates for in-process replay; a pickled non-replayable op drops them and func_id stays recorded only for replayable or save_args captures
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8c10f7b1775e15fd2066b3cab2cbbfa50ffafc22 (clean)
+recorded: 2026-11-03T08:19:04.291254+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: default captures record argument templates for in-process replay; a pickled non-replayable op drops them and func_id stays recorded only for replayable or save_args captures
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8c10f7b1775e15fd2066b3cab2cbbfa50ffafc22 (clean)
+recorded: 2026-11-03T08:19:04.325829+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: default captures record argument templates for in-process replay; a pickled non-replayable op drops them and func_id stays recorded only for replayable or save_args captures
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8c10f7b1775e15fd2066b3cab2cbbfa50ffafc22 (clean)
+recorded: 2026-11-03T08:19:04.366006+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: default captures record argument templates for in-process replay; a pickled non-replayable op drops them and func_id stays recorded only for replayable or save_args captures
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8c10f7b1775e15fd2066b3cab2cbbfa50ffafc22 (clean)
+recorded: 2026-11-03T08:19:04.400848+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: default captures record argument templates for in-process replay; a pickled non-replayable op drops them and func_id stays recorded only for replayable or save_args captures
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 8c10f7b1775e15fd2066b3cab2cbbfa50ffafc22 (clean)
+recorded: 2026-11-03T08:19:04.438910+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-apply-entry: inputs= rename, Recorder capture=/stop_after=, module_filter and layers_to_save removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ad0b5e78b1f577b423e4340b39dabd1d00df6c85 (dirty)
+recorded: 2026-11-03T08:04:42.506191+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-apply-entry: inputs= rename, Recorder capture=/stop_after=, module_filter and layers_to_save removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ad0b5e78b1f577b423e4340b39dabd1d00df6c85 (dirty)
+recorded: 2026-11-03T08:04:42.696100+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-apply-entry: inputs= rename, Recorder capture=/stop_after=, module_filter and layers_to_save removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ad0b5e78b1f577b423e4340b39dabd1d00df6c85 (dirty)
+recorded: 2026-11-03T08:04:42.881090+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-apply-entry: inputs= rename, Recorder capture=/stop_after=, module_filter and layers_to_save removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ad0b5e78b1f577b423e4340b39dabd1d00df6c85 (dirty)
+recorded: 2026-11-03T08:04:43.128864+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-apply-entry: inputs= rename, Recorder capture=/stop_after=, module_filter and layers_to_save removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ad0b5e78b1f577b423e4340b39dabd1d00df6c85 (dirty)
+recorded: 2026-11-03T08:04:43.281816+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-apply-entry: inputs= rename, Recorder capture=/stop_after=, module_filter and layers_to_save removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: ad0b5e78b1f577b423e4340b39dabd1d00df6c85 (dirty)
+recorded: 2026-11-03T08:04:43.458201+00:00
+reason: rulings-gap-2: the provenance fingerprint is the module-address-free graph-shape hash (item 7); recipe artifacts persist (item 4)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c2957ce04117e00a6592b561e537eaa5a9be7c54 (clean)
+recorded: 2026-11-03T15:36:37.887961+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-gap-2: the provenance fingerprint is the module-address-free graph-shape hash (item 7); recipe artifacts persist (item 4)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c2957ce04117e00a6592b561e537eaa5a9be7c54 (clean)
+recorded: 2026-11-03T15:36:38.572078+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-gap-2: the provenance fingerprint is the module-address-free graph-shape hash (item 7); recipe artifacts persist (item 4)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c2957ce04117e00a6592b561e537eaa5a9be7c54 (clean)
+recorded: 2026-11-03T15:36:39.251889+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-gap-2: the provenance fingerprint is the module-address-free graph-shape hash (item 7); recipe artifacts persist (item 4)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c2957ce04117e00a6592b561e537eaa5a9be7c54 (clean)
+recorded: 2026-11-03T15:36:39.949778+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-gap-2: the provenance fingerprint is the module-address-free graph-shape hash (item 7); recipe artifacts persist (item 4)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c2957ce04117e00a6592b561e537eaa5a9be7c54 (clean)
+recorded: 2026-11-03T15:36:40.679426+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-gap-2: the provenance fingerprint is the module-address-free graph-shape hash (item 7); recipe artifacts persist (item 4)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: c2957ce04117e00a6592b561e537eaa5a9be7c54 (clean)
+recorded: 2026-11-03T15:36:41.447129+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-gap-2: train ff816cf44 merged; the provenance fingerprint is the module-address-free graph-shape hash (item 7); recipe artifacts persist (item 4)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: aae626c09b1fefbd352d9f3504030ac67b8ab5c7 (clean)
+recorded: 2026-11-03T16:00:01.744701+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-gap-2: train ff816cf44 merged; the provenance fingerprint is the module-address-free graph-shape hash (item 7); recipe artifacts persist (item 4)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: aae626c09b1fefbd352d9f3504030ac67b8ab5c7 (clean)
+recorded: 2026-11-03T16:00:02.538870+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-gap-2: train ff816cf44 merged; the provenance fingerprint is the module-address-free graph-shape hash (item 7); recipe artifacts persist (item 4)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: aae626c09b1fefbd352d9f3504030ac67b8ab5c7 (clean)
+recorded: 2026-11-03T16:00:03.298960+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-gap-2: train ff816cf44 merged; the provenance fingerprint is the module-address-free graph-shape hash (item 7); recipe artifacts persist (item 4)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: aae626c09b1fefbd352d9f3504030ac67b8ab5c7 (clean)
+recorded: 2026-11-03T16:00:04.027726+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-gap-2: train ff816cf44 merged; the provenance fingerprint is the module-address-free graph-shape hash (item 7); recipe artifacts persist (item 4)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: aae626c09b1fefbd352d9f3504030ac67b8ab5c7 (clean)
+recorded: 2026-11-03T16:00:04.842570+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rulings-gap-2: train ff816cf44 merged; the provenance fingerprint is the module-address-free graph-shape hash (item 7); recipe artifacts persist (item 4)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: aae626c09b1fefbd352d9f3504030ac67b8ab5c7 (clean)
+recorded: 2026-11-03T16:00:05.635621+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: Op.is_in_conditional_body follows arm membership (Layer rule): conditional test ops leave the body, arm ops with an output descendant join it
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 7ee51b024960278d35a949593ed91cde9114b150 (clean)
+recorded: 2026-11-03T23:33:02.814774+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: census-order d539ad65d: Op.gpu_kernels is now declared on its class (OpAtenMixin in torchlens/_data_classes/_op_aten.py, resolving torchlens._kernel_telemetry by name only when read), so it exists in every process; before, it existed only after a save or load had imported the telemetry module, and these goldens were recorded without it. Only change: every op row gains gpu_kernels, one KernelLaunch (attribution_status=unavailable on CPU, never an empty tuple)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f229dff89cf702d8e85761577e3b58de54b85bca (dirty)
+recorded: 2026-11-03T23:40:59.896517+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: census-order d539ad65d: Op.gpu_kernels is now declared on its class (OpAtenMixin in torchlens/_data_classes/_op_aten.py, resolving torchlens._kernel_telemetry by name only when read), so it exists in every process; before, it existed only after a save or load had imported the telemetry module, and these goldens were recorded without it. Only change: every op row gains gpu_kernels, one KernelLaunch (attribution_status=unavailable on CPU, never an empty tuple)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f229dff89cf702d8e85761577e3b58de54b85bca (dirty)
+recorded: 2026-11-03T23:41:00.863612+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: census-order d539ad65d: Op.gpu_kernels is now declared on its class (OpAtenMixin in torchlens/_data_classes/_op_aten.py, resolving torchlens._kernel_telemetry by name only when read), so it exists in every process; before, it existed only after a save or load had imported the telemetry module, and these goldens were recorded without it. Only change: every op row gains gpu_kernels, one KernelLaunch (attribution_status=unavailable on CPU, never an empty tuple)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f229dff89cf702d8e85761577e3b58de54b85bca (dirty)
+recorded: 2026-11-03T23:41:02.075261+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: census-order d539ad65d: Op.gpu_kernels is now declared on its class (OpAtenMixin in torchlens/_data_classes/_op_aten.py, resolving torchlens._kernel_telemetry by name only when read), so it exists in every process; before, it existed only after a save or load had imported the telemetry module, and these goldens were recorded without it. Only change: every op row gains gpu_kernels, one KernelLaunch (attribution_status=unavailable on CPU, never an empty tuple)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f229dff89cf702d8e85761577e3b58de54b85bca (dirty)
+recorded: 2026-11-03T23:41:03.119914+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: census-order d539ad65d: Op.gpu_kernels is now declared on its class (OpAtenMixin in torchlens/_data_classes/_op_aten.py, resolving torchlens._kernel_telemetry by name only when read), so it exists in every process; before, it existed only after a save or load had imported the telemetry module, and these goldens were recorded without it. Only change: every op row gains gpu_kernels, one KernelLaunch (attribution_status=unavailable on CPU, never an empty tuple)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f229dff89cf702d8e85761577e3b58de54b85bca (dirty)
+recorded: 2026-11-03T23:41:04.335355+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: census-order d539ad65d: Op.gpu_kernels is now declared on its class (OpAtenMixin in torchlens/_data_classes/_op_aten.py, resolving torchlens._kernel_telemetry by name only when read), so it exists in every process; before, it existed only after a save or load had imported the telemetry module, and these goldens were recorded without it. Only change: every op row gains gpu_kernels, one KernelLaunch (attribution_status=unavailable on CPU, never an empty tuple)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f229dff89cf702d8e85761577e3b58de54b85bca (dirty)
+recorded: 2026-11-03T23:41:05.434507+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-133 fixq6-g3 (format 3, tlspec 12, docs/maintainers/saved_format_3.md): trace.tlspec_version 11 to 12; Op.edge_substitutions and Op.edge_replacement_stamps settled from null to {} on the live side before every save (writer.settle_live_side); op.is_constant persisted and op.arg_expressions restored (contract.py PLANNED_KEYS empty at tlspec 12); a loaded record finishes construction and keeps its saved _out_dedup_mode, _warned_* flags and module forward templates, each now equal to live; trace._buffer_persistence loads its saved null (format3/restore.py true_up_record, tests/test_format3_round_trip_fidelity.py); gpu_kernels keys from census-order f229dff89 removed after recording (not a format 3 change; routed on wip/mp-census-order)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: e42f1f58f09fcfb38552c13fba9e860a15b72857 (dirty)
+recorded: 2026-11-03T23:45:49.367359+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-133 fixq6-g3 (format 3, tlspec 12, docs/maintainers/saved_format_3.md): trace.tlspec_version 11 to 12; Op.edge_substitutions and Op.edge_replacement_stamps settled from null to {} on the live side before every save (writer.settle_live_side); op.is_constant persisted and op.arg_expressions restored (contract.py PLANNED_KEYS empty at tlspec 12); a loaded record finishes construction and keeps its saved _out_dedup_mode, _warned_* flags and module forward templates, each now equal to live; trace._buffer_persistence loads its saved null (format3/restore.py true_up_record, tests/test_format3_round_trip_fidelity.py); gpu_kernels keys from census-order f229dff89 removed after recording (not a format 3 change; routed on wip/mp-census-order)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: e42f1f58f09fcfb38552c13fba9e860a15b72857 (dirty)
+recorded: 2026-11-03T23:45:50.318743+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-133 fixq6-g3 (format 3, tlspec 12, docs/maintainers/saved_format_3.md): trace.tlspec_version 11 to 12; Op.edge_substitutions and Op.edge_replacement_stamps settled from null to {} on the live side before every save (writer.settle_live_side); op.is_constant persisted and op.arg_expressions restored (contract.py PLANNED_KEYS empty at tlspec 12); a loaded record finishes construction and keeps its saved _out_dedup_mode, _warned_* flags and module forward templates, each now equal to live; trace._buffer_persistence loads its saved null (format3/restore.py true_up_record, tests/test_format3_round_trip_fidelity.py); gpu_kernels keys from census-order f229dff89 removed after recording (not a format 3 change; routed on wip/mp-census-order)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: e42f1f58f09fcfb38552c13fba9e860a15b72857 (dirty)
+recorded: 2026-11-03T23:45:51.228156+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-133 fixq6-g3 (format 3, tlspec 12, docs/maintainers/saved_format_3.md): trace.tlspec_version 11 to 12; Op.edge_substitutions and Op.edge_replacement_stamps settled from null to {} on the live side before every save (writer.settle_live_side); op.is_constant persisted and op.arg_expressions restored (contract.py PLANNED_KEYS empty at tlspec 12); a loaded record finishes construction and keeps its saved _out_dedup_mode, _warned_* flags and module forward templates, each now equal to live; trace._buffer_persistence loads its saved null (format3/restore.py true_up_record, tests/test_format3_round_trip_fidelity.py); gpu_kernels keys from census-order f229dff89 removed after recording (not a format 3 change; routed on wip/mp-census-order)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: e42f1f58f09fcfb38552c13fba9e860a15b72857 (dirty)
+recorded: 2026-11-03T23:45:52.271531+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-133 fixq6-g3 (format 3, tlspec 12, docs/maintainers/saved_format_3.md): trace.tlspec_version 11 to 12; Op.edge_substitutions and Op.edge_replacement_stamps settled from null to {} on the live side before every save (writer.settle_live_side); op.is_constant persisted and op.arg_expressions restored (contract.py PLANNED_KEYS empty at tlspec 12); a loaded record finishes construction and keeps its saved _out_dedup_mode, _warned_* flags and module forward templates, each now equal to live; trace._buffer_persistence loads its saved null (format3/restore.py true_up_record, tests/test_format3_round_trip_fidelity.py); gpu_kernels keys from census-order f229dff89 removed after recording (not a format 3 change; routed on wip/mp-census-order)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: e42f1f58f09fcfb38552c13fba9e860a15b72857 (dirty)
+recorded: 2026-11-03T23:45:53.270608+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-133 fixq6-g3 (format 3, tlspec 12, docs/maintainers/saved_format_3.md): trace.tlspec_version 11 to 12; Op.edge_substitutions and Op.edge_replacement_stamps settled from null to {} on the live side before every save (writer.settle_live_side); op.is_constant persisted and op.arg_expressions restored (contract.py PLANNED_KEYS empty at tlspec 12); a loaded record finishes construction and keeps its saved _out_dedup_mode, _warned_* flags and module forward templates, each now equal to live; trace._buffer_persistence loads its saved null (format3/restore.py true_up_record, tests/test_format3_round_trip_fidelity.py); gpu_kernels keys from census-order f229dff89 removed after recording (not a format 3 change; routed on wip/mp-census-order)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: e42f1f58f09fcfb38552c13fba9e860a15b72857 (dirty)
+recorded: 2026-11-03T23:45:54.188693+00:00
+reason: C-154 walk rulings 3 Nov (names.6 MoE router facts: Op.expert, Module/Trace.routing_table; names.1, names.8, names.10, names.11, names.13 spellings)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6f7dc5e1e64a585f76be5c4f0aa34375fbed4956 (dirty)
+recorded: 2026-11-04T08:36:35.137838+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-154 walk rulings 3 Nov (names.6 MoE router facts: Op.expert, Module/Trace.routing_table; names.1, names.8, names.10, names.11, names.13 spellings)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6f7dc5e1e64a585f76be5c4f0aa34375fbed4956 (dirty)
+recorded: 2026-11-04T08:36:35.162103+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-154 walk rulings 3 Nov (names.6 MoE router facts: Op.expert, Module/Trace.routing_table; names.1, names.8, names.10, names.11, names.13 spellings)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6f7dc5e1e64a585f76be5c4f0aa34375fbed4956 (dirty)
+recorded: 2026-11-04T08:36:35.180665+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-154 walk rulings 3 Nov (names.6 MoE router facts: Op.expert, Module/Trace.routing_table; names.1, names.8, names.10, names.11, names.13 spellings)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6f7dc5e1e64a585f76be5c4f0aa34375fbed4956 (dirty)
+recorded: 2026-11-04T08:36:35.200290+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-154 walk rulings 3 Nov (names.6 MoE router facts: Op.expert, Module/Trace.routing_table; names.1, names.8, names.10, names.11, names.13 spellings)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6f7dc5e1e64a585f76be5c4f0aa34375fbed4956 (dirty)
+recorded: 2026-11-04T08:36:35.222119+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-154 walk rulings 3 Nov (names.6 MoE router facts: Op.expert, Module/Trace.routing_table; names.1, names.8, names.10, names.11, names.13 spellings)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 6f7dc5e1e64a585f76be5c4f0aa34375fbed4956 (dirty)
+recorded: 2026-11-04T08:36:35.243728+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rq1104 re-merge of rulings-gap-5 onto train 759b86af01: Op/Layer concern groups, graph.site_key, gpu_kernels removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 15aacfc89e6972bee957445b0b60eda8d74d09ac (dirty)
+recorded: 2026-11-05T03:09:57.040761+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rq1104 re-merge of rulings-gap-5 onto train 759b86af01: Op/Layer concern groups, graph.site_key, gpu_kernels removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 15aacfc89e6972bee957445b0b60eda8d74d09ac (dirty)
+recorded: 2026-11-05T03:09:57.165559+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rq1104 re-merge of rulings-gap-5 onto train 759b86af01: Op/Layer concern groups, graph.site_key, gpu_kernels removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 15aacfc89e6972bee957445b0b60eda8d74d09ac (dirty)
+recorded: 2026-11-05T03:09:57.278724+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rq1104 re-merge of rulings-gap-5 onto train 759b86af01: Op/Layer concern groups, graph.site_key, gpu_kernels removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 15aacfc89e6972bee957445b0b60eda8d74d09ac (dirty)
+recorded: 2026-11-05T03:09:57.395072+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rq1104 re-merge of rulings-gap-5 onto train 759b86af01: Op/Layer concern groups, graph.site_key, gpu_kernels removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 15aacfc89e6972bee957445b0b60eda8d74d09ac (dirty)
+recorded: 2026-11-05T03:09:57.514017+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rq1104 re-merge of rulings-gap-5 onto train 759b86af01: Op/Layer concern groups, graph.site_key, gpu_kernels removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 15aacfc89e6972bee957445b0b60eda8d74d09ac (dirty)
+recorded: 2026-11-05T03:09:57.635062+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rq1104 re-merge of rulings-gap-5 onto train 7b3e155c70: Op/Layer concern groups, graph.site_key, gpu_kernels removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 4f322f1f9dfe3dbf2d0777da3ba29fdaced21c3f (dirty)
+recorded: 2026-11-05T03:38:30.579743+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rq1104 re-merge of rulings-gap-5 onto train 7b3e155c70: Op/Layer concern groups, graph.site_key, gpu_kernels removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 4f322f1f9dfe3dbf2d0777da3ba29fdaced21c3f (dirty)
+recorded: 2026-11-05T03:38:31.689807+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rq1104 re-merge of rulings-gap-5 onto train 7b3e155c70: Op/Layer concern groups, graph.site_key, gpu_kernels removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 4f322f1f9dfe3dbf2d0777da3ba29fdaced21c3f (dirty)
+recorded: 2026-11-05T03:38:33.087978+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rq1104 re-merge of rulings-gap-5 onto train 7b3e155c70: Op/Layer concern groups, graph.site_key, gpu_kernels removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 4f322f1f9dfe3dbf2d0777da3ba29fdaced21c3f (dirty)
+recorded: 2026-11-05T03:38:34.303439+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rq1104 re-merge of rulings-gap-5 onto train 7b3e155c70: Op/Layer concern groups, graph.site_key, gpu_kernels removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 4f322f1f9dfe3dbf2d0777da3ba29fdaced21c3f (dirty)
+recorded: 2026-11-05T03:38:35.362467+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: rq1104 re-merge of rulings-gap-5 onto train 7b3e155c70: Op/Layer concern groups, graph.site_key, gpu_kernels removal
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 4f322f1f9dfe3dbf2d0777da3ba29fdaced21c3f (dirty)
+recorded: 2026-11-05T03:38:36.521914+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: ValidationStatus defining module moved to torchlens._validation_status (layering lane)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f6ae26bcda99def1c59502a065c1acf765517f7c (dirty)
+recorded: 2026-11-03T21:42:44.264446+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: ValidationStatus defining module moved to torchlens._validation_status (layering lane)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f6ae26bcda99def1c59502a065c1acf765517f7c (dirty)
+recorded: 2026-11-03T21:42:44.326064+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: ValidationStatus defining module moved to torchlens._validation_status (layering lane)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f6ae26bcda99def1c59502a065c1acf765517f7c (dirty)
+recorded: 2026-11-03T21:42:44.397183+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: ValidationStatus defining module moved to torchlens._validation_status (layering lane)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f6ae26bcda99def1c59502a065c1acf765517f7c (dirty)
+recorded: 2026-11-03T21:42:44.466545+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: ValidationStatus defining module moved to torchlens._validation_status (layering lane)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f6ae26bcda99def1c59502a065c1acf765517f7c (dirty)
+recorded: 2026-11-03T21:42:44.533836+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: ValidationStatus defining module moved to torchlens._validation_status (layering lane)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: f6ae26bcda99def1c59502a065c1acf765517f7c (dirty)
+recorded: 2026-11-03T21:42:44.602187+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-263 fixq3: fixq2 bc2a2ef2c9 merged with train 4590c7cde2 (C-249 homes and hoists, C-263 group spellings)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 2268a75b526582c1d616838b2900c89454e96edf (dirty)
+recorded: 2026-11-05T08:37:37.983109+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-263 fixq3: fixq2 bc2a2ef2c9 merged with train 4590c7cde2 (C-249 homes and hoists, C-263 group spellings)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 2268a75b526582c1d616838b2900c89454e96edf (dirty)
+recorded: 2026-11-05T08:37:38.118781+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-263 fixq3: fixq2 bc2a2ef2c9 merged with train 4590c7cde2 (C-249 homes and hoists, C-263 group spellings)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 2268a75b526582c1d616838b2900c89454e96edf (dirty)
+recorded: 2026-11-05T08:37:38.281187+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-263 fixq3: fixq2 bc2a2ef2c9 merged with train 4590c7cde2 (C-249 homes and hoists, C-263 group spellings)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 2268a75b526582c1d616838b2900c89454e96edf (dirty)
+recorded: 2026-11-05T08:37:38.514737+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-263 fixq3: fixq2 bc2a2ef2c9 merged with train 4590c7cde2 (C-249 homes and hoists, C-263 group spellings)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 2268a75b526582c1d616838b2900c89454e96edf (dirty)
+recorded: 2026-11-05T08:37:38.830533+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: C-263 fixq3: fixq2 bc2a2ef2c9 merged with train 4590c7cde2 (C-249 homes and hoists, C-263 group spellings)
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 2268a75b526582c1d616838b2900c89454e96edf (dirty)
+recorded: 2026-11-05T08:37:39.356636+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: callsite_v2: stateless modules group by their calling line inside the innermost stateful module; detector stamp callsite_v1 -> callsite_v2 and per-line layer labels
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 48fd01e1898cf7537a305d6338c628bf4b266c59 (dirty)
+recorded: 2026-11-08T23:39:00.615515+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: callsite_v2: stateless modules group by their calling line inside the innermost stateful module; detector stamp callsite_v1 -> callsite_v2 and per-line layer labels
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 48fd01e1898cf7537a305d6338c628bf4b266c59 (dirty)
+recorded: 2026-11-08T23:39:00.659182+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: callsite_v2: stateless modules group by their calling line inside the innermost stateful module; detector stamp callsite_v1 -> callsite_v2 and per-line layer labels
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 48fd01e1898cf7537a305d6338c628bf4b266c59 (dirty)
+recorded: 2026-11-08T23:39:00.707082+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: callsite_v2: stateless modules group by their calling line inside the innermost stateful module; detector stamp callsite_v1 -> callsite_v2 and per-line layer labels
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 48fd01e1898cf7537a305d6338c628bf4b266c59 (dirty)
+recorded: 2026-11-08T23:39:00.754431+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: callsite_v2: stateless modules group by their calling line inside the innermost stateful module; detector stamp callsite_v1 -> callsite_v2 and per-line layer labels
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 48fd01e1898cf7537a305d6338c628bf4b266c59 (dirty)
+recorded: 2026-11-08T23:39:00.813463+00:00
+---
+generator: tests/surface_oracle
+flag: TORCHLENS_UPDATE_SURFACE_ORACLE=1
+reason: callsite_v2: stateless modules group by their calling line inside the innermost stateful module; detector stamp callsite_v1 -> callsite_v2 and per-line layer labels
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 48fd01e1898cf7537a305d6338c628bf4b266c59 (dirty)
+recorded: 2026-11-08T23:39:00.885768+00:00

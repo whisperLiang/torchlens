@@ -22,8 +22,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-
-pytestmark = pytest.mark.smoke
+from torchlens.errors import ArtifactError
 
 _SENTINEL = "concurrent-artifact-do-not-destroy"
 
@@ -56,8 +55,9 @@ def test_bundle_write_overwrite_false_does_not_destroy_concurrent(
         return real_fsync(path)
 
     monkeypatch.setattr(tlspec_mod, "fsync_tree", racing_fsync)
-    with pytest.raises(FileExistsError):
+    with pytest.raises(ArtifactError) as info:
         tl.Bundle({"m": _trace(1)}).save(target, overwrite=False)
+    assert info.value.fields.get("code") == "bundle_path_exists"
 
     assert (target / "MARKER").read_text(encoding="utf-8") == _SENTINEL
 
@@ -67,16 +67,17 @@ def test_intervention_save_overwrite_false_does_not_destroy_concurrent(
 ) -> None:
     """The intervention-spec writer refuses a concurrently-published target."""
 
-    from torchlens.intervention import save as intervention_save
+    from torchlens.intervention import _save as intervention_save
 
     target = tmp_path / "spec.tlspec"
-    real_fsync = intervention_save._fsync_directory
+    # The staged directory's fsync is the last step before the swap-time check.
+    real_fsync = intervention_save.fsync_tree
 
     def racing_fsync(path: Path) -> None:
         _plant_concurrent(target)
         return real_fsync(path)
 
-    monkeypatch.setattr(intervention_save, "_fsync_directory", racing_fsync)
+    monkeypatch.setattr(intervention_save, "fsync_tree", racing_fsync)
     torch.manual_seed(0)
     trace = tl.trace(
         nn.Linear(4, 4),
@@ -90,12 +91,13 @@ def test_intervention_save_overwrite_false_does_not_destroy_concurrent(
     assert (target / "MARKER").read_text(encoding="utf-8") == _SENTINEL
 
 
+@pytest.mark.smoke
 def test_streaming_finalize_does_not_destroy_concurrent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The streaming finalize refuses a concurrently-published target (no overwrite)."""
 
-    from torchlens._io import TorchLensIOError, streaming as streaming_mod
+    from torchlens._io import ArtifactError, streaming as streaming_mod
 
     target = tmp_path / "stream.tlspec"
     real_fsync = streaming_mod.fsync_tree
@@ -105,7 +107,7 @@ def test_streaming_finalize_does_not_destroy_concurrent(
         return real_fsync(path)
 
     monkeypatch.setattr(streaming_mod, "fsync_tree", racing_fsync)
-    with pytest.raises(TorchLensIOError, match="already exists"):
+    with pytest.raises(ArtifactError, match="already exists"):
         tl.trace(
             nn.Linear(4, 4),
             torch.randn(2, 4),

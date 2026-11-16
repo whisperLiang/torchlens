@@ -1,8 +1,8 @@
 """Round-11 security regression: duplicate container-type resolver RCE.
 
-r10 hardened the container-type resolver in ``torchlens/ir/container.py`` into a strict
+r10 hardened the container-type resolver in ``torchlens/_ir/container.py`` into a strict
 default-deny, never-import gate. But a PARALLEL resolver survived in
-``torchlens/data_classes/op.py``: the public inspection property ``Op.multi_output_type``
+``torchlens/_data_classes/op.py``: the public inspection property ``Op.multi_output_type``
 called its own ``importlib.import_module(container_spec.type_module)`` on the
 attacker-controlled, portable ``ContainerSpec`` strings (they ride through the safe
 unpickler untouched -- it gates GLOBALS, not string field VALUES). Reading that documented
@@ -11,7 +11,7 @@ executing its top-level code = arbitrary-code execution -- even though ``trace.r
 already guarded through the ``ir/container.py`` path.
 
 The fix consolidates BOTH sinks onto the SINGLE default-deny resolver
-``torchlens.ir.container.resolve_container_type``: it never imports a bundle-controlled
+``torchlens._ir.container.resolve_container_type``: it never imports a bundle-controlled
 module name (resolves only from ``sys.modules``), decides admissibility by name against the
 recorded container kind, and returns a graceful qualified-name string only when the type is
 not resolvable without importing. A legit ``torch.max`` / ``torch.topk`` structseq (or
@@ -29,11 +29,12 @@ from typing import Any
 
 import pytest
 import torch
+from _format3_envelope import redigest
 from torch import nn
 
 import torchlens as tl
-from torchlens.ir import container as _ir_container
-from torchlens.ir.container import (
+from torchlens._ir import container as _ir_container
+from torchlens._ir.container import (
     ContainerReconstructionError,
     resolve_container_type,
 )
@@ -61,7 +62,7 @@ def _trace_max_model() -> tl.Trace:
         _MaxModel(),
         torch.randn(2, 4),
         save=tl.func("max"),
-        intervention_ready=True,
+        capture=tl.options.CaptureOptions(replayable=True),
     )
 
 
@@ -72,12 +73,13 @@ def test_op_py_has_no_second_import_module_resolver() -> None:
     against regression by asserting the vulnerable primitive is absent from the module.
     """
 
-    op_src = Path(_ir_container.__file__).parent.parent / "data_classes" / "op.py"
-    text = op_src.read_text()
-    assert "import_module" not in text, (
-        "op.py must route container-type resolution through the single hardened "
-        "ir.container.resolve_container_type resolver, never its own import_module."
-    )
+    data_classes = Path(_ir_container.__file__).parent.parent / "_data_classes"
+    for name in ("op.py", "_op_relations.py"):
+        text = (data_classes / name).read_text()
+        assert "import_module" not in text, (
+            f"{name} must route container-type resolution through the single hardened "
+            "ir.container.resolve_container_type resolver, never its own import_module."
+        )
 
 
 def test_shared_resolver_is_the_ir_container_one() -> None:
@@ -94,7 +96,7 @@ def test_legit_multi_output_type_resolves_live_and_after_load(tmp_path) -> None:
     assert live_type is torch.return_types.max
 
     bundle = os.path.join(str(tmp_path), "m.tlspec")
-    tl.save(trace, bundle, level="runnable")
+    trace.save(bundle, level="runnable")
     loaded = tl.load(bundle)
     loaded_type = _multi_output_op(loaded).multi_output_type
     assert loaded_type is torch.return_types.max
@@ -142,7 +144,7 @@ def test_multi_output_type_denies_loaded_but_inadmissible_type() -> None:
 
 
 def test_end_to_end_tampered_bundle_property_read_is_safe(tmp_path) -> None:
-    """Full flow: tamper the saved bundle's metadata, load, read property -> no code exec."""
+    """Full flow: tamper the saved bundle's record tables, load, read property -> no code exec."""
 
     sentinel = os.path.join(str(tmp_path / "sentinel_dir"), "r11_pwned_sentinel")
     os.makedirs(os.path.dirname(sentinel), exist_ok=True)
@@ -159,12 +161,20 @@ def test_end_to_end_tampered_bundle_property_read_is_safe(tmp_path) -> None:
         trace = _trace_max_model()
         bundle = os.path.join(str(tmp_path / "bundle_dir"), "m.tlspec")
         os.makedirs(os.path.dirname(bundle), exist_ok=True)
-        tl.save(trace, bundle, level="runnable")
+        trace.save(bundle, level="runnable")
 
-        pkl = os.path.join(bundle, "metadata.pkl")
-        raw = open(pkl, "rb").read()
-        raw = raw.replace(b"torch.return_types", evil.encode())
-        open(pkl, "wb").write(raw)
+        # The saved format keeps the multi-output type path in the JSON record
+        # tables: rewrite it in every record file and re-list each in the
+        # manifest so the tampered path reaches the property read.
+        replaced = 0
+        for record in sorted(Path(bundle, "records").glob("*.json")):
+            raw = record.read_bytes()
+            if b"torch.return_types" not in raw:
+                continue
+            replaced += raw.count(b"torch.return_types")
+            record.write_bytes(raw.replace(b"torch.return_types", evil.encode()))
+            redigest(Path(bundle), record.relative_to(bundle).as_posix())
+        assert replaced, "the saved bundle names no torch.return_types type to tamper"
 
         loaded = tl.load(bundle)
         _ = _multi_output_op(loaded).multi_output_type

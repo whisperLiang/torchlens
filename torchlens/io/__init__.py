@@ -3,56 +3,69 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import torch
 
 from .._errors import ArgumentTypeError
-from .._io import JaxPayloadLoadHint, PayloadLoadHints, TorchLensIOError, _json, rehydrate_nested
-from .._io.bundle import cleanup_tmp, load, save
+from .._io import ArtifactError, JaxPayloadLoadHint, PayloadLoadHints, _json
+from .._io.bundle import cleanup_tmp, load as _load
+from .._io.format3 import contract as _format3_contract
+from .._io.format3.reader import (  # noqa: F401  (validate_tlspec's 3.0 door)
+    validate_artifact as _validate_format3_artifact,
+)
+from .._io.sidecar import (
+    AnalysisOnlySidecar,
+    SidecarFamily,
+    attach_sidecar,
+    list_sidecar_families,
+    read_sidecar,
+    register_sidecar_family,
+    unregister_sidecar_family,
+)
 from .._trace_state import TraceState
-from ..intervention.save import save_intervention
-from ..intervention.types import InterventionSpec
-from ..options import suppress_mutate_warnings
+from ..intervention._save import save_intervention
+from ..intervention._types import InterventionSpec
 
 
-def list_logs() -> tuple[Any, ...]:
-    """Return a snapshot of currently live TorchLens traces."""
+def list_traces() -> tuple[Any, ...]:
+    """Return a snapshot of currently live TorchLens traces.
 
-    from .. import user_funcs
+    Examples
+    --------
+    >>> trace = tl.trace(model, x)
+    >>> any(live is trace for live in list_traces())
+    True
+    """
+
+    from .. import _user_funcs as user_funcs
 
     return user_funcs.list_logs()
 
 
 def reset_naming_counter(class_name: str | None = None) -> None:
-    """Reset automatic TorchLens trace naming counters."""
+    """Reset automatic TorchLens trace naming counters.
 
-    from .. import user_funcs
+    Examples
+    --------
+    >>> reset_naming_counter("sequential")
+    >>> tl.trace(model, x).name
+    'sequential_1'
+    >>> reset_naming_counter()
+    """
+
+    from .. import _user_funcs as user_funcs
 
     user_funcs.reset_naming_counter(class_name)
-
-
-def log_model_metadata(*args: Any, **kwargs: Any) -> Any:
-    """Run metadata-only model capture through the public user_funcs surface."""
-
-    from .. import user_funcs
-
-    return user_funcs.log_model_metadata(*args, **kwargs)
-
-
-def get_model_metadata(*args: Any, **kwargs: Any) -> Any:
-    """Deprecated metadata alias routed through the public user_funcs surface."""
-
-    from .. import user_funcs
-
-    return user_funcs.get_model_metadata(*args, **kwargs)
 
 
 def detect_tlspec_format(path: str | Path) -> str:
     """Detect the on-disk TorchLens ``.tlspec`` format.
 
-    Detection is ordered from the newest, most explicit schema markers to older
-    legacy markers. The first matching marker wins.
+    Detection runs from the newest, most explicit markers to the oldest; the first match wins.
 
     Parameters
     ----------
@@ -62,35 +75,74 @@ def detect_tlspec_format(path: str | Path) -> str:
     Returns
     -------
     str
-        One of ``"v2.0_unified"``, ``"v2.16_intervention_with_kind"``,
-        ``"v2.16_intervention"``, ``"v2.16_modellog_portable"``, or
-        ``"unknown"``.
+        One of ``"v3"`` (saved format 3), ``"pre_3"`` (a save written by
+        torchlens 2.37 or earlier), or ``"unknown"`` (no TorchLens save markers).
+
+    Examples
+    --------
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     path = pathlib.Path(tmp) / "trace.tlspec"
+    ...     _ = tl.trace(model, x).save(path)
+    ...     print(detect_tlspec_format(path))
+    v3
     """
 
     tlspec_path = Path(path)
     _reject_symlinked_metadata_path(tlspec_path)
     manifest = _read_json_object_if_present(tlspec_path / "manifest.json")
-    if manifest is not None:
-        has_kind = "kind" in manifest
-        has_tlspec_version = "tlspec_version" in manifest
-        if has_tlspec_version and has_kind:
-            return "v2.0_unified"
-        if has_kind and _read_json_object_if_present(tlspec_path / "spec.json") is not None:
-            # The intervention classification needs the artifact to actually
-            # BE one: a v2.16 intervention bundle carries spec.json. Inferring
-            # it from `kind` alone misrouted a unified manifest whose
-            # tlspec_version was deleted into the intervention loader, which
-            # died on the absent spec.json with an untyped FileNotFoundError
-            # (R73) instead of falling through to the typed manifest refusal.
-            return "v2.16_intervention_with_kind"
+    if manifest is not None and manifest.get("format") == _format3_contract.FORMAT_NAME:
+        return "v3"
+    return "pre_3" if _pre3_observed(tlspec_path) is not None else "unknown"
 
-    spec = _read_json_object_if_present(tlspec_path / "spec.json")
+
+def _pre3_observed(path: Path) -> str | None:
+    """Identify the 2.x marker without opening a pickle or decoding a record.
+
+    Parameters
+    ----------
+    path:
+        Artifact root already checked for symlinks by format detection.
+
+    Returns
+    -------
+    str | None
+        Marker text shared by load and validation, or no recognized 2.x marker.
+    """
+
+    from .._io.format3.validate import legacy_stamp
+
+    _reject_symlinked_metadata_path(path)
+    _reject_symlinked_metadata_path(path / "manifest.json")
+    stamp = legacy_stamp(path / "manifest.json")
+    if stamp is not None:
+        return f"tlspec_version={stamp}"
+    manifest = _read_json_object_if_present(path / "manifest.json")
+    if manifest is not None and all(
+        marker in manifest for marker in ("io_format_version", "n_activation_blobs")
+    ):
+        return (
+            f"io_format_version={manifest['io_format_version']}, "
+            f"n_activation_blobs={manifest['n_activation_blobs']}"
+        )
+    for marker in ("metadata.pkl", "bundle.json"):
+        marker_path = path / marker
+        _reject_symlinked_metadata_path(marker_path)
+        if marker_path.exists():
+            return f"{marker} at the artifact root"
+    spec = _read_json_object_if_present(path / "spec.json")
     if spec is not None and "format_version" in spec:
-        return "v2.16_intervention"
-
-    if manifest is not None and "tlspec_version" in manifest:
-        return "v2.16_modellog_portable"
-    return "unknown"
+        return f"intervention format_version={spec['format_version']}"
+    if manifest is None:
+        return None
+    for marker in ("tlspec_version", "kind", "io_format_version", "n_activation_blobs"):
+        if marker in manifest:
+            return f"{marker}={manifest[marker]}, format={manifest.get('format', '<missing>')!r}"
+    if "format" not in manifest and any(
+        marker in manifest for marker in ("torchlens_version", "tensor_entries")
+    ):
+        return "manifest.json without a format key"
+    return None
 
 
 def _reject_symlinked_metadata_path(path: Path) -> None:
@@ -111,14 +163,14 @@ def _reject_symlinked_metadata_path(path: Path) -> None:
 
     Raises
     ------
-    TorchLensIOError
+    ArtifactError
         If ``path`` is a symlink.
     """
 
     if path.is_symlink():
         # Same front-door cause as the bundle loader's symlink guards, so it
         # carries the same stable code a caller branches on (R65).
-        raise TorchLensIOError(
+        raise ArtifactError(
             f"Refusing symlinked .tlspec format-detection path: {path}. "
             f"Remedy: pass the resolved bundle directory instead, e.g. "
             f"tl.load(str(Path(path).resolve())).",
@@ -142,7 +194,7 @@ def _read_json_object_if_present(path: Path) -> dict[str, Any] | None:
     """
 
     _reject_symlinked_metadata_path(path)
-    if not path.exists():
+    if not path.is_file():  # absent, a directory, or a FIFO/device whose open() would block
         return None
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -174,6 +226,16 @@ def inspect_tlspec(path: str | Path) -> dict[str, Any]:
         If no inspectable ``.tlspec`` metadata file exists.
     ValueError
         If the metadata file is not a JSON object.
+
+    Examples
+    --------
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     path = pathlib.Path(tmp) / "trace.tlspec"
+    ...     _ = tl.trace(model, x).save(path)
+    ...     manifest = inspect_tlspec(path)
+    >>> manifest["kind"]
+    'trace'
     """
 
     tlspec_path = Path(path)
@@ -190,6 +252,43 @@ def inspect_tlspec(path: str | Path) -> dict[str, Any]:
         inspected["_inspected_from"] = "spec.json"
         return inspected
     raise FileNotFoundError(f"No TorchLens .tlspec manifest found at {tlspec_path}.")
+
+
+def read_safetensors(path: str | Path) -> Any:
+    """Read a ``tl.export.safetensors`` Trace export back (DOCUMENTED-UNSTABLE).
+
+    The file holds no pickle, so reading it never executes code. Returns a
+    read-only record: ``header`` (schema, tlspec version, writer-contract
+    digest, TorchLens version, capture-honesty facts), ``trace_fields`` and
+    ``op_fields`` (the exported writer-contract KEEP fields, decoded to their
+    original Python values), ``tensors`` (``op label -> {payload field:
+    tensor}``, bit-equal to the exported payloads), and ``omitted`` (KEEP
+    fields that had no exact JSON encoding).
+
+    Parameters
+    ----------
+    path:
+        File written by :func:`torchlens.export.safetensors`.
+
+    Returns
+    -------
+    Any
+        The read-only export record.
+
+    Examples
+    --------
+    >>> # requires: safetensors
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     path = tl.export.safetensors(tl.trace(model, x), pathlib.Path(tmp) / "t.safetensors")
+    ...     record = read_safetensors(path)
+    >>> record.header["schema"]
+    'tl_trace_safetensors_v1'
+    """
+
+    from .._extraction.trace_safetensors import read_trace_safetensors
+
+    return read_trace_safetensors(path)
 
 
 def load_intervention_spec(
@@ -220,9 +319,21 @@ def load_intervention_spec(
     ------
     TypeError
         If ``path`` does not load as an intervention spec.
+
+    Examples
+    --------
+    >>> import pathlib, tempfile
+    >>> fork = tl.trace(model, x).fork()
+    >>> _ = fork.do(tl.func("relu"), tl.zero_ablate())
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     path = pathlib.Path(tmp) / "edit.tlspec"
+    ...     _ = fork.save_intervention(path, level="portable")
+    ...     spec = load_intervention_spec(path)
+    >>> type(spec).__name__
+    'InterventionSpec'
     """
 
-    loaded = load(
+    loaded = _load(
         path,
         trust_custom_callables=trust_custom_callables,
         allowed_custom_callable_modules=allowed_custom_callable_modules,
@@ -231,28 +342,91 @@ def load_intervention_spec(
         raise ArgumentTypeError(
             f"load_intervention_spec loaded {type(loaded).__name__}, not InterventionSpec",
             code="artifact_kind_mismatch",
-            remedy="pass the path of an intervention .tlspec artifact or use torchlens.io.load",
+            remedy="pass the path of an intervention .tlspec artifact or use torchlens.load",
             argument="path",
             loaded_type=type(loaded).__name__,
         )
     return loaded
 
 
+#: Removed public names: each raises the typed ``facade_redirect`` error naming
+#: its replacement (clean break, no alias).
+_REDIRECTS: dict[str, str] = {
+    "get_model_metadata": "use torchlens.trace(model, x, save='none') -- a metadata-only capture is a trace that saves no payloads",
+    "log_model_metadata": "use torchlens.trace(model, x, save='none') -- a metadata-only capture is a trace that saves no payloads",
+}
+
+
+# Runtime only: under TYPE_CHECKING a module ``__getattr__`` would make every
+# name on this module type-check as Any.
+if not TYPE_CHECKING:
+
+    def __getattr__(name: str) -> Any:
+        """Raise the typed teaching error for a removed torchlens.io name."""
+
+        from .._utils.facade import resolve_facade_attr
+
+        return resolve_facade_attr(
+            owner=__name__, name=name, module_globals=globals(), redirects=_REDIRECTS
+        )
+
+
+def materialize_nested(
+    trace: Any,
+    *,
+    map_location: str | torch.device = "cpu",
+    payload_hints: PayloadLoadHints | Mapping[str, Any] | None = None,
+) -> None:
+    """Replace any remaining nested portable blob refs on a loaded model log.
+
+    This function is a no-op unless the model log was loaded with
+    ``lazy=True, materialize_nested=False``. In the default load mode, nested
+    tensors are already materialized.
+
+    Parameters
+    ----------
+    trace:
+        Model log loaded from a portable bundle.
+    map_location:
+        Target device for the materialized nested tensors.
+    payload_hints:
+        Optional backend payload hints used during materialization.
+
+    Examples
+    --------
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     path = pathlib.Path(tmp) / "trace.tlspec"
+    ...     _ = tl.trace(model, x).save(path)
+    ...     loaded = tl.load(path, lazy=True, materialize_nested=False)
+    ...     materialize_nested(loaded)
+    >>> isinstance(loaded, tl.Trace)
+    True
+    """
+
+    from .._io.rehydrate import rehydrate_nested
+
+    rehydrate_nested(trace, map_location=map_location, payload_hints=payload_hints)
+
+
 __all__ = [
+    "AnalysisOnlySidecar",
+    "SidecarFamily",
     "TraceState",
     "JaxPayloadLoadHint",
     "PayloadLoadHints",
+    "attach_sidecar",
     "cleanup_tmp",
     "detect_tlspec_format",
-    "get_model_metadata",
     "inspect_tlspec",
-    "list_logs",
-    "load",
+    "list_traces",
+    "list_sidecar_families",
     "load_intervention_spec",
-    "log_model_metadata",
-    "rehydrate_nested",
+    "read_safetensors",
+    "read_sidecar",
+    "register_sidecar_family",
+    "materialize_nested",
     "reset_naming_counter",
-    "save",
     "save_intervention",
-    "suppress_mutate_warnings",
+    "unregister_sidecar_family",
 ]

@@ -60,12 +60,15 @@ import torch
 from torch import nn
 
 import torchlens as tl
-import torchlens.backends.torch.ops as tlops
+import torchlens.backends.torch._ops_exhaustive
+import torchlens.backends.torch._ops_predicate_events
+import torchlens.backends.torch._ops_shared_fields
+from torchlens._runnable import PathFaithfulness
+from torchlens._utils._record_group_table import record_member
 from torchlens.errors import PathDivergenceError, RunnablePreflightError
 from torchlens.options import CaptureOptions
-from torchlens.runnable import PathFaithfulness
 
-_CAPTURE = CaptureOptions(intervention_ready=True, capture_container_structure=True, cache=False)
+_CAPTURE = CaptureOptions(replayable=True, capture_container_structure=True, cache=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -134,7 +137,7 @@ def _save_and_run(
         warnings.simplefilter("ignore")
         trace = tl.trace(model, capture_input, capture=_CAPTURE)
         trace.save(path, level="runnable", include_weights=True)
-        return tl.load(path).run(inputs=run_input.clone())
+        return tl.load(path).run_transaction(inputs=run_input.clone())
 
 
 def _assert_layout_launder_closed(model_factory: Any, tmp_path: Path) -> None:
@@ -156,10 +159,11 @@ def _assert_layout_launder_closed(model_factory: Any, tmp_path: Path) -> None:
         return  # fail-closed at save or at divergence: both honest
     max_diff = (result.output - oracle).abs().max().item()
     assert not (
-        result.report.path_faithfulness is PathFaithfulness.VERIFIED and not result.report.poisoned
+        result.report.path_faithfulness is PathFaithfulness.VERIFIED
+        and not result.report.is_poisoned
     ), f"FALSE VERIFIED reopened: layout twin missed oracle 1 by {max_diff}"
     assert result.report.path_faithfulness is not PathFaithfulness.VERIFIED
-    assert result.report.poisoned
+    assert result.report.is_poisoned
 
 
 def test_f1_swap_rebind_layout_read_ceils(tmp_path: Path) -> None:
@@ -184,7 +188,7 @@ def test_f1_pointer_preserving_rebind_stays_verified(tmp_path: Path) -> None:
     )
     oracle = _PointerPreservingRebindLayoutRead().eval()(capture_input.clone())
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
-    assert not result.report.poisoned
+    assert not result.report.is_poisoned
     assert (result.output - oracle).abs().max().item() < 1e-6
 
 
@@ -240,7 +244,7 @@ def test_f3a_dropped_param_edge_fails_validation(
     fail.
     """
 
-    original = tlops._build_param_fields
+    original = torchlens.backends.torch._ops_predicate_events._build_param_fields
     state = {"dropped": 0}
 
     def patched(self: Any, fields_dict: dict, arg_parameters: list) -> dict:
@@ -251,7 +255,12 @@ def test_f3a_dropped_param_edge_fails_validation(
             arg_parameters = []
         return original(self, fields_dict, arg_parameters)
 
-    monkeypatch.setattr(tlops, "_build_param_fields", patched)
+    # The helper lives in _ops_predicate_events; _ops_shared_fields calls a from-import copy.
+    for module in (
+        torchlens.backends.torch._ops_predicate_events,
+        torchlens.backends.torch._ops_shared_fields,
+    ):
+        monkeypatch.setattr(module, "_build_param_fields", patched)
     torch.manual_seed(0)
     result = tl.validate(model_cls().eval(), x, scope="forward")
     assert state["dropped"] > 0, "injection did not drop any parameter -- inconclusive"
@@ -274,7 +283,7 @@ def test_f3a_honest_param_capture_stays_clean(
     torch.manual_seed(0)
     trace = tl.trace(model_cls().eval(), x)
     op = next(o for o in trace.ops if o.func_name == func_name)
-    assert tuple(getattr(op, "dropped_edge_tensor_args", ()) or ()) == ()
+    assert tuple(record_member(op, "dropped_edge_tensor_args", ()) or ()) == ()
     assert op.num_params > 0
     assert bool(tl.validate(model_cls().eval(), x, scope="forward"))
 
@@ -304,7 +313,7 @@ def test_f3c_slot_permutation_fails_validation(monkeypatch: pytest.MonkeyPatch) 
     witness must stamp both slots and fail public validation.
     """
 
-    original = tlops._build_graph_relationship_fields
+    original = torchlens.backends.torch._ops_predicate_events._build_graph_relationship_fields
     state = {"permuted": 0}
 
     def patched(
@@ -328,13 +337,19 @@ def test_f3c_slot_permutation_fails_validation(monkeypatch: pytest.MonkeyPatch) 
                 state["permuted"] += 1
         return result
 
-    monkeypatch.setattr(tlops, "_build_graph_relationship_fields", patched)
+    # Home plus every module that bound the name by from-import.
+    for module in (
+        torchlens.backends.torch._ops_predicate_events,
+        torchlens.backends.torch._ops_shared_fields,
+        torchlens.backends.torch._ops_exhaustive,
+    ):
+        monkeypatch.setattr(module, "_build_graph_relationship_fields", patched)
     torch.manual_seed(0)
     x = torch.randn(4)
     trace = tl.trace(_TwinSub().eval(), x)
     sub_op = next(o for o in trace.ops if o.func_name == "__sub__")
     assert state["permuted"] > 0, "injection did not permute any slot -- inconclusive"
-    assert tuple(sub_op.dropped_edge_tensor_args or ()) != ()
+    assert tuple(sub_op.call.dropped_edge_tensor_args or ()) != ()
     assert not bool(tl.validate(_TwinSub().eval(), x, scope="forward"))
 
 
@@ -345,7 +360,7 @@ def test_f3c_honest_twin_capture_stays_clean() -> None:
     x = torch.randn(4)
     trace = tl.trace(_TwinSub().eval(), x)
     sub_op = next(o for o in trace.ops if o.func_name == "__sub__")
-    assert tuple(getattr(sub_op, "dropped_edge_tensor_args", ()) or ()) == ()
+    assert tuple(record_member(sub_op, "dropped_edge_tensor_args", ()) or ()) == ()
     assert bool(tl.validate(_TwinSub().eval(), x, scope="forward"))
 
 
@@ -373,8 +388,8 @@ def test_f3b_postprocess_edge_drop_fails_invariants(monkeypatch: pytest.MonkeyPa
     the sealed capture-time edge truth and must raise.
     """
 
-    import torchlens.postprocess as pp
-    from torchlens.validation.invariants import (
+    import torchlens._postprocess as pp
+    from torchlens.validation._invariants import (
         MetadataInvariantError,
         check_metadata_invariants,
     )
@@ -387,7 +402,7 @@ def test_f3b_postprocess_edge_drop_fails_invariants(monkeypatch: pytest.MonkeyPa
 
         result = original(self, *args, **kwargs)
         target = next(
-            (o for o in self.layer_list if o.func_name == "__mul__" and len(o.parents) >= 2),
+            (o for o in self._layer_list if o.func_name == "__mul__" and len(o.parents) >= 2),
             None,
         )
         if target is None:
@@ -398,10 +413,10 @@ def test_f3b_postprocess_edge_drop_fails_invariants(monkeypatch: pytest.MonkeyPa
         victim = victims[0]
         target.parents = [p for p in target.parents if p != victim]
         for domain in ("args", "kwargs"):
-            positions = target.parent_arg_positions.get(domain, {})
+            positions = target.call.parent_arg_positions.get(domain, {})
             for key in [k for k, v in positions.items() if v == victim]:
                 del positions[key]
-        producer = next((o for o in self.layer_list if o.layer_label == victim), None)
+        producer = next((o for o in self._layer_list if o.layer_label == victim), None)
         if producer is not None:
             producer.children = [c for c in producer.children if c != target.layer_label]
         state["dropped"] += 1
@@ -410,7 +425,10 @@ def test_f3b_postprocess_edge_drop_fails_invariants(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(pp, "postprocess", patched)
     torch.manual_seed(0)
     trace = tl.trace(
-        _MulTrivialProducer().eval(), torch.randn(4), layers_to_save="all", save_arg_values=True
+        _MulTrivialProducer().eval(),
+        torch.randn(4),
+        capture=tl.options.CaptureOptions(save_args=True),
+        save="all",
     )
     assert state["dropped"] > 0, "injection did not drop any edge -- inconclusive"
     # Two independent tripwires catch this plant: the capture-sealed
@@ -431,11 +449,14 @@ def test_f3b_postprocess_edge_drop_fails_invariants(monkeypatch: pytest.MonkeyPa
 def test_f3b_honest_capture_passes_invariants() -> None:
     """The capture-edge-survival invariant never fires on an honest capture."""
 
-    from torchlens.validation.invariants import check_metadata_invariants
+    from torchlens.validation._invariants import check_metadata_invariants
 
     torch.manual_seed(0)
     trace = tl.trace(
-        _MulTrivialProducer().eval(), torch.randn(4), layers_to_save="all", save_arg_values=True
+        _MulTrivialProducer().eval(),
+        torch.randn(4),
+        capture=tl.options.CaptureOptions(save_args=True),
+        save="all",
     )
     assert check_metadata_invariants(trace)
 
@@ -452,7 +473,12 @@ def _final_twin_sub_trace() -> Any:
     """Return a postprocessed _TwinSub trace plus its final ``__sub__`` op."""
 
     torch.manual_seed(0)
-    trace = tl.trace(_TwinSub().eval(), torch.randn(4), layers_to_save="all", save_arg_values=True)
+    trace = tl.trace(
+        _TwinSub().eval(),
+        torch.randn(4),
+        capture=tl.options.CaptureOptions(save_args=True),
+        save="all",
+    )
     sub_op = next(o for o in trace.ops if o.func_name == "__sub__")
     return trace, sub_op
 
@@ -465,13 +491,13 @@ def test_f1_final_slot_permutation_fails_invariants() -> None:
     to its exact slot.
     """
 
-    from torchlens.validation.invariants import (
+    from torchlens.validation._invariants import (
         MetadataInvariantError,
         check_metadata_invariants,
     )
 
     trace, sub_op = _final_twin_sub_trace()
-    positions = sub_op.parent_arg_positions["args"]
+    positions = sub_op.call.parent_arg_positions["args"]
     slots = sorted(positions, key=str)
     assert len(slots) >= 2, "twin consumer lost its two positional slots -- inconclusive"
     first, second = slots[0], slots[1]
@@ -489,13 +515,13 @@ def test_f1_final_argpos_entry_drop_fails_invariants() -> None:
     metadata silently lost an edge.
     """
 
-    from torchlens.validation.invariants import (
+    from torchlens.validation._invariants import (
         MetadataInvariantError,
         check_metadata_invariants,
     )
 
     trace, sub_op = _final_twin_sub_trace()
-    positions = sub_op.parent_arg_positions["args"]
+    positions = sub_op.call.parent_arg_positions["args"]
     assert len(positions) >= 2, "twin consumer lost its two positional slots -- inconclusive"
     victim_slot = sorted(positions, key=str)[0]
     victim_label = positions[victim_slot]

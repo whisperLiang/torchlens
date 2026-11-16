@@ -43,7 +43,11 @@ _FIRST_CAPTURE_UNDER_INFERENCE = textwrap.dedent(
     # FIRST torchlens capture in this process, under an ambient inference_mode:
     # this triggers the lazy _callable_safety import + pure-view probe.
     with torch.inference_mode():
-        log = tl.trace(M().eval(), torch.randn(2, 4), intervention_ready=True)
+        log = tl.trace(
+            M().eval(),
+            torch.randn(2, 4),
+            capture=tl.options.CaptureOptions(replayable=True),
+        )
     assert len(list(log)) > 0
     print("OK", len(list(log)))
     """
@@ -68,11 +72,10 @@ def test_first_capture_under_inference_mode_succeeds_fresh_process() -> None:
     assert "OK" in completed.stdout
 
 
-@pytest.mark.smoke
 def test_pure_view_classification_identical_inside_and_outside_inference_mode() -> None:
     """The pure-view classification is unchanged whether or not inference mode is active."""
 
-    from torchlens.utils import _callable_safety as cs
+    from torchlens._utils import _callable_safety as cs
 
     outside = frozenset(cs._compute_pure_view_property_names())
     with torch.inference_mode():
@@ -82,11 +85,10 @@ def test_pure_view_classification_identical_inside_and_outside_inference_mode() 
     assert torch.is_grad_enabled()
 
 
-@pytest.mark.smoke
 def test_mode_free_probe_context_neutralizes_inference_and_grad() -> None:
     """Inside the probe context, inference mode is off and grad is on, regardless of ambient."""
 
-    from torchlens.utils._callable_safety import _mode_free_probe_context
+    from torchlens._utils._callable_safety import _mode_free_probe_context
 
     with torch.inference_mode(), torch.no_grad():
         assert not torch.is_grad_enabled()  # ambient: grad OFF

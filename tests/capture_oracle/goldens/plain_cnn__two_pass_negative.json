@@ -21,14 +21,14 @@
           "input_value_after": {
             "dtype": "float32",
             "sha256_chunks": [
-              "3d700c6c",
-              "97ced9f3",
-              "66f48fe6",
-              "db55ba49",
-              "e23d1d61",
-              "3fe90927",
-              "f38cd69c",
-              "3510ffe0"
+              "cae3a3b1",
+              "673d883d",
+              "c842fd39",
+              "56865588",
+              "0ccb751e",
+              "85db0a07",
+              "22664379",
+              "7c3bb372"
             ],
             "shape": [
               1,
@@ -40,14 +40,14 @@
           "input_value_before": {
             "dtype": "float32",
             "sha256_chunks": [
-              "3d700c6c",
-              "97ced9f3",
-              "66f48fe6",
-              "db55ba49",
-              "e23d1d61",
-              "3fe90927",
-              "f38cd69c",
-              "3510ffe0"
+              "cae3a3b1",
+              "673d883d",
+              "c842fd39",
+              "56865588",
+              "0ccb751e",
+              "85db0a07",
+              "22664379",
+              "7c3bb372"
             ],
             "shape": [
               1,
@@ -97,8 +97,8 @@
             "func_name": "conv2d",
             "has_saved_activation": false,
             "intervention_fired": false,
-            "intervention_replaced": false,
             "is_bottom_level": true,
+            "is_edited": false,
             "is_output_parent": false,
             "is_scalar_bool": false,
             "kind": "op",
@@ -127,12 +127,12 @@
             "_edge_uses[0].edge_use": "populated",
             "_edge_uses[0].parent_func_call_id": "unknown",
             "_edge_uses[0].parent_label": "populated",
-            "_edge_uses[0].view_or_copy": "populated",
+            "_edge_uses[0].view_or_copy": "sentinel_unknown",
             "backend_semantics.aliased_output_inputs": "defaulted_empty",
             "backend_semantics.autograd_memory": "populated",
             "backend_semantics.backend_grad_handle": "populated",
-            "backend_semantics.bytes_delta_at_call": "defaulted_zero",
-            "backend_semantics.bytes_peak_at_call": "defaulted_zero",
+            "backend_semantics.bytes_delta_at_call": "unknown",
+            "backend_semantics.bytes_peak_at_call": "unknown",
             "backend_semantics.grad_fn_class_name": "populated",
             "backend_semantics.mutated_input_positions": "defaulted_empty",
             "backend_semantics.num_autograd_tensors": "populated",
@@ -170,9 +170,9 @@
             "input_was_parameter": "defaulted_false",
             "internal_source_ancestors": "defaulted_empty",
             "intervention_fired": "defaulted_false",
-            "intervention_replaced": "defaulted_false",
             "intervention_template_ref": "unknown",
             "is_bottom_level": "populated",
+            "is_edited": "defaulted_false",
             "is_output_parent": "defaulted_false",
             "is_scalar_bool": "defaulted_false",
             "is_transform": "defaulted_false",
@@ -221,8 +221,8 @@
             "params[1].trainable": "populated",
             "parent_arg_positions": "populated",
             "parent_params": "populated",
+            "parents[0]._edge_use": "populated",
             "parents[0].arg_position": "defaulted_zero",
-            "parents[0].edge_use": "populated",
             "parents[0].parent_label_raw": "populated",
             "pass_index": "populated",
             "policy.save_grad": "defaulted_false",
@@ -236,7 +236,14 @@
             "source_trace": "unknown",
             "source_trace_id": "unknown",
             "step_index": "defaulted_zero",
-            "templates.args_template": "unknown",
+            "templates.args_template.args": "populated",
+            "templates.args_template.func_id.dispatch_kind": "populated",
+            "templates.args_template.func_id.import_path": "unknown",
+            "templates.args_template.func_id.namespace": "populated",
+            "templates.args_template.func_id.qualname": "populated",
+            "templates.args_template.func_id.version": "populated",
+            "templates.args_template.kwargs": "defaulted_empty",
+            "templates.args_template.notes": "defaulted_empty",
             "templates.has_saved_args": "defaulted_false",
             "templates.kwargs_template": "unknown",
             "templates.saved_args": "unknown",
@@ -259,8 +266,8 @@
             "func_name": "relu",
             "has_saved_activation": false,
             "intervention_fired": false,
-            "intervention_replaced": false,
             "is_bottom_level": true,
+            "is_edited": false,
             "is_output_parent": true,
             "is_scalar_bool": false,
             "kind": "op",
@@ -289,12 +296,12 @@
             "_edge_uses[0].edge_use": "populated",
             "_edge_uses[0].parent_func_call_id": "populated",
             "_edge_uses[0].parent_label": "populated",
-            "_edge_uses[0].view_or_copy": "populated",
+            "_edge_uses[0].view_or_copy": "sentinel_unknown",
             "backend_semantics.aliased_output_inputs": "defaulted_empty",
             "backend_semantics.autograd_memory": "populated",
             "backend_semantics.backend_grad_handle": "populated",
-            "backend_semantics.bytes_delta_at_call": "defaulted_zero",
-            "backend_semantics.bytes_peak_at_call": "defaulted_zero",
+            "backend_semantics.bytes_delta_at_call": "unknown",
+            "backend_semantics.bytes_peak_at_call": "unknown",
             "backend_semantics.grad_fn_class_name": "populated",
             "backend_semantics.mutated_input_positions": "defaulted_empty",
             "backend_semantics.num_autograd_tensors": "populated",
@@ -332,9 +339,9 @@
             "input_was_parameter": "defaulted_false",
             "internal_source_ancestors": "defaulted_empty",
             "intervention_fired": "defaulted_false",
-            "intervention_replaced": "defaulted_false",
             "intervention_template_ref": "unknown",
             "is_bottom_level": "populated",
+            "is_edited": "defaulted_false",
             "is_output_parent": "populated",
             "is_scalar_bool": "defaulted_false",
             "is_transform": "defaulted_false",
@@ -367,8 +374,8 @@
             "params": "defaulted_empty",
             "parent_arg_positions": "populated",
             "parent_params": "defaulted_empty",
+            "parents[0]._edge_use": "populated",
             "parents[0].arg_position": "defaulted_zero",
-            "parents[0].edge_use": "populated",
             "parents[0].parent_label_raw": "populated",
             "pass_index": "populated",
             "policy.save_grad": "defaulted_false",
@@ -382,7 +389,14 @@
             "source_trace": "unknown",
             "source_trace_id": "unknown",
             "step_index": "defaulted_zero",
-            "templates.args_template": "unknown",
+            "templates.args_template.args[0]": "populated",
+            "templates.args_template.func_id.dispatch_kind": "populated",
+            "templates.args_template.func_id.import_path": "unknown",
+            "templates.args_template.func_id.namespace": "populated",
+            "templates.args_template.func_id.qualname": "populated",
+            "templates.args_template.func_id.version": "populated",
+            "templates.args_template.kwargs": "defaulted_empty",
+            "templates.args_template.notes": "defaulted_empty",
             "templates.has_saved_args": "defaulted_false",
             "templates.kwargs_template": "unknown",
             "templates.saved_args": "unknown",
@@ -492,12 +506,12 @@
       "outcome": {
         "failed": false,
         "halt_frontier": null,
-        "halt_reason": null,
         "halted": false,
         "output_layers": [
           "output_1"
         ],
-        "status": "complete"
+        "status": "complete",
+        "stop_reason": null
       },
       "selected_payloads": [
         {
@@ -506,14 +520,14 @@
           "tensor": {
             "dtype": "float32",
             "sha256_chunks": [
-              "da5a2e73",
-              "668aff4f",
-              "3c2cc6ad",
-              "607fd85e",
-              "65071118",
-              "81aa6a66",
-              "449933a8",
-              "ec09ece4"
+              "e6f9ac31",
+              "f283d96e",
+              "868c9a9c",
+              "c94c36bb",
+              "ee9c0cf2",
+              "7da2267a",
+              "e29e97e3",
+              "cd1cd4b9"
             ],
             "shape": [
               1,
@@ -529,14 +543,14 @@
           "tensor": {
             "dtype": "float32",
             "sha256_chunks": [
-              "da5a2e73",
-              "668aff4f",
-              "3c2cc6ad",
-              "607fd85e",
-              "65071118",
-              "81aa6a66",
-              "449933a8",
-              "ec09ece4"
+              "e6f9ac31",
+              "f283d96e",
+              "868c9a9c",
+              "c94c36bb",
+              "ee9c0cf2",
+              "7da2267a",
+              "e29e97e3",
+              "cd1cd4b9"
             ],
             "shape": [
               1,
@@ -554,20 +568,20 @@
     "schema_version": 1,
     "tracking": {
       "cuda_peak_memory_median_bytes": null,
-      "python_peak_memory_median_bytes": 472384,
+      "python_peak_memory_median_bytes": 522289,
       "sample_count": 3,
       "torch_version": "2.13.0+cpu",
-      "wall_time_median_ms": 36.054936004802585
+      "wall_time_median_ms": 65.52288797684014
     }
   },
   "sha256_chunks": [
-    "425aa0b8",
-    "9decdfb9",
-    "68000709",
-    "d84cc42f",
-    "3843b2a2",
-    "db8e2e50",
-    "32258019",
-    "c642980b"
+    "371d5d04",
+    "2dad0fad",
+    "865ef94a",
+    "f595e6a3",
+    "601a6963",
+    "7153089e",
+    "4bb07594",
+    "c0403107"
   ]
 }

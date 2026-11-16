@@ -1,65 +1,53 @@
 """Predicate context evaluation and layer-entry finalization."""
 
+import contextlib
 import warnings
 from collections.abc import Callable
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
-from ..._state import pause_logging
-from ...capture.predicates import (
+from ..._capture.predicates import (
     _evaluate_keep_op,
 )
-from ...capture.projections import (
+from ..._capture.projections import (
     commit_op,
 )
-from ...capture.session import capture_session_for
-from ...capture.stop import stop_directive_for_trace
-from ...data_classes._nonfinite import record_op_nonfinite
-from ...data_classes.op import (
+from ..._capture.session import capture_session_for
+from ..._capture.stop import stop_directive_for_trace
+from ..._data_classes._nonfinite import record_op_nonfinite
+from ..._data_classes.op import (
     _recursive_safe_copy,
 )
-from ...fastlog.types import (
-    CaptureSpec,
-    RecordContext,
-)
-from ...intervention.selectors import (
-    BaseSelector,
-)
-from ...ir.events import (
+from ..._ir.events import (
     FunctionCallRef,
     ModuleFrame,
 )
-from ...ir.predicate import RetroactiveCaptureDecision
-from ...utils.display import _timed_phase
-from ...utils.tensor_utils import (
+from ..._ir.predicate import RetroactiveCaptureDecision
+from ..._selection.selectors import (
+    BaseSelector,
+)
+from ..._state import pause_logging
+from ..._utils.display import _timed_phase
+from ..._utils.tensor_utils import (
     fp8_widen_for_numeric_ops,
     safe_copy,
 )
+from ...recording._types import (
+    CaptureSpec,
+    RecordContext,
+)
+from ._aten_capture import _note_aten_owner_verdict
 
 if TYPE_CHECKING:
-    from ...data_classes.trace import Trace
+    from ..._data_classes.trace import Trace
 
-if TYPE_CHECKING:
-    from .ops import (
-        ExhaustiveOpDraft,
-        _admit_saved_args_budget,
-        _append_trace_predicate_context,
-        _apply_retroactive_decision,
-        _build_trace_predicate_context,
-        _commit_saved_args_budget,
-        _retain_lookback_candidate,
-        _save_activation_fields,
-        _save_predicate_activation_fields,
-    )
 
 __all__ = (
     "_trace_predicate_context_key",
     "_cache_trace_predicate_context",
     "_pop_trace_predicate_context",
     "_evaluate_trace_save_predicate",
-    "_module_filter_namespace",
     "_make_layer_log_entry",
     "_raise_if_nonfinite_requested",
     "_record_nonfinite_if_requested",
@@ -90,7 +78,7 @@ def _cache_trace_predicate_context(
     contexts[
         _trace_predicate_context_key(
             ctx.raw_label or ctx.label,
-            ctx.pass_index,
+            ctx.pass_number,
             container_path,
         )
     ] = ctx
@@ -107,7 +95,7 @@ def _pop_trace_predicate_context(
         return None
     key = _trace_predicate_context_key(
         str(fields_dict["_label_raw"]),
-        int(fields_dict.get("pass_index", 0)),
+        int(fields_dict.get("pass_number", 0)),
         tuple(fields_dict.get("container_path", ())),
     )
     return contexts.pop(key, None)
@@ -135,7 +123,7 @@ def _evaluate_trace_save_predicate(
         Capture decision when selective predicate save is active, otherwise ``None``.
     """
 
-    options = getattr(trace, "_predicate_save_options", None)
+    options = trace.__dict__.get("_predicate_save_options")
     if options is None:
         return None, None
     if options.keep_op is None:
@@ -165,24 +153,11 @@ def _evaluate_trace_save_predicate(
     decisions[
         (
             raw_label,
-            int(fields_dict.get("pass_index", 0)),
+            int(fields_dict.get("pass_number", 0)),
             tuple(fields_dict.get("container_path", ())),
         )
     ] = spec
     return spec, ctx
-
-
-def _module_filter_namespace(fields_dict: dict[str, Any]) -> SimpleNamespace:
-    """Build the legacy-shaped compatibility namespace ``module_filter`` sees.
-
-    The documented compatibility surface (producer unification 2.6): the
-    filter runs ONLY inside the exhaustive commit pipeline, and the namespace
-    carries the legacy key names WITHOUT ``fire_results`` (popped before the
-    filter today — preserved exactly). The decomposed producer builds this
-    same namespace lazily from its draft.
-    """
-
-    return SimpleNamespace(**fields_dict)
 
 
 def _make_layer_log_entry(
@@ -216,10 +191,6 @@ def _make_layer_log_entry(
 
     fire_results = tuple(fields_dict.pop("fire_results", ()))
 
-    keep_by_predicate = True
-    module_filter = getattr(self, "module_filter", None)
-    if module_filter is not None:
-        keep_by_predicate = bool(module_filter(_module_filter_namespace(fields_dict)))
     layer_nums_to_save = cast(Any, self._layer_nums_to_save)
     raw_index = cast(int, fields_dict["raw_index"])
     predicate_spec, predicate_ctx = _evaluate_trace_save_predicate(self, fields_dict, t)
@@ -232,11 +203,12 @@ def _make_layer_log_entry(
         capture_session.escrow_candidate(
             raw_index,
             t,
-            retain_activation=not (keep_by_predicate and save_this_activation),
+            retain_activation=not save_this_activation,
+            raw_label=fields_dict.get("_label_raw"),
         )
-    if keep_by_predicate and save_this_activation:
+    if save_this_activation:
         if predicate_spec is None or predicate_ctx is None:
-            with _timed_phase(self, "clone_save:activation_fields"):
+            with _timed_phase(self, "clone_save_activation_fields"):
                 _save_activation_fields(
                     self,
                     fields_dict,
@@ -246,7 +218,7 @@ def _make_layer_log_entry(
                     activation_transform,
                 )
         else:
-            with _timed_phase(self, "clone_save:activation_fields"):
+            with _timed_phase(self, "clone_save_activation_fields"):
                 _save_predicate_activation_fields(
                     self,
                     fields_dict,
@@ -255,8 +227,8 @@ def _make_layer_log_entry(
                     predicate_ctx,
                     activation_transform,
                 )
-    if predicate_spec is not None and self.save_arg_values and not fields_dict["has_saved_args"]:
-        # Admit BEFORE the clones allocate (r8 R34, sol 2).
+    if predicate_spec is not None and self._options_save_args and not fields_dict["has_saved_args"]:
+        # Admit BEFORE the clones allocate.
         arg_reservations = _admit_saved_args_budget(self, fields_dict, t_args, t_kwargs)
         fields_dict["has_saved_args"] = True
         fields_dict["saved_args"] = [_recursive_safe_copy(arg) for arg in t_args]
@@ -264,12 +236,12 @@ def _make_layer_log_entry(
             key: _recursive_safe_copy(value) for key, value in t_kwargs.items()
         }
         _commit_saved_args_budget(self, fields_dict, arg_reservations)
-    # r29 F3b: seal this record's capture-time (slot -> producer) truth on the
+    # Seal this record's capture-time (slot -> producer) truth on the
     # Trace, keyed by raw label. The witness (``dropped_edge_tensor_args``) is
     # stamped at CAPTURE, so an edge dropped DOWNSTREAM of it -- anywhere in the
     # 20-step postprocess pipeline or later -- was invisible whenever the
     # payload was trivial. The post-pipeline metadata invariant
-    # (``validation/invariants.py::_check_capture_edges_survive_postprocess``)
+    # (``validation/_invariants.py::_check_capture_edges_survive_postprocess``)
     # reconciles the final graph against this sealed truth. Runtime-only
     # bookkeeping (same class as ``_validation_orphan_candidate_index``): never
     # persisted, absent on loaded traces.
@@ -299,12 +271,49 @@ def _make_layer_log_entry(
             call_ref_box=call_ref_box,
         ),
     )
-    if predicate_ctx is not None and not save_this_activation:
-        _retain_lookback_candidate(self, predicate_ctx, fields_dict, t)
+    _settle_lookback_and_aten_values(self, predicate_ctx, save_this_activation, fields_dict, t)
     _record_nonfinite_if_requested(self, t, new_entry)
+    # Echo narrator slot: exactly once per committed op, after the
+    # commit and the nonfinite recording, BEFORE the raise_on_nan settlement
+    # so the minting op is the last narrated line when the tripwire trips.
+    _emit_op_echo(self, fields_dict, t, predicate_ctx, fire_results)
     _raise_if_nonfinite_requested(self, t, new_entry)
 
     return new_entry
+
+
+def _settle_lookback_and_aten_values(
+    self: "Trace",
+    predicate_ctx: Any,
+    save_this_activation: bool,
+    fields_dict: dict[str, Any],
+    t: torch.Tensor,
+) -> None:
+    """Park an unsaved op as a lookback candidate, then settle its ATen values.
+
+    Args:
+        self: Trace under capture.
+        predicate_ctx: The op's save-predicate context, or ``None`` without a predicate.
+        save_this_activation: Whether the op's output was saved at commit time.
+        fields_dict: The committed op's field values.
+        t: The op's output tensor.
+    """
+
+    deferred = False
+    if predicate_ctx is not None and not save_this_activation:
+        deferred = _retain_lookback_candidate(self, predicate_ctx, fields_dict, t)
+    if self._options_aten_ops == "values":
+        # The ATen values recorded beneath this call follow its save verdict:
+        # kept with a saved output, parked while a lookback candidate may still
+        # be saved retroactively, freed at the next recorded call otherwise.
+
+        _note_aten_owner_verdict(
+            self,
+            fields_dict.get("func_call_id"),
+            "keep"
+            if fields_dict.get("has_saved_activation")
+            else ("deferred" if deferred else "drop"),
+        )
 
 
 def _record_nonfinite_if_requested(self: Any, tensor: torch.Tensor, entry: Any) -> None:
@@ -334,6 +343,33 @@ def _record_nonfinite_if_requested(self: Any, tensor: torch.Tensor, entry: Any) 
     record_op_nonfinite(self, tensor, str(raw_label))
 
 
+def _emit_op_echo(
+    self: "Trace",
+    fields_dict: dict[str, Any],
+    t: torch.Tensor,
+    predicate_ctx: RecordContext | None,
+    fire_results: tuple[Any, ...],
+) -> None:
+    """Feed one committed exhaustive op to the echo narrator, if armed.
+
+    Save-scope and echo-scope are independent: without a save predicate no
+    context exists yet, so echo forces the context build (the named
+    build-context-when-echo change, snoop build row 1). Source tensors also
+    route through this commit path on the exhaustive tier; their narration
+    seam (with the right event kind and io address) lives in ``sources.py``
+    -- exactly once per event. Duck-typed runtime-only session read: the hot
+    path imports nothing and pays one dict read when echo is off.
+    """
+
+    echo_session = self.__dict__.get("_echo_session")
+    if echo_session is None or fields_dict.get("type") in ("input", "buffer", "output"):
+        return
+    echo_ctx = predicate_ctx
+    if echo_ctx is None:
+        echo_ctx = _build_trace_predicate_context(self, fields_dict, t)
+    echo_session.emit_op(echo_ctx, tensor=t, trace=self, intervened=bool(fire_results))
+
+
 def _raise_if_nonfinite_requested(self: Any, tensor: torch.Tensor, entry: Any) -> None:
     """Raise a structured capture error if ``raise_on_nan`` finds a non-finite tensor.
 
@@ -349,10 +385,10 @@ def _raise_if_nonfinite_requested(self: Any, tensor: torch.Tensor, entry: Any) -
     Raises
     ------
     CaptureError
-        If ``self.raise_on_nan`` is enabled and ``tensor`` contains NaN or Inf.
+        If ``self._options_on_nonfinite`` is enabled and ``tensor`` contains NaN or Inf.
     """
 
-    if not getattr(self, "raise_on_nan", False):
+    if not self._options_on_nonfinite:
         return
     try:
         with pause_logging():
@@ -369,11 +405,24 @@ def _raise_if_nonfinite_requested(self: Any, tensor: torch.Tensor, entry: Any) -
             # ``RuntimeError`` subclass -- so without the exact float32 widening this
             # tripwire SILENTLY declined to check every fp8 activation. Widening keeps
             # the verdict identical (see fp8_widen_for_numeric_ops).
-            has_nonfinite = bool(
-                (~torch.isfinite(fp8_widen_for_numeric_ops(safe_copy(tensor, detach_tensor=True))))
-                .any()
-                .item()
-            )
+            #
+            # TWO-STAGE CHECK: stage 1 is
+            # a cheap fused screen -- one reduction, no full-size clone or
+            # inverted mask temporary (the shipped form full-cloned per op;
+            # measured 2.4x-35x dearer on the clean path). IEEE propagation
+            # makes the screen free of false negatives: any NaN/Inf in the
+            # elements yields a nonfinite accumulator (Inf + -Inf = NaN). A
+            # finite-overflow of the float32 accumulator can only ADD a screen
+            # trip, and stage 2 -- the exact localizing check, run only on a
+            # trip -- confirms or clears it, so the VERDICT is byte-identical
+            # to the historical whole-tensor scan.
+            # safe_copy reference mode = detached source, NO clone (both the
+            # bare-detach and the no-grad AST gates hold; the screen's
+            # reductions must not build autograd graph on a grad-bearing out).
+            probe = fp8_widen_for_numeric_ops(safe_copy(tensor, save_mode="reference"))
+            accumulate_dtype = torch.complex64 if probe.is_complex() else torch.float32
+            screen_tripped = not bool(torch.isfinite(probe.sum(dtype=accumulate_dtype)).item())
+            has_nonfinite = screen_tripped and bool((~torch.isfinite(probe)).any().item())
     except (RuntimeError, TypeError) as exc:
         # An unrunnable check is NOT a clean tensor. fp8 was the known real case and
         # is handled above, but any dtype/layout without an ``isfinite`` kernel lands
@@ -401,6 +450,38 @@ def _raise_if_nonfinite_requested(self: Any, tensor: torch.Tensor, entry: Any) -
     shape = tuple(tensor.shape)
     dtype = tensor.dtype
     parents = list(getattr(entry, "parents", []) or [])
+    # Reuse rung, tripwire arm: the tripwire HAS the tensor, so the
+    # crash line carries the full exact nonfinite census even in metadata
+    # mode -- reuse of an already-paid-for scan, never a second hidden one.
+    echo_session = self.__dict__.get("_echo_session")
+    if echo_session is not None:
+        # The tripwire's own raise below must win over any echo failure.
+        with contextlib.suppress(Exception):
+            with pause_logging():
+                widened = fp8_widen_for_numeric_ops(safe_copy(tensor, save_mode="reference"))
+                nan_count = int(torch.isnan(widened).sum().item())
+                if widened.is_complex():
+                    census = f"nan={nan_count} inf={int(torch.isinf(widened).sum().item())}"
+                else:
+                    census = (
+                        f"nan={nan_count} "
+                        f"+inf={int(torch.isposinf(widened).sum().item())} "
+                        f"-inf={int(torch.isneginf(widened).sum().item())}"
+                    )
+            echo_session.note_line(f"!! raise_on_nan tripped at {raw_label}: {census} (exact)")
+    # Stash the offending tensor as the prefix-finalization frontier (observe
+    # item 1): seeding it as an output means the OFFENDER can never be elided
+    # by the orphan flood, so its public label always exists. The abort fires
+    # BEFORE the caller's ordinary ``_tag_tensor_and_track_variations`` stamp,
+    # so stamp the exact committed raw label here (identical to the stamp the
+    # completed path would have written) or output attribution cannot resolve
+    # the frontier. Popped by the finalizer or, on paths that never finalize,
+    # by the failed-capture scrub.
+    if isinstance(raw_label, str) and raw_label:
+        from ..._utils._tensor_label import set_tensor_label
+
+        set_tensor_label(tensor, raw_label)
+    self.__dict__["_nonfinite_frontier_out"] = tensor
     stop_directive_for_trace(self).raise_nonfinite(
         raw_label=raw_label,
         func_name=func_name,
@@ -408,3 +489,22 @@ def _raise_if_nonfinite_requested(self: Any, tensor: torch.Tensor, entry: Any) -
         dtype=dtype,
         parents=parents,
     )
+
+
+# Late imports: the split modules of this package import one another (cycles), so each
+# imports its siblings once every definition above exists.
+from ._ops_activations import (  # noqa: E402
+    _save_activation_fields,
+)
+from ._ops_retention import (  # noqa: E402
+    _admit_saved_args_budget,
+    _append_trace_predicate_context,
+    _apply_retroactive_decision,
+    _build_trace_predicate_context,
+    _commit_saved_args_budget,
+    _retain_lookback_candidate,
+    _save_predicate_activation_fields,
+)
+from .ops import (  # noqa: E402
+    ExhaustiveOpDraft,
+)

@@ -1,6 +1,6 @@
 # Split execution memory and microbatch training
 
-These split APIs are documented-unstable. A prepared runtime keeps its canonical,
+A prepared runtime keeps its canonical,
 batch-polymorphic graph and can replay or train different logical batch sizes without
 retracing. Torch suffix microbatching is an execution option on that same runtime.
 

@@ -21,6 +21,60 @@ import torchlens as tl  # noqa: E402
 pytestmark = pytest.mark.backend_mlx
 
 
+def test_native_running_state_is_checked_and_validation_is_repeatable() -> None:
+    """Native state writes validate, while changing the captured write fails closed."""
+
+    from dataclasses import replace
+
+    from torchlens.backends.mlx import MLXBackend
+
+    class SharedNorm(nn.Module):
+        """Reuse one stateful native operation."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.norm = nn.BatchNorm(4)
+
+        def __call__(self, x: Any) -> Any:
+            return self.norm(self.norm(x))
+
+    trace = tl.trace(SharedNorm(), mx.arange(8).reshape(2, 4).astype(mx.float32), backend="mlx")
+    assert trace.provenance.verified is not False
+    backend = MLXBackend()
+    assert backend.validate_trace(trace)
+    assert backend.validate_trace(trace)
+    captures = list(trace._mlx_op_captures)
+    index = next(index for index, call in enumerate(captures) if call.state_writes)
+    path, value = captures[index].state_writes[0]
+    captures[index] = replace(captures[index], state_writes=((path, value + 1),))
+    trace._mlx_op_captures = captures
+    assert not backend.validate_trace(trace)
+
+
+def test_unwrapped_running_state_replacement_still_reports_a_gap() -> None:
+    """A field written outside a recorded native call never becomes trusted state."""
+
+    from torchlens.errors import TorchLensWarning
+
+    unwrapped_add = mx.add
+
+    class ReplacedState(nn.Module):
+        """Replace a buffer using an operation the capture cannot observe."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.norm = nn.BatchNorm(4)
+
+        def __call__(self, x: Any) -> Any:
+            hidden = self.norm(x)
+            self.norm.running_mean = unwrapped_add(self.norm.running_mean, 1)
+            return self.norm(hidden)
+
+    with pytest.warns(TorchLensWarning, match="intermediate array"):
+        trace = tl.trace(ReplacedState(), mx.ones((2, 4)), backend="mlx")
+    assert not trace.provenance.verified
+
+
 def test_batchnorm_partition_preserves_shared_buffer_call_order() -> None:
     """Allow ordered native writes and refuse reordering two calls sharing their buffers."""
 
@@ -450,9 +504,11 @@ def test_mlx_stateful_tied_updates_across_native_devices(
 ) -> None:
     """Native CPU/GPU placements share state and sum tied gradients on the optimizer owner."""
 
-    try:
-        mx.default_stream(mx.gpu)
-    except ValueError:
+    available = any(
+        callable(probe := getattr(getattr(mx, name, None), "is_available", None)) and probe()
+        for name in ("metal", "cuda")
+    )
+    if not available:
         pytest.skip("Installed MLX runtime has no GPU backend")
     mx.random.seed(43)
     model = _StatefulModel()

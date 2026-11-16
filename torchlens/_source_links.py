@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from html import escape
 from pathlib import Path
 from urllib.parse import quote
@@ -28,8 +29,18 @@ def file_line_text(file_path: str, line_number: int | str | None) -> str:
     return f"{file_path}:{line_number}"
 
 
-def terminal_file_line_link(file_path: str, line_number: int | str | None) -> str:
-    """Return an OSC 8 terminal hyperlink for a source location.
+def terminal_file_line_link(
+    file_path: str,
+    line_number: int | str | None,
+    *,
+    enable_links: bool | None = None,
+) -> str:
+    """Return an OSC 8 terminal hyperlink for a source location, tty-gated.
+
+    The helper checks for a tty (an unconditional OSC 8 escape would put
+    raw ``\\x1b]8;;`` sequences into redirected output and CI logs). Escapes resolve from
+    ``sys.stdout.isatty()`` by default; the non-tty rendering is the plain
+    ``path:line`` text, byte-clean.
 
     Parameters
     ----------
@@ -37,14 +48,22 @@ def terminal_file_line_link(file_path: str, line_number: int | str | None) -> st
         Source file path.
     line_number:
         Source line number, or ``None`` when unknown.
+    enable_links:
+        Override for the tty gate: ``True`` forces the OSC 8 hyperlink,
+        ``False`` forces plain text, ``None`` (default) auto-detects.
 
     Returns
     -------
     str
-        OSC 8 hyperlink whose visible text is ``path:line``.
+        OSC 8 hyperlink whose visible text is ``path:line``, or the plain
+        text when links are gated off.
     """
 
     label = file_line_text(file_path, line_number)
+    if enable_links is None:
+        enable_links = bool(getattr(sys.stdout, "isatty", lambda: False)())
+    if not enable_links:
+        return label
     resolved = Path(file_path).expanduser()
     try:
         resolved = resolved.resolve()

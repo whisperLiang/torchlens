@@ -5,8 +5,11 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from torchlens.split.errors import SplitRequestError
+
 from ... import _state
 from ...backends.paddle._cuda import paddle_cuda_scope
+from .._capture_projection import reorder_container_leaves
 from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
@@ -117,12 +120,14 @@ class _PaddleGeneratedSegmentBase:
                 raise SplitUnsupportedError(
                     f"{node.label!r} has an unlabeled Paddle tensor template leaf.",
                     context=self._context(node, "unlabeled tensor template"),
+                    code=SplitUnsupportedError.code,
                 )
             node_id = self._label_to_id.get(label)
             if node_id is None or node_id not in overlay:
                 raise SplitUnsupportedError(
                     f"{node.label!r} references unavailable Paddle parent {label!r}.",
                     context=self._context(node, "missing parent value"),
+                    code=SplitUnsupportedError.code,
                 )
             return overlay[node_id]
         if isinstance(component, tuple):
@@ -169,6 +174,7 @@ class _PaddleGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} has no captured Paddle args_template.",
                 context=self._context(node, "missing args_template"),
+                code=SplitUnsupportedError.code,
             )
         args = tuple(
             self._resolve_component(component, node, overlay) for component in node.args_template
@@ -187,6 +193,7 @@ class _PaddleGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} source value is unavailable.",
                 context=self._context(node, "missing source value"),
+                code=SplitUnsupportedError.code,
             )
         return value
 
@@ -208,6 +215,7 @@ class _PaddleGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} has no callable target for Paddle split replay.",
                 context=self._context(node, "missing callable target"),
+                code=SplitUnsupportedError.code,
             )
         paddle = _paddle()
         if self.spec.trainable:
@@ -262,6 +270,7 @@ class _PaddleGeneratedSegmentBase:
                 raise SplitUnsupportedError(
                     f"{node.label!r} has no callable target for Paddle split replay.",
                     context=self._context(node, "missing callable target"),
+                    code=SplitUnsupportedError.code,
                 )
             executed_call_ids.add(call_id)
             args, kwargs = self._reconstruct_args(executor, overlay)
@@ -271,6 +280,7 @@ class _PaddleGeneratedSegmentBase:
                 raise SplitUnsupportedError(
                     f"Paddle replay failed at {executor.label!r} ({executor.op_type}): {exc}",
                     context=self._context(executor, "backend replay execution failed"),
+                    code=SplitUnsupportedError.code,
                 ) from exc
             for member in group:
                 value = _slice_output_by_path(output, member.output_container_path)
@@ -300,6 +310,7 @@ class PaddleGeneratedPrefix(_PaddleGeneratedSegmentBase):
                     split_point=self.spec.boundary,
                     reason="input count mismatch",
                 ),
+                code=SplitUnsupportedError.code,
             )
         overlay = dict(zip(self.graph.input_node_ids, input_leaves))
         if self.graph.shape_program is not None:
@@ -396,7 +407,7 @@ class PaddleGeneratedSuffix(_PaddleGeneratedSegmentBase):
             None,
         )
         if spec is not None:
-            from ...ir.container import rebuild_container_from_spec, reorder_container_leaves
+            from ..._ir.container import rebuild_container_from_spec
 
             addressed = [
                 (path, self._output_leaf(node, overlay))
@@ -463,7 +474,10 @@ class PaddleSplitAdapter(SplitPolicyMixin):
             return value
         current = int(value.shape[axis])
         if current <= 0:
-            raise ValueError("Cannot resize an empty batch axis.")
+            raise SplitRequestError(
+                "Cannot resize an empty batch axis.",
+                code=SplitRequestError.code,
+            )
         paddle = _paddle()
         with paddle_cuda_scope(value):
             indexes = paddle.to_tensor(
@@ -563,4 +577,4 @@ class PaddleSplitAdapter(SplitPolicyMixin):
         return SegmentBundle(prefix=prefix, training_prefix=training_prefix, suffix=suffix)
 
 
-__all__ = ["PaddleGeneratedPrefix", "PaddleGeneratedSuffix", "PaddleSplitAdapter"]
+__all__ = ("PaddleGeneratedPrefix", "PaddleGeneratedSuffix", "PaddleSplitAdapter")

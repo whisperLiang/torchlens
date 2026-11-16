@@ -1,0 +1,241 @@
+"""One-backward reads: the by= door and composition rows (F04 item 5, D9).
+
+"Select the 50 most important sites" is one line: the three rank producers
+accept a single-target ReadTable, rank at the table's declared grain, and
+carry full Selection provenance. The closed loop (read -> select ->
+intervene -> re-read) and the algebra-composition rows from M(reads)
+section 6 ride here too.
+"""
+
+from __future__ import annotations
+
+import pytest
+import torch
+import torch.nn as nn
+
+import torchlens as tl
+from torchlens._utils._torch_compat import get_gradient_edge_support
+from torchlens.attribution import _onebackward as ob
+from torchlens.errors import SelectionError, TraceCleanedUpError
+
+_requires_gradient_edge = pytest.mark.skipif(
+    not get_gradient_edge_support(),
+    reason="one-backward reads require torch.autograd.graph.GradientEdge (2.4+)",
+)
+
+
+def _trace(**kwargs) -> tl.Trace:
+    """Trace the toy MLP."""
+
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(4, 8), nn.GELU(), nn.Linear(8, 3))
+    return tl.trace(model, torch.randn(2, 4), **kwargs)
+
+
+def _site_table(trace: tl.Trace) -> ob.ReadTable:
+    """A site-grain magnitude table over the implicit population."""
+
+    return ob.read(
+        trace,
+        target=ob.seed("output_1", index=(0, 0)),
+        method="grad",
+        reduce="sum_of_abs",
+    )
+
+
+class TestSiteGrainRanking:
+    """Site-grain: k counts SITES; a win selects the whole existing mask."""
+
+    # Kept by the shrink-r4 coverage proof: sole branch coverage of _selection/values.py.
+    @_requires_gradient_edge
+    def test_top_fraction_and_largest_false(self) -> None:
+        trace = _trace()
+        table = _site_table(trace)
+        half = trace[tl.top_fraction(fraction=0.5, by=table)]
+        assert len([entry for entry in half if entry.num_selected]) == 2
+        bottom = trace[tl.top_k(k=1, by=table, largest=False)]
+        lowest = min((row.score, row.address) for row in table.rows())
+        (winner,) = [entry for entry in bottom if entry.num_selected]
+        assert winner.key == lowest[1]
+
+    # Kept by the shrink-r4 coverage proof: sole branch coverage of _selection/values.py.
+    @_requires_gradient_edge
+    def test_threshold_site_grain(self) -> None:
+        trace = _trace()
+        table = _site_table(trace)
+        cut = sorted(row.score for row in table.rows())[1]
+        resolved = trace[tl.threshold(above=cut, by=table)]
+        assert {entry.key for entry in resolved} == {
+            row.address for row in table.rows() if row.score > cut
+        }
+
+    # Kept by the shrink-r4 coverage proof: sole branch coverage of _selection/values.py.
+    @_requires_gradient_edge
+    def test_k_over_population_refuses(self) -> None:
+        trace = _trace()
+        table = _site_table(trace)
+        with pytest.raises(SelectionError) as excinfo:
+            trace[tl.top_k(k=99, by=table)]
+        assert excinfo.value.fields["reason"] == "population_too_small"
+
+
+class TestElementGrainRanking:
+    """Element-grain: dense values rank globally; k counts elements."""
+
+    # Kept by the shrink-r4 coverage proof: sole branch coverage of _selection/values.py.
+    @_requires_gradient_edge
+    def test_top_k_elements(self) -> None:
+        trace = _trace()
+        table = ob.read(trace, target=ob.seed("output_1", index=(0, 0)), method="grad", reduce=None)
+        resolved = trace[tl.top_k(k=3, by=table)]
+        assert sum(entry.num_selected for entry in resolved) == 3
+
+    # Kept by the shrink-r4 coverage proof: sole branch coverage of _selection/values.py.
+    @_requires_gradient_edge
+    def test_element_threshold(self) -> None:
+        trace = _trace()
+        table = ob.read(trace, target=ob.seed("output_1", index=(0, 0)), method="grad", reduce=None)
+        resolved = trace[tl.threshold(above=0.0, by=table)]
+        expected = sum(int((row.value > 0).sum()) for row in table.rows())
+        assert sum(entry.num_selected for entry in resolved) == expected
+
+
+class TestByDoorContract:
+    """D9 at the door: foreign/stale/multi-target/coverage refusals."""
+
+    # Kept by the shrink-r4 coverage proof: sole branch coverage of _selection/values.py.
+    @_requires_gradient_edge
+    def test_foreign_table_refuses(self) -> None:
+        trace_a, trace_b = _trace(), _trace()
+        table = _site_table(trace_a)
+        with pytest.raises(SelectionError) as excinfo:
+            trace_b[tl.top_k(k=1, by=table)]
+        assert excinfo.value.fields["code"] == "by_score_invalid"
+        assert excinfo.value.fields["reason"] == "by_table_foreign"
+
+    # Kept by the shrink-r4 coverage proof: sole branch coverage of _data_classes/trace.py.
+    @_requires_gradient_edge
+    def test_stale_table_refuses_after_cleanup(self) -> None:
+        trace = _trace()
+        table = _site_table(trace)
+        selection = tl.top_k(k=1, by=table)
+        trace.cleanup()
+        # The resolution door is trace[selector]; a husked trace refuses at the door.
+        with pytest.raises(TraceCleanedUpError):
+            trace[selection]
+
+    # Kept by the shrink-r4 coverage proof: sole branch coverage of _selection/values.py, attribution/_onebackward/_table.py.
+    @_requires_gradient_edge
+    def test_multi_target_requires_explicit_fold(self) -> None:
+        trace = _trace()
+        table = ob.read(
+            trace,
+            target=[
+                ob.seed("output_1", index=(0, 0)),
+                ob.seed("output_1", index=(0, 1)),
+            ],
+            method="grad",
+            reduce="sum_of_abs",
+        )
+        with pytest.raises(SelectionError) as excinfo:
+            trace[tl.top_k(k=1, by=table)]
+        assert excinfo.value.fields["reason"] == "by_table_multi_target"
+        narrowed = trace[tl.top_k(k=1, by=table.target("t0"))]
+        assert any(entry.num_selected for entry in narrowed)
+        folded_table = table.aggregate_targets(lambda scores: max(scores), name="max")
+        folded = trace[tl.top_k(k=1, by=folded_table)]
+        assert any(entry.num_selected for entry in folded)
+
+    # Kept by the shrink-r4 coverage proof: sole branch coverage of _selection/values.py.
+    @_requires_gradient_edge
+    def test_explicit_population_not_covered(self) -> None:
+        trace = _trace()
+        table = ob.read(
+            trace,
+            target=ob.seed("gelu_1_2", index=(0, 0)),
+            method="grad",
+            reduce="sum",
+            within=tl.units("linear_1_1", [(0, 0)]) | tl.units("linear_2_3", [(0, 0)]),
+        )
+        # linear_2_3 is not upstream of the target: its row is 'unreachable',
+        # so an explicit by-population naming it refuses.
+        with pytest.raises(SelectionError) as excinfo:
+            trace[tl.top_k(k=1, by=table, within="linear_2_3")]
+        assert excinfo.value.fields["code"] == "population_not_covered"
+
+    # Kept by the shrink-r4 coverage proof: sole branch coverage of _selection/values.py.
+    def test_string_by_still_works(self) -> None:
+        """The existing by='value'/'abs' door is untouched."""
+
+        trace = _trace()
+        resolved = trace[tl.top_k(k=2, by="abs")]
+        assert sum(entry.num_selected for entry in resolved) == 2
+        with pytest.raises(ValueError):
+            tl.top_k(k=1, by="magnitude")
+
+
+class TestCompositionRows:
+    """M(reads) section 6 composition rows at toy scale."""
+
+    # Kept by the shrink-r4 coverage proof: sole branch coverage of _selection/mask.py, _selection/provenance.py and more.
+    @_requires_gradient_edge
+    def test_table_selection_composes_with_algebra(self) -> None:
+        trace = _trace()
+        table = _site_table(trace)
+        combined = tl.top_k(k=2, by=table) | tl.units("linear_1_1", [(0, 0)])
+        resolved = trace[combined]
+        assert len(list(resolved)) >= 2
+        narrowed = tl.top_k(k=2, by=table) - tl.units("gelu_1_2", [(0, 0)])
+        assert trace[narrowed] is not None
+
+    # Kept by the shrink-r4 coverage proof: a sole campaign mutation kill.
+    @_requires_gradient_edge
+    def test_closed_loop_read_select_intervene_reread(self) -> None:
+        """read -> top-k -> zero_ablate -> re-score: the R16 flagship loop."""
+
+        trace = _trace(capture=tl.options.CaptureOptions(replayable=True))
+        table = _site_table(trace)
+        # The table binds to the BASE trace, so the circuit resolves there;
+        # align_to is the one explicit door onto the fork (L6 stage 4a).
+        circuit = trace[tl.top_k(k=1, by=table)]
+        fork = trace.fork()
+        fork.do(circuit.align_to(fork), tl.zero_ablate())
+        rescored = ob.read(
+            fork,
+            target=ob.seed("output_1", index=(0, 0)),
+            method="grad",
+            reduce="sum_of_abs",
+        )
+        assert len(rescored) > 0
+        assert rescored.trace is fork
+
+    # Kept by the shrink-r4 coverage proof: sole branch coverage of _data_classes/module.py, attribution/_onebackward/_facet_bridge.py.
+    @_requires_gradient_edge
+    def test_multipass_addresses_rank_distinctly(self) -> None:
+        """Recurrence row: pass-qualified addresses are distinct table rows."""
+
+        torch.manual_seed(0)
+
+        class Reuser(nn.Module):
+            """Applies one linear twice (multi-pass layer)."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.shared = nn.Linear(4, 4)
+
+            def forward(self, value: torch.Tensor) -> torch.Tensor:
+                return self.shared(torch.tanh(self.shared(value)))
+
+        trace = tl.trace(Reuser(), torch.randn(2, 4))
+        index = ob.read_edge_index(trace)
+        multi_pass = [edge.label for edge in index.edges.values() if edge.label.endswith(":2")]
+        assert multi_pass, "the reused linear must produce a second pass"
+        table = ob.read(
+            trace,
+            target=ob.seed("output_1", index=(0, 0)),
+            method="grad",
+            reduce="sum_of_abs",
+        )
+        addresses = {row.address for row in table.rows()}
+        passes = {address[1] for address in addresses}
+        assert {1, 2} <= passes, "pass-qualified addresses must stay distinct rows"

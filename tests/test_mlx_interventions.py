@@ -12,18 +12,20 @@ an intervened value as captured-native.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 
-pytestmark = [pytest.mark.backend_mlx, pytest.mark.smoke]
+pytestmark = [pytest.mark.backend_mlx, pytest.mark.rare]
 
 mlx = pytest.importorskip("mlx")
 import mlx.core as mx  # noqa: E402
 import mlx.nn as nn  # noqa: E402
 
 import torchlens as tl  # noqa: E402
-from torchlens.backends import BackendUnsupportedError  # noqa: E402
 from torchlens.backends.mlx import MLXBackend  # noqa: E402
+from torchlens.errors import BackendUnsupportedError, InvalidArgumentError  # noqa: E402
 
 
 class _TwoLayerMLP(nn.Module):
@@ -58,6 +60,144 @@ def _input() -> mx.array:
     return mx.ones((1, 4))
 
 
+def test_mlx_module_exit_changes_output_and_validates() -> None:
+    """A module site edits its output before the downstream layer consumes it."""
+
+    model = _TwoLayerMLP()
+    trace = tl.trace(
+        model, _input(), backend="mlx", intervene=tl.when(tl.module("l1"), tl.zero_ablate())
+    )
+    producer = next(op for op in trace._layer_list if op.type == "linear")
+    assert producer.is_edited
+    assert producer.edits[0]["backend"] == "mlx"
+    assert producer.edits[0]["site_label"] == producer._label_raw
+    assert np.allclose(np.asarray(trace._layer_list[-1].out), np.asarray(model.l2.bias))
+    assert MLXBackend().validate_trace(trace).passed
+
+
+@pytest.mark.parametrize("dtype", [mx.bool_, mx.int32, mx.float32])
+def test_mlx_module_identity_output_preserves_dtype(dtype: Any) -> None:
+    """The boundary copy preserves boolean and numeric identity outputs."""
+
+    class Block(nn.Module):
+        def __call__(self, x: Any) -> Any:
+            return x
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.block = Block()
+
+        def __call__(self, x: Any) -> Any:
+            return self.block(x)
+
+    trace = tl.trace(
+        Model(),
+        mx.array([1, 0], dtype=dtype),
+        backend="mlx",
+        intervene=tl.when(tl.module("block"), tl.zero_ablate()),
+    )
+    out = trace._layer_list[-1].out
+    assert out.dtype == dtype
+    assert np.array_equal(np.asarray(out), np.zeros(2))
+    assert MLXBackend().validate_trace(trace).passed
+
+
+@pytest.mark.parametrize("second, factor", [("l1", 1.0), ("l2", 0.5)])
+def test_mlx_module_union_fires_once_per_call(second: str, factor: float) -> None:
+    """An overlapping union applies a non-idempotent action only once."""
+
+    model = _TwoLayerMLP()
+    trace = tl.trace(
+        model,
+        _input(),
+        backend="mlx",
+        intervene=tl.when(tl.module("l1") | tl.module(second), tl.scale(0.5)),
+    )
+    expected = np.full((1, 2), (2.1 * 0.5 * 3 * 0.25 - 0.2) * factor)
+    assert np.allclose(np.asarray(trace._layer_list[-1].out), expected)
+    assert MLXBackend().validate_trace(trace).passed
+
+
+@pytest.mark.parametrize("address, expected", [("block", 9.0), ("block:2", 13.5)])
+def test_mlx_module_exit_nested_leaves_aliases_and_repeated_calls(
+    address: str, expected: float
+) -> None:
+    """Edit boundary leaves, preserving earlier consumers and call-qualified sites."""
+
+    class Leaves(nn.Module):
+        def __call__(self, x: Any) -> Any:
+            first = x + 1
+            return {"main": first, "alias": first, "other": [first * 2, x], "tag": "kept"}
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.block = Leaves()
+
+        def __call__(self, x: Any) -> Any:
+            a, b = self.block(x), self.block(x)
+            assert a["tag"] == b["tag"] == "kept"
+            return (
+                a["main"] + a["alias"] + sum(a["other"]) + b["main"] + b["alias"] + sum(b["other"])
+            )
+
+    trace = tl.trace(
+        Model(), _input(), backend="mlx", intervene=tl.when(tl.module(address), tl.scale(0.5))
+    )
+    assert np.allclose(np.asarray(trace._layer_list[-1].out), expected)
+    assert MLXBackend().validate_trace(trace).passed
+
+
+@pytest.mark.parametrize("root", [False, True])
+def test_mlx_module_exit_inside_opaque_parent_validates(root: bool) -> None:
+    """A selected attention projection remains editable through its parent."""
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attn = nn.MultiHeadAttention(4, 2, bias=False)
+            for name in ("query_proj", "key_proj", "value_proj", "out_proj"):
+                getattr(self.attn, name).weight = mx.full((4, 4), 0.25)
+
+        def __call__(self, x: Any) -> Any:
+            return self.attn(x, x, x)
+
+    x = mx.arange(8).reshape(1, 2, 4).astype(mx.float32) / 8
+    model = Model()
+    expected = np.asarray(model(x)) * 0.5
+    address = "value_proj" if root else "attn.value_proj"
+    trace = tl.trace(
+        model.attn if root else model,
+        (x, x, x) if root else x,
+        backend="mlx",
+        intervene=tl.when(tl.module(address), tl.scale(0.5)),
+    )
+    assert np.allclose(np.asarray(trace._layer_list[-1].out), expected)
+    assert MLXBackend().validate_trace(trace).passed
+
+
+@pytest.mark.parametrize("kind", ["and", "or", "not"])
+def test_mlx_mixed_module_selector_refuses_before_forward(kind: str) -> None:
+    """Unsupported module trees fail preflight rather than silently matching nothing."""
+
+    calls = []
+    module = tl.module("l1")
+    selector = {
+        "and": module & tl.func("linear"),
+        "or": module | tl.func("linear"),
+        "not": ~module,
+    }[kind]
+
+    def forward(x: Any) -> Any:
+        calls.append(True)
+        return x + 1
+
+    with pytest.raises(BackendUnsupportedError, match="(?i)mlx"):
+        tl.trace(forward, _input(), backend="mlx", intervene=tl.when(selector, tl.zero_ablate()))
+    assert calls == []
+
+
 def test_mlx_zero_ablate_substitutes_downstream_and_validates() -> None:
     """Ablating the relu changes downstream values; validation still passes."""
 
@@ -71,24 +211,22 @@ def test_mlx_zero_ablate_substitutes_downstream_and_validates() -> None:
         intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
     )
 
-    relu_op = next(op for op in ablated.layer_list if op.layer_type == "relu")
-    assert relu_op.intervention_replaced is True
+    relu_op = next(op for op in ablated._layer_list if op.type == "relu")
+    assert relu_op.is_edited is True
     assert np.allclose(np.asarray(relu_op.out), 0.0)
 
     # The substituted zeros flowed into the downstream linear: its output is
     # the bias alone and differs from the baseline forward.
-    final_ablated = np.asarray(ablated.layer_list[-1].out)
-    final_baseline = np.asarray(baseline.layer_list[-1].out)
+    final_ablated = np.asarray(ablated._layer_list[-1].out)
+    final_baseline = np.asarray(baseline._layer_list[-1].out)
     bias = np.asarray(model.l2.bias)
     assert np.allclose(final_ablated, bias, atol=1e-5)
     assert not np.allclose(final_ablated, final_baseline)
 
-    non_intervened = [
-        op for op in ablated.layer_list if op.layer_type != "relu" and not op.is_input
-    ]
-    assert all(not op.intervention_replaced for op in non_intervened)
+    non_intervened = [op for op in ablated._layer_list if op.type != "relu" and not op.is_input]
+    assert all(not op.is_edited for op in non_intervened)
 
-    assert MLXBackend().validate_trace(ablated) is True
+    assert MLXBackend().validate_trace(ablated).passed is True
 
 
 def test_mlx_scale_and_callable_transform_apply() -> None:
@@ -97,40 +235,46 @@ def test_mlx_scale_and_callable_transform_apply() -> None:
     model = _TwoLayerMLP()
     x = _input()
     baseline = tl.trace(model, x, backend="mlx")
-    relu_baseline = np.asarray(
-        next(op for op in baseline.layer_list if op.layer_type == "relu").out
-    )
+    relu_baseline = np.asarray(next(op for op in baseline._layer_list if op.type == "relu").out)
 
     scaled = tl.trace(model, x, backend="mlx", intervene=tl.when(tl.func("relu"), tl.scale(0.5)))
-    relu_scaled = np.asarray(next(op for op in scaled.layer_list if op.layer_type == "relu").out)
+    relu_scaled = np.asarray(next(op for op in scaled._layer_list if op.type == "relu").out)
     assert np.allclose(relu_scaled, relu_baseline * 0.5, atol=1e-5)
-    assert MLXBackend().validate_trace(scaled) is True
+    assert MLXBackend().validate_trace(scaled).passed is True
 
-    def _negate(out: mx.array, *, hook: object) -> mx.array:
+    def _negate(out: mx.array, *, ctx: object) -> mx.array:
         """Return the negated activation."""
 
-        del hook
+        del ctx
         return out * -1.0
 
     negated = tl.trace(model, x, backend="mlx", intervene=tl.when(tl.func("relu"), _negate))
-    relu_negated = np.asarray(next(op for op in negated.layer_list if op.layer_type == "relu").out)
+    relu_negated = np.asarray(next(op for op in negated._layer_list if op.type == "relu").out)
     assert np.allclose(relu_negated, -relu_baseline, atol=1e-5)
-    assert MLXBackend().validate_trace(negated) is True
+    assert MLXBackend().validate_trace(negated).passed is True
 
 
 def test_mlx_halt_returns_partial_trace_at_frontier() -> None:
     """halt= stops the forward at the matched op; the partial trace ends there."""
 
     model = _TwoLayerMLP()
-    trace = tl.trace(model, _input(), backend="mlx", halt=tl.func("relu"))
+    trace = tl.trace(model, _input(), backend="mlx", stop_after=tl.func("relu"))
 
-    assert trace.halted is True
-    assert str(trace.halt_reason).startswith("relu")
-    labels = [op._label_raw for op in trace.layer_list]
+    assert trace.is_stopped is True
+    assert str(trace.stop_reason).startswith("relu")
+    labels = [op._label_raw for op in trace._layer_list]
     # Save-then-halt: the relu frontier is captured; the second linear is not.
     assert any(label.startswith("relu") for label in labels)
     assert sum(label.startswith("linear") for label in labels) == 1
-    assert MLXBackend().validate_trace(trace) is True
+    assert MLXBackend().validate_trace(trace).passed is True
+
+
+def test_mlx_unfired_stop_after_refuses_like_torch() -> None:
+    """A stop_after selector that never fires refuses typed, with torch's code."""
+
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        tl.trace(_TwoLayerMLP(), _input(), backend="mlx", stop_after=tl.func("nosuchopzzz"))
+    assert excinfo.value.fields["code"] == "stop_after_never_fired"
 
 
 def test_mlx_intervened_record_stripped_of_declaration_fails_validation() -> None:
@@ -148,7 +292,7 @@ def test_mlx_intervened_record_stripped_of_declaration_fails_validation() -> Non
     index = next(i for i, capture in enumerate(captures) if capture.interventions)
     captures[index] = dataclasses.replace(captures[index], interventions=(), appliers=())
 
-    assert MLXBackend().validate_trace(trace) is False
+    assert MLXBackend().validate_trace(trace).state == "failed"
 
 
 def test_mlx_intervened_record_with_forged_declaration_fails_validation() -> None:
@@ -165,7 +309,7 @@ def test_mlx_intervened_record_with_forged_declaration_fails_validation() -> Non
         appliers=((0, lambda out: mx.zeros_like(out)),),
     )
 
-    assert MLXBackend().validate_trace(trace) is False
+    assert MLXBackend().validate_trace(trace).state == "failed"
 
 
 def test_mlx_value_dependent_intervene_refuses_typed() -> None:
@@ -196,52 +340,62 @@ def test_mlx_backward_direction_intervene_refuses_typed() -> None:
             _TwoLayerMLP(),
             _input(),
             backend="mlx",
-            intervene=tl.when(tl.func("relu"), tl.grad_zero()),
+            intervene=tl.when(tl.grad(tl.func("relu")), tl.zero_ablate()),
         )
 
 
 def test_mlx_unsupported_helper_refuses_typed() -> None:
     """Helpers without an MLX-native application refuse by name."""
 
-    with pytest.raises(BackendUnsupportedError, match="resample_ablate"):
+    with pytest.raises(BackendUnsupportedError, match="scramble_elements"):
         tl.trace(
             _TwoLayerMLP(),
             _input(),
             backend="mlx",
-            intervene=tl.when(tl.func("relu"), tl.resample_ablate(mx.ones((3,)))),
+            intervene=tl.when(tl.func("relu"), tl.intervention.scramble_elements(mx.ones((3,)))),
         )
 
 
 def test_mlx_shape_changing_hook_refuses_typed() -> None:
     """A fired hook that changes shape refuses instead of mis-broadcasting."""
 
-    def _grow(out: mx.array, *, hook: object) -> mx.array:
+    def _grow(out: mx.array, *, ctx: object) -> mx.array:
         """Return a wrong-shape replacement."""
 
-        del hook
+        del ctx
         return mx.zeros((7, 7))
 
-    with pytest.raises(BackendUnsupportedError, match="shape"):
+    with pytest.raises(BackendUnsupportedError, match="shape") as info:
         tl.trace(
             _TwoLayerMLP(),
             _input(),
             backend="mlx",
             intervene=tl.when(tl.func("relu"), _grow),
         )
+    assert info.value.code == "intervention_result_invalid"
 
 
-def test_mlx_recipes_refuses_typed() -> None:
-    """Recipe specs stay refused; only tl.when static predicates dispatch."""
+def test_mlx_recipes_snapshot_dispatches() -> None:
+    """facets= attaches a per-trace facet registry snapshot; non-callables refuse typed."""
 
-    with pytest.raises(BackendUnsupportedError, match="recipe"):
-        tl.trace(_TwoLayerMLP(), _input(), backend="mlx", recipes=object())
+    def recipe(record: Any) -> dict[str, Any]:
+        return {"is_relu": "relu" in str(getattr(record, "label", ""))}
+
+    trace = tl.trace(_TwoLayerMLP(), _input(), backend="mlx", facets=[recipe])
+    snapshot = trace.facet_functions
+    assert snapshot is not None
+    assert any("recipe" in entry.public.name for entry in snapshot.functions)
+
+    with pytest.raises(BackendUnsupportedError, match="recipe callables") as info:
+        tl.trace(_TwoLayerMLP(), _input(), backend="mlx", facets=object())
+    assert info.value.code == "trace_option_unsupported"
 
 
 def test_mlx_halt_non_selector_refuses_typed() -> None:
     """Value-dependent halt predicates keep the typed refusal."""
 
     with pytest.raises(BackendUnsupportedError, match="static-label"):
-        tl.trace(_TwoLayerMLP(), _input(), backend="mlx", halt=lambda ctx: True)
+        tl.trace(_TwoLayerMLP(), _input(), backend="mlx", stop_after=lambda ctx: True)
 
 
 def test_mlx_grad_options_with_intervene_refuses_typed() -> None:
@@ -250,25 +404,24 @@ def test_mlx_grad_options_with_intervene_refuses_typed() -> None:
     from torchlens.backends.mlx import GradOptions
 
     model = _TwoLayerMLP()
-    with pytest.raises(BackendUnsupportedError, match="grad_options"):
+    with pytest.raises(BackendUnsupportedError, match="grad_options") as info:
         MLXBackend().capture_trace(
             model,
             _input(),
             grad_options=GradOptions(loss_fn=lambda out: out.sum()),
             intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
         )
+    assert info.value.code == "intervention_with_derived_grads_unsupported"
 
 
 def test_mlx_interventions_flag_false_refuses_the_surface() -> None:
-    """Sol probe, reverse direction: flipping interventions=False in place
+    """Review probe, reverse direction: flipping interventions=False in place
     refuses trace(intervene=) typed — the table stays load-bearing on MLX."""
 
-    from torchlens.backends import get_backend_spec
-
-    spec = get_backend_spec("mlx")
-    object.__setattr__(spec.capabilities, "interventions", False)
+    spec = tl.backends.spec("mlx")
+    object.__setattr__(spec.capabilities, "can_intervene", False)
     try:
-        with pytest.raises(BackendUnsupportedError, match="interventions=False"):
+        with pytest.raises(BackendUnsupportedError, match="can_intervene=False"):
             tl.trace(
                 _TwoLayerMLP(),
                 _input(),
@@ -276,7 +429,7 @@ def test_mlx_interventions_flag_false_refuses_the_surface() -> None:
                 intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
             )
     finally:
-        object.__setattr__(spec.capabilities, "interventions", True)
+        object.__setattr__(spec.capabilities, "can_intervene", True)
 
 
 def test_mlx_in_module_intervention_site() -> None:
@@ -309,9 +462,9 @@ def test_mlx_in_module_intervention_site() -> None:
         backend="mlx",
         intervene=tl.when(tl.in_module("encoder") & tl.func("linear"), tl.zero_ablate()),
     )
-    encoder_op = next(op for op in trace.layer_list if op.layer_type == "linear")
-    assert encoder_op.intervention_replaced is True
+    encoder_op = next(op for op in trace._layer_list if op.type == "linear")
+    assert encoder_op.is_edited is True
     assert np.allclose(np.asarray(encoder_op.out), 0.0)
-    head_ops = [op for op in trace.layer_list if op.layer_type == "linear"]
-    assert not head_ops[-1].intervention_replaced
-    assert MLXBackend().validate_trace(trace) is True
+    head_ops = [op for op in trace._layer_list if op.type == "linear"]
+    assert not head_ops[-1].is_edited
+    assert MLXBackend().validate_trace(trace).passed is True

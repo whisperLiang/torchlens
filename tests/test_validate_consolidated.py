@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any
 from unittest import mock
 
 import pytest
 import torch
 
 import torchlens as tl
-import torchlens.validation.consolidated as consolidated_validation
-from torchlens.validation.consolidated import InterventionValidationReport
+import torchlens._user_public_impls as user_public_impls
+import torchlens.validation._consolidated as consolidated_validation
+from torchlens.validation._consolidated import InterventionValidationReport
 
 
 class TinyModel(torch.nn.Module):
@@ -55,36 +55,29 @@ def model_and_input() -> tuple[TinyModel, torch.Tensor]:
     return model, torch.randn(1, 3)
 
 
-def test_validate_forward_and_saved_scopes(model_and_input: tuple[TinyModel, torch.Tensor]) -> None:
-    """Consolidated forward and saved scopes should return booleans."""
+def test_validate_scope_defaults_to_forward(
+    model_and_input: tuple[TinyModel, torch.Tensor],
+) -> None:
+    """Omitting ``scope`` runs the forward scope and matches ``scope="forward"``."""
 
     model, x = model_and_input
-    assert isinstance(tl.validate(model, x, scope="forward", random_seed=42), bool)
-    assert isinstance(tl.validate(model, x, scope="saved", random_seed=42), bool)
-
-
-def test_validate_backward_scope(model_and_input: tuple[TinyModel, torch.Tensor]) -> None:
-    """Consolidated backward scope should call the backward validator."""
-
-    model, x = model_and_input
-
-    def loss_fn(output: torch.Tensor) -> torch.Tensor:
-        """Return a scalar loss.
-
-        Parameters
-        ----------
-        output:
-            Model output.
-
-        Returns
-        -------
-        torch.Tensor
-            Scalar loss.
-        """
-
-        return output.sum()
-
-    assert tl.validate(model, x, scope="backward", loss_fn=loss_fn)
+    with (
+        mock.patch(
+            "torchlens._user_public_impls.validate_forward_pass",
+            wraps=user_public_impls.validate_forward_pass,
+        ) as forward_validator,
+        mock.patch(
+            "torchlens.validation._consolidated.validate_backward_pass",
+            wraps=consolidated_validation.validate_backward_pass,
+        ) as backward_validator,
+    ):
+        default_result = tl.validate(model, x, seed=42)
+        explicit_result = tl.validate(model, x, scope="forward", seed=42)
+    assert default_result is True
+    assert default_result == explicit_result
+    assert forward_validator.call_count == 2
+    assert forward_validator.call_args_list[0] == forward_validator.call_args_list[1]
+    assert backward_validator.call_count == 0
 
 
 def test_validate_backward_scope_detects_corrupted_captured_grad(
@@ -94,36 +87,23 @@ def test_validate_backward_scope_detects_corrupted_captured_grad(
     """The consolidated default must inspect captured gradient payloads."""
 
     model, x = model_and_input
-    original_log_backward = tl.Trace.log_backward
+    original_backward = tl.Trace.backward
 
     def corrupt_captured_grad(trace: tl.Trace, *args: object, **kwargs: object) -> object:
         """Corrupt one captured module-output grad after backward logging."""
 
-        result = original_log_backward(trace, *args, **kwargs)
-        for op in trace.layer_list:
+        result = original_backward(trace, *args, **kwargs)
+        for op in trace._layer_list:
             grad = getattr(op, "grad", None)
             if not isinstance(grad, torch.Tensor) or not getattr(op, "modules", None):
                 continue
-            op.grads.for_pass(1).grad = torch.full_like(grad, 12345.0)
+            op.autograd.grads.for_pass(1).grad = torch.full_like(grad, 12345.0)
             break
         return result
 
-    monkeypatch.setattr(tl.Trace, "log_backward", corrupt_captured_grad)
+    monkeypatch.setattr(tl.Trace, "backward", corrupt_captured_grad)
 
-    assert not tl.validate(model, x, scope="backward", random_seed=42)
-
-
-def test_scope_backward_with_metadata(model_and_input: tuple[TinyModel, torch.Tensor]) -> None:
-    """Backward scope forwards default validate_metadata=True."""
-
-    model, x = model_and_input
-    with mock.patch(
-        "torchlens.validation.consolidated.validate_backward_pass",
-        wraps=consolidated_validation.validate_backward_pass,
-    ) as validator:
-        assert tl.validate(model, x, scope="backward")
-    assert validator.call_args is not None
-    assert validator.call_args.kwargs["validate_metadata"] is True
+    assert not tl.validate(model, x, scope="backward", seed=42)
 
 
 def test_scope_backward_with_metadata_forwards_false(
@@ -133,28 +113,12 @@ def test_scope_backward_with_metadata_forwards_false(
 
     model, x = model_and_input
     with mock.patch(
-        "torchlens.validation.consolidated.validate_backward_pass",
+        "torchlens.validation._consolidated.validate_backward_pass",
         wraps=consolidated_validation.validate_backward_pass,
     ) as validator:
         assert tl.validate(model, x, scope="backward", validate_metadata=False)
     assert validator.call_args is not None
     assert validator.call_args.kwargs["validate_metadata"] is False
-
-
-def test_validate_scope_backward_random_seed(
-    model_and_input: tuple[TinyModel, torch.Tensor],
-) -> None:
-    """Backward scope accepts and forwards random_seed."""
-
-    model, x = model_and_input
-    with mock.patch(
-        "torchlens.validation.consolidated.validate_backward_pass",
-        wraps=consolidated_validation.validate_backward_pass,
-    ) as validator:
-        assert tl.validate(model, x, scope="backward", random_seed=42)
-    assert validator.call_args is not None
-    assert validator.call_args.kwargs["random_seed"] == 42
-    assert tl.validate(model, x, scope="backward", random_seed=42)
 
 
 def test_validate_intervention_scope_returns_report(
@@ -163,7 +127,7 @@ def test_validate_intervention_scope_returns_report(
     """Intervention scope returns a report with explicit unevaluated axes."""
 
     model, x = model_and_input
-    report = tl.validate(model, x, scope="intervention", random_seed=42)
+    report = tl.validate(model, x, scope="intervention", seed=42)
     assert isinstance(report, InterventionValidationReport)
     assert bool(report) is report.passed
     assert set(report.details) == {
@@ -173,11 +137,11 @@ def test_validate_intervention_scope_returns_report(
         "consistency",
         "locality",
     }
-    assert report.invariance is True
-    assert report.specificity is False
-    assert report.completeness is False
-    assert report.consistency is False
-    assert report.locality is False
+    assert report.is_invariant is True
+    assert report.is_specific is False
+    assert report.is_complete is False
+    assert report.is_consistent is False
+    assert report.is_local is False
     assert bool(report) is False
 
 
@@ -187,39 +151,6 @@ def test_scope_keyword_visibility(model_and_input: tuple[TinyModel, torch.Tensor
     model, x = model_and_input
     with pytest.raises(TypeError, match="loss_fn only valid for scope='backward'"):
         tl.validate(model, x, scope="forward", loss_fn=lambda output: output.sum())
-
-
-def test_legacy_validator_positionals(model_and_input: tuple[TinyModel, torch.Tensor]) -> None:
-    """Deprecated wrappers should preserve legacy positional argument binding."""
-
-    model, x = model_and_input
-
-    def loss_fn(output: Any) -> torch.Tensor:
-        """Return a scalar loss.
-
-        Parameters
-        ----------
-        output:
-            Model output.
-
-        Returns
-        -------
-        torch.Tensor
-            Scalar loss.
-        """
-
-        return output.sum()
-
-    with pytest.warns(DeprecationWarning):
-        forward_result = tl.validate_forward_pass(model, x, None, 42)
-    with pytest.warns(DeprecationWarning):
-        saved_result = tl.validate_saved_outs(model, x, None, 42)
-    with pytest.warns(DeprecationWarning):
-        backward_result = tl.validate_backward_pass(model, x, None, loss_fn)
-
-    assert isinstance(forward_result, bool)
-    assert isinstance(saved_result, bool)
-    assert isinstance(backward_result, bool)
 
 
 def test_validate_scope_end_trims_the_host_allocator(
@@ -237,7 +168,7 @@ def test_validate_scope_end_trims_the_host_allocator(
 
     from torch import nn
 
-    from torchlens.data_classes import cleanup as cleanup_mod
+    from torchlens._data_classes import cleanup as cleanup_mod
 
     calls = {"n": 0}
     real_trim = cleanup_mod._trim_host_allocator
@@ -248,7 +179,7 @@ def test_validate_scope_end_trims_the_host_allocator(
 
     monkeypatch.setattr(cleanup_mod, "_trim_host_allocator", counting_trim)
     model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
-    assert tl.validate(model, torch.randn(2, 4), scope="forward", random_seed=0) is True
+    assert tl.validate(model, torch.randn(2, 4), scope="forward", seed=0) is True
     assert calls["n"] >= 3, f"only {calls['n']} allocator trims ran; the scope-end trim is missing"
 
 
@@ -266,18 +197,18 @@ def test_validate_peak_instrumentation_is_opt_in(
 
     from torch import nn
 
-    from torchlens.validation.diagnostics import last_validation_peak_memory
+    from torchlens.validation._diagnostics import last_validation_peak_memory
 
     model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
 
     monkeypatch.delenv("TORCHLENS_VALIDATE_PEAK_MEMORY", raising=False)
-    assert tl.validate(model, torch.randn(2, 4), scope="forward", random_seed=0) is True
+    assert tl.validate(model, torch.randn(2, 4), scope="forward", seed=0) is True
     assert last_validation_peak_memory() is None, (
         "default validate populated peak observations without the opt-in"
     )
 
     monkeypatch.setenv("TORCHLENS_VALIDATE_PEAK_MEMORY", "1")
-    assert tl.validate(model, torch.randn(2, 4), scope="forward", random_seed=0) is True
+    assert tl.validate(model, torch.randn(2, 4), scope="forward", seed=0) is True
     peaks = last_validation_peak_memory()
     assert peaks is not None and "host_rss_peak_delta_bytes" in peaks
     assert peaks["host_rss_peak_delta_bytes"] >= 0

@@ -85,4 +85,4 @@ def callable_capture_state(model: Any, adapter: Any) -> Iterator[None]:
         state.restore()
 
 
-__all__ = ["callable_capture_state"]
+__all__ = ("callable_capture_state",)

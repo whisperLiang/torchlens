@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 import importlib
 import re
-from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -14,13 +13,11 @@ from _source_corpus import module_ast
 from torch import nn
 
 import torchlens as tl
-from torchlens import kernel_telemetry as telemetry
-from torchlens._io import FieldPolicy
-from torchlens._io.prerelease import registered_prerelease_fields
-from torchlens.kernel_telemetry import KernelLaunch
+from torchlens import _kernel_telemetry as telemetry
+from torchlens._observability._kineto import NormalizedEvent
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_TELEMETRY_MODULE = "torchlens.kernel_telemetry"
+_TELEMETRY_MODULE = "torchlens._kernel_telemetry"
 _REAL_CUDA_ROWS = (
     "one ATen call to many kernels",
     "several ATen calls to one fused launch",
@@ -32,8 +29,6 @@ _REAL_CUDA_ROWS = (
 )
 _DOCUMENTED_UNSTABLE_TOKENS = {
     "KernelLaunch",
-    "AtenOp.gpu_kernels",
-    "Op.gpu_kernels",
     "launch_name",
     "device",
     "stream",
@@ -56,11 +51,21 @@ class _CudaTelemetryModel(nn.Module):
         return torch.relu(value @ value)
 
 
-@pytest.mark.smoke
+def test_factory_that_recorded_no_aten_rows_refuses_typed() -> None:
+    """The seam refuses typed when its factory captured without ``aten_ops``."""
+
+    with pytest.raises(tl.errors.AtenOpsUnavailableError) as excinfo:
+        telemetry._profile_trace_with_cuda_kernels(
+            lambda: tl.trace(_CudaTelemetryModel(), torch.ones(2, 2))
+        )
+    assert excinfo.value.fields["code"] == "aten_ops_unavailable"
+    assert "CaptureOptions(aten_ops=True)" in str(excinfo.value)
+
+
 def test_documented_unstable_kernel_surface_matches_glossary_index() -> None:
     """Every telemetry spelling has the exact no-shim unstable marker."""
 
-    glossary = (_REPO_ROOT / "docs/reference/glossary.md").read_text(encoding="utf-8")
+    glossary = (_REPO_ROOT / "docs/internal/reference/name_index.md").read_text(encoding="utf-8")
     indexed = glossary.split("<!-- KERNEL-TELEMETRY-UNSTABLE-INDEX:START -->", 1)[1].split(
         "<!-- KERNEL-TELEMETRY-UNSTABLE-INDEX:END -->", 1
     )[0]
@@ -70,7 +75,7 @@ def test_documented_unstable_kernel_surface_matches_glossary_index() -> None:
     assert all("unstable -- no deprecation shim owed" in row for row in surface_rows)
 
 
-def _event(
+def _event(  # noqa: PLR0913 -- fixture mirrors the six normalized event fields
     name: str,
     category: str,
     timestamp: float,
@@ -79,66 +84,69 @@ def _event(
     correlation: int | None = None,
     stream: int | None = None,
     device: int | None = None,
-    phase: str = "X",
-) -> dict[str, object]:
-    """Build one compact synthetic Chrome-trace event.
+) -> NormalizedEvent:
+    """Build one compact synthetic normalized profiler event (W2.1 shape).
 
     Parameters
     ----------
     name
         Event name.
     category
-        Exact Chrome category.
+        Normalized activity token (``user_annotation`` / ``cuda_runtime`` /
+        ``kernel`` / ``gpu_memcpy`` / ...).
     timestamp
-        Event start coordinate.
+        Event start in microseconds (converted to integer nanoseconds).
     duration
-        Event duration coordinate.
+        Event duration in microseconds.
     correlation
         Optional Kineto runtime correlation id.
     stream
         Optional CUDA stream id.
     device
         Optional CUDA device id.
-    phase
-        Chrome event phase.
 
     Returns
     -------
-    dict[str, object]
-        Synthetic event mapping.
+    NormalizedEvent
+        Synthetic normalized event.
     """
 
-    args: dict[str, object] = {}
-    if correlation is not None:
-        args["correlation"] = correlation
-    if stream is not None:
-        args["stream"] = stream
-    if device is not None:
-        args["device"] = device
-    return {
-        "name": name,
-        "cat": category,
-        "ph": phase,
-        "ts": timestamp,
-        "dur": duration,
-        "pid": 1,
-        "tid": 2,
-        "args": args,
-    }
+    kind = {
+        "user_annotation": "marker",
+        "cuda_runtime": "runtime",
+        "kernel": "kernel",
+        "gpu_memcpy": "memcpy",
+        "gpu_memset": "memset",
+    }.get(category, "other")
+    start_ns = int(timestamp * 1_000)
+    return NormalizedEvent(
+        name=name,
+        kind=kind,
+        activity=category,
+        start_ns=start_ns,
+        end_ns=start_ns + int(duration * 1_000),
+        tid=2,
+        device_type="cuda" if kind in ("kernel", "memcpy", "memset") else "cpu",
+        device_index=device,
+        correlation_id=correlation,
+        is_user_annotation=kind == "marker",
+        scope=None,
+        stream=stream,
+    )
 
 
-def _synthetic_matrix() -> tuple[list[Mapping[str, object]], dict[str, int]]:
+def _synthetic_matrix() -> tuple[list[NormalizedEvent], dict[str, int]]:
     """Return a synthetic event graph covering the required correlation shapes.
 
     Returns
     -------
-    tuple[list[Mapping[str, object]], dict[str, int]]
-        Chrome events and marker-to-primitive sequence mapping.
+    tuple[list[NormalizedEvent], dict[str, int]]
+        Normalized events and marker-to-primitive sequence mapping.
     """
 
     marker_a = "torchlens::aten::1"
     marker_b = "torchlens::aten::2"
-    events: list[Mapping[str, object]] = [
+    events: list[NormalizedEvent] = [
         _event(marker_a, "user_annotation", 10, 10),
         _event(marker_b, "user_annotation", 30, 10),
         # Correlation 101 occurs inside A and launches two asynchronous rows.
@@ -157,12 +165,11 @@ def _synthetic_matrix() -> tuple[list[Mapping[str, object]], dict[str, int]]:
     return events, {marker_a: 11, marker_b: 22}
 
 
-@pytest.mark.smoke
 def test_synthetic_kineto_join_covers_required_async_and_many_to_many_shapes() -> None:
     """Runtime correlation, not names or timestamps, owns device attribution."""
 
     events, markers = _synthetic_matrix()
-    payload = telemetry._payload_from_chrome_events(events, markers, telemetry_available=True)
+    payload = telemetry._payload_from_events(events, markers, telemetry_available=True)
 
     assert payload._available
     assert [launch.launch_name for launch in payload._launches] == [
@@ -179,59 +186,6 @@ def test_synthetic_kineto_join_covers_required_async_and_many_to_many_shapes() -
 
 
 @pytest.mark.smoke
-def test_marker_begin_end_and_capture_exception_shape_close_cleanly() -> None:
-    """A begin/end marker still correlates when capture exits exceptionally."""
-
-    marker = "torchlens::aten::exception"
-    begin = _event(marker, "user_annotation", 5, 0, phase="B")
-    end = _event(marker, "user_annotation", 9, 0, phase="E")
-    runtime = _event("cudaLaunchKernel", "cuda_runtime", 7, 1, correlation=44)
-    kernel = _event("kernel", "kernel", 20, 1, correlation=44, stream=1, device=0)
-    payload = telemetry._payload_from_chrome_events(
-        [begin, runtime, end, kernel], {marker: 4}, telemetry_available=True
-    )
-    assert payload._relations == ((4, 0),)
-    assert payload._launches[0].attribution_status == "attributed"
-
-
-@pytest.mark.smoke
-def test_unavailable_session_is_typed_and_never_fabricates_a_launch() -> None:
-    """Unavailable CUDA produces one fact-free disclosure, never a zero claim."""
-
-    payload = telemetry._payload_from_chrome_events(
-        (), {"torchlens::aten::1": 3, "torchlens::aten::2": 5}, telemetry_available=False
-    )
-    assert not payload._available
-    assert payload._relations == ((3, 0), (5, 0))
-    assert payload._launches == (
-        KernelLaunch(
-            launch_name=None,
-            device=None,
-            stream=None,
-            duration=None,
-            runtime_correlation=None,
-            attribution_status="unavailable",
-        ),
-    )
-
-
-@pytest.mark.smoke
-def test_scoped_marker_instrumentation_restores_exact_core_functions() -> None:
-    """The adapter restores both monkeypatched seams after a capture exception."""
-
-    from torchlens.backends.torch import _aten_capture
-
-    prepare = _aten_capture._prepare_aten_call
-    finish = _aten_capture._finish_aten_call
-    with pytest.raises(RuntimeError, match="planned"), telemetry._instrument_aten_markers():
-        assert _aten_capture._prepare_aten_call is not prepare
-        assert _aten_capture._finish_aten_call is not finish
-        raise RuntimeError("planned")
-    assert _aten_capture._prepare_aten_call is prepare
-    assert _aten_capture._finish_aten_call is finish
-
-
-@pytest.mark.smoke
 def test_cpu_host_records_unavailable_views_and_drop_gated_annotation(tmp_path: Path) -> None:
     """CPU capture discloses NOT-RUN; plain v8 saves persist the telemetry section."""
 
@@ -239,12 +193,19 @@ def test_cpu_host_records_unavailable_views_and_drop_gated_annotation(tmp_path: 
         pytest.skip("CPU-only NOT-RUN disclosure row applies only without CUDA")
 
     trace = telemetry._profile_trace_with_cuda_kernels(
-        lambda: tl.trace(_CudaTelemetryModel(), torch.ones(2, 2))
+        lambda: tl.trace(
+            _CudaTelemetryModel(),
+            torch.ones(2, 2),
+            capture=tl.options.CaptureOptions(aten_ops=True),
+        )
     )
     primitive_rows = trace._primitive_op_profile.primitive_ops
     assert primitive_rows
-    assert all(row.gpu_kernels[0].attribution_status == "unavailable" for row in primitive_rows)
-    assert trace.ops[0].gpu_kernels[0].attribution_status == "unavailable"
+    assert all(
+        telemetry._aten_gpu_kernels(row)[0].attribution_status == "unavailable"
+        for row in primitive_rows
+    )
+    assert telemetry._op_gpu_kernels(trace.ops[0])[0].attribution_status == "unavailable"
     assert set(_REAL_CUDA_ROWS) == {
         "one ATen call to many kernels",
         "several ATen calls to one fused launch",
@@ -256,24 +217,12 @@ def test_cpu_host_records_unavailable_views_and_drop_gated_annotation(tmp_path: 
     }
 
     default_path = tmp_path / "default.tlspec"
-    tl.save(trace, default_path)
+    trace.save(default_path)
     loaded = tl.load(default_path)
     # tlspec v8: the telemetry annotation section persists on a plain save.
     assert "_kernel_telemetry" in loaded.annotations
     telemetry._bind_trace_telemetry(loaded)
-    assert loaded.ops[0].gpu_kernels[0].attribution_status == "unavailable"
-
-
-@pytest.mark.smoke
-def test_kernel_rows_persist_and_registrations_are_retired() -> None:
-    """tlspec v8: telemetry rows declare KEEP directly; registrations retired."""
-
-    inventory = registered_prerelease_fields()
-    assert "KernelLaunch" not in inventory
-    assert "_TelemetryPayload" not in inventory
-    assert "Trace.annotations" not in inventory
-    assert set(KernelLaunch.PORTABLE_STATE_SPEC.values()) == {FieldPolicy.KEEP}
-    assert set(telemetry._TelemetryPayload.PORTABLE_STATE_SPEC.values()) == {FieldPolicy.KEEP}
+    assert telemetry._op_gpu_kernels(loaded.ops[0])[0].attribution_status == "unavailable"
 
 
 def _imported_modules(path: Path) -> set[str]:
@@ -316,7 +265,6 @@ def test_kernel_telemetry_lane_is_detachable_from_package_and_other_tests() -> N
         if path.name
         not in {
             Path(__file__).name,
-            "test_legacy_artifact.py",
             "test_prebump_roundtrip_acceptance.py",
             "test_prerelease_registrar.py",
         }
@@ -329,20 +277,56 @@ def test_kernel_telemetry_lane_is_detachable_from_package_and_other_tests() -> N
 
 @pytest.mark.heavy
 @pytest.mark.optional
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA/CUPTI matrix NOT-RUN-DISCLOSED")
 def test_real_cuda_cupti_correlation_matrix() -> None:
     """Run the real CUDA/CUPTI correlation gate when a device leg exists."""
 
     device = torch.device("cuda")
     trace = telemetry._profile_trace_with_cuda_kernels(
-        lambda: tl.trace(_CudaTelemetryModel().to(device), torch.ones(32, 32, device=device))
+        lambda: tl.trace(
+            _CudaTelemetryModel().to(device),
+            torch.ones(32, 32, device=device),
+            capture=tl.options.CaptureOptions(aten_ops=True),
+        )
     )
     launches = [
         launch
         for row in trace._primitive_op_profile.primitive_ops
-        for launch in row.gpu_kernels
+        for launch in telemetry._aten_gpu_kernels(row)
         if launch.attribution_status == "attributed"
     ]
     assert launches
     assert all(launch.runtime_correlation is not None for launch in launches)
     assert all(launch.duration is not None and launch.duration >= 0 for launch in launches)
+
+
+def test_gpu_kernels_is_removed_and_refuses_typed() -> None:
+    """``Op``/``AtenOp.gpu_kernels`` left the public surface (ruled removal).
+
+    The saved kernel annotation stays in the artifact format; the public
+    property refuses with the typed redirect, and importing the telemetry
+    module no longer installs it.
+    """
+
+    from torchlens._errors import FacadeTeachingError
+
+    trace = telemetry._profile_trace_with_cuda_kernels(
+        lambda: tl.trace(
+            _CudaTelemetryModel(),
+            torch.ones(2, 2),
+            capture=tl.options.CaptureOptions(aten_ops=True),
+        )
+    )
+    aten_row = trace._primitive_op_profile.primitive_ops[0]
+    for owner, record in (("Op", trace.ops[0]), ("AtenOp", aten_row)):
+        assert "gpu_kernels" not in vars(type(record))
+        assert not hasattr(record, "gpu_kernels")
+        with pytest.raises(FacadeTeachingError) as caught:
+            _ = record.gpu_kernels
+        assert caught.value.fields["code"] == "facade_redirect"
+        assert f"{owner}.gpu_kernels was removed" in str(caught.value)
+    with pytest.raises(AttributeError) as plain:
+        _ = trace.ops[0].no_such_member
+    assert not isinstance(plain.value, FacadeTeachingError)
+    assert "_kernel_telemetry" in trace.annotations

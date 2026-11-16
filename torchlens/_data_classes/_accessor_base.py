@@ -1,0 +1,386 @@
+"""Shared base class for TorchLens dict-like accessors."""
+
+from __future__ import annotations
+
+import weakref
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from typing import Any, ClassVar, Generic, TypeVar
+
+import torch
+
+from .._errors import InvalidArgumentError
+from .._utils._display_collections import accessor_noun, collection_repr, collection_str
+from .._utils._display_errors import candidate_keys, lookup_message
+from .._utils.fail_open import fail_open
+
+T = TypeVar("T")
+
+#: Scalar types a record field may hold for ``count_by`` to group on it.
+_COUNTABLE_SCALARS: tuple[type, ...] = (str, int, bool, type(None), torch.dtype, torch.device)
+_MISSING = object()
+
+
+def attach_source_honesty(frame: Any, records: list[Any]) -> Any:
+    """Attach capture-honesty facts from the records' source trace.
+
+    Walks ``records`` for the first one whose ``_source_trace_ref`` weakref
+    still resolves and asks that trace to attach its shared capture-honesty
+    facts to ``frame`` (no tabular export without them). The
+    trace is the parameter that reaches ``_capture_honesty``; this module
+    imports nothing above layer L1.
+
+    Parameters
+    ----------
+    frame:
+        Pandas DataFrame to annotate in place.
+    records:
+        Record objects that may carry a ``_source_trace_ref`` weakref.
+
+    Returns
+    -------
+    Any
+        ``frame``, for call-site chaining.
+    """
+    source_trace = first_source_trace(records)
+    if source_trace is not None:
+        source_trace._attach_dataframe_honesty(frame)
+    return frame
+
+
+def first_source_trace(records: Iterable[Any]) -> Any:
+    """The first owning trace still reachable from ``records``, else ``None``.
+
+    Walks ``records`` for the first one whose ``_source_trace_ref`` weakref
+    still resolves (a ``_slot``-backed record exposes the same name through
+    ``getattr``). Collections use it to reach the Trace-level filters without
+    holding a trace reference of their own.
+    """
+
+    for record in records:
+        source_ref = getattr(record, "_source_trace_ref", None)
+        source_trace = source_ref() if callable(source_ref) else None
+        if source_trace is not None:
+            return source_trace
+    return None
+
+
+class Accessor(Generic[T]):
+    """Generic dict-like accessor for ordered TorchLens log objects.
+
+    Examples
+    --------
+    >>> trace = tl.trace(model, x)
+    >>> layers = trace.layers
+    >>> isinstance(layers, Accessor), len(layers)
+    (True, 5)
+    >>> "relu_1_2" in layers, layers[2].func_name
+    (True, 'relu')
+    """
+
+    def __init__(
+        self,
+        items: Mapping[Any, T],
+        *,
+        source_ref: weakref.ReferenceType[Any] | None = None,
+        item_list: list[T] | None = None,
+    ) -> None:
+        """Initialize the accessor.
+
+        Parameters
+        ----------
+        items:
+            Mapping from lookup keys to log objects.
+        source_ref:
+            Optional weak reference to the owning Trace-like object.
+        item_list:
+            Optional explicit ordered values. When omitted, mapping insertion
+            order is used.
+        """
+        self._dict = dict(items)
+        self._list = list(item_list) if item_list is not None else list(self._dict.values())
+        if source_ref is not None:
+            self._source_ref = source_ref
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Return pickle state with the owning-Trace weakref stripped.
+
+        ``_source_ref`` (set only by some accessor subclasses -- e.g.
+        ``BufferAccessor``/``GradFnCallAccessor``/``LayerAccessor``) is a live
+        ``weakref.ref`` to the owning ``Trace``, and ``weakref`` objects cannot
+        be pickled. Stripping it here at the shared base class closes this gap
+        for every ``Accessor`` subclass at once, mirroring the weakref-nulling
+        ``__getstate__`` every record class (``Op``/``Layer``/``Param``/...)
+        already implements; without this, ``pickle.dumps(trace.buffers)`` /
+        ``pickle.dumps(trace.layers)`` crash with
+        ``TypeError: cannot pickle 'weakref.ReferenceType' object``.
+        """
+
+        state = self.__dict__.copy()
+        if "_source_ref" in state:
+            state["_source_ref"] = None
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore pickle state without reviving the owning-Trace weakref."""
+
+        from .._io.state_keys import refuse_callable_shadowing_state_keys
+
+        refuse_callable_shadowing_state_keys(type(self), state)
+        self.__dict__.update(state)
+
+    def __getitem__(self, key: int | str) -> T:
+        """Return an item by ordinal index, exact key, or subclass-specific lookup."""
+        if isinstance(key, int):
+            return self._list[key]
+        if key in self._dict:
+            return self._dict[key]
+        if ":" in key:
+            resolved = self._resolve_pass_qualified(key)
+            if resolved is not None:
+                return resolved
+        resolved = self._resolve_substring(key)
+        if resolved is not None:
+            return resolved
+        suggestions = self._suggest(key)
+        if suggestions:
+            raise KeyError(
+                lookup_message(
+                    f"{self._item_kind} {key!r} not found.",
+                    candidate_keys(suggestions, self._dict),
+                    "pass an in-range integer or a key from this accessor.",
+                    query=key,
+                )
+            )
+        raise KeyError(f"{self._item_kind} '{key}' not found.")
+
+    def __contains__(self, key: object) -> bool:
+        """Return whether ``key`` resolves to an item."""
+        if not isinstance(key, (int, str)):
+            return False
+        try:
+            self[key]
+        except (KeyError, TypeError, IndexError, ValueError):
+            return False
+        return True
+
+    def __iter__(self) -> Iterator[T]:
+        """Iterate over log objects in accessor order."""
+        return iter(self._list)
+
+    def __len__(self) -> int:
+        """Return the number of primary items."""
+        return len(self._dict)
+
+    def __dir__(self) -> list[str]:
+        """Return Python attributes plus lookup keys for tab completion."""
+        return sorted(set(super().__dir__()) | {str(key) for key in self._dict})
+
+    def _ipython_key_completions_(self) -> list[str]:
+        """Return lookup keys for IPython ``obj[...]`` completion."""
+        return [str(key) for key in self._dict]
+
+    def keys(self) -> list[Any]:
+        """Return primary lookup keys."""
+        return list(self._dict.keys())
+
+    @property
+    def labels(self) -> tuple[str, ...]:
+        """The lookup label of every record this collection lists, in order.
+
+        Layer labels on a Layer collection, Op labels on an Op collection,
+        module addresses on a Module collection: the strings ``keys()`` lists,
+        so ``accessor[accessor.labels[i]]`` is the ``i``-th record.
+        """
+
+        return tuple(str(key) for key in self.keys())
+
+    def values(self) -> list[T]:
+        """Return primary values."""
+        return list(self._dict.values())
+
+    def items(self) -> list[tuple[Any, T]]:
+        """Return ``(key, value)`` pairs."""
+        return list(self._dict.items())
+
+    #: Public key -> reader for the fields a user may ``count_by``; subclasses
+    #: declare theirs. Any other string or int field of the record also counts.
+    _COUNTABLE_FIELDS: ClassVar[Mapping[str, Callable[[Any], Any]]] = {}
+
+    def count_by(self, *keys: str) -> dict[Any, int]:
+        """Count records by one or more record fields.
+
+        Parameters
+        ----------
+        *keys:
+            Field names of this accessor's records. One key gives
+            ``{value: count}``; two or more give ``{(v1, v2, ...): count}``.
+            Keys appear in first-seen record order.
+
+        Returns
+        -------
+        dict
+            Counts keyed by the field value(s). ``len(accessor)`` is the total.
+
+        Raises
+        ------
+        InvalidArgumentError
+            ``accessor_count_by_key_required`` with no key;
+            ``accessor_count_by_key_unknown`` for a key that is not a countable
+            field, naming the countable fields.
+        """
+
+        if not keys:
+            raise InvalidArgumentError(
+                "count_by needs at least one field name; len(accessor) is the total.",
+                code="accessor_count_by_key_required",
+                remedy=(
+                    "pass the field to count by, for example count_by('module') or "
+                    "count_by('module', 'kind')"
+                ),
+                countable=tuple(self._COUNTABLE_FIELDS),
+            )
+        readers = [self._countable_reader(key) for key in keys]
+        counts: dict[Any, int] = {}
+        for record in self._list:
+            values = tuple(reader(record) for reader in readers)
+            group = values[0] if len(values) == 1 else values
+            counts[group] = counts.get(group, 0) + 1
+        return counts
+
+    def _countable_reader(self, key: str) -> Callable[[Any], Any]:
+        """Return the reader for ``key``, refusing typed when it is not countable."""
+
+        reader = self._COUNTABLE_FIELDS.get(key)
+        if reader is not None:
+            return reader
+        if self._list and all(
+            isinstance(getattr(record, key, _MISSING), _COUNTABLE_SCALARS) for record in self._list
+        ):
+            return lambda record: getattr(record, key)
+        declared = ", ".join(repr(name) for name in self._COUNTABLE_FIELDS) or "none declared"
+        raise InvalidArgumentError(
+            f"{key!r} is not a countable field of {self._item_kind} records.",
+            code="accessor_count_by_key_unknown",
+            remedy=(
+                f"count by one of the countable fields ({declared}) or any string or int "
+                "field every record carries"
+            ),
+            key=key,
+            countable=tuple(self._COUNTABLE_FIELDS),
+        )
+
+    def to_pandas(self) -> Any:
+        """Return a dataframe containing one row per accessor item.
+
+        Returns
+        -------
+        Any
+            Pandas DataFrame built from each item's ``to_pandas`` export.
+        """
+
+        try:
+            import pandas as pd
+        except ImportError as e:
+            raise ImportError(
+                "pandas is required for this feature. Install with `pip install torchlens[tabular]`."
+            ) from e
+
+        frames = [item.to_pandas() for item in self._list if hasattr(item, "to_pandas")]
+        if not frames:
+            return pd.DataFrame()
+        combined = pd.concat(frames, ignore_index=True)
+        return attach_source_honesty(combined, self._list)
+
+    def _resolve_pass_qualified(self, key: str) -> T | None:
+        """Resolve a pass-qualified key, if supported by the subclass.
+
+        Parameters
+        ----------
+        key:
+            Lookup key containing pass-qualified notation.
+
+        Returns
+        -------
+        T | None
+            Matching item, or ``None`` when unsupported/not found.
+        """
+        return None
+
+    def _resolve_substring(self, key: str) -> T | None:
+        """Resolve a substring key, if supported by the subclass.
+
+        Parameters
+        ----------
+        key:
+            Lookup key that did not exactly match.
+
+        Returns
+        -------
+        T | None
+            Matching item, or ``None`` when unsupported/not found.
+        """
+        return None
+
+    def _suggest(self, key: str) -> list[str]:
+        """Return lookup suggestions for ``key``.
+
+        Parameters
+        ----------
+        key:
+            Lookup key that did not resolve.
+
+        Returns
+        -------
+        list[str]
+            Candidate lookup strings.
+        """
+        return []
+
+    @property
+    def _item_kind(self) -> str:
+        """Return the display name used in generic ``KeyError`` messages."""
+        return type(self).__name__.removesuffix("Accessor")
+
+    def _composition_note(self) -> str | None:
+        """Optional composition breakdown for the one-line card (override)."""
+
+        return None
+
+    def __repr__(self) -> str:
+        """Count and composition only; member rendering belongs to ``str``."""
+
+        noun = accessor_noun(self._item_kind.removeprefix("Trace"), len(self))
+        composition = fail_open(self._composition_note, lambda _error: None)
+        return collection_repr(type(self).__name__, len(self), noun, composition)
+
+    def __str__(self) -> str:
+        """Render only the first five members, then an exact remainder."""
+
+        return collection_str(repr(self), self)
+
+    def head(self, n: int = 5) -> list[T]:
+        """Return the first ``n`` records in order (a collection exit)."""
+
+        return list(self._list[: max(int(n), 0)])
+
+    def search(self, needle: str) -> list[T]:
+        """Return records whose lookup key contains ``needle`` (substring).
+
+        Parameters
+        ----------
+        needle:
+            Substring matched against every string lookup key.
+
+        Returns
+        -------
+        list
+            Matching records in insertion order, deduplicated by identity.
+        """
+
+        matches: list[T] = []
+        seen: set[int] = set()
+        for key, value in self._dict.items():
+            if isinstance(key, str) and needle in key and id(value) not in seen:
+                matches.append(value)
+                seen.add(id(value))
+        return matches

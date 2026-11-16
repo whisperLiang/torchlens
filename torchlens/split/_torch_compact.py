@@ -6,10 +6,10 @@ from dataclasses import dataclass, replace
 from typing import Any
 from weakref import ReferenceType, ref
 
+from .._data_classes._runtime_handles import source_model_from_trace
+from .._ir.refs import TensorRef
 from ..backends.registry import TORCH_BACKEND_NAME
-from ..data_classes._runtime_handles import source_model_from_trace
-from ..intervention.types import LiteralTensor
-from ..ir.refs import TensorRef
+from ..intervention._types import LiteralTensor
 from .errors import SplitErrorContext, SplitUnsupportedError
 from .graph import SplitTraceGraph, SplitTraceNode
 
@@ -17,7 +17,7 @@ from .graph import SplitTraceGraph, SplitTraceNode
 def _buffer_owner(buffer: Any) -> tuple[Any | None, str]:
     """Resolve a captured buffer's module without retaining its diagnostic Trace."""
 
-    model = source_model_from_trace(getattr(buffer, "source_trace", None))
+    model = source_model_from_trace(getattr(buffer, "trace", None))
     address = getattr(buffer, "address", None)
     if model is None or not isinstance(address, str):
         return None, ""
@@ -134,6 +134,7 @@ def _validate_training_sources(graph: SplitTraceGraph) -> None:
                     op_type=node.op_type,
                     reason="compact_training_autograd_source",
                 ),
+                code=SplitUnsupportedError.code,
             )
 
     def visit(component: Any, node: SplitTraceNode) -> None:

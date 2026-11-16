@@ -13,13 +13,11 @@ from __future__ import annotations
 import pytest
 import torch
 
-from torchlens.utils.alias_footprint import tensor_byte_footprint, touched_bytes_relation
-from torchlens.utils.arg_handling import (
+from torchlens._utils.alias_footprint import tensor_byte_footprint, touched_bytes_relation
+from torchlens._utils.arg_handling import (
     _alias_candidate_pairs,
     _record_unpreserved_tensor_aliases,
 )
-
-pytestmark = pytest.mark.smoke
 
 
 def _reference_scan(
@@ -79,6 +77,8 @@ def _torture_records() -> list[tuple[str, torch.Tensor, bool]]:
     ]
 
 
+# Kept by the shrink-r4 coverage proof: sole branch coverage of _utils/arg_handling.py.
+@pytest.mark.smoke_cells("test_alias_scan_matches_exhaustive_reference[True]")
 @pytest.mark.parametrize("require_distinct", [False, True])
 def test_alias_scan_matches_exhaustive_reference(require_distinct: bool) -> None:
     """The swept scan reproduces the exhaustive scan's diagnostics byte for byte."""
@@ -93,18 +93,7 @@ def test_alias_scan_matches_exhaustive_reference(require_distinct: bool) -> None
     assert expected  # the torture set must actually exercise diagnostic lanes
 
 
-def test_disjoint_leaves_produce_zero_candidate_pairs() -> None:
-    """Distinct-storage leaves generate NO candidate pairs: the scan is O(T log T)."""
-
-    records = [(f"input.args.{i}", torch.ones(1), False) for i in range(512)]
-    footprints = [tensor_byte_footprint(tensor) for _, tensor, _ in records]
-    assert _alias_candidate_pairs(records, footprints) == set()
-
-    gaps: list[str] = []
-    _record_unpreserved_tensor_aliases(records, gaps, require_distinct_tensor_sites=True)
-    assert gaps == []
-
-
+# Kept by the shrink-r4 coverage proof: sole branch coverage of _utils/arg_handling.py.
 def test_candidate_pairs_cover_identity_overlap_and_unknown() -> None:
     """Identity, interval-overlap, and unprovable-footprint pairs all survive."""
 

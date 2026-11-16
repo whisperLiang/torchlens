@@ -21,6 +21,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens.errors import ArtifactError
+from torchlens.io import cleanup_tmp
 
 
 class _TinyBundleModel(nn.Module):
@@ -54,12 +56,12 @@ def _build_bundle(seed: int) -> tl.Bundle:
     torch.manual_seed(seed)
     model = _TinyBundleModel()
     x = torch.randn(2, 4)
-    member = tl.trace(model, x, layers_to_save="all", random_seed=seed)
+    member = tl.trace(model, x, capture=tl.options.CaptureOptions(seed=seed), save="all")
     return tl.Bundle({f"m{seed}": member})
 
 
 def _sibling_temp_dirs(target: Path) -> list[str]:
-    """Return leftover ``tmp.*``/``tmp.bak.*`` siblings of ``target``.
+    """Return leftover ``{name}.tmp.*``/``{name}.bak.*`` siblings of ``target``.
 
     Parameters
     ----------
@@ -75,7 +77,7 @@ def _sibling_temp_dirs(target: Path) -> list[str]:
     return sorted(
         entry.name
         for entry in target.parent.iterdir()
-        if entry != target and entry.name.startswith("tmp.")
+        if entry != target and entry.name.startswith((f"{target.name}.tmp.", f"{target.name}.bak."))
     )
 
 
@@ -112,10 +114,17 @@ def test_overwrite_failure_preserves_existing_bundle(
         _build_bundle(1).save(target, overwrite=True)
     monkeypatch.undo()
 
-    # The OLD bundle survived and is still a loadable, unchanged bundle.
+    # The OLD bundle survived; until the failed save's PARTIAL staging dir is
+    # cleaned, tl.load refuses to serve that older copy as current.
     assert target.exists()
+    (staging,) = _sibling_temp_dirs(target)
+    assert staging.startswith(f"{target.name}.tmp."), "no backup leaked, only the staging dir"
+    assert (target.parent / staging / "PARTIAL").exists()
+    with pytest.raises(ArtifactError) as info:
+        tl.load(target)
+    assert info.value.fields.get("code") == "newer_save_unfinished"
+    cleanup_tmp(target)
     assert list(tl.load(target).members) == ["m0"]
-    # No orphaned temp/backup directories leaked.
     assert _sibling_temp_dirs(target) == []
 
 
@@ -140,8 +149,9 @@ def test_overwrite_false_on_existing_raises(tmp_path: Path) -> None:
     target = tmp_path / "bundle.tlspec"
     _build_bundle(0).save(target, overwrite=True)
 
-    with pytest.raises(FileExistsError):
+    with pytest.raises(ArtifactError) as info:
         _build_bundle(1).save(target, overwrite=False)
+    assert info.value.fields.get("code") == "bundle_path_exists"
 
     # The refusal left the original bundle exactly as it was.
     assert list(tl.load(target).members) == ["m0"]

@@ -58,11 +58,10 @@ def main() -> None:
 
     # Render from ModelLog metadata (model tensors no longer in memory).
     ml.draw(
-        vis_mode="rolled",
-        vis_outpath=os.path.join(args.outdir, label),
-        vis_save_only=True,
-        vis_fileformat=args.format,
-        vis_node_placement="rank",
+        os.path.join(args.outdir, label),
+        rolled=True,
+        file_format=args.format,
+        layout="rank",
     )
 
     total = time.time() - t0

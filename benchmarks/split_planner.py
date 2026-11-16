@@ -35,7 +35,7 @@ def _node(
 ) -> SplitTraceNode:
     """Construct one normalized synthetic value with explicit replay dependencies."""
 
-    from torchlens.intervention.types import CapturedArgTemplate
+    from torchlens.intervention._types import CapturedArgTemplate
     from torchlens.split.graph import SplitTraceNode
 
     return SplitTraceNode(
@@ -75,7 +75,7 @@ def _graph(writes: int) -> SplitTraceGraph:
 
     import torch
 
-    from torchlens.intervention.types import LiteralValue
+    from torchlens.intervention._types import LiteralValue
     from torchlens.split.graph import ReplayValueRef, SplitTraceGraph
 
     nodes = [_node("input", 0, is_input=True)]

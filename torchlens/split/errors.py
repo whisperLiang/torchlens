@@ -58,6 +58,7 @@ class SplitError(Exception):
         message: str,
         *,
         context: SplitErrorContext | None = None,
+        code: str | None = None,
     ) -> None:
         """Create a split error.
 
@@ -67,9 +68,14 @@ class SplitError(Exception):
             Human-readable message.
         context:
             Optional structured context.
+        code:
+            Explicit machine-readable refusal code. Omission retains the
+            exception class's existing default code.
         """
 
         super().__init__(message)
+        if code is not None:
+            self.code = code
         self.context = context
         self._partition_diagnostic: dict[str, Any] | None = None
 
@@ -100,10 +106,10 @@ class SplitUnsupportedError(SplitError, NotImplementedError):
     code = "split_unsupported"
 
 
-__all__ = [
+__all__ = (
     "SplitBoundaryError",
     "SplitError",
     "SplitErrorContext",
     "SplitRequestError",
     "SplitUnsupportedError",
-]
+)

@@ -24,7 +24,9 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.utils.rng import _skip_retired_hooks, host_nondeterminism_monitor
+from torchlens._utils.rng import host_nondeterminism_monitor
+from torchlens._utils.rng.monitor_state import _skip_retired_hooks
+from torchlens.errors import TraceCaptureError
 
 _HELD_LOCALTIME = time.localtime  # pre-window held alias (module import time)
 
@@ -40,7 +42,6 @@ class _SpawningModel(nn.Module):
         return x
 
 
-@pytest.mark.smoke
 def test_generator_spawn_changes_state_digest() -> None:
     """The digest must witness spawn(): it is verdict-steering hidden state."""
 
@@ -51,7 +52,6 @@ def test_generator_spawn_changes_state_digest() -> None:
     assert before != after, "Generator.spawn() left the state digest unchanged"
 
 
-@pytest.mark.smoke
 def test_bit_generator_spawn_changes_state_digest() -> None:
     """Same seal for a bare model-held BitGenerator."""
 
@@ -62,7 +62,6 @@ def test_bit_generator_spawn_changes_state_digest() -> None:
     assert before != after, "BitGenerator.spawn() left the state digest unchanged"
 
 
-@pytest.mark.smoke
 def test_seed_sequence_holder_is_digestable_and_spawn_witnessed() -> None:
     """A bare model-held SeedSequence is a spawnable entropy root."""
 
@@ -73,7 +72,6 @@ def test_seed_sequence_holder_is_digestable_and_spawn_witnessed() -> None:
     assert before != after, "SeedSequence.spawn() left the state digest unchanged"
 
 
-@pytest.mark.smoke
 def test_model_held_generator_spawn_draw_is_witnessed_in_window() -> None:
     """The r5 probe scenario: spawn a child from a model-held generator and
     draw from it inside the window -- the window must NOT settle clean."""
@@ -88,7 +86,6 @@ def test_model_held_generator_spawn_draw_is_witnessed_in_window() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_held_alias_localtime_none_is_marked() -> None:
     """``held_localtime(None)`` reads the clock exactly like ``held_localtime()``."""
 
@@ -99,7 +96,6 @@ def test_held_alias_localtime_none_is_marked() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_held_alias_localtime_literal_timestamp_stays_a_transform() -> None:
     """A provably non-None literal keeps the pure-transform classification."""
 
@@ -109,7 +105,6 @@ def test_held_alias_localtime_literal_timestamp_stays_a_transform() -> None:
     assert not result.uncertain
 
 
-@pytest.mark.smoke
 def test_held_alias_localtime_unresolvable_argument_flags_uncertainty() -> None:
     """An UNRESOLVABLE argument is runtime-dependent: neither a clock-draw
     claim nor a clean pass is provable, so the window flags uncertainty.
@@ -133,7 +128,6 @@ def test_held_alias_localtime_unresolvable_argument_flags_uncertainty() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_held_alias_localtime_bound_variable_stays_a_transform() -> None:
     """A bound non-None local resolves at ``c_call`` time: pure transform.
 
@@ -150,7 +144,63 @@ def test_held_alias_localtime_bound_variable_stays_a_transform() -> None:
     assert not result.uncertain
 
 
-@pytest.mark.smoke
+def test_call_site_time_arg_proof_skips_interposed_call_bookkeeping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bytecode walk-back must not mistake a call-bookkeeping opcode for
+    the last argument instruction (grind-pyver R8).
+
+    Python 3.11 alone splits a call into ``PRECALL`` (dispatch) followed by
+    ``CALL`` (the invocation), with ``PRECALL`` sitting directly before
+    ``CALL`` in the instruction stream -- after the real last argument
+    instruction. A fixed-width slice ending at the ``CALL`` position then
+    swallows ``PRECALL`` as if it were that argument, starving the decode of
+    the actual ``LOAD_CONST(None)`` and misclassifying every held-alias call
+    as monitor uncertainty ("unknown") instead of "now_read" -- the exact
+    3.11-only failure this test pins directly against FABRICATED
+    instructions, so it holds on every interpreter regardless of which
+    Python actually ships ``PRECALL`` today or reintroduces a similar
+    bookkeeping opcode tomorrow.
+    """
+
+    from torchlens._utils.rng import call_sites as rng_call_sites
+
+    class _FakeInstruction:
+        def __init__(
+            self, offset: int, opname: str, argval: object = None, *, arg: int | None = None
+        ) -> None:
+            self.offset = offset
+            self.opname = opname
+            self.argval = argval
+            self.arg = arg
+
+    class _FakeFrame:
+        f_lasti = 100  # the CALL instruction's offset, below
+        f_code = None  # unused by the stubbed get_instructions below
+        f_locals: dict = {}
+        f_globals: dict = {}
+
+    # Mirrors the real 3.11 shape for ``held_localtime(None)``: a LOAD_GLOBAL
+    # for the callable, a LOAD_CONST(None) argument, a PRECALL bookkeeping
+    # opcode, then the CALL at f_lasti.
+    fake_instructions = [
+        _FakeInstruction(0, "LOAD_GLOBAL", "held_localtime"),
+        _FakeInstruction(50, "LOAD_CONST", None),
+        _FakeInstruction(75, "PRECALL", arg=1),
+        _FakeInstruction(100, "CALL"),
+    ]
+
+    monkeypatch.setattr(
+        rng_call_sites._dis_module, "get_instructions", lambda code: iter(fake_instructions)
+    )
+    proof = rng_call_sites._call_site_time_arg_proof(_FakeFrame(), argcount=1, time_arg_index=0)
+
+    assert proof == "now_read", (
+        f"PRECALL-interposed call site misclassified as {proof!r}; the walk-back "
+        "must skip call-bookkeeping opcodes to find the real last argument"
+    )
+
+
 def test_skip_retired_hooks_follows_the_dead_links_own_chain() -> None:
     """A dead THREADING hook found while restoring the sys slot must resolve
     through the dead owner's threading predecessor, not the sys one."""
@@ -210,7 +260,6 @@ def _global_rng_fingerprint() -> tuple[bytes, bytes, bytes]:
     )
 
 
-@pytest.mark.smoke
 def test_capture_restores_user_global_rng_streams() -> None:
     """``tl.trace`` must not leave the process reseeded (r7 restore half).
 
@@ -227,13 +276,12 @@ def test_capture_restores_user_global_rng_streams() -> None:
     np.random.seed(4711)
     torch.manual_seed(99)
     before = _global_rng_fingerprint()
-    tl.trace(model, torch.ones(2, 3), random_seed=1234)
+    tl.trace(model, torch.ones(2, 3), capture=tl.options.CaptureOptions(seed=1234))
     assert _global_rng_fingerprint() == before, (
         "capture left the user's global RNG engines reseeded"
     )
 
 
-@pytest.mark.smoke
 def test_failed_capture_restores_user_global_rng_streams() -> None:
     """A capture failing mid-forward restores the streams on the unwind."""
 
@@ -242,19 +290,19 @@ def test_failed_capture_restores_user_global_rng_streams() -> None:
     np.random.seed(626)
     torch.manual_seed(939)
     before = _global_rng_fingerprint()
-    with pytest.raises(RuntimeError, match="injected forward failure"):
-        tl.trace(model, torch.ones(2, 3), random_seed=77)
+    with pytest.raises(TraceCaptureError, match="injected forward failure") as _tce_info:
+        tl.trace(model, torch.ones(2, 3), capture=tl.options.CaptureOptions(seed=77))
+    assert isinstance(_tce_info.value.__cause__, RuntimeError)
     assert _global_rng_fingerprint() == before, (
         "failed capture leaked the seeded RNG engines to the user"
     )
 
 
-@pytest.mark.smoke
 def test_auto_seed_freshness_survives_the_restore() -> None:
     """Auto-seeded captures still draw FRESH seeds after the restore.
 
     The seed pick (``random.randint``) deliberately stays OUTSIDE the restore
-    bracket: restoring the pick too would make every ``random_seed=None``
+    bracket: restoring the pick too would make every ``seed=None``
     capture reuse the identical seed, silently correlating dropout patterns
     across runs.
     """
@@ -262,12 +310,11 @@ def test_auto_seed_freshness_survives_the_restore() -> None:
     random.seed(555)
     first = tl.trace(_TinyNet(), torch.ones(2, 3))
     second = tl.trace(_TinyNet(), torch.ones(2, 3))
-    assert first.random_seed != second.random_seed, (
+    assert first.options.seed != second.options.seed, (
         "restore bracket swallowed the auto-seed draw; captures now reuse one seed"
     )
 
 
-@pytest.mark.smoke
 def test_torch_generator_draw_changes_state_digest() -> None:
     """A model-held ``torch.Generator`` is digestable like the numpy analog.
 
@@ -286,7 +333,6 @@ def test_torch_generator_draw_changes_state_digest() -> None:
     assert before != after, "torch.Generator draw left the state digest unchanged"
 
 
-@pytest.mark.smoke
 def test_model_held_torch_generator_pre_existing_thread_draw_is_witnessed() -> None:
     """The exact sol scenario: pre-existing thread draws from a model-held
     ``torch.Generator`` mid-window -- the window must NOT settle clean."""
@@ -324,7 +370,6 @@ def test_model_held_torch_generator_pre_existing_thread_draw_is_witnessed() -> N
     )
 
 
-@pytest.mark.smoke
 def test_seeded_global_torch_draw_stays_clean() -> None:
     """The replayable global torch engine stays identity-exempt (no
     over-trigger): a seeded ``torch.randn`` model draw must not ceiling."""
@@ -337,7 +382,6 @@ def test_seeded_global_torch_draw_stays_clean() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_capture_is_rng_neutral_to_the_host_process() -> None:
     """grind-r6 b8 R57 (opus MED, measured): capture restores all engines.
 
@@ -350,7 +394,7 @@ def test_capture_is_rng_neutral_to_the_host_process() -> None:
     untouched (queued RNG-reseed fork); only the leak is closed. The
     auto-seed pick itself draws from a PRIVATE entropy stream (never the
     user's global engines), so neutrality holds even with
-    ``random_seed=None`` while consecutive captures still get fresh seeds.
+    ``seed=None`` while consecutive captures still get fresh seeds.
     """
 
     import random as _random

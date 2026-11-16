@@ -1,0 +1,121 @@
+"""Reusable batch summary renderers for TorchLens visualizations."""
+
+from __future__ import annotations
+
+import html
+import math
+from collections.abc import Sequence
+
+from PIL import Image
+
+from .._entry_refusals import refuse_if_below, refuse_viz_empty
+
+
+def montage(images: Sequence[Image.Image], max_items: int, max_size: int = 600) -> Image.Image:
+    """Render a PIL image batch as a thumbnail montage.
+
+    Parameters
+    ----------
+    images:
+        Input images to render.
+    max_items:
+        Maximum number of images to include.
+    max_size:
+        Maximum montage width or height.
+
+    Returns
+    -------
+    Image.Image
+        RGB montage image.
+
+    Raises
+    ------
+    ValueError
+        If ``max_items`` is less than one or ``images`` is empty.
+
+    Examples
+    --------
+    >>> from PIL import Image
+    >>> images = [Image.new("RGB", (8, 8), "red") for _ in range(4)]
+    >>> tl.viz.montage(images, max_items=4, max_size=64).size
+    (64, 64)
+    """
+
+    refuse_if_below("max_n", max_items, 1)
+    shown = list(images[:max_items])
+    if not shown:
+        refuse_viz_empty("montage requires at least one image")
+
+    cols = int(math.ceil(math.sqrt(len(shown))))
+    rows = int(math.ceil(len(shown) / cols))
+    cell_size = max(1, max_size // max(cols, rows))
+    canvas = Image.new("RGB", (cols * cell_size, rows * cell_size), "white")
+    for index, image in enumerate(shown):
+        tile = image.convert("RGB")
+        tile.thumbnail((cell_size, cell_size), Image.Resampling.LANCZOS)
+        x = (index % cols) * cell_size + (cell_size - tile.width) // 2
+        y = (index // cols) * cell_size + (cell_size - tile.height) // 2
+        canvas.paste(tile, (x, y))
+    return canvas
+
+
+def text_table(strings: Sequence[str], max_items: int) -> str:
+    """Render a text batch as a Graphviz HTML-like table label.
+
+    Parameters
+    ----------
+    strings:
+        Text items to render.
+    max_items:
+        Maximum number of strings to include before a ``+N more`` row.
+
+    Returns
+    -------
+    str
+        Graphviz HTML-like label string.
+
+    Raises
+    ------
+    ValueError
+        If ``max_items`` is less than one.
+
+    Examples
+    --------
+    >>> label = tl.viz.nodes.text_table(["first", "second", "third"], max_items=2)
+    >>> label.startswith("<<TABLE"), "+1 more" in label
+    (True, True)
+    """
+
+    refuse_if_below("max_n", max_items, 1)
+
+    shown = list(strings[:max_items])
+    rows = ["<TR><TD><B>input</B></TD></TR>"]
+    rows.extend(
+        f"<TR><TD ALIGN='LEFT'>{html.escape(_truncate_text(text, limit=60))}</TD></TR>"
+        for text in shown
+    )
+    more_count = len(strings) - len(shown)
+    if more_count > 0:
+        rows.append(f"<TR><TD ALIGN='LEFT'>+{more_count} more</TD></TR>")
+    return f"<<TABLE BORDER='0' CELLBORDER='0' CELLSPACING='0'>{''.join(rows)}</TABLE>>"
+
+
+def _truncate_text(text: str, *, limit: int) -> str:
+    """Return ``text`` truncated to ``limit`` characters.
+
+    Parameters
+    ----------
+    text:
+        Text to truncate.
+    limit:
+        Maximum displayed character count including the ellipsis.
+
+    Returns
+    -------
+    str
+        Original text or a shortened form ending in ``...``.
+    """
+
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."

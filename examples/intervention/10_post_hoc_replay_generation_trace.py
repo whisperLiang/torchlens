@@ -2,8 +2,8 @@
 
 What this demonstrates
 ----------------------
-Capture a tiny recurrent loop that emits several steps, then attach a
-post-hoc intervention and rerun the model. Real language-model generation uses
+Capture a tiny recurrent loop that emits several steps, then apply a
+post-hoc intervention with ``do`` on the rerun engine. Real language-model generation uses
 the same intervention idea, but this example avoids external dependencies.
 
 How to run
@@ -47,18 +47,17 @@ def main() -> None:
     torch.manual_seed(10)
     model = TinyGenerator().eval()
     x = torch.randn(2, 4)
-    log = tl.trace(model, x, intervention_ready=True)
+    log = tl.trace(model, x)
     relu_sites = log.find_sites(tl.func("relu"), max_fanout=3)
 
     edited = log.fork("generation_patch")
-    edited.attach_hooks(tl.func("relu"), tl.zero_ablate())
-    edited.rerun(model, x)
+    edited.do(tl.func("relu"), tl.zero_ablate(), model=model, inputs=x)
 
-    assert edited.layer_list[-1].out.shape == (2, 3, 4)
+    assert edited.output_ops[-1].out.shape == (2, 3, 4)
     assert len(relu_sites) == 3
     assert edited.last_run["hooks"] == 1
     assert edited.last_run["engine"] == "rerun"
-    assert not torch.allclose(log.layer_list[-1].out, edited.layer_list[-1].out)
+    assert not torch.allclose(log.output_ops[-1].out, edited.output_ops[-1].out)
 
 
 if __name__ == "__main__":

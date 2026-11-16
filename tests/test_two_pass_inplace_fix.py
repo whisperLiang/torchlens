@@ -5,9 +5,9 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
+from torchlens._ir.intervention import FunctionEventInput
 from torchlens.backends.torch.aliasing import detect_torch_alias_contract
-from torchlens.ir.intervention import FunctionEventInput
-from torchlens.options import CaptureOptions
+from torchlens.errors import TorchLensWarning
 
 
 def _assert_layer_present(trace: tl.Trace, layer_label: str) -> None:
@@ -20,35 +20,24 @@ def _assert_layer_present(trace: tl.Trace, layer_label: str) -> None:
     layer_label
         The expected final layer label.
     """
-    assert layer_label in [layer.layer_label for layer in trace.layer_list]
+    assert layer_label in [layer.layer_label for layer in trace._layer_list]
 
 
-@pytest.mark.smoke
-def test_two_pass_succeeds_with_inplace_relu_module() -> None:
-    """Two-pass logging should handle modules with in-place ReLU.
+@pytest.mark.parametrize(
+    "inplace",
+    [True, False],
+    ids=[
+        "two_pass_succeeds_with_inplace_relu_module",
+        "two_pass_succeeds_with_non_inplace_relu_module",
+    ],
+)
+def test_two_pass_succeeds_with_relu_module(inplace: bool) -> None:
+    """Two-pass logging should handle modules with in-place and non-in-place ReLU.
 
-    Returns
-    -------
-    None
-        This test only asserts that logging succeeds and expected labels exist.
-    """
-    model = nn.Sequential(
-        nn.Conv2d(3, 16, 3, padding=1),
-        nn.ReLU(inplace=True),
-        nn.Conv2d(16, 32, 3, padding=1),
-        nn.Flatten(),
-        nn.Linear(32 * 8 * 8, 10),
-    )
-    x = torch.randn(2, 3, 8, 8)
-
-    trace = tl.trace(model, x, capture=CaptureOptions(layers_to_save=["conv2d_1_1"]))
-
-    _assert_layer_present(trace, "conv2d_1_1")
-    trace.cleanup()
-
-
-def test_two_pass_succeeds_with_non_inplace_relu_module() -> None:
-    """Two-pass logging should still handle non-in-place ReLU modules.
+    Parameters
+    ----------
+    inplace
+        The ``inplace`` flag of the ``nn.ReLU`` module between the two convolutions.
 
     Returns
     -------
@@ -57,14 +46,14 @@ def test_two_pass_succeeds_with_non_inplace_relu_module() -> None:
     """
     model = nn.Sequential(
         nn.Conv2d(3, 16, 3, padding=1),
-        nn.ReLU(inplace=False),
+        nn.ReLU(inplace=inplace),
         nn.Conv2d(16, 32, 3, padding=1),
         nn.Flatten(),
         nn.Linear(32 * 8 * 8, 10),
     )
     x = torch.randn(2, 3, 8, 8)
 
-    trace = tl.trace(model, x, capture=CaptureOptions(layers_to_save=["conv2d_1_1"]))
+    trace = tl.trace(model, x, save=["conv2d_1_1"])
 
     _assert_layer_present(trace, "conv2d_1_1")
     trace.cleanup()
@@ -87,13 +76,13 @@ def test_two_pass_preserves_identity_pass_through_detection() -> None:
 
     exhaustive_log = tl.trace(model, x)
     identity_labels = [
-        layer.layer_label for layer in exhaustive_log.layer_list if layer.layer_type == "identity"
+        layer.layer_label for layer in exhaustive_log._layer_list if layer.type == "identity"
     ]
     assert identity_labels
     identity_label = identity_labels[0]
     exhaustive_log.cleanup()
 
-    trace = tl.trace(model, x, capture=CaptureOptions(layers_to_save=[identity_label]))
+    trace = tl.trace(model, x, save=[identity_label])
 
     _assert_layer_present(trace, identity_label)
     assert trace[identity_label].has_saved_activation
@@ -145,7 +134,7 @@ def test_two_pass_succeeds_with_function_level_inplace_relu() -> None:
     )
     x = torch.randn(4, 10)
 
-    trace = tl.trace(model, x, capture=CaptureOptions(layers_to_save=["linear_1_1"]))
+    trace = tl.trace(model, x, save=["linear_1_1"])
 
     _assert_layer_present(trace, "linear_1_1")
     trace.cleanup()
@@ -250,7 +239,7 @@ def test_two_pass_succeeds_with_multiple_inplace_relu_modules() -> None:
     x = torch.randn(2, 3, 8, 8)
 
     for selector in (["conv2d_1_1"], ["conv2d_2_3"], [-1]):
-        trace = tl.trace(model, x, capture=CaptureOptions(layers_to_save=selector))
+        trace = tl.trace(model, x, save=selector)
         assert trace is not None
         trace.cleanup()
 
@@ -259,16 +248,39 @@ def test_two_pass_succeeds_with_multiple_inplace_relu_modules() -> None:
 def test_two_pass_succeeds_with_resnet50_inplace_relu_modules() -> None:
     """Two-pass logging should handle ResNet50's default in-place ReLU modules.
 
+    An op-label selector needs final numbering, so the capture escrows every op's
+    output and spills the oldest past the escrow RAM budget. ResNet50's first conv
+    output is the oldest, so it comes back detached and the capture discloses it
+    with the coded ``escrow_spill_detached`` warning; the later selectors
+    stay in RAM and warn nothing.
+
     Returns
     -------
     None
-        This test only asserts that logging succeeds for previously failing selectors.
+        This test asserts that logging succeeds for previously failing selectors.
     """
     torchvision = pytest.importorskip("torchvision")
     model = torchvision.models.resnet50(weights=None).eval()
     x = torch.randn(2, 3, 224, 224)
 
-    for selector in (["conv2d_1_1"], ["linear_1_175"], [-1]):
-        trace = tl.trace(model, x, capture=CaptureOptions(layers_to_save=selector))
+    # The final linear's label counts layers before it: each Bottleneck calls its
+    # stateless relu module on three lines, three single-pass layers (``callsite_v2``).
+    final_linear = "linear_1_175"
+    for selector, detached_spills in ((["conv2d_1_1"], 1), ([final_linear], 0), ([-1], 0)):
+        if detached_spills:
+            with pytest.warns(TorchLensWarning) as caught:
+                trace = tl.trace(model, x, save=selector)
+            # Every TorchLens warning is caught here, so pin that the spill is the only one.
+            coded = [
+                (fields.get("code"), fields.get("detached_spill_count"))
+                for fields in (
+                    record.message.fields
+                    for record in caught
+                    if isinstance(record.message, TorchLensWarning)
+                )
+            ]
+            assert coded == [("escrow_spill_detached", detached_spills)], coded
+        else:
+            trace = tl.trace(model, x, save=selector)
         assert trace is not None
         trace.cleanup()

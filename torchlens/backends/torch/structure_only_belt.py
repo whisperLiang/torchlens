@@ -1,4 +1,4 @@
-"""Structure-only teaching-refusal belts (L7a memo sec 2, D8-default branch).
+"""Structure-only teaching-refusal belts.
 
 Two layers over the torch capture path, both active ONLY when the session
 trace carries ``structure_only=True`` (the default path is zero-diff):
@@ -33,7 +33,7 @@ user errors stay user errors; on 3.10 the degradation is a RuntimeWarning).
 Unclassifiable exceptions propagate annotated: the fail direction is "don't
 claim what we can't classify", never "wrap everything".
 
-NAMING: all spellings DOCUMENTED-UNSTABLE pending naming-session/S2
+NAMING: all spellings DOCUMENTED-UNSTABLE pending naming
 ratification.
 """
 
@@ -44,7 +44,6 @@ import functools
 import inspect
 import threading
 import types
-import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -53,9 +52,13 @@ from typing import Any, Final
 import torch
 
 from ... import _state
-from ...errors._base import TorchLensError
-from ...utils._torch_symbols import torch_attr
-from ._tl import get_tensor_label
+from ..._capture.structure_only import ValueDependentBranchError
+from ..._utils._exception_notes import defer_failure_note
+from ..._utils._tensor_label import DescriptorCompatProperty, get_tensor_label
+from ..._utils._torch_symbols import torch_attr
+from ...errors._base import TorchLensError, transparent_contextmanager
+from ._completeness_cross_thread import _internal_read_active
+from ._consumer_kind import _classify_consumer_kind
 from .completeness_witness import (
     _TORCHLENS_ROOT,
     HOST_VALUE_ESCAPE_METHODS,
@@ -63,13 +66,12 @@ from .completeness_witness import (
     INVISIBLE_HOST_ESCAPE_FUNCS,
     INVISIBLE_HOST_ESCAPE_PROPERTIES,
     STORAGE_BRIDGE_ESCAPE_FUNCS,
-    _internal_read_active,
 )
 
 _TORCH_ROOT: Final[Path] = Path(torch.__file__).resolve().parent
 
-# The belt surface IS the union of the five existing closed sets (memo sec
-# 2.2; opus r2 M2): computed from the constituents at import so a new member
+# The belt surface IS the union of the five existing closed sets:
+# computed from the constituents at import so a new member
 # in any constituent set is inherited automatically. Pinned against all five
 # by the belt-census meta-test.
 STRUCTURE_ONLY_ESCAPE_SURFACE: Final[frozenset[str]] = (
@@ -107,8 +109,8 @@ def _first_non_torchlens_caller() -> tuple[str, int, bool] | None:
     and classifies the very next frame: a torchlens-internal or torch-internal
     caller retains today's behavior (``is_user`` False) — torchlens internals
     legitimately touch real-tensor storage in form (b) and torch's own
-    formatting reads scalars — while a user-code caller refuses (memo sec 2.2:
-    the scoping is PROVENANCE, not device). Classifying the immediate caller,
+    formatting reads scalars — while a user-code caller refuses (the
+    scoping is PROVENANCE, not device). Classifying the immediate caller,
     not "the first user frame anywhere below", is load-bearing: every capture
     ultimately has user frames below it.
     """
@@ -150,24 +152,6 @@ def _belt_should_consider(state: _StructureOnlyBeltState) -> bool:
     )
 
 
-def _classify_consumer_kind(filename: str, line: int) -> str:
-    """Raise-time branch-kind classification (memo sec 2.3).
-
-    Uses the standalone ``ast_branches.classify_bool`` lookup — no
-    postprocess dependency; its ``"unknown"`` maps to ``"scalar_escape"`` (an
-    escape the classifier cannot tie to a branch context is by definition a
-    bare escape). The vocabulary of record is ``BoolConsumer.kind``.
-    """
-
-    try:
-        from ...postprocess.ast_branches import classify_bool
-
-        kind = classify_bool(filename, line).kind
-    except Exception:  # noqa: BLE001 — classification must never mask the refusal
-        return "scalar_escape"
-    return "scalar_escape" if kind == "unknown" else kind
-
-
 def _tensor_substrate(tensor: Any) -> str:
     """Return ``"meta"`` or ``"real"`` (guarded: hostile subclasses)."""
 
@@ -186,8 +170,6 @@ def _raise_teaching_refusal(
     line: int,
 ) -> None:
     """Raise the sec-2.3 typed teaching refusal for one user-frame escape."""
-
-    from ...capture.structure_only import ValueDependentBranchError
 
     consumer_kind = _classify_consumer_kind(filename, line)
     substrate = _tensor_substrate(tensor)
@@ -289,7 +271,12 @@ def _make_escalated_property(descriptor: Any, state: _StructureOnlyBeltState, na
         _maybe_refuse_escape(state, name, self)
         return descriptor.__get__(self, type(self))
 
-    return property(getter)
+    # doc= MUST be explicit (never defaulted): see DescriptorCompatProperty's
+    # constructor-landmine note in _tl.py.
+    replacement = DescriptorCompatProperty(getter, doc=name)
+    replacement.__objclass__ = getattr(descriptor, "__objclass__", torch.Tensor)
+    replacement.__name__ = name
+    return replacement
 
 
 def _install_method_belt(
@@ -342,17 +329,17 @@ def _install_property_belt(
         property_restores[name] = (shadowed, descriptor)
 
 
-@contextmanager
+@transparent_contextmanager
 def structure_only_escape_belt(trace: Any) -> Iterator[None]:
     """LAYER 1: install the escalated escape belt for one capture.
 
-    No-op unless ``trace.structure_only`` (default path zero-diff). Install
+    No-op unless ``trace.options.structure_only`` (default path zero-diff). Install
     and unwind are BaseException-safe with shadow-aware restore (the R07
     unwind standard): a name set on ``torch.Tensor`` that shadowed a C-level
     slot member must be DELETED on restore, never written back.
     """
 
-    if not bool(getattr(trace, "structure_only", False)):
+    if not bool(trace._options_structure_only):
         yield
         return
 
@@ -452,16 +439,6 @@ def _raised_by_raise_statement(tb: types.TracebackType) -> bool:
     return False
 
 
-def _annotate_guarded(exc: BaseException, note: str) -> None:
-    """The guarded PEP-678 house idiom (3.10 degrades to a RuntimeWarning)."""
-
-    add_note = getattr(exc, "add_note", None)
-    if add_note is not None:
-        add_note(note)
-    else:  # Python 3.10: no PEP 678 notes — surface via warning.
-        warnings.warn(note, RuntimeWarning, stacklevel=3)
-
-
 _USER_ANNOTATION: Final[str] = (
     "torchlens: raised during structure-only capture; tensors here may be meta (no values)"
 )
@@ -490,16 +467,73 @@ def _wrapper_op_name(exc: BaseException) -> str | None:
     return candidate
 
 
+def _substrate_mismatch_kind(exc: BaseException) -> str | None:
+    """Classify a RuntimeError as a substrate mismatch, or ``None``.
+
+    Two provenance-based mechanisms, never message text: (a) the innermost
+    TorchLens wrapper frame's failing call OBSERVABLY mixed meta and real
+    tensor operands; (b) the raising frame sits inside ``torch/amp`` (the
+    autocast device-validation family — measured: torch validates the device
+    string even for ``enabled=True`` on meta and dies there).
+    """
+
+    tb = exc.__traceback__
+    amp_root = _TORCH_ROOT / "amp"
+    saw_meta = False
+    saw_real = False
+    while tb is not None:
+        path, _ = _frame_location(tb)
+        try:
+            path.relative_to(amp_root)
+            return "torch.amp device validation (autocast family)"
+        except ValueError:
+            pass
+        try:
+            path.relative_to(_TORCHLENS_ROOT)
+        except ValueError:
+            tb = tb.tb_next
+            continue
+        frame_meta, frame_real = _frame_operand_substrates(tb.tb_frame)
+        saw_meta = saw_meta or frame_meta
+        saw_real = saw_real or frame_real
+        tb = tb.tb_next
+    if saw_meta and saw_real:
+        return "mixed meta/real operands in the failing wrapped call"
+    return None
+
+
+def _frame_operand_substrates(frame: types.FrameType) -> tuple[bool, bool]:
+    """Whether one TorchLens wrapper frame holds (meta, real) tensor operands."""
+
+    saw_meta = False
+    saw_real = False
+    for variable in ("args", "call_args", "kwargs", "call_kwargs"):
+        value = frame.f_locals.get(variable)
+        if isinstance(value, dict):
+            values: tuple[Any, ...] = tuple(value.values())
+        elif isinstance(value, (list, tuple)):
+            values = tuple(value)
+        else:
+            continue
+        for item in values:
+            if isinstance(item, torch.Tensor):
+                if item.is_meta:
+                    saw_meta = True
+                else:
+                    saw_real = True
+    return saw_meta, saw_real
+
+
 @contextmanager
 def structure_only_forward_boundary(trace: Any) -> Iterator[None]:
-    """LAYER 2: classify exceptions escaping the user forward (memo 2.2/2.4).
+    """LAYER 2: classify exceptions escaping the user forward.
 
-    No-op unless ``trace.structure_only``. TorchLens-typed exceptions
+    No-op unless ``trace.options.structure_only``. TorchLens-typed exceptions
     (including Layer-1 refusals and halt/stop signals) always pass through
     byte-untouched.
     """
 
-    if not bool(getattr(trace, "structure_only", False)):
+    if not bool(trace._options_structure_only):
         yield
         return
     try:
@@ -514,19 +548,19 @@ def structure_only_forward_boundary(trace: Any) -> Iterator[None]:
         innermost_external = _is_external(innermost_path)
         user_raised = innermost_external and _raised_by_raise_statement(innermost)
         if user_raised:
-            _annotate_guarded(exc, _USER_ANNOTATION)
+            defer_failure_note(trace, exc, _USER_ANNOTATION)
             raise
         externals = _external_frames(exc)
         # The INNERMOST external frame is the failing callsite (a traceback
         # enumerates OUTER frames first, so "last in tb order" is the frame
-        # adjacent to the transition into torch — sol r2 M2); the outermost
+        # adjacent to the transition into torch); the outermost
         # is recorded for orientation only.
         failing_file, failing_line = (
             (str(externals[-1][0]), externals[-1][1]) if externals else (None, None)
         )
         entry_frame = f"{externals[0][0]}:{externals[0][1]}" if externals else None
         if isinstance(exc, NotImplementedError):
-            from ...capture.structure_only import MetaKernelUnavailableError
+            from ..._capture.structure_only import MetaKernelUnavailableError
 
             op_name = _wrapper_op_name(exc)
             location = f"{failing_file}:{failing_line}" if failing_file else "<unknown>"
@@ -548,6 +582,40 @@ def structure_only_forward_boundary(trace: Any) -> Iterator[None]:
                     "upgrade torch for broader meta-kernel coverage"
                 ),
             ) from exc
+        mismatch_kind = (
+            _substrate_mismatch_kind(exc)
+            if isinstance(exc, RuntimeError) and not user_raised
+            else None
+        )
+        if mismatch_kind is not None:
+            # Device-mismatch RuntimeErrors and
+            # the autocast/unsupported-scalarType family classify into the
+            # SUBSTRATE family BEFORE the value-escape fallback — both were
+            # measured to mis-teach the user to hunt a value branch that does
+            # not exist. Classification is by observed wrapper operands
+            # (mixed meta/real tensors in the failing wrapped call) or
+            # raising-frame provenance (torch/amp), never message text.
+            from ..._errors import SubstrateMismatchError
+
+            kind = mismatch_kind
+            location = f"{failing_file}:{failing_line}" if failing_file else "<unknown>"
+            raise SubstrateMismatchError(
+                "Structure-only capture refused: a REAL tensor met the meta "
+                f"substrate mid-forward at {location} ({kind}). A stale "
+                "pre-wrap factory reference or a device='cpu' literal mints "
+                "real tensors inside an admitted weights-free forward; the "
+                "recorded graph would be neither the real model's nor a "
+                "coherent hypothesis. Remedy: pass device= through the "
+                "module's factory kwargs (or drop the pinned device so the "
+                "owned factory scope places it), and construct every tensor "
+                "the forward mints on the model's substrate. Original error "
+                f"annotates, never decides: {exc}",
+                code="structure_only_substrate_mismatch",
+                file_path=failing_file,
+                line_no=failing_line,
+                mismatch_kind=kind,
+                entry_frame=entry_frame,
+            ) from exc
         if isinstance(exc, RuntimeError) and not user_raised:
             # Memo 2.2 Layer 2: a RuntimeError that was NOT raised by a user
             # `raise` statement — either the raising frame sits inside torch
@@ -556,7 +624,7 @@ def structure_only_forward_boundary(trace: Any) -> Iterator[None]:
             # C-level callee died at an external CALL site (the
             # unenumerated-escape shape, e.g. tensor.tobytes() on meta). The
             # exception family + provenance decide; message text never does.
-            from ...capture.structure_only import ValueDependentBranchError
+            from ..._capture.structure_only import ValueDependentBranchError
 
             location = f"{failing_file}:{failing_line}" if failing_file else "<unknown>"
             raise ValueDependentBranchError(
@@ -584,5 +652,5 @@ def structure_only_forward_boundary(trace: Any) -> Iterator[None]:
                 ),
             ) from exc
         # Unclassifiable: propagate unchanged with the guarded annotation.
-        _annotate_guarded(exc, _USER_ANNOTATION)
+        defer_failure_note(trace, exc, _USER_ANNOTATION)
         raise

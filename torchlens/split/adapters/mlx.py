@@ -6,10 +6,13 @@ from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from typing import Any
 
+from torchlens.split.errors import SplitRequestError
+
 from ... import _state
+from ..._ir.container import rebuild_container_from_spec
 from ...backends.mlx.containers import iter_arrays_with_paths, rebuild_mlx_module
 from ...backends.mlx.validation import REPLAY_SLOT, MLXOpCapture
-from ...ir.container import rebuild_container_from_spec, reorder_container_leaves
+from .._capture_projection import reorder_container_leaves
 from ..boundary import ReplayBoundary
 from ..errors import SplitBoundaryError, SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
@@ -139,6 +142,7 @@ class _MlxGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} source value is unavailable.",
                 context=self._context(node, "missing source value"),
+                code=SplitUnsupportedError.code,
             )
         return self._binding.resolve(value)
 
@@ -155,6 +159,7 @@ class _MlxGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} references unavailable MLX parent {parent_label!r}.",
                 context=self._context(node, "missing parent value"),
+                code=SplitUnsupportedError.code,
             )
         return overlay[parent_id]
 
@@ -174,6 +179,7 @@ class _MlxGeneratedSegmentBase:
                     raise SplitUnsupportedError(
                         f"{node.label!r} has an unlabeled MLX replay slot.",
                         context=self._context(node, "unlabeled replay slot"),
+                        code=SplitUnsupportedError.code,
                     )
                 return self._binding.resolve(component)
             return self._resolve_parent_value(str(label), node, overlay)
@@ -204,6 +210,7 @@ class _MlxGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} has no MLX operation capture.",
                 context=self._context(node, "missing MLX operation capture"),
+                code=SplitUnsupportedError.code,
             )
         args_template, kwargs_template = mlx_shape_templates(
             capture, node.canonical_id, self.graph.shape_program, self._shape_binding
@@ -250,6 +257,7 @@ class _MlxGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} has no callable MLX operation capture.",
                 context=self._context(node, "missing callable target"),
+                code=SplitUnsupportedError.code,
             )
         args, kwargs = self._reconstruct_args(node, overlay)
         module_arrays = self._binding.module_arrays(capture, args)
@@ -270,6 +278,7 @@ class _MlxGeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"MLX split replay failed for {node.label!r}: {exc}",
                 context=self._context(node, "MLX operation replay failed"),
+                code=SplitUnsupportedError.code,
             ) from exc
 
     def _execute_nodes(self, overlay: dict[str, Any]) -> dict[str, Any]:
@@ -290,6 +299,7 @@ class _MlxGeneratedSegmentBase:
                 raise SplitUnsupportedError(
                     f"{node.label!r} has no executable MLX operation capture.",
                     context=self._context(node, "missing MLX operation capture"),
+                    code=SplitUnsupportedError.code,
                 )
             # Raw output labels group the entire native call, including leaves
             # returned directly from the model. Model output paths can differ
@@ -313,6 +323,7 @@ class _MlxGeneratedSegmentBase:
                 f"{node.label!r} returned {len(output_leaves)} MLX array leaves, "
                 f"but the trace records {len(capture.labels_raw)} outputs.",
                 context=self._context(node, "output arity mismatch"),
+                code=SplitUnsupportedError.code,
             )
         for label, (value, _path) in zip(capture.labels_raw, output_leaves, strict=True):
             node_id = self._label_to_id.get(label)
@@ -351,6 +362,7 @@ class MlxGeneratedPrefix(_MlxGeneratedSegmentBase):
                     split_point=self.spec.boundary,
                     reason="input count mismatch",
                 ),
+                code=SplitUnsupportedError.code,
             )
         for index, previous in self._input_aliases:
             if input_leaves[index] is not input_leaves[previous]:
@@ -361,6 +373,7 @@ class MlxGeneratedPrefix(_MlxGeneratedSegmentBase):
                         split_point=self.spec.boundary,
                         reason="input alias mismatch",
                     ),
+                    code=SplitBoundaryError.code,
                 )
         overlay = dict(zip(self.graph.input_node_ids, input_leaves, strict=True))
         if self.graph.shape_program is not None:
@@ -467,6 +480,7 @@ class MlxGeneratedSuffix(_MlxGeneratedSegmentBase):
         raise SplitUnsupportedError(
             f"Final output {node.canonical_id!r} has no available MLX replay value.",
             context=self._context(node, "missing output replay value"),
+            code=SplitUnsupportedError.code,
         )
 
     def _reconstruct_output(self, overlay: dict[str, Any]) -> Any:
@@ -481,6 +495,7 @@ class MlxGeneratedSuffix(_MlxGeneratedSegmentBase):
                     split_point=self.spec.boundary,
                     reason="missing output records",
                 ),
+                code=SplitUnsupportedError.code,
             )
         leaves = [
             (path, self._output_leaf(node, overlay))
@@ -498,12 +513,14 @@ class MlxGeneratedSuffix(_MlxGeneratedSegmentBase):
                 raise SplitUnsupportedError(
                     "MLX output records do not match the recorded container specification.",
                     context=self._context(output_nodes[0], "invalid output container records"),
+                    code=SplitUnsupportedError.code,
                 ) from exc
         if len(leaves) == 1 and not leaves[0][0]:
             return leaves[0][1]
         raise SplitUnsupportedError(
             "MLX split replay requires captured metadata to reconstruct output containers.",
             context=self._context(output_nodes[0], "missing output container metadata"),
+            code=SplitUnsupportedError.code,
         )
 
 
@@ -626,7 +643,10 @@ class MlxSplitAdapter(SplitPolicyMixin):
             return value
         current = int(value.shape[axis])
         if current <= 0:
-            raise ValueError("Cannot resize an empty batch axis.")
+            raise SplitRequestError(
+                "Cannot resize an empty batch axis.",
+                code=SplitRequestError.code,
+            )
         indexes = _mx().arange(batch_size, dtype=_mx().int32) % current
         return _mx().take(value, indexes, axis=axis)
 
@@ -691,4 +711,4 @@ class MlxSplitAdapter(SplitPolicyMixin):
         )
 
 
-__all__ = ["MlxGeneratedPrefix", "MlxGeneratedSuffix", "MlxSplitAdapter"]
+__all__ = ("MlxGeneratedPrefix", "MlxGeneratedSuffix", "MlxSplitAdapter")

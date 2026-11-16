@@ -63,4 +63,4 @@ class MlxStateCoordinator:
                 state.version += 1
 
 
-__all__ = ["MlxStateCoordinator", "snapshot_mlx_values"]
+__all__ = ("MlxStateCoordinator", "snapshot_mlx_values")

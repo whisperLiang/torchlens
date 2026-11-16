@@ -65,6 +65,7 @@ def resolve_mlx_device(device: Any, *, split_point: str = "") -> Any:
                 split_point=split_point,
                 reason="invalid or unavailable MLX device",
             ),
+            code=SplitUnsupportedError.code,
         ) from exc
 
 
@@ -98,4 +99,4 @@ def _preserved_stream(mx: Any, stream: Any) -> Iterator[None]:
         mx.set_default_device(previous_device)
 
 
-__all__ = ["mlx_execution_context", "resolve_mlx_device"]
+__all__ = ("mlx_execution_context", "resolve_mlx_device")

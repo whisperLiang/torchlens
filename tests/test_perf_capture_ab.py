@@ -9,7 +9,7 @@ to measurements taken at the sprint merge-base, recorded in
 ceiling: a re-measured gate metric may not exceed its baseline by more than
 10%. The 2% strict advisory mode arrives with the post-features perf pass.
 
-**RATIFIED METRIC (JMT 2026-08-19): the TRACE FLOOR, not a ratio.** D14/D15
+**RATIFIED METRIC (decided 2026-08-19): the TRACE FLOOR, not a ratio.** D14/D15
 were worded around a native-vs-trace ratio; the ratio was measured to be both
 flaky-red and leaky-green (see the rejected-statistics list below) and is
 therefore superseded. The floor is now the locked gated statistic and the
@@ -30,7 +30,7 @@ Two workloads:
    rejects load spikes by construction.
 
    Two prior statistics were measured and rejected (2026-08-19, quiet
-   32-core devbox):
+   32-core Linux worker):
 
    * median-of-12 ratio (original): ~30% run-to-run spread (mlp ratios
      220-313 over 5 quiet runs, 2026-08-17) against a ceiling only 10%
@@ -55,7 +55,7 @@ Two workloads:
    more-samples-on-demand, never a wider gate. Medians and the native
    floor ride alongside for provenance.
 2. **Fast-tier decode pair** — native vs wrapped-episode (``tl.trace`` per
-   decode step) vs guarded-fast (``trace.run(inputs=..., fast=True)`` per
+   decode step) vs guarded-fast (``trace.run_transaction(inputs=..., fast=True)`` per
    step) on a fixed-window greedy decode loop over a HuggingFace causal LM.
    The METAPLAN P2 floor (r3 decision rule) is absolute: guarded-fast must
    beat wrapped-episode by >= 2x wall clock on the primary CPU row. Both
@@ -119,7 +119,7 @@ GATE_CEILING_FRACTION = 0.10
 #: measurement compared to a median-era baseline would read systematically
 #: low and wave regressions through.
 #:
-#: LOCKED (JMT 2026-08-19): the trace floor is the RATIFIED gated statistic,
+#: LOCKED (decided 2026-08-19): the trace floor is the RATIFIED gated statistic,
 #: superseding the D14/D15 native-vs-trace ratio wording. Changing this token
 #: changes what the gate means and forces a re-baseline, so it takes an
 #: explicit ruling -- not a lane's judgement call.
@@ -139,7 +139,7 @@ ESCALATION_NATIVE_SAMPLES = 200
 
 #: Quiet-box measurement precondition: above this 1-minute load average as a
 #: fraction of cores, a floor measurement is NO measurement (measured
-#: 2026-08-19: sustained load 9-16 on the 32-core devbox inflated trace
+#: 2026-08-19: sustained load 9-16 on the 32-core Linux worker inflated trace
 #: floors 10-90%, and CPU-time floors inflated identically — the contention
 #: is memory-bandwidth/cache, not descheduling, so no statistic recovers the
 #: quiet floor). The gate SKIPS with the load in the reason instead of
@@ -332,7 +332,7 @@ def decode_pair_rows(
 
         # Warm both tiers once: wrapper install, module prep, fast binders.
         warm = tl.trace(model, ids, save=predicate)
-        warm.run(inputs=ids, fast=True)
+        warm.run_transaction(inputs=ids, fast=True)
 
         def native_step(current: torch.Tensor) -> Any:
             with torch.no_grad():
@@ -342,7 +342,7 @@ def decode_pair_rows(
             return tl.trace(model, current, save=predicate)
 
         def fast_step(current: torch.Tensor) -> Any:
-            return warm.run(inputs=current, fast=True)
+            return warm.run_transaction(inputs=current, fast=True)
 
         native_ms = run_tier(native_step, windows)
         wrapped_ms = run_tier(wrapped_step, windows)
@@ -469,11 +469,97 @@ def test_fast_tier_floor_decode_reference() -> None:
     )
 
 
+def _git_sha() -> str:
+    """Return the current commit SHA, or ``"unknown"`` when unavailable."""
+
+    import subprocess
+
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def _write_baseline(small_capture: dict[str, dict[str, float]], reason: str) -> None:
+    """Write ``capture_ab_baseline.json`` from a measured ``small_capture`` payload."""
+
+    payload: dict[str, Any] = {
+        "context": load_context(),
+        "statistic": SMALL_CAPTURE_STATISTIC,
+        "sha": _git_sha(),
+        "small_capture": small_capture,
+        "rebaseline_reason": reason,
+        "rebaselined": time.strftime("%Y-%m-%d"),
+    }
+    BASELINE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    BASELINE_PATH.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+#: Opt-in env vars for the pytest-native baseline writer below. Never armed in
+#: CI (a plain presence check, not the "1"-only arming convention other
+#: golden-mutation flags use, since this baseline is not part of the
+#: GOLDEN_FLAG_REGISTRY/_oracle_env governance -- it is gated by its own
+#: required reason instead).
+WRITE_BASELINE_ENV_VAR = "TORCHLENS_PERF_AB_WRITE_BASELINE"
+WRITE_BASELINE_REASON_ENV_VAR = "TORCHLENS_PERF_AB_REASON"
+
+
+@pytest.mark.skipif(
+    os.environ.get(WRITE_BASELINE_ENV_VAR) != "1",
+    reason=(
+        f"opt-in baseline writer; set {WRITE_BASELINE_ENV_VAR}=1 and "
+        f"{WRITE_BASELINE_REASON_ENV_VAR}=... at a declared re-baselining point"
+    ),
+)
+def test_write_baseline_under_pytest() -> None:
+    """Record ``capture_ab_baseline.json`` from INSIDE pytest (opt-in, never CI).
+
+    ``main()``'s ``--write-baseline`` runs this file as a bare script with
+    none of pytest's fixtures or collection overhead; on a 32-core Linux worker
+    (2026-10-02), ``test_small_capture_overhead_within_gate`` measured trace
+    floors ~14-20% HIGHER under pytest than a same-box bare-script
+    recording taken moments earlier, with the box's load average near zero
+    both times -- a baseline written outside pytest fails the pytest-gated
+    comparison unconditionally, independent of any real regression. This
+    test performs the SAME pooled measurement and write (``repeats=3``,
+    matching ``main()``'s default) from inside pytest, so the recorded
+    floor matches the gate's actual runtime.
+    """
+
+    reason = os.environ.get(WRITE_BASELINE_REASON_ENV_VAR)
+    if not reason:
+        pytest.fail(
+            f"set {WRITE_BASELINE_REASON_ENV_VAR} (declared re-baselining point); "
+            "refusing to write an undocumented baseline"
+        )
+    _require_quiet_box("before an opt-in baseline write")
+    _write_baseline(pooled_capture_overhead_rows(), reason)
+    print(f"baseline written: {BASELINE_PATH}")
+
+
 def main() -> None:
-    """Measurement/report pass: print all rows, optionally refresh baseline."""
+    """Measurement/report pass: print all rows, optionally refresh baseline.
+
+    ``--write-baseline`` here runs as a BARE SCRIPT, with none of pytest's
+    fixtures or collection overhead. Measured on a 32-core Linux worker (2026-10-02): the
+    same box's trace floor runs measurably (~14-20%) higher under pytest
+    than a bare-script recording taken moments earlier, both at a near-zero
+    load average, so a baseline recorded this way can fail
+    ``test_small_capture_overhead_within_gate`` unconditionally, independent
+    of any real regression. Prefer the pytest-native writer instead:
+    ``TORCHLENS_PERF_AB_WRITE_BASELINE=1 TORCHLENS_PERF_AB_REASON="..." pytest
+    tests/test_perf_capture_ab.py::test_write_baseline_under_pytest -m rare``.
+    This CLI path stays for quick diagnostics (``--skip-small``,
+    ``--decode-model``) where an exact pytest-floor match does not matter.
+    """
 
     import argparse
-    import subprocess
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--decode-model", default=os.environ.get("TL_PERF_AB_DECODE_MODEL"))
@@ -494,17 +580,8 @@ def main() -> None:
     payload: dict[str, Any] = {
         "context": load_context(),
         "statistic": SMALL_CAPTURE_STATISTIC,
+        "sha": _git_sha(),
     }
-    try:
-        payload["sha"] = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=Path(__file__).parent,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        payload["sha"] = "unknown"
 
     if not args.skip_small:
         if args.write_baseline:

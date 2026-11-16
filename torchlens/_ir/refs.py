@@ -1,0 +1,193 @@
+"""Reference dataclasses for backend-neutral captured objects."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, fields
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .events import BlobRef
+
+
+@dataclass(frozen=True, slots=True)
+class DtypeRef:
+    """Backend-neutral dtype reference.
+
+    Attributes
+    ----------
+    backend
+        Framework namespace the dtype belongs to: the prefix before the first
+        ``"."`` in ``name`` (for example ``"torch"`` for ``"torch.float32"``), or
+        ``"unknown"`` when the value carries no namespace. NOTE: this names the
+        *framework*, which is NOT what the same-named :attr:`DeviceRef.backend`
+        carries -- that one is the hardware device class (``"cpu"``/``"cuda"``).
+        The two ``backend`` fields share a name but not a meaning.
+    name
+        Canonical dtype string (for example ``"torch.float32"``).
+    """
+
+    backend: str
+    name: str
+
+    @classmethod
+    def from_value(cls: type[DtypeRef], value: Any) -> DtypeRef | None:
+        """Create a dtype reference from a backend dtype-like value.
+
+        Parameters
+        ----------
+        value
+            Backend dtype object or string.
+
+        Returns
+        -------
+        DtypeRef | None
+            Neutral dtype reference, or ``None`` when ``value`` is ``None``.
+        """
+
+        if value is None:
+            return None
+        text = str(value)
+        backend = text.split(".", 1)[0] if "." in text else "unknown"
+        return cls(backend=backend, name=text)
+
+    def __str__(self) -> str:
+        """Return the canonical dtype name."""
+
+        return self.name
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceRef:
+    """Backend-neutral device reference.
+
+    Attributes
+    ----------
+    backend
+        Hardware device class: the prefix before the first ``":"`` in ``name``
+        (for example ``"cpu"`` for ``"cpu"``, or ``"cuda"`` for ``"cuda:0"``).
+        NOTE: despite the shared field name, this is the hardware device class,
+        NOT the framework namespace that :attr:`DtypeRef.backend` carries
+        (``"torch"``). A consumer that reads ``DeviceRef.backend`` expecting the
+        framework would incorrectly get ``"cuda"``.
+    name
+        Canonical device string (for example ``"cpu"`` or ``"cuda:0"``).
+    """
+
+    backend: str
+    name: str
+
+    @classmethod
+    def from_value(cls: type[DeviceRef], value: Any) -> DeviceRef | None:
+        """Create a device reference from a backend device-like value.
+
+        Parameters
+        ----------
+        value
+            Backend device object or string.
+
+        Returns
+        -------
+        DeviceRef | None
+            Neutral device reference, or ``None`` when ``value`` is ``None``.
+        """
+
+        if value is None:
+            return None
+        text = str(value)
+        backend = text.split(":", 1)[0] if ":" in text else text
+        return cls(backend=backend, name=text)
+
+    def __str__(self) -> str:
+        """Return the canonical device name."""
+
+        return self.name
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredRef:
+    """Backend-private lazy payload reference."""
+
+    backend: str
+    handle_id: str
+    blob_ref: BlobRef | None
+    inferred_shape: tuple[int, ...] | None
+    inferred_dtype: str | None
+    materialize_fn: object | None
+
+
+@dataclass(frozen=True, slots=True)
+class TensorRef:
+    """Backend-neutral metadata for a captured tensor-like value."""
+
+    label_raw: str
+    shape: tuple[int, ...] | None
+    dtype: str | None
+    device: str | None
+    requires_grad: bool | None
+    memory: int | None
+    payload: object | DeferredRef | None
+    blob_ref: BlobRef | None
+    backend_handle_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ParamRef:
+    """Backend-neutral metadata for a captured parameter."""
+
+    barcode: str
+    address: str
+    shape: tuple[int, ...] | None
+    dtype: str | None
+    trainable: bool
+    module_address: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReservedLabel:
+    """Atomic raw-label reservation for a loggable output site."""
+
+    label: str
+    label_raw: str
+    raw_index: int
+    type_index: int
+    layer_type: str
+    site: object
+
+
+#: Field names per frozen record class, for :func:`_clone_frozen_record`.
+_FROZEN_RECORD_FIELD_NAMES: dict[type, tuple[str, ...]] = {}
+
+
+def _clone_frozen_record(value: Any, **changes: Any) -> Any:
+    """Shallow-copy a frozen ``slots`` dataclass, overriding ``changes``.
+
+    ``dataclasses.replace`` rebuilds the instance through keyword
+    ``__init__``, which for a frozen class pays one guarded ``__setattr__``
+    per field plus the keyword marshalling; a capture clones every journal
+    record twice (pass absorption and the replay projection), so this copies
+    the slots directly. The result equals ``replace(value, **changes)`` field
+    for field: the record classes define no ``__post_init__`` and no
+    ``init=False`` field, so there is nothing to recompute.
+    """
+
+    cls = type(value)
+    names = _FROZEN_RECORD_FIELD_NAMES.get(cls)
+    if names is None:
+        names = tuple(spec.name for spec in fields(cls))
+        _FROZEN_RECORD_FIELD_NAMES[cls] = names
+    clone = object.__new__(cls)
+    for name in names:
+        object.__setattr__(clone, name, changes[name] if name in changes else getattr(value, name))
+    return clone
+
+
+def journal_record(event: Any) -> Any:
+    """Return ``event``'s full record when it is a row handle, else ``event`` itself.
+
+    Row handles (``_row_journal._RowOpRecord``) are the only journal entries
+    whose class defines ``materialize``. Checking the class, not the instance,
+    avoids the record's strict ``__getattr__``, and lets the capture journal and
+    the captured-run views unwrap handles without importing ``_row_journal``.
+    """
+
+    return event.materialize() if hasattr(type(event), "materialize") else event

@@ -1,7 +1,7 @@
 """r-b4 R26-2: structural gate -- private torch API touches stay inside `_torch_compat`.
 
 The CLAUDE.md rule ("every fragile torch-private-API probe routes through
-``torchlens/utils/_torch_compat.py`` and flips a named ``HAS_*`` flag") was
+``torchlens/_utils/_torch_compat.py`` and flips a named ``HAS_*`` flag") was
 unenforced: probes kept escaping the boundary (the fail-open census probe, the
 unguarded dispatcher-schema census, the silent DTensor geometry import, the
 ``python -O``-stripped TensorBase assert, ...). This AST gate makes the rule
@@ -30,7 +30,7 @@ _PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "torchlens"
 #: The sanctioned boundary modules: the torch compat chokepoint and its TF
 #: sibling (the ONLY module allowed to import ``tensorflow.python``).
 _BOUNDARY_FILES = {
-    "torchlens/utils/_torch_compat.py",
+    "torchlens/_utils/_torch_compat.py",
     "torchlens/backends/tf/_tf_compat.py",
 }
 
@@ -41,7 +41,7 @@ _ALLOWED_PRIVATE_TOUCHES: dict[str, frozenset[str]] = {
     # Fail-closed CVE-surface / unpickler hardening checks: absence REFUSES the
     # load or shrinks the admitted class set, never degrades silently
     # (b4 R26 census, fable inventory).
-    "torchlens/_io/_safe_unpickle.py": frozenset(
+    "torchlens/_io/_alloc_belt.py": frozenset(
         {
             "torch._C",
             "getattr(torch, '_storage_classes')",
@@ -61,12 +61,16 @@ _ALLOWED_PRIVATE_TOUCHES: dict[str, frozenset[str]] = {
     # binding disappears, the escape route it guards disappears with it
     # (fail-neutral; nothing to patch means nothing can escape through it).
     "torchlens/backends/torch/_completeness_finalize.py": frozenset({"getattr(torch, '_C')"}),
+    # The torch.ops call classes patched for the wrapped epoch so a user's direct
+    # ``torch.ops.*`` call is recorded as an op; a missing class is skipped, which
+    # leaves those calls unrecorded and failing validation (fail-closed).
+    "torchlens/backends/torch/_torch_ops_calls.py": frozenset({"import torch._ops"}),
     # TorchDispatchMode base class (public-by-usage, import fails the module
     # loudly at import time) for the shared owned-mode marker and pause
     # bracket; the l3 aten wave 0 mode-pop unification MOVED the import here
     # from completeness_witness.py, and the stack getter already routes
     # through _torch_compat (get_current_dispatch_mode_stack).
-    "torchlens/backends/torch/_modes.py": frozenset({"from torch.utils._python_dispatch"}),
+    "torchlens/_utils/_dispatch_modes.py": frozenset({"from torch.utils._python_dispatch"}),
     # The fail-closed torch.ops enumeration (the TorchDispatchMode base-class
     # import moved to _modes.py with the l3 mode-pop unification).
     "torchlens/backends/torch/completeness_witness.py": frozenset({"import torch._ops"}),
@@ -123,13 +127,31 @@ _ALLOWED_PRIVATE_TOUCHES: dict[str, frozenset[str]] = {
     # entire declared 2.1->2.12+ floor. Unguarded on purpose: if torch ever
     # moves them the read fails LOUDLY at call time -- there is no
     # silent-degradation path for a capability flag to disclose.
-    "torchlens/data_classes/_trace_validation.py": frozenset(
-        {"torch.nn.modules.batchnorm._BatchNorm"}
-    ),
-    "torchlens/intervention/rerun.py": frozenset(
+    "torchlens/intervention/_trace_run.py": frozenset({"torch.nn.modules.batchnorm._BatchNorm"}),
+    "torchlens/intervention/_rerun.py": frozenset(
         {
             "torch.nn.modules.batchnorm._BatchNorm",
             "torch.nn.modules.dropout._DropoutNd",
+        }
+    ),
+    # Same taxonomy-base class, F17 quickstart lineage (PROBEFIX microlane):
+    # the pinned-execution norm-buffer snapshot/restore and the train-mode
+    # running-stats disclosure classify modules against torch's own norm
+    # family bases (``_BatchNorm``, ``_InstanceNorm``) -- the identity basis
+    # torch uses for BatchNorm1d/2d/3d/Sync and InstanceNorm1d/2d/3d across
+    # the declared 2.1->2.12+ floor. From-import spellings, unguarded on
+    # purpose: if torch ever moves them the import fails LOUDLY -- there is
+    # no silent-degradation path for a capability flag to disclose.
+    "torchlens/_quickstart/_primitive.py": frozenset(
+        {
+            "from torch.nn.modules.batchnorm import _BatchNorm",
+            "from torch.nn.modules.instancenorm import _InstanceNorm",
+        }
+    ),
+    "torchlens/_capture/prepare/door.py": frozenset(
+        {
+            "from torch.nn.modules.batchnorm import _BatchNorm",
+            "from torch.nn.modules.instancenorm import _InstanceNorm",
         }
     ),
     # TF graph-only static path (r-b4 R26 opus LM, now VISIBLE to the gate):
@@ -145,6 +167,13 @@ _ALLOWED_PRIVATE_TOUCHES: dict[str, frozenset[str]] = {
             "from tensorflow.python.framework",
             "from tensorflow.python.framework.convert_to_constants",
         }
+    ),
+    # Loaded-trace callable resolution maps a ``custom`` key naming a torch C
+    # builtin to its public namespace only when that public attribute, unwrapped,
+    # IS the C function; an absent module or attribute leaves the op unresolved
+    # and validation refuses the bundle by name (fail-closed).
+    "torchlens/validation/_loaded_callables.py": frozenset(
+        {"torch._C._VariableFunctions", "torch._C._nn"}
     ),
 }
 
@@ -336,7 +365,7 @@ def test_private_torch_touches_match_the_ledger_exactly() -> None:
         if touches - _ALLOWED_PRIVATE_TOUCHES.get(rel, frozenset())
     }
     assert not unsanctioned, (
-        "Private torch API touch(es) outside torchlens/utils/_torch_compat.py: "
+        "Private torch API touch(es) outside torchlens/_utils/_torch_compat.py: "
         f"{unsanctioned}. Route the probe through a _torch_compat accessor with a "
         "named HAS_* flag (CLAUDE.md rule), or -- for a genuinely fail-closed "
         "touch -- add a reason-bearing ledger row in this test."
@@ -352,7 +381,6 @@ def test_private_torch_touches_match_the_ledger_exactly() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_gate_scanner_detects_planted_offenders() -> None:
     """Planted positives: the scanner sees attribute, import, and getattr forms."""
 
@@ -371,7 +399,6 @@ def test_gate_scanner_detects_planted_offenders() -> None:
     assert "getattr(torch, '_VF')" in touches
 
 
-@pytest.mark.smoke
 def test_gate_scanner_detects_aliased_and_string_literal_offenders() -> None:
     """grind-r6 b4 R26 (sol MED): the scanner blind spots, planted.
 
@@ -402,7 +429,6 @@ def test_gate_scanner_detects_aliased_and_string_literal_offenders() -> None:
     assert "__import__('torch._dynamo')" in touches
 
 
-@pytest.mark.smoke
 def test_gate_scanner_detects_planted_bypass_spellings() -> None:
     """r7 R26: the spellings that historically passed the gate clean.
 
@@ -442,7 +468,6 @@ def test_gate_scanner_detects_planted_bypass_spellings() -> None:
     assert "import tensorflow.python.eager.context" in touches
 
 
-@pytest.mark.smoke
 def test_gate_scanner_ignores_public_alias_use() -> None:
     """Aliased PUBLIC use stays clean: no false positives from the alias rooter."""
 

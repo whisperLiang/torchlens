@@ -13,7 +13,6 @@ and the root call's ops exactly mirror ``trace.layer_labels`` (no pass-qualified
 root ops, so ``validation._check_function_root_module_invariants`` stays armed).
 """
 
-import pytest
 import torch
 import torch.nn as nn
 
@@ -45,20 +44,19 @@ def _linear_layer(log: "tl.Trace") -> str:
 
 
 def _assert_root_call_mirrors_layers(log: "tl.Trace") -> None:
-    """The root ``self`` call's ops must equal ``trace.layer_labels`` verbatim.
+    """The root ``self`` call's ops equal ``trace.op_labels`` and project onto its Layers.
 
     This is the module-trace analogue of
-    ``validation._check_function_root_module_invariants``: the root op sequence
-    is never pass-qualified, so it lines up 1:1 with the trace's layer labels.
+    ``validation._check_function_root_module_invariants``: the root call lists
+    pass-qualified Op labels like every other call, and its distinct Layers in
+    order are exactly the trace's layer labels.
     """
-    root_call = log["self"]
-    assert list(root_call.ops) == list(log.layer_labels), (
-        list(root_call.ops),
-        list(log.layer_labels),
-    )
+    root_call = log["self:1"]
+    assert list(root_call.ops) == list(log.op_labels), (list(root_call.ops), list(log.op_labels))
+    projection = list(dict.fromkeys(log.ops[label].layer_label for label in root_call.ops))
+    assert projection == list(log.layer_labels), (projection, list(log.layer_labels))
 
 
-@pytest.mark.smoke
 def test_trace_submodule_as_root_after_container() -> None:
     """(a) outer -> inner-as-root -> outer again all trace correctly."""
     outer = _Outer()
@@ -94,7 +92,6 @@ def test_trace_submodule_as_root_after_container() -> None:
     _assert_root_call_mirrors_layers(log_outer_again)
 
 
-@pytest.mark.smoke
 def test_trace_submodule_as_root_before_container() -> None:
     """(b) reverse order: inner-as-root first, then the container."""
     outer = _Outer()

@@ -1,7 +1,7 @@
 """Input-facet patcher fixes (grind-p3-fixplan T3, fix-patching lane).
 
 Four coupled defects in the input-facet patching path of
-``torchlens/semantic/patching.py``:
+``torchlens/_semantic/patching.py``:
 
 * [HIGH] the patcher indexed BFS-ordered ``input_ops`` ordinals into a DFS
   tree walk, silently patching the WRONG leaf on mixed-nesting inputs. The
@@ -27,7 +27,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.semantic import FacetSpec
+from torchlens._utils._record_group_table import record_member
+from torchlens.facets import FacetSpec
 
 
 class MixedLeafReader(nn.Module):
@@ -126,8 +127,8 @@ class MappingInputModel(nn.Module):
 def _input_facet(trace: Any, io_role: str) -> FacetSpec:
     """Return a facet spec homed on the input op recorded at ``io_role``."""
 
-    home = next(op for op in trace.input_ops if getattr(op, "io_role", None) == io_role)
-    return FacetSpec.from_home(home, recipe_id="test_input_leaf_patching")
+    home = next(op for op in trace.input_ops if record_member(op, "io_role", None) == io_role)
+    return FacetSpec.from_home(home, function_id="test_input_leaf_patching")
 
 
 def mixed_leaf_reader(module: Any) -> dict[str, Any]:
@@ -162,7 +163,7 @@ def _register_module_facet_recipes() -> Iterator[None]:
     (hunt-b2-sol R76/R77).
     """
 
-    from torchlens.semantic import facets as _facets
+    from torchlens._semantic import facets as _facets
 
     saved = list(_facets._REGISTRY)
     tl.facets.register(
@@ -202,7 +203,6 @@ def _mixed_tree(value: float) -> tuple[tuple[torch.Tensor, list[torch.Tensor]], 
     return ((leaf(), [leaf()]), leaf())
 
 
-@pytest.mark.smoke
 def test_input_facet_patch_binds_recorded_address_not_ordinal() -> None:
     """Patching the facet homed on leaf ``c`` must change ``c``, not leaf ``a``.
 
@@ -223,7 +223,7 @@ def test_input_facet_patch_binds_recorded_address_not_ordinal() -> None:
     assert torch.isclose(scores[0], torch.tensor(86.0)), scores
 
 
-@pytest.mark.smoke
+@pytest.mark.smoke_cells("test_every_input_leaf_patches_its_own_recorded_address[leaf_a-32.0]")
 @pytest.mark.parametrize(
     ("facet_name", "expected"),
     [
@@ -247,8 +247,7 @@ def test_every_input_leaf_patches_its_own_recorded_address(
     assert torch.isclose(scores[0], torch.tensor(expected)), (facet_name, scores)
 
 
-@pytest.mark.smoke
-@pytest.mark.filterwarnings("ignore::torchlens._errors.TorchLensCaptureGapWarning")
+@pytest.mark.filterwarnings("ignore::torchlens._errors.CaptureGapWarning")
 def test_aliased_input_leaf_patches_every_site() -> None:
     """One tensor object at two input sites is replaced at BOTH sites.
 
@@ -277,7 +276,6 @@ def test_aliased_input_leaf_patches_every_site() -> None:
     assert torch.isclose(scores[0], torch.tensor(40.0)), scores
 
 
-@pytest.mark.smoke
 def test_mapping_input_container_type_is_preserved() -> None:
     """A Mapping-subclass input keeps its type through the patched rerun.
 
@@ -297,7 +295,6 @@ def test_mapping_input_container_type_is_preserved() -> None:
     assert torch.isclose(scores[0], torch.tensor(30.0)), scores
 
 
-@pytest.mark.smoke
 def test_teardown_restores_state_when_cleanup_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -309,7 +306,7 @@ def test_teardown_restores_state_when_cleanup_raises(
     fork must be released too.
     """
 
-    from torchlens.data_classes.trace import Trace
+    from torchlens._data_classes.trace import Trace
 
     model = MixedNestingModel()
     clean, corrupted = _mixed_tree(10.0), _mixed_tree(1.0)

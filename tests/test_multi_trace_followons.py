@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 
 import torch
@@ -127,27 +126,19 @@ def _bundle() -> tl.Bundle:
 
     torch.manual_seed(20)
     x = torch.randn(2, 3)
-    first = tl.trace(_ModuleModel(), x, intervention_ready=True)
-    second = tl.trace(_ModuleModel(), x, intervention_ready=True)
-    return tl.bundle({"first": first, "second": second})
-
-
-def test_supergraph_accessor_and_module_type_labels() -> None:
-    """Bundle exposes its supergraph with module type metadata."""
-
-    bundle = _bundle()
-    supergraph = bundle.supergraph
-
-    assert supergraph.topological_order
-    assert any(node.module_type == "Linear" for node in supergraph.nodes.values())
+    first = tl.trace(_ModuleModel(), x, capture=tl.options.CaptureOptions(replayable=True))
+    second = tl.trace(_ModuleModel(), x, capture=tl.options.CaptureOptions(replayable=True))
+    return tl.Bundle({"first": first, "second": second})
 
 
 def test_compare_topology_rejects_reordered_graphs() -> None:
     """Reordered unique-fingerprint graphs are not reported identical."""
 
     x = torch.randn(2, 3)
-    first = tl.trace(_ReorderedReluSigmoid(), x, intervention_ready=True)
-    second = tl.trace(_ReorderedSigmoidRelu(), x, intervention_ready=True)
+    first = tl.trace(_ReorderedReluSigmoid(), x, capture=tl.options.CaptureOptions(replayable=True))
+    second = tl.trace(
+        _ReorderedSigmoidRelu(), x, capture=tl.options.CaptureOptions(replayable=True)
+    )
 
     diff = compare_topology(first, second)
 
@@ -156,70 +147,45 @@ def test_compare_topology_rejects_reordered_graphs() -> None:
     assert diff.unmatched_b
 
 
-def test_supergraph_topological_order_respects_edges_after_reordered_bundle() -> None:
-    """Merged bundles with reordered graphs stay acyclic and edge-consistent."""
+def test_super_buffer_views_use_public_live_values_and_param_reads_refuse() -> None:
+    """Buffer super views expose live values; cross-member param reads refuse.
 
-    x = torch.randn(2, 3)
-    bundle = tl.bundle(
-        {
-            "first": tl.trace(_ReorderedReluSigmoid(), x, intervention_ready=True),
-            "second": tl.trace(_ReorderedSigmoidRelu(), x, intervention_ready=True),
-        }
-    )
+    The historical assertion here pinned the checkpoint live-ref defect
+    (A-CKPT): ``weight_norm_diff`` served live-handle bytes as per-member
+    capture values. Cross-member parameter value reads now refuse typed with
+    ``checkpoint_series_live_params`` -- the claim is unprovable from live
+    handles, regardless of whether the members come from distinct model
+    objects (claim-keyed, never identity-keyed).
+    """
 
-    supergraph = bundle.supergraph
-    positions = {name: idx for idx, name in enumerate(supergraph.topological_order)}
+    import pytest
 
-    assert len(positions) == len(supergraph.nodes)
-    assert all(positions[parent] < positions[child] for parent, child in supergraph.edges)
-
-
-def test_super_buffer_and_param_views_use_public_live_values() -> None:
-    """Bundle super views expose live buffer values and parameter diffs."""
+    from torchlens.errors import ParamEvidenceMissingError
 
     x = torch.randn(2, 3)
     model_a = _BufferParamModel(scale=1.0, weight=1.0)
     model_b = _BufferParamModel(scale=2.0, weight=3.0)
-    trace_a = tl.trace(model_a, x, intervention_ready=True)
-    trace_b = tl.trace(model_b, x, intervention_ready=True)
-    bundle = tl.bundle({"a": trace_a, "b": trace_b})
+    trace_a = tl.trace(model_a, x, capture=tl.options.CaptureOptions(replayable=True))
+    trace_b = tl.trace(model_b, x, capture=tl.options.CaptureOptions(replayable=True))
+    bundle = tl.Bundle({"a": trace_a, "b": trace_b})
 
     buffer_out = bundle.buffers["scale"].out
-    weight_diffs = bundle.params["linear.weight"].weight_norm_diff
-    expected_diff = float(
-        torch.linalg.vector_norm(
-            model_b.linear.weight.detach() - model_a.linear.weight.detach()
-        ).item()
-    )
-
     assert torch.equal(buffer_out, torch.cat([model_a.scale, model_b.scale], dim=0))
-    assert math.isclose(weight_diffs["a"], 0.0)
-    assert math.isclose(weight_diffs["b"], expected_diff)
+
+    with pytest.raises(ParamEvidenceMissingError) as excinfo:
+        _ = bundle.params["linear.weight"].weight_norm_diff
+    assert excinfo.value.fields["code"] == "checkpoint_series_live_params"
 
 
-def test_show_bundle_graph_rolled_and_backward_modes(tmp_path: Path) -> None:
-    """show_bundle_graph handles rolled and backward bundle render modes."""
+def test_bundle_draw_rolled_and_backward_graphs(tmp_path: Path) -> None:
+    """Bundle.draw handles the rolled and backward bundle pictures."""
 
     bundle = _bundle()
-    rolled_source = tl.show_bundle_graph(
-        bundle,
-        vis_outpath=str(tmp_path / "rolled_bundle"),
-        vis_mode="rolled",
-        vis_save_only=True,
-        vis_fileformat="svg",
-    )
-    backward_source = tl.show_bundle_graph(
-        bundle,
-        vis_outpath=str(tmp_path / "backward_bundle"),
-        direction="backward",
-        vis_save_only=True,
-        vis_fileformat="svg",
-    )
+    rolled_source = bundle.draw(str(tmp_path / "rolled_bundle.svg"), rolled=True).dot
+    backward_source = bundle.draw(str(tmp_path / "backward_bundle.svg"), graph="backward").dot
 
-    assert rolled_source is not None
     assert "rolled" in rolled_source
     assert "(Linear)" in rolled_source
-    assert backward_source is not None
     assert "backward" in backward_source
 
 
@@ -227,35 +193,11 @@ def test_bundle_backward_regression_path(tmp_path: Path) -> None:
     """Bundle backward rendering emits per-member backward subgraphs."""
 
     bundle = _bundle()
-    source = tl.show_bundle_graph(
-        bundle,
-        vis_outpath=str(tmp_path / "backward_bundle_regression"),
-        direction="backward",
-        vis_save_only=True,
-        vis_fileformat="svg",
-    )
+    source = bundle.draw(str(tmp_path / "backward_bundle_regression.svg"), graph="backward").dot
 
-    assert source is not None
     assert "cluster_backward_first" in source
     assert "cluster_backward_second" in source
     assert "backward" in source
-
-
-def test_bundle_backward_no_unified_supergraph(tmp_path: Path) -> None:
-    """Bundle backward rendering stays per-member in P6."""
-
-    bundle = _bundle()
-    source = tl.show_bundle_graph(
-        bundle,
-        vis_outpath=str(tmp_path / "backward_bundle_no_supergraph"),
-        direction="backward",
-        vis_save_only=True,
-        vis_fileformat="svg",
-    )
-
-    assert source is not None
-    assert "cluster_backward" in source
-    assert "backward_supergraph" not in source
 
 
 def test_bundle_graph_style_primitives_and_chrome_trace_diff(tmp_path: Path) -> None:
@@ -264,19 +206,15 @@ def test_bundle_graph_style_primitives_and_chrome_trace_diff(tmp_path: Path) -> 
     bundle = _bundle()
     first_node = bundle.supergraph.topological_order[0]
     first_edge = next(iter(bundle.supergraph.edges))
-    source = tl.show_bundle_graph(
-        bundle,
-        vis_outpath=str(tmp_path / "styled_bundle"),
-        vis_node_overrides={first_node: {"fillcolor": "#DDEAF7"}},
-        vis_edge_overrides={first_edge: {"color": "#0072B2"}},
-        vis_save_only=True,
-        vis_fileformat="svg",
-    )
+    source = bundle.draw(
+        str(tmp_path / "styled_bundle.svg"),
+        node_overrides={first_node: {"fillcolor": "#DDEAF7"}},
+        edge_overrides={first_edge: {"color": "#0072B2"}},
+    ).dot
 
     trace_path = tl.export.chrome_trace_diff(bundle, tmp_path / "trace_diff.json")
     payload = json.loads(trace_path.read_text(encoding="utf-8"))
 
-    assert source is not None
     assert "#DDEAF7" in source
     assert "#0072B2" in source
     assert payload["metadata"]["schema"] == "torchlens.chrome_trace_diff.v1"

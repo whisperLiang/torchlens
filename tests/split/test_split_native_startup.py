@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from torchlens.utils._subprocess import run_bounded_subprocess
+from torchlens._utils._subprocess import run_bounded_subprocess
 
 pytestmark = pytest.mark.heavy
 

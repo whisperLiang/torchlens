@@ -6,13 +6,8 @@ from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    from ..data_classes.op import Op
-    from ..data_classes.trace import Trace
-    from .invariants import (
-        MetadataInvariantError,
-        _module_claim_address,
-        _module_claims,
-    )
+    from .._data_classes.op import Op
+    from .._data_classes.trace import Trace
 
 __all__ = (
     "_param_log_list_contains_param",
@@ -46,7 +41,7 @@ def _param_log_list_contains_param(param_logs: object, param: object) -> bool:
         ``True`` when any log has the same address or barcode as ``param``.
     """
 
-    address = getattr(param, "address", None)
+    address = record_member(param, "address", None)
     barcode = getattr(param, "barcode", None)
     if not isinstance(param_logs, Iterable):
         return False
@@ -54,7 +49,7 @@ def _param_log_list_contains_param(param_logs: object, param: object) -> bool:
         candidate is param
         or (
             address is not None
-            and getattr(candidate, "address", None) == address
+            and record_member(candidate, "address", None) == address
             and getattr(candidate, "barcode", None) == barcode
         )
         for candidate in param_logs or ()
@@ -64,7 +59,7 @@ def _param_log_list_contains_param(param_logs: object, param: object) -> bool:
 def _param_address_index(ml: Trace) -> dict[object, object]:
     """Build a one-pass primary/alias address -> Param index.
 
-    Replaces a per-lookup linear scan over ``ml.param_logs``. Co-parent
+    Replaces a per-lookup linear scan over ``ml._param_logs``. Co-parent
     resolution runs once per param, so the scan made ``param_xrefs`` quadratic in
     the parameter count: every weight-tied or bias/weight sibling link re-walked
     the whole parameter list (800 lookups x 800 params on an 800-layer chain).
@@ -102,8 +97,8 @@ def _param_address_index(ml: Trace) -> dict[object, object]:
     # param before any co-parent lookup happens, so this pass adds no resolution
     # the check did not already perform.
     index: dict[object, object] = {}
-    for param in ml.param_logs:
-        address = getattr(param, "address", None)
+    for param in ml._param_logs:
+        address = record_member(param, "address", None)
         if address not in index:
             index[address] = param
         for alias in getattr(param, "all_addresses", None) or ():
@@ -171,7 +166,7 @@ def _check_buffer_static_versions(ml: Trace, buf: object, name: str) -> None:
         mismatched version addresses, or no acceptable ancestor module.
     """
 
-    address = getattr(buf, "address", None)
+    address = record_member(buf, "address", None)
     layer_label = getattr(buf, "layer_label", None)
     if not address:
         raise MetadataInvariantError(
@@ -186,18 +181,18 @@ def _check_buffer_static_versions(ml: Trace, buf: object, name: str) -> None:
         )
     for version in versions:
         label = getattr(version, "layer_label", type(version).__name__)
-        if not getattr(version, "is_buffer", False):
+        if not record_member(version, "is_buffer", False):
             raise MetadataInvariantError(
                 name,
                 f"Buffer '{address}' version '{label}' is not a buffer Op",
             )
-        if getattr(version, "address", None) != address:
+        if record_member(version, "address", None) != address:
             raise MetadataInvariantError(
                 name,
                 f"Buffer '{address}' version '{label}' has address "
-                f"{getattr(version, 'address', None)!r}",
+                f"{record_member(version, 'address', None)!r}",
             )
-        if label not in getattr(ml, "layer_dict_all_keys", {}):
+        if label not in ml._layer_dict_all_keys:
             raise MetadataInvariantError(
                 name,
                 f"Buffer '{address}' version '{label}' does not resolve in trace",
@@ -253,7 +248,7 @@ def _check_buffer_semantic_ownership(ml: Trace, buf: object, name: str) -> None:
         registered buffer owner and unrelated to any active consumer op.
     """
 
-    address = getattr(buf, "address", None)
+    address = record_member(buf, "address", None)
     if not isinstance(address, str) or not address:
         return
     owner_address = _owner_module_address_for_buffer(address)
@@ -366,7 +361,7 @@ def _check_buffer_write_versions(ml: Trace, buf: object, name: str) -> None:
     """
 
     valid_write_kinds = {"reassign", "inplace", "fused", "data_reassign"}
-    address = getattr(buf, "address", None)
+    address = record_member(buf, "address", None)
     versions = list(getattr(buf, "versions", ()) or ())
     write_versions = [
         version for version in versions if getattr(version, "buffer_write_kind", None) is not None
@@ -377,7 +372,7 @@ def _check_buffer_write_versions(ml: Trace, buf: object, name: str) -> None:
     passes: list[int] = [
         buffer_pass
         for version in versions
-        if isinstance(buffer_pass := getattr(version, "buffer_pass", None), int)
+        if isinstance(buffer_pass := record_member(version, "buffer_pass", None), int)
     ]
     for version in write_versions:
         label = getattr(version, "layer_label", type(version).__name__)
@@ -388,14 +383,14 @@ def _check_buffer_write_versions(ml: Trace, buf: object, name: str) -> None:
                 f"Buffer '{address}' version '{label}' has invalid buffer_write_kind "
                 f"{write_kind!r}",
             )
-        buffer_pass = getattr(version, "buffer_pass", None)
+        buffer_pass = record_member(version, "buffer_pass", None)
         if not isinstance(buffer_pass, int) or buffer_pass < 1:
             raise MetadataInvariantError(
                 name,
                 f"Buffer '{address}' version '{label}' has invalid buffer_pass {buffer_pass!r}",
             )
 
-        source = getattr(version, "buffer_source", None)
+        source = record_member(version, "buffer_source", None)
         if source is not None and _resolve_trace_label(ml, source) is None:
             raise MetadataInvariantError(
                 name,
@@ -433,7 +428,7 @@ def _resolve_trace_label(ml: Trace, label: str) -> str | None:
     # rebuilding the set made every resolution O(n_labels). This helper is
     # called once per edge-use record and per module boundary, so the copy made
     # `check_metadata_invariants` quadratic in trace size.
-    all_keys = getattr(ml, "layer_dict_all_keys", {})
+    all_keys = ml._layer_dict_all_keys
     final_label = getattr(ml, "_raw_to_final_layer_labels", {}).get(label)
     # `.get(label)` returns None both when `label` genuinely has no raw-label
     # mapping (the common case for an already-final label) and, in principle,
@@ -474,14 +469,14 @@ def _check_buffer_replay_validated_versions(ml: Trace, buf: object, name: str) -
         postprocessing.
     """
 
-    address = getattr(buf, "address", None)
+    address = record_member(buf, "address", None)
     for version in getattr(buf, "versions", ()) or ():
         if getattr(version, "buffer_write_kind", None) is None:
             continue
         if getattr(version, "buffer_replay_validated", None) is not True:
             continue
         label = getattr(version, "layer_label", type(version).__name__)
-        source = getattr(version, "buffer_source", None)
+        source = record_member(version, "buffer_source", None)
         if source is None:
             raise MetadataInvariantError(
                 name,
@@ -500,7 +495,7 @@ def _check_buffer_replay_validated_versions(ml: Trace, buf: object, name: str) -
                 name,
                 f"Buffer '{address}' version '{label}' replay source is not a parent",
             )
-        parent_args = getattr(version, "parent_arg_positions", {}) or {}
+        parent_args = record_member(version, "parent_arg_positions", {}) or {}
         arg_positions = parent_args.get("args", {}) if isinstance(parent_args, Mapping) else {}
         resolved_arg0 = _resolve_trace_label(ml, arg_positions.get(0, ""))
         if resolved_arg0 != resolved_source:
@@ -508,7 +503,7 @@ def _check_buffer_replay_validated_versions(ml: Trace, buf: object, name: str) -
                 name,
                 f"Buffer '{address}' version '{label}' replay source is not args[0]",
             )
-        if not getattr(version, "saved_args", None):
+        if not record_member(version, "saved_args", None):
             raise MetadataInvariantError(
                 name,
                 f"Buffer '{address}' version '{label}' claims replay validation without "
@@ -523,3 +518,15 @@ def _check_buffer_replay_validated_versions(ml: Trace, buf: object, name: str) -
                 f"Buffer '{address}' version '{label}' claims replay validation without "
                 "comparable payloads",
             )
+
+
+# Late imports: the split modules of this package import one another (cycles), so each
+# imports its siblings once every definition above exists.
+from .._utils._record_group_table import record_member  # noqa: E402
+from ._invariants import (  # noqa: E402
+    MetadataInvariantError,
+)
+from ._invariants_entry import (  # noqa: E402
+    _module_claim_address,
+    _module_claims,
+)

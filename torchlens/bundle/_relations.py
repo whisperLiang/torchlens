@@ -1,58 +1,232 @@
-"""Bundle member-relation table (S6): typed, closed, OPTIONAL relations.
+"""Bundle member-relation table (grammar v2): typed, closed, OPTIONAL relations.
 
 One optional relation table per :class:`~torchlens.bundle.Bundle`. Absence
 means a plain Bundle with unchanged semantics; membership NEVER requires
-alignment or relations (the S6 flexibility invariant). The table is DATA,
+alignment or relations (the flexibility invariant). The table is DATA,
 not derivation: loads never recompute it, but its invariants (R1/R2/R3) are
 re-checked on every load and every mutation.
 
-Pattern-of-record: :mod:`torchlens.distributed._ledger` — closed
+Pattern-of-record: :mod:`torchlens._distributed._ledger` — closed
 vocabularies, frozen payload key sets, fail-closed ``from_payload``,
 immutable identity-stable finalized views. Parse boundaries raise
 ``ValueError``; the public Bundle wiring converts into the typed
 :class:`~torchlens.errors.BundleRelationError` family (stable codes on
-``exc.fields["code"]``, never message text).
+``exc.fields["code"]``, never message text). The one exception is the
+evidence byte budget, which raises ``BundleRelationError`` directly so its
+distinct code (``bundle_relation_evidence_over_budget``) survives the
+conversion sites.
 
-Schema of record: DRAFT S6 in the L2 spike memo, BINDING as of the S2
-ratification. Every spelling is DOCUMENTED-UNSTABLE pending the rolling
-naming session (spike section 6.5); semantics are pinned.
+GRAMMAR v2 (the C07X coordinated tlspec-v9 amendment; foldB s4.4 items 1,
+2, 7, 8, 9, 10, 11): every kind's param keys split REQUIRED/OPTIONAL (the
+optional sets are per-kind CLOSED; an undeclared key still refuses — the
+unknown-key check is untouched). ``successor_of`` admits the optional
+``evidence`` envelope (``{schema, items[], facts_digest}``), ``carry_mode``,
+and ``state_source`` params. Evidence items are GRADED claims over the
+closed :data:`RELATION_CLAIM_GRADES` vocabulary with the closed
+:data:`RELATION_UNCHECKED_REASONS` menu (no lane may invent an uncontracted
+reason string) and a mandatory nullable ``basis`` key (a schema may demand
+it non-null; the grammar can express that without a bump). One per-row
+evidence canonical-JSON byte budget applies
+(:data:`RELATION_EVIDENCE_BUDGET_BYTES`, the sidecar family default).
 
-Payload spelling: PAIR rows persist their endpoints under the S6 keys
+DIRECTION PIN (item 8): on a ``successor_of`` row, ``from`` is ALWAYS the
+LATER member (the successor) and ``to`` the earlier member it succeeds —
+"B succeeds A" persists as ``{"kind": "successor_of", "from": "B",
+"to": "A"}``. The tlspec-v10 ``fed_by`` kind (:mod:`._fed_by`) pins the same
+direction: "critique fed_by draft" persists as ``{"kind": "fed_by", "from":
+"critique", "to": "draft"}``, and so does the tlspec-v10 ``selected_by``
+control kind (:mod:`._selected_by`): "writer selected_by router" persists as
+``{"kind": "selected_by", "from": "writer", "to": "router"}``. Version-axis
+relation rows ORDER members; they never license cross-member parameter VALUE
+reads (``checkpoint_series_live_params``).
+
+UNKNOWN-KIND LOADING (loader doctrine leg (a)): builtin kinds are BARE
+names; extension kinds are NAMESPACED (``"<ns>.<name>"``, at least one dot —
+the sidecar family-id grammar). A well-formed row of an unknown NAMESPACED
+kind loads OPAQUE and DISCLOSED under ``unknown_kinds="opaque"`` (an
+:class:`OpaqueRelationRow`: preserved verbatim on re-save, never executed,
+graded ``unchecked(kind_unregistered)`` where a grade applies, skipped by
+R1 — its endpoints are unreadable without its kind's schema). A BARE
+unknown kind keeps refusing in every mode, and ``unknown_kinds="refuse"``
+(``tl.load(unknown_relations="refuse")``) restores the strict behavior for
+namespaced kinds too. CONSTRUCTION (``Bundle.relate`` / the constructor)
+always refuses unknown kinds: opaque rows enter from artifacts only.
+
+Payload spelling: PAIR rows persist their endpoints under the keys
 ``from``/``to`` (``from`` is a Python keyword, so the dataclass attributes
 are ``from_member``/``to_member``); MEMBER rows persist under ``member``.
 
-PERSISTENCE IS GATED (S3 version discipline): ``member_relations`` is a NEW
-``bundle.json`` key and never rides a real tlspec-v7 artifact. The writer
-ships inert behind the pre-release registrar switch
-(:mod:`torchlens._io.prerelease`); the coordinated wave-3 bump activates it.
+PERSISTENCE: ``member_relations`` persists plainly in ``bundle.json`` as of
+the coordinated tlspec v8 bump (the pre-release registrar retired empty);
+loads re-check R1/R2/R3 on every rebuild. The v2 grammar rides tlspec v9
+(the C07X amendment): every new slot is optional, so every v8-era payload
+remains valid under v2.
+
+Relation rows are ORDERING/TOPOLOGY claims only. A row asserting a version
+axis never licenses cross-member parameter VALUE reads: those refuse typed
+(``checkpoint_series_live_params``) until every member carries immutable
+capture-time parameter evidence (R8(b), future).
 """
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
-from ..errors.episode import BundleRelationError
+from ..errors._episode import BundleRelationError
+from ._fed_by import FED_BY_KIND, check_fed_by_params, validate_fed_by_param
+from ._relation_evidence import (
+    validate_carry_mode,
+    validate_evidence_class,
+    validate_evidence_seam,
+    validate_seams,
+)
+from ._selected_by import (
+    SELECTED_BY_DECISION_PARAMS,
+    SELECTED_BY_KIND,
+    check_selected_by_params,
+    validate_selected_by_param,
+)
 
 __all__ = [
     "MEMBER_ROW_KINDS",
     "PAIR_ROW_KINDS",
+    "RELATION_CLAIM_GRADES",
+    "RELATION_DECLARED_GRADE_KEY",
+    "RELATION_EVIDENCE_BUDGET_BYTES",
+    "RELATION_MEASURED_GRADES",
+    "RELATION_UNCHECKED_REASONS",
+    "RESERVED_EVIDENCE_SCHEMA_IDS",
     "MemberRelationRow",
     "MemberRelationTable",
+    "OpaqueRelationRow",
+    "RelationKindSpec",
 ]
 
-#: PAIR-row kinds -> the EXACT param-key set each kind declares (closed, v1).
-PAIR_ROW_KINDS: dict[str, frozenset[str]] = {
-    "alternative_of": frozenset(),
-    "forked_from": frozenset({"at_step"}),
-    "successor_of": frozenset(),
-    "escalates": frozenset({"at_step"}),
+#: Closed relation claim-grade vocabulary.
+#: Reserved NOW so the composition rule (outcomes gate whether a check
+#: RUNS; evidence never adjudicates an outcome) is expressible without a
+#: later coordinated bump. Users extend the RELATION vocabulary, never this
+#: TRUST vocabulary -- and they never MINT trust either:
+#: every evidence item that reaches a row today is user-authored (no
+#: TorchLens producer writes evidence envelopes yet), so the MEASUREMENT
+#: grades in :data:`RELATION_MEASURED_GRADES` are clamped to ``disclosed`` at
+#: row construction (relate-time AND load-time, since a loaded payload is
+#: rebuilt through the same constructor) with the declared grade preserved
+#: under ``declared_grade``. ``disclosed`` and ``unchecked`` (with its
+#: contracted reason) are the two grades a user may author.
+RELATION_CLAIM_GRADES = frozenset({"verified", "consistent", "disclosed", "unchecked", "divergent"})
+
+#: Grades that assert a TorchLens MEASUREMENT. A user-authored item carrying
+#: one is clamped to ``disclosed`` (never refused: the declaration is real
+#: evidence of what the user believes, just not a check TorchLens ran).
+RELATION_MEASURED_GRADES = frozenset({"verified", "consistent", "divergent"})
+
+#: Item key preserving the grade a user declared before the clamp.
+RELATION_DECLARED_GRADE_KEY = "declared_grade"
+
+#: Closed unchecked-reason menu. A teaching refusal must never state
+#: something false, and no caller may invent an uncontracted reason string;
+#: new reasons enter by contract change only.
+#:
+#: - ``incomparable_basis``: statistical fingerprints without a matching
+#:   ``basis.recipe`` id never condemn.
+#: - ``no_param_snapshot``: the producer is present and healthy; the
+#:   parameter snapshot was simply never taken.
+#: - ``member_outcome_refused``: the cited member's settled outcome refused
+#:   the N2 validation entry, so the item's check never ran.
+#: - ``schema_unknown``: the evidence envelope's schema id is not known to
+#:   this process; items load opaque (loader doctrine leg (b)).
+#: - ``kind_unregistered``: the row's namespaced kind is not registered in
+#:   this process; the row loads opaque (loader doctrine leg (a)).
+RELATION_UNCHECKED_REASONS = frozenset(
+    {
+        "incomparable_basis",
+        "no_param_snapshot",
+        "member_outcome_refused",
+        "schema_unknown",
+        "kind_unregistered",
+    }
+)
+
+#: Per-row evidence canonical-JSON byte budget (C07X item 7; the sidecar
+#: family default). Evidence envelopes are metadata-sized graded claims,
+#: never activation stores; crossing the budget refuses typed
+#: (``bundle_relation_evidence_over_budget``).
+RELATION_EVIDENCE_BUDGET_BYTES = 1_048_576
+
+#: Reserved evidence schema-ID strings (C07X item 11): registrations, not
+#: slots. Their payload validators arrive with their owning lanes; loader
+#: doctrine leg (b) makes late arrival safe (an unknown schema id inside a
+#: well-formed envelope loads opaque, grades unchecked, and is preserved on
+#: re-save — including future ``torchlens.*``-authored ids read by earlier
+#: builds).
+RESERVED_EVIDENCE_SCHEMA_IDS = frozenset({"version_boundary_v1", "turn_boundary_v1"})
+
+#: Exact key set of the successor_of evidence envelope (C07X item 1).
+_EVIDENCE_ENVELOPE_KEYS = frozenset({"schema", "items", "facts_digest"})
+
+#: Namespaced-kind grammar: ``<ns>.<name>`` lowercase identifiers with at
+#: least one dot — the sidecar family-id grammar, one namespace grammar for
+#: both extension doors.
+_NAMESPACED_KIND_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
+
+
+@dataclass(frozen=True)
+class RelationKindSpec:
+    """One builtin relation kind's REQUIRED/OPTIONAL param-key split (v2).
+
+    Both sets are CLOSED: a key outside their union refuses
+    (``bundle_relation_schema_invalid``) exactly as the v1 exact-set check
+    did — the required/optional split does not weaken the undeclared-key
+    refusal.
+    """
+
+    required: frozenset[str]
+    optional: frozenset[str] = frozenset()
+
+    @property
+    def declared(self) -> frozenset[str]:
+        """The union of required and optional param keys."""
+
+        return self.required | self.optional
+
+
+#: PAIR-row kinds -> required/optional param-key split (closed, v2).
+PAIR_ROW_KINDS: dict[str, RelationKindSpec] = {
+    "alternative_of": RelationKindSpec(frozenset()),
+    "forked_from": RelationKindSpec(frozenset({"at_step"})),
+    "successor_of": RelationKindSpec(
+        frozenset(),
+        frozenset({"evidence", "carry_mode", "state_source", "seams"}),
+    ),
+    "escalates": RelationKindSpec(frozenset({"at_step"})),
+    # tlspec v10 (harness bundles): "B fed_by A" -- B's prompt contains A's
+    # output. Content provenance only; from = the LATER member (the reader).
+    FED_BY_KIND: RelationKindSpec(
+        frozenset(),
+        frozenset({"token_spans", "basis", "coverage", "label"}),
+    ),
+    # tlspec v10 (harness bundles): "B selected_by A" -- A's decision (a
+    # route, a verdict) selected B. Control only; from = the LATER member.
+    SELECTED_BY_KIND: RelationKindSpec(
+        frozenset(),
+        frozenset({"chosen", "candidates", "evidence"}),
+    ),
 }
 
-#: MEMBER-row kinds -> the EXACT param-key set each kind declares (closed, v1).
-MEMBER_ROW_KINDS: dict[str, frozenset[str]] = {
-    "episode_member": frozenset({"episode_id", "at_step", "role"}),
+#: Relation kinds admitted after the first relation-carrying tlspec: kind ->
+#: the first stamped ``tlspec_version`` whose grammar has it. A loaded
+#: artifact stamped earlier carrying the kind refuses (its writer could not
+#: have produced the row, so the row was forged or hand-built).
+RELATION_KIND_ADMITTED_FROM: dict[str, int] = {FED_BY_KIND: 10, SELECTED_BY_KIND: 10}
+
+#: MEMBER-row kinds -> required/optional param-key split (closed, v2).
+MEMBER_ROW_KINDS: dict[str, RelationKindSpec] = {
+    "episode_member": RelationKindSpec(frozenset({"episode_id", "at_step", "role"})),
 }
 
 _EPISODE_ROLES = frozenset({"prefill", "decode"})
@@ -80,39 +254,92 @@ def _validated_params(kind: str, params: Any) -> dict[str, Any]:
     Raises
     ------
     ValueError
-        On a non-mapping, an unknown or missing param key, or an ill-typed
-        param value (the S6 R2 refusal family; callers convert into
-        ``bundle_relation_schema_invalid``).
+        On a non-mapping, an undeclared or missing-required param key, or an
+        ill-typed param value (the R2 refusal family; callers convert
+        into ``bundle_relation_schema_invalid``).
+    BundleRelationError
+        ``bundle_relation_evidence_over_budget`` when an evidence envelope
+        crosses :data:`RELATION_EVIDENCE_BUDGET_BYTES` (raised directly so
+        the distinct code survives the conversion sites).
     """
 
-    if kind in PAIR_ROW_KINDS:
-        declared = PAIR_ROW_KINDS[kind]
-    else:
-        declared = MEMBER_ROW_KINDS[kind]
+    spec = PAIR_ROW_KINDS[kind] if kind in PAIR_ROW_KINDS else MEMBER_ROW_KINDS[kind]
     if not isinstance(params, Mapping):
         raise ValueError(
             f"bundle-relation row params must be a mapping, got {type(params).__name__}"
         )
-    unknown = set(params) - declared
+    unknown = set(params) - spec.declared
     if unknown:
         raise ValueError(
             f"bundle-relation row of kind {kind!r} carries undeclared param "
-            f"keys {sorted(unknown)}; declared keys are {sorted(declared)}"
+            f"keys {sorted(unknown)}; declared keys are {sorted(spec.declared)} "
+            f"(required: {sorted(spec.required)})"
         )
-    missing = declared - set(params)
+    missing = spec.required - set(params)
     if missing:
         raise ValueError(
             f"bundle-relation row of kind {kind!r} is missing required param keys {sorted(missing)}"
         )
-    validated: dict[str, Any] = {}
-    for key in sorted(declared):
-        value = params[key]
-        _validate_param_value(key, value)
-        validated[key] = value
+    validated = {
+        key: _validated_param_value(kind, key, params[key])
+        for key in sorted(spec.declared)
+        if key in params
+    }
+    _check_cross_params(kind, validated)
     return validated
 
 
-def _validate_param_value(key: str, value: Any) -> None:
+def _validated_param_value(kind: str, key: str, value: Any) -> Any:
+    """Validate one declared param value and return its persisted normal form."""
+
+    if kind == FED_BY_KIND:
+        return validate_fed_by_param(key, value)
+    if kind == SELECTED_BY_KIND and key in SELECTED_BY_DECISION_PARAMS:
+        return validate_selected_by_param(key, value)
+    _validate_param_value(kind, key, value)
+    if key == "evidence":
+        return _clamp_evidence_grades(value)
+    return list(value) if key == "seams" else value
+
+
+def _check_cross_params(kind: str, validated: Mapping[str, Any]) -> None:
+    """Run a kind's cross-param rules over its validated params."""
+
+    if kind == FED_BY_KIND:
+        check_fed_by_params(validated)
+        if "token_spans" in validated:
+            spans = {"token_spans": validated["token_spans"]}
+            _enforce_evidence_budget(kind, spans, param="token_spans")
+    if kind == SELECTED_BY_KIND:
+        check_selected_by_params(validated)
+    if "evidence" in validated:
+        seams = tuple(validated.get("seams", ()))
+        for index, item in enumerate(validated["evidence"]["items"]):
+            validate_evidence_seam(index, item, seams=seams)
+
+
+def _clamp_evidence_grades(envelope: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the envelope with user-authored MEASUREMENT grades clamped to ``disclosed``.
+
+    Runs after :func:`_validate_evidence_envelope` (so every item is a
+    well-formed graded claim) at BOTH doors -- ``Bundle.relate`` and the
+    payload rebuild at load -- because both construct the row through
+    :class:`MemberRelationRow`. Idempotent: a clamped item re-loads unchanged
+    and its ``declared_grade`` is never overwritten. Schema-specific keys are
+    preserved opaque.
+    """
+
+    items: list[dict[str, Any]] = []
+    for item in envelope["items"]:
+        clamped = dict(item)
+        if clamped.get("grade") in RELATION_MEASURED_GRADES:
+            clamped.setdefault(RELATION_DECLARED_GRADE_KEY, clamped["grade"])
+            clamped["grade"] = "disclosed"
+        items.append(clamped)
+    return {**dict(envelope), "items": items}
+
+
+def _validate_param_value(kind: str, key: str, value: Any) -> None:
     """Type/vocabulary check for one declared relation param value."""
 
     if key == "at_step":
@@ -130,18 +357,134 @@ def _validate_param_value(key: str, value: Any) -> None:
             f"bundle-relation param 'role' is {value!r}, outside the closed "
             f"vocabulary {sorted(_EPISODE_ROLES)}"
         )
+    elif key in ("carry_mode", "state_source"):
+        # Reserved spellings. ``carry_mode`` is the
+        # closed carry-mode vocabulary (``none`` is a declared fresh start that
+        # grades disclosed); ``state_source`` keeps the type envelope only.
+        if not isinstance(value, str) or not value:
+            raise ValueError(
+                f"bundle-relation param {key!r} must be a non-empty string, got {value!r}"
+            )
+        if key == "carry_mode":
+            validate_carry_mode(value)
+    elif key == "seams":
+        validate_seams(value)
+    elif key == "evidence":
+        _validate_evidence_envelope(kind, value)
+
+
+def _validate_evidence_envelope(kind: str, value: Any) -> None:
+    """Validate one evidence envelope's SHAPE fail-closed (C07X item 1).
+
+    The envelope is ``{schema, items[], facts_digest}`` exactly. Item
+    payload SEMANTICS belong to the schema id's owning validator (none are
+    registered today; :data:`RESERVED_EVIDENCE_SCHEMA_IDS` are id
+    reservations only), so items are validated as GRADED claims — the
+    grade/basis/reason grammar — with schema-specific keys preserved opaque
+    (loader doctrine leg (b)).
+    """
+
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            f"bundle-relation 'evidence' must be a mapping envelope, got {type(value).__name__}"
+        )
+    if set(value) != _EVIDENCE_ENVELOPE_KEYS:
+        raise ValueError(
+            "bundle-relation 'evidence' envelope must carry exactly the keys "
+            f"{sorted(_EVIDENCE_ENVELOPE_KEYS)}, got {sorted(value)}"
+        )
+    schema = value["schema"]
+    if not isinstance(schema, str) or not schema:
+        raise ValueError("bundle-relation evidence 'schema' must be a non-empty schema-id string")
+    facts_digest = value["facts_digest"]
+    if not isinstance(facts_digest, str) or not facts_digest:
+        raise ValueError("bundle-relation evidence 'facts_digest' must be a non-empty string")
+    items = value["items"]
+    if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
+        raise ValueError("bundle-relation evidence 'items' must be a list of graded claims")
+    for index, item in enumerate(items):
+        _validate_evidence_item(index, item)
+        validate_evidence_class(index, item, schema=schema)
+    _enforce_evidence_budget(kind, value)
+
+
+def _validate_evidence_item(index: int, item: Any) -> None:
+    """Validate one graded evidence claim (grade/basis/reason grammar)."""
+
+    if not isinstance(item, Mapping):
+        raise ValueError(
+            f"bundle-relation evidence item {index} must be a mapping, got {type(item).__name__}"
+        )
+    grade = item.get("grade")
+    if grade not in RELATION_CLAIM_GRADES:
+        raise ValueError(
+            f"bundle-relation evidence item {index} carries grade {grade!r}, "
+            f"outside the closed vocabulary {sorted(RELATION_CLAIM_GRADES)}"
+        )
+    if "basis" not in item:
+        raise ValueError(
+            f"bundle-relation evidence item {index} is missing the 'basis' key "
+            "(nullable, but always present — a schema may demand it non-null)"
+        )
+    basis = item["basis"]
+    if basis is not None and (not isinstance(basis, str) or not basis):
+        raise ValueError(
+            f"bundle-relation evidence item {index} 'basis' must be a non-empty string or null"
+        )
+    if grade == "unchecked":
+        reason = item.get("reason")
+        if reason not in RELATION_UNCHECKED_REASONS:
+            raise ValueError(
+                f"bundle-relation evidence item {index} grades 'unchecked' with "
+                f"reason {reason!r}, outside the contracted menu "
+                f"{sorted(RELATION_UNCHECKED_REASONS)} (no lane may invent an "
+                "uncontracted reason string)"
+            )
+
+
+def _enforce_evidence_budget(
+    kind: str, envelope: Mapping[str, Any], *, param: str = "evidence"
+) -> None:
+    """Refuse an evidence envelope (or ``fed_by`` span list) crossing the byte budget."""
+
+    try:
+        encoded = json.dumps(dict(envelope), sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"bundle-relation {param!r} on kind {kind!r} is not JSON-portable: {exc}. "
+            "Evidence envelopes persist inside bundle.json, so payloads are JSON "
+            "data (store digests, never tensors)."
+        ) from exc
+    size = len(encoded.encode("utf-8"))
+    if size > RELATION_EVIDENCE_BUDGET_BYTES:
+        raise BundleRelationError(
+            f"bundle-relation {param!r} on kind {kind!r} is {size} canonical-JSON "
+            f"bytes, above the {RELATION_EVIDENCE_BUDGET_BYTES}-byte per-row budget. "
+            "Evidence envelopes are metadata-sized graded claims; move bulk "
+            "payloads to a sidecar family and cite them by digest.",
+            code="bundle_relation_evidence_over_budget",
+            row_kind=kind,
+            size_bytes=size,
+            budget_bytes=RELATION_EVIDENCE_BUDGET_BYTES,
+        )
 
 
 @dataclass(frozen=True)
 class MemberRelationRow:
-    """One frozen S6 relation row; ``kind`` selects one of TWO closed shapes.
+    """One frozen relation row; ``kind`` selects one of TWO closed shapes.
 
     PAIR rows (kinds ``alternative_of`` / ``forked_from`` / ``successor_of``
-    / ``escalates``) carry ``from_member``/``to_member`` (persisted as the
-    S6 ``from``/``to`` keys) and leave ``member`` unset. MEMBER rows (kind
+    / ``escalates`` / ``fed_by`` / ``selected_by``) carry ``from_member``/``to_member`` (persisted as the
+    ``from``/``to`` keys) and leave ``member`` unset. MEMBER rows (kind
     ``episode_member``) carry ``member`` and leave the endpoints unset.
-    ``params`` holds exactly the keys the kind declares — closed per-kind
-    vocabularies, validated at construction and again at every load.
+    ``params`` holds only keys the kind declares — per-kind closed
+    REQUIRED/OPTIONAL sets (grammar v2), validated at construction and again
+    at every load.
+
+    DIRECTION PIN: on a ``successor_of`` row ``from_member``
+    is ALWAYS the LATER member (the successor) and ``to_member`` the earlier
+    member it succeeds — "B succeeds A" is
+    ``MemberRelationRow(kind="successor_of", from_member="B", to_member="A")``.
     """
 
     kind: str
@@ -182,7 +525,7 @@ class MemberRelationRow:
         return (str(self.member),)
 
     def to_payload(self) -> dict[str, Any]:
-        """Return a JSON-serializable payload in the S6 key spelling."""
+        """Return a JSON-serializable payload in the key spelling."""
 
         if self.kind in PAIR_ROW_KINDS:
             return {
@@ -207,6 +550,9 @@ class MemberRelationRow:
             On an unknown kind, a wrong row shape for the kind, an unknown
             or missing payload/param key, or an ill-typed value (callers
             convert into ``bundle_relation_schema_invalid``).
+        BundleRelationError
+            ``bundle_relation_evidence_over_budget`` (rides through
+            conversion sites unchanged).
         TypeError
             When ``payload`` is not a mapping.
         """
@@ -242,28 +588,88 @@ class MemberRelationRow:
         )
 
 
+@dataclass(frozen=True)
+class OpaqueRelationRow:
+    """One preserved-and-disclosed relation row of an unknown NAMESPACED kind.
+
+    Loader doctrine leg (a): a well-formed row whose
+    namespaced kind is not registered in this process loads OPAQUE — the raw
+    payload is preserved verbatim for byte-exact re-save, the row is
+    DISCLOSED (one load warning; :attr:`MemberRelationTable.opaque_kinds`),
+    it is never executed, any grade it implies reads
+    ``unchecked(kind_unregistered)``, and R1 endpoint validation skips it
+    (its endpoints are unreadable without its kind's schema). Opaque rows
+    enter from ARTIFACTS only; construction of new rows always refuses
+    unknown kinds.
+    """
+
+    kind: str
+    payload: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not _NAMESPACED_KIND_PATTERN.match(self.kind or ""):
+            raise ValueError(
+                f"opaque relation rows carry NAMESPACED kinds ('<ns>.<name>'); "
+                f"got {self.kind!r} (bare unknown kinds refuse, never load opaque)"
+            )
+        if not isinstance(self.payload, Mapping):
+            raise TypeError("opaque relation row payload must be a mapping")
+        if self.payload.get("kind") != self.kind:
+            raise ValueError(
+                f"opaque relation row payload 'kind' {self.payload.get('kind')!r} "
+                f"does not match the row kind {self.kind!r}"
+            )
+        object.__setattr__(self, "payload", dict(self.payload))
+
+    def named_members(self) -> tuple[str, ...]:
+        """Opaque rows expose no readable endpoints (R1 skips them)."""
+
+        return ()
+
+    def to_payload(self) -> dict[str, Any]:
+        """Return the preserved raw payload (verbatim re-save)."""
+
+        return dict(self.payload)
+
+
+#: How ``MemberRelationTable.from_payload`` treats unknown NAMESPACED kinds.
+UnknownKindPolicy = Literal["opaque", "refuse"]
+
+
 class MemberRelationTable:
-    """Immutable S6 relation table: an identity-stable tuple of frozen rows.
+    """Immutable relation table: an identity-stable tuple of frozen rows.
 
     Mutation never happens in place (R4): ``Bundle.relate`` and the R5
     cascade paths build a NEW validated table, so views handed out never
-    change underfoot.
+    change underfoot. Rows are :class:`MemberRelationRow` (validated closed
+    grammar) or :class:`OpaqueRelationRow` (preserved unknown namespaced
+    kinds, artifacts only).
     """
 
-    def __init__(self, rows: Sequence[MemberRelationRow] = ()) -> None:
+    def __init__(self, rows: Sequence[MemberRelationRow | OpaqueRelationRow] = ()) -> None:
         for row in rows:
-            if not isinstance(row, MemberRelationRow):
+            if not isinstance(row, (MemberRelationRow, OpaqueRelationRow)):
                 raise TypeError(
-                    "MemberRelationTable rows must be MemberRelationRow instances, "
-                    f"got {type(row).__name__}"
+                    "MemberRelationTable rows must be MemberRelationRow or "
+                    f"OpaqueRelationRow instances, got {type(row).__name__}"
                 )
-        self._rows: tuple[MemberRelationRow, ...] = tuple(rows)
+        self._rows: tuple[MemberRelationRow | OpaqueRelationRow, ...] = tuple(rows)
 
     @property
-    def rows(self) -> tuple[MemberRelationRow, ...]:
+    def rows(self) -> tuple[MemberRelationRow | OpaqueRelationRow, ...]:
         """Immutable, identity-stable view of the relation rows in order."""
 
         return self._rows
+
+    @property
+    def opaque_kinds(self) -> tuple[str, ...]:
+        """The distinct unknown namespaced kinds preserved opaque, in order."""
+
+        seen: list[str] = []
+        for row in self._rows:
+            if isinstance(row, OpaqueRelationRow) and row.kind not in seen:
+                seen.append(row.kind)
+        return tuple(seen)
 
     def __len__(self) -> int:
         return len(self._rows)
@@ -271,40 +677,81 @@ class MemberRelationTable:
     def __iter__(self) -> Any:
         return iter(self._rows)
 
-    def rows_naming(self, member_name: str) -> tuple[MemberRelationRow, ...]:
+    def rows_naming(self, member_name: str) -> tuple[MemberRelationRow | OpaqueRelationRow, ...]:
         """Return the rows that reference ``member_name`` (R5 mutator guards)."""
 
         return tuple(row for row in self._rows if member_name in row.named_members())
 
     def to_payload(self) -> list[dict[str, Any]]:
-        """Return a JSON-serializable payload for portable artifacts."""
+        """Return a JSON-serializable payload for portable artifacts.
+
+        Opaque rows re-emit their preserved raw payloads verbatim, in their
+        original positions (loader doctrine: preserved on re-save, never
+        silently destroyed).
+        """
 
         return [row.to_payload() for row in self._rows]
 
     @classmethod
-    def from_payload(cls, payload: Any) -> MemberRelationTable:
+    def from_payload(
+        cls,
+        payload: Any,
+        *,
+        unknown_kinds: UnknownKindPolicy = "refuse",
+    ) -> MemberRelationTable:
         """Rebuild a table from :meth:`to_payload` output, FAIL-CLOSED.
+
+        Parameters
+        ----------
+        payload:
+            The list-of-row-payloads value :meth:`to_payload` produced (or
+            the equivalent artifact section); anything else refuses.
+        unknown_kinds:
+            ``"refuse"`` (default; construction semantics — every unknown
+            kind refuses) or ``"opaque"`` (loader doctrine leg (a): unknown
+            NAMESPACED kinds load as :class:`OpaqueRelationRow`; bare
+            unknown kinds still refuse). ``tl.load(unknown_relations=...)``
+            selects the policy at the artifact door, defaulting to
+            ``"opaque"``.
 
         Raises
         ------
         ValueError
             On a non-list payload or any invalid row payload (callers
             convert into ``bundle_relation_schema_invalid``).
+        BundleRelationError
+            ``bundle_relation_evidence_over_budget`` (rides through
+            unchanged).
         """
 
         if not isinstance(payload, list):
             raise ValueError(
                 f"bundle-relation table payload must be a list, got {type(payload).__name__}"
             )
-        return cls([MemberRelationRow.from_payload(entry) for entry in payload])
+        rows: list[MemberRelationRow | OpaqueRelationRow] = []
+        for entry in payload:
+            if (
+                unknown_kinds == "opaque"
+                and isinstance(entry, Mapping)
+                and isinstance(entry.get("kind"), str)
+                and entry["kind"] not in PAIR_ROW_KINDS
+                and entry["kind"] not in MEMBER_ROW_KINDS
+                and _NAMESPACED_KIND_PATTERN.match(entry["kind"])
+            ):
+                rows.append(OpaqueRelationRow(kind=entry["kind"], payload=entry))
+                continue
+            rows.append(MemberRelationRow.from_payload(entry))
+        return cls(rows)
 
     def validate_against_members(self, member_names: Iterable[str]) -> None:
         """Re-check the load-time invariants against a concrete member set.
 
         R1: every named member must be a current Bundle member — no dangling
-        edges, ever. R3 kind-scoped invariants: ``episode_member`` rows for
-        one ``episode_id`` carry distinct ``at_step`` values and exactly one
-        ``role="prefill"`` row, sitting at ``at_step`` 0.
+        edges, ever (opaque rows are skipped: their endpoints are unreadable
+        without their kind's schema, which is exactly why they are disclosed
+        as unchecked). R3 kind-scoped invariants: ``episode_member`` rows
+        for one ``episode_id`` carry distinct ``at_step`` values and exactly
+        one ``role="prefill"`` row, sitting at ``at_step`` 0.
 
         Raises
         ------
@@ -329,7 +776,7 @@ class MemberRelationTable:
                     )
         episodes: dict[str, list[MemberRelationRow]] = {}
         for row in self._rows:
-            if row.kind == "episode_member":
+            if isinstance(row, MemberRelationRow) and row.kind == "episode_member":
                 episodes.setdefault(str(row.params["episode_id"]), []).append(row)
         for episode_id, rows in episodes.items():
             steps = [int(row.params["at_step"]) for row in rows]

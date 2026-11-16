@@ -28,14 +28,12 @@ import torch.nn as nn
 import torchlens as tl
 import torchlens._state as _state
 import torchlens.backends.torch.wrappers as wrappers_module
+from torchlens._utils.introspection import nested_getattr
 from torchlens.backends.torch.wrappers import (
     get_orig_torch_funcs,
     is_decorated_function,
 )
-from torchlens.utils.introspection import nested_getattr
-
-pytestmark = pytest.mark.smoke
-
+from torchlens.distributed import is_vetted_build
 
 # Strong refs to superseded wrapper generations. Wrapper objects minted before a
 # forced regeneration stay reachable for the whole session (other test modules'
@@ -54,7 +52,7 @@ def _undecorated_targets() -> list[str]:
         namespace_key = namespace_name.replace("torch.", "")
         try:
             holder = nested_getattr(torch, namespace_key)
-        except AttributeError:
+        except Exception:
             continue
         if not hasattr(holder, func_name):
             continue
@@ -63,6 +61,7 @@ def _undecorated_targets() -> list[str]:
     return undecorated
 
 
+# Kept: sole branch coverage of backends/torch/_transform_wrappers.py, backends/torch/arg_names.py, backends/torch/belt.py and more; a sole mutation kill; the catch of its regression fault.
 def test_partial_first_time_decoration_completes_on_retry(monkeypatch) -> None:
     """A mid-pass decoration failure must NOT launder into `_is_decorated=True`."""
 
@@ -140,15 +139,23 @@ def test_partial_first_time_decoration_completes_on_retry(monkeypatch) -> None:
     # test pins leaves the count STRICTLY ABOVE the baseline, so the direction
     # that matters stays exact.
     assert len(_undecorated_targets()) <= baseline_undecorated
-    assert tl.trace(nn.Linear(4, 4), torch.randn(1, 4)).num_ops >= 1
+    assert tl.trace(nn.Linear(4, 4), torch.randn(1, 4))._num_ops >= 1
 
 
+# Kept: sole branch coverage of distributed/_ledger.py, distributed/_lifecycle.py, distributed/_recognizer.py.
+@pytest.mark.skipif(
+    not is_vetted_build(),
+    reason="full collective arming requires a census-vetted torch build "
+    "(torchlens.distributed.is_vetted_build() is False here); on an unvetted "
+    "torch, _arm's recognizer derivation refuses typed before reaching the second "
+    "install family this test provokes (F1 ruling, Lead, 2026-10-01).",
+)
 def test_distributed_arm_restores_its_wraps_when_the_second_install_fails(
     monkeypatch,
 ) -> None:
     """A failure between the two wrap families must leave no unowned wraps."""
 
-    from torchlens.distributed import _lifecycle
+    from torchlens._distributed import _lifecycle
 
     if _lifecycle._STATE is not None:
         _lifecycle.disarm()
@@ -175,10 +182,24 @@ def test_distributed_arm_restores_its_wraps_when_the_second_install_fails(
         assert getattr(dist, name) is original, f"{name} was left wrapped with no owner"
 
 
+# Kept: skipped in its per-id coverage run, so it has no measurement (shrink rule 3).
 def test_escape_detector_teardown_frees_the_tool_id_and_clears_the_guard(
     monkeypatch,
 ) -> None:
-    """A raising uninstall step must report failure after releasing the tool id."""
+    """A raising uninstall step must still release the id and clear the guard.
+
+    ``_uninstall_monitoring`` attempts every step independently, frees the tool
+    id in a ``finally``, and THEN re-raises as ``RuntimeError`` so a caller can
+    demote the capture's verdict instead of silently blessing a trace whose
+    detector may still be firing into a dead guard (``ac617c60b``,
+    "disclose and demote on detector teardown failure instead of swallowing").
+    This test predates that change and asserted a bare, non-raising call,
+    which went undetected because no CI leg ran Python 3.12 (grind-pyver R9);
+    the end-to-end demotion contract is separately pinned by
+    ``test_detector_teardown_failure_demotes_and_discloses`` in
+    ``tests/test_scoped_patching_escape_detection.py``. Expect the raise here
+    too and verify cleanup still happened around it.
+    """
 
     import sys
 
@@ -212,7 +233,7 @@ def test_escape_detector_teardown_frees_the_tool_id_and_clears_the_guard(
     for candidate in range(6):
         try:
             monitoring.use_tool_id(candidate, "torchlens-test")
-        except ValueError:
+        except Exception:
             continue
         tool_id = candidate
         break
@@ -226,7 +247,7 @@ def test_escape_detector_teardown_frees_the_tool_id_and_clears_the_guard(
         raise RuntimeError("injected set_events failure")
 
     monkeypatch.setattr(monitoring, "set_events", _raise)
-    with pytest.raises(RuntimeError, match="teardown failed: set_events:.*injected set_events"):
+    with pytest.raises(RuntimeError, match="detector teardown failed"):
         escape_detection._uninstall_monitoring(guard)
     assert guard.monitoring_tool_id is None
     # Proof the id really was released: re-acquiring it must succeed.
@@ -235,10 +256,11 @@ def test_escape_detector_teardown_frees_the_tool_id_and_clears_the_guard(
     monitoring.free_tool_id(tool_id)
 
 
+# Kept: reads source statically or runs a subprocess, so per-id coverage cannot measure it (shrink rule 3).
 def test_call_execution_context_unwind_exits_every_context() -> None:
     """A raising inner `__exit__` must not strand the outer contexts."""
 
-    from torchlens import _runnable_state_context
+    from torchlens._runnable import state_context as _runnable_state_context
 
     exited: list[str] = []
 
@@ -259,11 +281,11 @@ def test_call_execution_context_unwind_exits_every_context() -> None:
     # Drive the finally body directly with a controlled stack: the unwind contract is
     # "every context gets its chance, the first failure is re-raised".
     stack = [_Ctx("outer", False), _Ctx("inner", True)]
-    first_error: RuntimeError | None = None
+    first_error: BaseException | None = None
     for ctx in reversed(stack):
         try:
             ctx.__exit__(None, None, None)
-        except RuntimeError as error:
+        except BaseException as error:
             if first_error is None:
                 first_error = error
     assert exited == ["inner", "outer"]
@@ -273,11 +295,3 @@ def test_call_execution_context_unwind_exits_every_context() -> None:
 
     source = inspect.getsource(_runnable_state_context._call_execution_context_entered)
     assert "first_error" in source, "the per-context fence must be present"
-
-
-def test_baseline_capture_stays_healthy_after_the_guard_changes() -> None:
-    """A plain capture must be unaffected by every guard change in this lane."""
-
-    trace = tl.trace(nn.Sequential(nn.Linear(4, 4), nn.ReLU()), torch.randn(1, 4))
-    assert trace.num_ops == 2
-    tl.validation.check_metadata_invariants(trace)

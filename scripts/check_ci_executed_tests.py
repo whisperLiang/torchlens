@@ -6,16 +6,85 @@ skips every test and pytest exits 0, so the leg stays green while covering
 nothing. This check reads the run's junit XML and fails when the number of
 EXECUTED tests (collected minus skipped) is below the leg's declared floor.
 
+Non-blocking legs additionally need PASSED-count attestation (testing MEMO
+D4): ``executed = total - skipped`` counts failures as executed, which is
+harmless on a blocking leg (the failures already fail it) and unsound the
+moment a leg is non-blocking. ``--min-passed`` floors the PASSED count, and
+``--passed-ids FILE`` is the exact-passed-ID floor: every listed node must
+appear in the junit as a PASS -- absence, skip, failure, error, or rename
+is red.
+
 Usage::
 
-    python scripts/check_ci_executed_tests.py <junit.xml> <min_executed>
+    python scripts/check_ci_executed_tests.py <junit.xml> <min_executed> [max_skipped_fraction]
+    python scripts/check_ci_executed_tests.py <junit.xml> 0 --min-passed <N>
+    python scripts/check_ci_executed_tests.py <junit.xml> 0 --passed-ids <file>
+
+The passed-ids file holds one ``<classname>::<name>`` per line (pytest junit
+identity); blank lines and ``#`` comments are ignored.
+
+``<min_executed>`` may also be ``tier:<name>``: the floor is then half the
+count that the test-tier collection artifact (``tests/tiers/collection.json``)
+records for that tier, so a tier leg's floor is derived from the measured
+selection instead of a hand-written literal that drifts.
+
+Each workflow calls this once, after its test jobs, in directory mode::
+
+    python scripts/check_ci_executed_tests.py --legs <dir>
+
+Every ``*.floor`` file under ``<dir>`` declares its job's legs, one per line,
+in the single-leg argument form above with the junit path relative to the
+floor file. Every leg is checked; any failed leg, or a directory with no
+floor file at all, fails the run.
 """
 
 from __future__ import annotations
 
+import json
+import shlex
 import sys
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
+
+#: The test-tier collection artifact ``tier:<name>`` floors are read from.
+TIER_ARTIFACT = Path(__file__).resolve().parents[1] / "tests" / "tiers" / "collection.json"
+#: A ``tier:<name>`` floor is this share of the tier's recorded count.
+TIER_FLOOR_SHARE = 0.5
+
+
+def resolve_floor(token: str, artifact: Path = TIER_ARTIFACT) -> int:
+    """Return the executed floor a ``<min_executed>`` argument names.
+
+    Parameters
+    ----------
+    token:
+        An integer literal, or ``tier:<name>`` for half the count the
+        collection artifact records for tier ``<name>``.
+    artifact:
+        The collection artifact to read ``tier:`` floors from.
+
+    Returns
+    -------
+    int
+        The floor.
+
+    Raises
+    ------
+    SystemExit
+        When the artifact is missing or does not record the named tier.
+    """
+
+    if not token.startswith("tier:"):
+        return int(token)
+    name = token.removeprefix("tier:")
+    try:
+        tiers = json.loads(artifact.read_text(encoding="utf-8"))["tiers"]
+        count = int(tiers[name]["count"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SystemExit(
+            f"executed-test check FAILED: cannot read tier {name!r} from {artifact}: {exc!r}"
+        ) from exc
+    return int(count * TIER_FLOOR_SHARE)
 
 
 def count_executed_tests(junit_path: Path) -> tuple[int, int]:
@@ -39,6 +108,63 @@ def count_executed_tests(junit_path: Path) -> tuple[int, int]:
     return total - skipped, skipped
 
 
+def count_passed_tests(junit_path: Path) -> int:
+    """Return the PASSED count: total minus skipped, failures, and errors."""
+
+    root = ElementTree.parse(junit_path).getroot()
+    suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+    total = sum(int(suite.get("tests", 0)) for suite in suites)
+    skipped = sum(int(suite.get("skipped", 0)) for suite in suites)
+    failures = sum(int(suite.get("failures", 0)) for suite in suites)
+    errors = sum(int(suite.get("errors", 0)) for suite in suites)
+    return total - skipped - failures - errors
+
+
+def collect_passed_ids(junit_path: Path) -> set[str]:
+    """Return ``classname::name`` for every PASSED testcase in the junit."""
+
+    root = ElementTree.parse(junit_path).getroot()
+    passed: set[str] = set()
+    for case in root.iter("testcase"):
+        if any(child.tag in ("skipped", "failure", "error") for child in case):
+            continue
+        passed.add(f"{case.get('classname', '')}::{case.get('name', '')}")
+    return passed
+
+
+def normalize_node_id(node_id: str) -> str:
+    """Map a pytest node id onto the junit ``classname::name`` spelling.
+
+    pytest writes ``tests/a/b.py::test_x`` on the command line and in
+    ``--collect-only`` output but ``classname="tests.a.b" name="test_x"`` in
+    the junit report. The passed-ids floor files are maintained in the
+    path spelling (the RG manifest lint checks them against collection), so
+    the floor check accepts either spelling (D05 release gate, 2026-09-02:
+    the path-spelled RG floor never matched a single junit row).
+    """
+
+    path, sep, name = node_id.partition("::")
+    if sep and path.endswith(".py"):
+        return path[:-3].replace("/", ".") + "::" + name
+    return node_id
+
+
+def check_passed_ids(junit_path: Path, ids_path: Path) -> list[str]:
+    """Return the exact-passed-ID floor violations (empty when green)."""
+
+    required = [
+        line.strip()
+        for line in ids_path.read_text().splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    passed = collect_passed_ids(junit_path)
+    return [
+        node_id
+        for node_id in required
+        if node_id not in passed and normalize_node_id(node_id) not in passed
+    ]
+
+
 def main(argv: list[str]) -> int:
     """Run the executed-test floor check.
 
@@ -58,14 +184,31 @@ def main(argv: list[str]) -> int:
         Process exit code: 0 when the floor is met, 1 otherwise.
     """
 
+    min_passed: int | None = None
+    passed_ids_path: Path | None = None
+    positional: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--min-passed":
+            min_passed = int(argv[index + 1])
+            index += 2
+        elif token == "--passed-ids":
+            passed_ids_path = Path(argv[index + 1])
+            index += 2
+        else:
+            positional.append(token)
+            index += 1
+    argv = positional
     if len(argv) not in (2, 3):
         print(
-            "usage: check_ci_executed_tests.py <junit.xml> <min_executed> [max_skipped_fraction]",
+            "usage: check_ci_executed_tests.py <junit.xml> <min_executed>"
+            " [max_skipped_fraction] [--min-passed N] [--passed-ids FILE]",
             file=sys.stderr,
         )
         return 2
     junit_path = Path(argv[0])
-    floor = int(argv[1])
+    floor = resolve_floor(argv[1])
     max_skipped_fraction = float(argv[2]) if len(argv) == 3 else None
     if not junit_path.exists():
         print(f"executed-test check FAILED: {junit_path} does not exist.", file=sys.stderr)
@@ -88,9 +231,56 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 1
+    if min_passed is not None:
+        passed = count_passed_tests(junit_path)
+        if passed < min_passed:
+            print(
+                f"passed-count check FAILED: {passed} passed (< floor {min_passed})."
+                " On a non-blocking leg executed counts are unsound (failures"
+                " count as executed); the PASSED floor is the attestation.",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"passed-count check passed: {passed} passed (floor {min_passed}).")
+    if passed_ids_path is not None:
+        missing = check_passed_ids(junit_path, passed_ids_path)
+        if missing:
+            print(
+                "exact-passed-ID floor FAILED: these required nodes did not PASS"
+                " (absent, skipped, failed, errored, or renamed):",
+                file=sys.stderr,
+            )
+            for node_id in missing:
+                print(f"  {node_id}", file=sys.stderr)
+            return 1
+        print(f"exact-passed-ID floor passed: {passed_ids_path}")
     print(f"executed-test check passed: {executed} executed, {skipped} skipped.")
     return 0
 
 
+def check_legs(legs_dir: Path) -> int:
+    """Check every leg declared by the ``*.floor`` files under ``legs_dir``."""
+
+    floor_files = sorted(legs_dir.rglob("*.floor"))
+    if not floor_files:
+        print(f"executed-test check FAILED: no *.floor file under {legs_dir}.", file=sys.stderr)
+        return 1
+    failed = 0
+    for floor_file in floor_files:
+        for line in floor_file.read_text().splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            leg = shlex.split(line)
+            leg[0] = str(floor_file.parent / leg[0])
+            print(f"== {floor_file.relative_to(legs_dir)}: {line.strip()}")
+            failed += main(leg) != 0
+    if failed:
+        print(f"executed-test check FAILED: {failed} leg(s) below floor.", file=sys.stderr)
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--legs"] and len(sys.argv) == 3:
+        raise SystemExit(check_legs(Path(sys.argv[2])))
     raise SystemExit(main(sys.argv[1:]))

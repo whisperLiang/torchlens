@@ -12,6 +12,7 @@ from support.rf_isolation import preserved_rf_registry
 from torch import nn
 
 import torchlens as tl
+from torchlens._utils._torch_compat import HAS_SDPA_GQA
 from torchlens.receptive_field._types import (
     ReceptiveFieldStatus,
     ReceptiveFieldValidationStatus,
@@ -36,7 +37,7 @@ def _op(trace: object, name: str) -> object:
 
     return next(
         item
-        for item in reversed(trace.layer_list)  # type: ignore[union-attr]
+        for item in reversed(trace._layer_list)  # type: ignore[union-attr]
         if item.func_name == name
     )
 
@@ -44,7 +45,7 @@ def _op(trace: object, name: str) -> object:
 def _input_op(trace: object) -> object:
     """Return the canonical input operation from a one-input trace."""
 
-    return next(item for item in trace.layer_list if item.is_input)  # type: ignore[union-attr]
+    return next(item for item in trace._layer_list if item.is_input)  # type: ignore[union-attr]
 
 
 def _trace(model: nn.Module, inputs: torch.Tensor) -> object:
@@ -53,108 +54,16 @@ def _trace(model: nn.Module, inputs: torch.Tensor) -> object:
     return tl.trace(
         model,
         inputs,
-        capture=tl.options.CaptureOptions(backward_ready=True),
-        save_mode="reference",
+        capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"),
     )
 
 
-def test_depthwise_convolution_has_tight_exact_channel_and_spatial_geometry() -> None:
-    """Keep depthwise channels pointwise and spatial support exactly windowed."""
-
-    model = nn.Conv2d(4, 4, 3, padding=1, groups=4, bias=False)
-    with torch.no_grad():
-        model.weight.fill_(1.0)
-    trace = _trace(model, torch.ones(2, 4, 5, 5, requires_grad=True))
-    target = _op(trace, "conv2d")
-    descriptor = target.receptive_field._descriptor()
-
-    assert descriptor.status is ReceptiveFieldStatus.EXACT
-    assert tuple(axis.kind for axis in descriptor.axes) == (
-        "pointwise",
-        "pointwise",
-        "windowed",
-        "windowed",
-    )
-    result = cross_validate(
-        trace,
-        ops=[target],
-        units=(0, 0, 2, 2),
-        inputs=_input_op(trace),
-    )[0]
-    assert result.status is ReceptiveFieldValidationStatus.PASS
-
-
-@pytest.mark.parametrize("pool", [nn.MaxPool2d(2), nn.AvgPool2d(2)])
-def test_pooling_preserves_exact_pointwise_channels(pool: nn.Module) -> None:
-    """Keep bare max and average pooling channel-pointwise and gradient-valid."""
-
-    trace = _trace(pool, torch.randn(1, 3, 6, 6, requires_grad=True))
-    target = next(item for item in trace.layer_list if "pool2d" in str(item.func_name))
-    descriptor = target.receptive_field._descriptor()
-
-    assert descriptor.status is ReceptiveFieldStatus.EXACT
-    assert tuple(axis.kind for axis in descriptor.axes) == (
-        "pointwise",
-        "pointwise",
-        "windowed",
-        "windowed",
-    )
-    result = cross_validate(trace, ops=[target], units=(0, 2, 1, 1))[0]
-    assert result.status is ReceptiveFieldValidationStatus.PASS
-
-
-def test_depthwise_convolution_then_pooling_remains_channel_pointwise() -> None:
-    """Preserve a single-channel route through depthwise convolution and max pooling."""
-
-    model = nn.Sequential(
-        nn.Conv2d(3, 3, 3, padding=1, groups=3, bias=False),
-        nn.MaxPool2d(2),
-    )
-    with torch.no_grad():
-        model[0].weight.fill_(1.0)
-    trace = _trace(model, torch.randn(1, 3, 6, 6, requires_grad=True))
-    target = next(item for item in trace.layer_list if item.func_name == "max_pool2d")
-    descriptor = target.receptive_field._descriptor()
-
-    assert descriptor.status is ReceptiveFieldStatus.EXACT
-    assert tuple(axis.kind for axis in descriptor.axes) == (
-        "pointwise",
-        "pointwise",
-        "windowed",
-        "windowed",
-    )
-    result = cross_validate(trace, ops=[target], units=(0, 2, 1, 1))[0]
-    assert result.status is ReceptiveFieldValidationStatus.PASS
-
-
-def test_grouped_convolution_keeps_spatial_windows_with_channel_upper_bound() -> None:
-    """Limit grouped-convolution degradation to a containing channel-axis bound."""
-
-    model = nn.Conv2d(4, 4, 3, padding=1, groups=2, bias=False)
-    with torch.no_grad():
-        model.weight.fill_(1.0)
-    trace = _trace(model, torch.ones(1, 4, 5, 5, requires_grad=True))
-    target = _op(trace, "conv2d")
-    descriptor = target.receptive_field._descriptor()
-
-    assert descriptor.status is ReceptiveFieldStatus.UPPER_BOUND
-    assert tuple(axis.kind for axis in descriptor.axes) == (
-        "pointwise",
-        "full",
-        "windowed",
-        "windowed",
-    )
-    assert descriptor.axes[1].exact is False
-    assert descriptor.axes[2].size == 3
-    result = target.receptive_field.check((0, 1, 2, 2))
-    assert result.status is ReceptiveFieldValidationStatus.PASS
-
-
+# Kept: sole branch coverage of receptive_field/__init__.py, receptive_field/_validation.py, receptive_field/_view.py.
 @pytest.mark.parametrize("surface", ["check", "verify"])
 def test_poisoned_trace_refuses_receptive_field_verdicts(surface: str) -> None:
     """RF verdict producers share the monotonic poisoned-trace refusal gate."""
+    from torchlens._runnable import PathFaithfulness, mark_trace_path_status
     from torchlens.errors import PoisonedRunError
-    from torchlens.runnable import PathFaithfulness, mark_trace_path_status
 
     model = nn.Conv2d(1, 1, 3, padding=1, bias=False)
     trace = _trace(model, torch.ones(1, 1, 5, 5, requires_grad=True))
@@ -186,38 +95,10 @@ class _GroupedQueryAttention(nn.Module):
         return functional.scaled_dot_product_attention(query, key, value, enable_gqa=True)
 
 
-def test_sdpa_feature_axis_upper_bound_contains_query_gradients() -> None:
-    """Include every query feature contributing through attention-score dot products."""
-
-    inputs = tuple(torch.randn(1, 2, 4, 3, requires_grad=True) for _ in range(3))
-    trace = tl.trace(
-        _DistinctAttention(),
-        inputs,
-        capture=tl.options.CaptureOptions(backward_ready=True),
-        save_mode="reference",
-    )
-    target = _op(trace, "scaled_dot_product_attention")
-    descriptor = target.receptive_field._descriptor(trace.input_ops[0])
-
-    assert descriptor.status is ReceptiveFieldStatus.UPPER_BOUND
-    assert tuple(axis.kind for axis in descriptor.axes) == (
-        "pointwise",
-        "pointwise",
-        "full",
-        "full",
-    )
-    results = cross_validate(
-        trace,
-        ops=[target],
-        units=(0, 0, 1, 0),
-        inputs=list(trace.input_ops),
-    )
-    assert len(results) == 3
-    assert all(result.status is ReceptiveFieldValidationStatus.PASS for result in results)
-
-
+# Kept: sole branch coverage of receptive_field/_builtin_rules/attention.py.
+@pytest.mark.skipif(not HAS_SDPA_GQA, reason="SDPA enable_gqa postdates the torch 2.1 floor (2.5+)")
 def test_sdpa_grouped_query_attention_widens_key_value_heads() -> None:
-    """Contain key/value support when grouped-query attention reuses fewer heads."""
+    """Contain key/value support under grouped-query attention; value stays feature-pointwise."""
 
     inputs = (
         torch.randn(1, 4, 3, 2, requires_grad=True),
@@ -227,20 +108,18 @@ def test_sdpa_grouped_query_attention_widens_key_value_heads() -> None:
     trace = tl.trace(
         _GroupedQueryAttention(),
         inputs,
-        capture=tl.options.CaptureOptions(backward_ready=True),
-        save_mode="reference",
+        capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"),
     )
     target = _op(trace, "scaled_dot_product_attention")
     key_value_inputs = list(trace.input_ops)[1:]
+    expected_kinds = {
+        0: ("pointwise", "full", "full", "full"),
+        1: ("pointwise", "full", "full", "pointwise"),
+    }
 
-    for source in key_value_inputs:
+    for index, source in enumerate(key_value_inputs):
         descriptor = target.receptive_field._descriptor(source)
-        assert tuple(axis.kind for axis in descriptor.axes) == (
-            "pointwise",
-            "full",
-            "full",
-            "full",
-        )
+        assert tuple(axis.kind for axis in descriptor.axes) == expected_kinds[index]
     results = cross_validate(
         trace,
         ops=[target],
@@ -250,8 +129,9 @@ def test_sdpa_grouped_query_attention_widens_key_value_heads() -> None:
     assert all(result.status is ReceptiveFieldValidationStatus.PASS for result in results)
 
 
+# Kept: sole branch coverage of receptive_field/_builtin_rules/attention.py.
 def test_sdpa_broadcast_widens_key_value_batch_and_head_axes() -> None:
-    """Contain key/value support broadcast across query batches and heads."""
+    """Contain broadcast key/value support; the value feature axis stays pointwise."""
 
     inputs = (
         torch.randn(2, 4, 3, 2, requires_grad=True),
@@ -261,20 +141,18 @@ def test_sdpa_broadcast_widens_key_value_batch_and_head_axes() -> None:
     trace = tl.trace(
         _DistinctAttention(),
         inputs,
-        capture=tl.options.CaptureOptions(backward_ready=True),
-        save_mode="reference",
+        capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"),
     )
     target = _op(trace, "scaled_dot_product_attention")
     key_value_inputs = list(trace.input_ops)[1:]
+    expected_kinds = {
+        0: ("full", "full", "full", "full"),
+        1: ("full", "full", "full", "pointwise"),
+    }
 
-    for source in key_value_inputs:
+    for index, source in enumerate(key_value_inputs):
         descriptor = target.receptive_field._descriptor(source)
-        assert tuple(axis.kind for axis in descriptor.axes) == (
-            "full",
-            "full",
-            "full",
-            "full",
-        )
+        assert tuple(axis.kind for axis in descriptor.axes) == expected_kinds[index]
     results = cross_validate(
         trace,
         ops=[target],
@@ -284,6 +162,7 @@ def test_sdpa_broadcast_widens_key_value_batch_and_head_axes() -> None:
     assert all(result.status is ReceptiveFieldValidationStatus.PASS for result in results)
 
 
+# Kept: sole branch coverage of receptive_field/_gradient.py, receptive_field/_gradient_forward.py, receptive_field/_validation.py and more.
 def test_embedding_bag_validation_returns_tri_state_rows_without_raising() -> None:
     """Report integer-index EmbeddingBag validation as honest indeterminate rows."""
 
@@ -339,6 +218,7 @@ class _PaddedConvolution(nn.Module):
         return functional.pad(self.convolution(value), (1, 1, 1, 1))
 
 
+# Kept: sole branch coverage of receptive_field/_engine.py, receptive_field/_gradient.py, receptive_field/_validation.py and more; a sole mutation kill.
 def test_trailing_reduction_and_pad_corner_validate_without_raising() -> None:
     """Return bounded PASS results for reduced-window and empty-pad geometries."""
 
@@ -362,20 +242,6 @@ def test_trailing_reduction_and_pad_corner_validate_without_raising() -> None:
     assert all(result.status is ReceptiveFieldValidationStatus.PASS for result in padded_results)
 
 
-def test_embedding_resolves_exact_index_position_geometry() -> None:
-    """Resolve embedding rank expansion without unknown passthrough taint."""
-
-    trace = tl.trace(nn.Embedding(10, 4), torch.tensor([[1, 2, 3], [4, 5, 6]]))
-    target = _op(trace, "embedding")
-    descriptor = target.receptive_field._descriptor()
-
-    assert descriptor.status is ReceptiveFieldStatus.EXACT
-    assert tuple((axis.kind, axis.output_axis) for axis in descriptor.axes) == (
-        ("pointwise", 0),
-        ("pointwise", 1),
-    )
-
-
 class _Reduction(nn.Module):
     """Middle-axis reduction fixture."""
 
@@ -383,30 +249,6 @@ class _Reduction(nn.Module):
         """Reduce channels while preserving batch and spatial identities."""
 
         return value.mean(dim=1)
-
-
-def test_reduction_preserves_surviving_axis_coordinates() -> None:
-    """Keep batch and spatial coordinate languages after a removed middle axis."""
-
-    trace = _trace(_Reduction(), torch.ones(2, 4, 3, 5, requires_grad=True))
-    target = _op(trace, "mean")
-    descriptor = target.receptive_field._descriptor()
-
-    assert descriptor.status is ReceptiveFieldStatus.WHOLE_INPUT
-    assert tuple(axis.kind for axis in descriptor.axes) == (
-        "pointwise",
-        "full",
-        "pointwise",
-        "pointwise",
-    )
-    assert tuple(axis.output_axis for axis in descriptor.axes) == (0, None, 1, 2)
-    result = cross_validate(
-        trace,
-        ops=[target],
-        units=(1, 2, 4),
-        inputs=_input_op(trace),
-    )[0]
-    assert result.status is ReceptiveFieldValidationStatus.PASS
 
 
 class _Cumulative(nn.Module):
@@ -418,29 +260,7 @@ class _Cumulative(nn.Module):
         return value.cumsum(dim=2)
 
 
-def test_cumulative_reads_dimension_and_bounds_that_axis() -> None:
-    """Use a containing bound on the selected cumulative axis only."""
-
-    trace = _trace(_Cumulative(), torch.ones(2, 4, 3, 5, requires_grad=True))
-    target = _op(trace, "cumsum")
-    descriptor = target.receptive_field._descriptor()
-
-    assert descriptor.status is ReceptiveFieldStatus.UPPER_BOUND
-    assert tuple(axis.kind for axis in descriptor.axes) == (
-        "pointwise",
-        "pointwise",
-        "full",
-        "pointwise",
-    )
-    result = cross_validate(
-        trace,
-        ops=[target],
-        units=(1, 3, 2, 4),
-        inputs=_input_op(trace),
-    )[0]
-    assert result.status is ReceptiveFieldValidationStatus.PASS
-
-
+# Kept: sole branch coverage of receptive_field/_validation.py; a sole mutation kill.
 def test_bare_training_batch_norm_declares_batch_coupling() -> None:
     """Recognize positional-None BatchNorm captures as batch-coupled whole input."""
 

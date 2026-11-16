@@ -1,7 +1,7 @@
 """P4 completeness fixture: the live mutator sites against the closed registry.
 
 Originally captured against the LIVE legacy ``replace_op_event`` sites BEFORE
-any wiring or migration (DoR 4.2, Opus C7 / Sol 2 — that pre-migration form is
+any wiring or migration (DoR 4.2, review C7 / review 2 — that pre-migration form is
 preserved at commit d4b1738d); re-targeted in P4c onto the amendment lane's
 single chokepoint, ``CaptureEvents.append_amendment``. Four layers:
 
@@ -9,7 +9,7 @@ single chokepoint, ``CaptureEvents.append_amendment``. Four layers:
    checked as ``(facet path, flat field)`` PAIRs against its family's registry
    row joined through ``PATH_TO_FLAT``, in registry order, and its call site
    must be the family's ONE intended site. A same-set identity permutation
-   (Sol's ``intervention_fired <-> intervention_replaced`` swap) is red.
+   (the review's ``intervention_fired <-> is_edited`` swap) is red.
 2. **Emit-site value round-trip** — at every live call the folded journal
    record must carry each patch value at its own flat field AND (decomposed
    leg) at its own facet path, by object identity for non-interned values.
@@ -47,23 +47,22 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.ir.capture_events import CaptureEvents
-from torchlens.ir.events import OpEvent
-from torchlens.ir.op_record import (
+from torchlens._ir.capture_events import CaptureEvents
+from torchlens._ir.events import OpEvent
+from torchlens._ir.op_record import (
     _FACET_ATTRIBUTES,
     AMENDMENT_FAMILIES,
     PATH_TO_FLAT,
     OpRecord,
     apply_patch_items,
 )
-
-pytestmark = pytest.mark.smoke
+from torchlens._ir.refs import journal_record
 
 # Journal SHAPES for the fold-routing tests (P7 deleted the legacy torch
 # producer): "decomposed" = captured OpRecord rows; "legacy" = genuine compat
 # OpEvent rows (preview stand-in until S15), synthesized via the retained
 # inverse adapter.
-_LEGS = ("legacy", "decomposed")
+_LEGS = ("decomposed",)
 _SEED = 20260812
 
 # The seven torch families; the two preview families are characterized on the
@@ -78,7 +77,7 @@ _RETIRED_FAMILIES: dict[str, str] = {
     # rewires the module boundary but does not replace the producing op's
     # value, so it must not mint replacement evidence that would exempt the
     # native op from replay validation (tripwire strengthening). The fresh-
-    # tensor branch stamps intervention_replaced at record construction and
+    # tensor branch stamps is_edited at record construction and
     # never used this amendment.
     "raw_hook_intervention": "emit site removed by 8858793e (recontainer hooks must not mint replacement evidence)",
 }
@@ -97,13 +96,13 @@ _TORCH_FAMILIES = (
 # the preview acceptance leg).
 _SITE_FAMILIES: dict[tuple[str, str], str] = {
     ("_ops_retention.py", "_replace_event_with_retained_payload"): "lookback_retention",
-    ("user_funcs.py", "_register_live_tensor_connection"): "graph_edge_insertion",
+    ("run_entry.py", "_register_live_tensor_connection"): "graph_edge_insertion",
     ("model_prep.py", "_record_module_exit_metadata"): "module_exit_intervention",
     (
-        "model_prep.py",
+        "_predicate_forward.py",
         "_record_predicate_module_boundary_outputs",
     ): "module_boundary_retention",
-    ("backend.py", "extract_and_mark_outputs"): "output_parent_promotion",
+    ("_outputs.py", "extract_and_mark_outputs"): "output_parent_promotion",
     ("graph_traversal.py", "_resolve_output_parent_labels"): "late_buffer_output_parent",
 }
 
@@ -136,13 +135,17 @@ def _spy_append_amendment(observations: list[_Observation], failures: list[str])
         family = amendment.family
         label_raw = amendment.target_label_raw
         folded = real_append(self, amendment)
+        # A row-journal handle (capture C2b) stands for the record it builds:
+        # the shape and facet checks below read that record, and the flat
+        # reads still go through the handle's own overlay.
+        record = journal_record(folded)
         observations.append(
             _Observation(
                 site=site,
                 family=family,
                 kwarg_names=tuple(PATH_TO_FLAT[path] for path, _ in amendment.patch),
                 label_raw=label_raw,
-                record_type=type(folded).__name__,
+                record_type=type(record).__name__,
             )
         )
         if site not in _TRANSPORT_SITES:
@@ -168,10 +171,10 @@ def _spy_append_amendment(observations: list[_Observation], failures: list[str])
                     f"{site}: flat field {flat!r} does not carry the emitted "
                     f"value (got {landed!r}, sent {value!r})"
                 )
-            if isinstance(folded, OpRecord):
+            if isinstance(record, OpRecord):
                 owner, _, field_name = path.partition(".")
                 holder = (
-                    folded.core if owner == "core" else getattr(folded, _FACET_ATTRIBUTES[owner])
+                    record.core if owner == "core" else getattr(record, _FACET_ATTRIBUTES[owner])
                 )
                 if holder is None:
                     failures.append(f"{site}: facet {owner!r} absent after folding {path!r}")
@@ -237,7 +240,7 @@ class _ManualEdge(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         a = self.fc1(x)
         b = self.fc2(x)
-        tl.register_tensor_connection(a, b)
+        tl.observers.register_tensor_connection(a, b)
         return a + b
 
 
@@ -296,8 +299,7 @@ _BATTERY: tuple[tuple[str, Callable[[], tuple[nn.Module, Any]], Callable[..., An
             m,
             x,
             save=tl.func("linear") & tl.followed_by(tl.func("tanh")),
-            lookback=4,
-            lookback_payload_policy="detached_raw",
+            capture=tl.options.CaptureOptions(lookback=4, lookback_payload_policy="detached_raw"),
         ),
     ),
     (
@@ -316,7 +318,7 @@ _BATTERY: tuple[tuple[str, Callable[[], tuple[nn.Module, Any]], Callable[..., An
             m,
             x,
             save=tl.func("linear"),
-            intervene=tl.when(tl.module("fc"), tl.tap(lambda t: None)),
+            intervene=tl.when(tl.module("fc"), tl.observers.tap(lambda t: None)),
         ),
     ),
     (
@@ -340,6 +342,7 @@ _BATTERY: tuple[tuple[str, Callable[[], tuple[nn.Module, Any]], Callable[..., An
 )
 
 
+@pytest.mark.smoke
 def test_live_legacy_sites_completeness() -> None:
     """Layers 1-3: pair-wise identity, value round-trip, reached-family >= 1."""
 
@@ -384,15 +387,15 @@ def _journal_templates(monkeypatch: pytest.MonkeyPatch, producer: str) -> list[A
     is synthesized through the retained inverse adapter (S15 stand-in).
     """
 
-    postprocess_module = importlib.import_module("torchlens.postprocess")
-    materialize_module = importlib.import_module("torchlens.postprocess._materialize")
+    postprocess_module = importlib.import_module("torchlens._postprocess")
+    materialize_module = importlib.import_module("torchlens._postprocess._materialize")
     original = materialize_module.materialize_from_events
     grabbed: list[Any] = []
 
-    def observing(trace: Any, events: Any) -> None:
+    def observing(trace: Any, events: Any, *rest: Any) -> None:
         if not grabbed:
             grabbed.extend(events.op_events)
-        original(trace, events)
+        original(trace, events, *rest)
 
     monkeypatch.setattr(postprocess_module, "materialize_from_events", observing)
     monkeypatch.setattr(materialize_module, "materialize_from_events", observing)
@@ -521,13 +524,11 @@ _GUARDED_CALLEES = frozenset(
 )
 # 7 torch sites (raw_hook_intervention's wrapped_hook site retired by
 # 8858793e, then revived narrowly by 56f8a29e -- genuine user raw-hook
-# replacements mint the amendment again) + 4 preview rebind sites (tf, mlx,
-# jax, tinygrad; MLX retains final output paths/specs for split replay)
-# + the ONE shared preview_output_parent_mark site in
-# backends/_finalize.py (the tf x2 / mlx / paddle per-backend mark copies
-# were hoisted there by R46-1, 5290caa7) + the tf module_exit_intervention
-# site fire in backends/tf/interventions.py (typed amendment lane, ef08d2a9).
-_EXPECTED_SITE_COUNT = 13
+# replacements mint the amendment again) + 2 native jax/tinygrad rebind
+# sites + 2 shared preview output mark/rebind sites in backends/_finalize.py
+# + 3 native module_exit_intervention sites (tf, mlx, paddle). Shared output
+# containers use the existing finalize channel, replacing backend copies.
+_EXPECTED_SITE_COUNT = 14
 
 
 def _call_name(node: ast.Call) -> str | None:
@@ -545,13 +546,24 @@ def test_static_ast_guard_no_expansion_no_conditional_kwargs() -> None:
     package_root = Path(tl.__file__).parent
     relative_files = (
         "backends/torch/_ops_retention.py",
-        "user_funcs.py",
+        "_user_funcs.py",
+        "_capture/run_entry.py",
+        "_capture/prepare/door.py",
+        "_capture/prepare/dispatch.py",
+        "_capture/prepare/cache.py",
+        "_capture/prepare/resolve.py",
+        "_capture/finalize/epilogue.py",
         "backends/torch/model_prep.py",
+        "backends/torch/_predicate_forward.py",
         "backends/torch/backend.py",
-        "postprocess/graph_traversal.py",
+        "backends/torch/_outputs.py",
+        "backends/torch/_failed_session.py",
+        "_postprocess/graph_traversal.py",
         "backends/tf/backend.py",
         "backends/tf/interventions.py",
         "backends/mlx/containers.py",
+        "backends/mlx/interventions.py",
+        "backends/paddle/interventions.py",
         "backends/paddle/backend.py",
         "backends/jax/backend.py",
         "backends/tinygrad/backend.py",

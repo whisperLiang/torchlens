@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from torchlens._utils._record_group_table import record_member
+
 
 def _stringify(value: Any) -> Any:
     """Convert nested values into JSON-stable primitive containers.
@@ -159,24 +161,24 @@ def _op_dict(op: Any) -> dict[str, Any]:
         "interventionreplacement" if op.func_name == "intervention_replacement" else op.func_name
     )
     return {
-        "atomic_module_call": _module_call_string(op.atomic_module_call),
+        "atomic_module_call": _module_call_string(op.module_context.atomic_module_call),
         "func_name": func_name,
-        "fx_call_index": op.fx_call_index,
-        "fx_qualpath": op.fx_qualpath,
-        "intervention_replaced": getattr(op, "intervention_replaced", False),
-        "is_atomic_module": op.is_atomic_module,
-        "is_internal_sink": op.is_internal_sink,
-        "is_internal_source": op.is_internal_source,
-        "is_orphan": getattr(op, "is_orphan", False),
-        "is_module_output": op.is_module_output,
+        "fx_call_index": op.source.fx_call_index,
+        "fx_qualpath": op.source.fx_path,
+        "is_edited": getattr(op, "is_edited", False),
+        "is_atomic_module": op.module_context.is_atomic_module,
+        "is_internal_sink": op.is_internal_sink,  # record-groups: flat
+        "is_internal_source": op.graph.is_internal_source,
+        "is_orphan": record_member(op, "is_orphan", False),
+        "is_module_output": op.module_context.is_module_output,
         "label": _op_label(op),
         "lookup_keys": _sorted_strings(_containment_lookup_keys(op)),
         "module": _module_call_string(op.module),
-        "module_entry_arg_keys": _normalize_argnames(op.module_entry_arg_keys),
-        "input_to_modules": _module_call_list(op.input_to_module_calls),
+        "module_entry_arg_keys": _normalize_argnames(op.module_context.entry_arg_keys),
+        "input_to_modules": _module_call_list(op.module_context.input_to_module_calls),
         "modules": _module_call_list(op.modules),
-        "output_of_module_calls": _module_call_list(op.output_of_module_calls),
-        "output_of_modules": [str(value) for value in op.output_of_modules],
+        "output_of_module_calls": _module_call_list(op.module_context.output_of_module_calls),
+        "output_of_modules": [str(value) for value in op.module_context.output_of_modules],
         "step_index": op.step_index,
     }
 
@@ -203,10 +205,10 @@ def _layer_dict(layer: Any) -> dict[str, Any]:
         "label": layer.layer_label,
         "lookup_keys": sorted(lookup_keys),
         "module": _module_call_string(layer.module),
-        "module_call_depth": layer.module_call_depth,
+        "module_call_depth": layer.module_context.call_depth,
         "modules": _module_call_list(layer.modules),
-        "output_of_module_calls": _module_call_list(layer.output_of_module_calls),
-        "output_of_modules": [str(value) for value in layer.output_of_modules],
+        "output_of_module_calls": _module_call_list(layer.module_context.output_of_module_calls),
+        "output_of_modules": [str(value) for value in layer.module_context.output_of_modules],
         "step_index": layer.step_index,
     }
 
@@ -265,7 +267,7 @@ def _call_dict(call: Any) -> dict[str, Any]:
 
     return {
         "address": call.address,
-        "call_label": call.call_label,
+        "call_label": call.label,
         "forward_args_summary": call.forward_args_summary,
         "forward_kwargs_summary": call.forward_kwargs_summary,
         "input_layers": list(call.input_layers),
@@ -275,7 +277,7 @@ def _call_dict(call: Any) -> dict[str, Any]:
 
 
 def _equivalence_partition(trace: Any) -> list[list[str]]:
-    """Serialize Trace.op_equivalence_classes as a deterministic partition.
+    """Serialize Trace.graph.op_equivalence_classes as a deterministic partition.
 
     Parameters
     ----------
@@ -289,7 +291,8 @@ def _equivalence_partition(trace: Any) -> list[list[str]]:
     """
 
     partition = [
-        sorted(str(label) for label in members) for members in trace.op_equivalence_classes.values()
+        sorted(str(label) for label in members)
+        for members in trace.graph.op_equivalence_classes.values()
     ]
     return sorted(partition)
 
@@ -318,9 +321,9 @@ def build_snapshot(trace: Any, fixture_name: str) -> dict[str, Any]:
             _call_dict(call) for module in trace.modules for call in module.ops.values()
         ],
         "modules": [_module_dict(module) for module in trace.modules],
-        "ops": [_op_dict(op) for op in trace.layer_list],
+        "ops": [_op_dict(op) for op in trace._layer_list],
         "trace_summary": {
-            "total_flops_forward": trace.total_flops_forward,
+            "total_flops_forward": trace.cost.total_flops_forward,
             "uncalled_modules": sorted(str(value) for value in trace.uncalled_modules),
         },
     }

@@ -1,178 +1,76 @@
-"""repeng bridge helpers."""
+"""repeng converter.
+
+Turns a TorchLens :class:`~torchlens.intervention.Direction` (built by
+``torchlens.intervention.fit_direction``) into a real
+``repeng.ControlVector``. Nothing is recomputed here: the vector is the
+direction's own, as float32, keyed by the decoder layer ``ControlModel``
+patches, so ``set_control(vector, coeff=m)`` adds ``m * direction.vector`` to
+that block's output, as ``direction.steer(m)`` does.
+"""
 
 from __future__ import annotations
 
-import inspect
 from typing import Any
 
-from ._utils import out_at
+from .._errors import InvalidArgumentError
+from .._utils._numpy_bridge import tensor_to_numpy
 
 
-def control_vector(
-    log: Any,
-    positive_site: Any,
-    negative_site: Any | None = None,
-    *,
-    vector_factory: Any | None = None,
-    **kwargs: Any,
-) -> dict[str, Any]:
-    """Build a repeng control vector from saved TorchLens outs.
+def from_direction(
+    direction: Any, *, layer: int | None = None, model_type: str | None = None
+) -> Any:
+    """Return a ``repeng.ControlVector`` holding ``direction.vector``.
 
     Parameters
     ----------
-    log:
-        TorchLens ``Trace``.
-    positive_site:
-        Site containing positive outs.
-    negative_site:
-        Optional site containing negative outs.
-    vector_factory:
-        Optional downstream factory or class.
-    **kwargs:
-        Additional keyword arguments forwarded to the downstream factory.
+    direction:
+        A TorchLens ``Direction``.
+    layer:
+        Decoder layer ``ControlModel`` applies it to; defaults to the trailing
+        index of the direction's site label (see ``Direction.library_layer``).
+    model_type:
+        ``ControlVector.model_type``; defaults to ``direction.model_type``.
 
     Returns
     -------
-    dict[str, Any]
-        Contract payload containing the downstream control vector.
+    Any
+        A real ``repeng.ControlVector``.
 
     Raises
     ------
     ImportError
         If repeng is unavailable.
-    RuntimeError
-        If no supported factory is exposed.
+    InvalidArgumentError
+        ``direction_model_type_unknown`` when no model type is given or recorded.
+
+    Examples
+    --------
+    >>> # requires: repeng
+    >>> net = nn.Sequential(nn.Linear(4, 4)).eval()
+    >>> pos = tl.trace(net, torch.randn(3, 4))
+    >>> neg = tl.trace(net, torch.randn(3, 4))
+    >>> direction = tl.intervention.fit_direction(pos, neg, "linear", read_token_index=None)
+    >>> vector = tl.bridge.repeng.from_direction(direction, layer=1, model_type="tiny")
+    >>> list(vector.directions)
+    [1]
     """
 
     try:
-        import repeng as repeng_module
+        import repeng
     except ImportError as exc:
         raise ImportError(
             "repeng bridge requires the `repeng` extra: install torchlens[repeng]."
         ) from exc
-
-    positive = out_at(log, positive_site)
-    negative = None if negative_site is None else out_at(log, negative_site)
-    factory, is_default = _resolve_factory(repeng_module, vector_factory)
-    result = _call_factory(
-        factory, positive=positive, negative=negative, is_default=is_default, **kwargs
-    )
-    return {
-        "schema": "torchlens.repeng.v1",
-        "control_vector": result,
-        "positive": positive,
-        "negative": negative,
-    }
-
-
-def _resolve_factory(module: Any, vector_factory: Any | None) -> tuple[Any, bool]:
-    """Return a repeng control-vector factory and whether it is a library default.
-
-    Parameters
-    ----------
-    module:
-        Imported ``repeng`` module.
-    vector_factory:
-        Optional explicit factory.
-
-    Returns
-    -------
-    tuple[Any, bool]
-        The callable factory and ``True`` when it was resolved as a library
-        default (rather than supplied explicitly by the caller).
-
-    Raises
-    ------
-    RuntimeError
-        If no factory is available.
-    """
-
-    if vector_factory is not None:
-        return vector_factory, False
-    control_vector_cls = getattr(module, "ControlVector", None)
-    train = getattr(control_vector_cls, "train", None)
-    if callable(train):
-        return train, True
-    if callable(control_vector_cls):
-        return control_vector_cls, True
-    raise RuntimeError("Installed repeng does not expose ControlVector or ControlVector.train.")
-
-
-def _accepts_out_pair(
-    factory: Any, positive: Any, negative: Any | None, kwargs: dict[str, Any]
-) -> bool:
-    """Return whether ``factory`` can bind the ``(positive, negative)`` out pair.
-
-    Parameters
-    ----------
-    factory:
-        Candidate factory callable.
-    positive:
-        Positive outs.
-    negative:
-        Optional negative outs.
-    kwargs:
-        Additional keyword arguments to be forwarded.
-
-    Returns
-    -------
-    bool
-        ``True`` when the call binds cleanly (or the signature cannot be
-        introspected, in which case the caller attempts the call directly).
-    """
-
-    try:
-        signature = inspect.signature(factory)
-    except (TypeError, ValueError):
-        return True
-    try:
-        signature.bind(positive, negative, **kwargs)
-    except TypeError:
-        return False
-    return True
-
-
-def _call_factory(
-    factory: Any, *, positive: Any, negative: Any | None, is_default: bool, **kwargs: Any
-) -> Any:
-    """Call a repeng vector factory with the normalized out pair.
-
-    Parameters
-    ----------
-    factory:
-        Factory callable.
-    positive:
-        Positive outs.
-    negative:
-        Optional negative outs.
-    is_default:
-        Whether ``factory`` was resolved as a repeng library default.
-    **kwargs:
-        Additional factory keyword arguments.
-
-    Returns
-    -------
-    Any
-        Downstream vector object.
-
-    Raises
-    ------
-    RuntimeError
-        When the library-default factory cannot accept the ``(positive, negative)``
-        out pair. repeng's ``ControlVector.train`` takes ``(model, tokenizer,
-        dataset, ...)``, which cannot be driven from saved TorchLens outs; rather
-        than silently misbind the activation tensors into those slots, require an
-        explicit ``vector_factory``.
-    """
-
-    if is_default and not _accepts_out_pair(factory, positive, negative, kwargs):
-        raise RuntimeError(
-            "The default repeng factory (ControlVector.train) expects "
-            "(model, tokenizer, dataset, ...) arguments and cannot be built from "
-            "saved TorchLens outs. Pass an explicit vector_factory that accepts "
-            "(positive_out, negative_out)."
+    index = direction.library_layer(layer)
+    found = model_type if model_type is not None else direction.model_type
+    if not isinstance(found, str):
+        raise InvalidArgumentError(
+            "The direction records no model type and none was given",
+            code="direction_model_type_unknown",
+            remedy="pass model_type= (for example 'llama')",
         )
-    return factory(positive, negative, **kwargs)
+    values = tensor_to_numpy(direction.vector.detach().cpu().float())
+    return repeng.ControlVector(model_type=found, directions={index: values})
 
 
-__all__ = ["control_vector"]
+__all__ = ["from_direction"]

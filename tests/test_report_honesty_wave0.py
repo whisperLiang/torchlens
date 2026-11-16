@@ -1,0 +1,316 @@
+"""A09 wave-0 report honesty: escape-free text, one-pass scan, log_value,
+agent-guide triage, presenter refusals, poisoned/episode banners.
+
+Covers listA rows 23 and 25a plus sumfam wave-0 items 1, 3, 4, and 6:
+- ``first_nonfinite`` defaults to the plain-text register; report text never
+  carries ESC bytes or resolved-absolute-path URIs (LAUNCH BLOCKER).
+- The health-scan predicate is the one-pass ``isfinite().all()`` form,
+  equivalence-pinned against the two-pass reference.
+- ``log_value`` lives in ``torchlens.observers`` only (U00 clean break: no
+  ``tl.report`` alias), and its values read back and render.
+- ``to_agent_json``'s guide menu is executable-by-the-reader and conditional.
+- explain/to_agent_json refuse known presenters typed; poisoned traces stop
+  rendering clean on explain/agent_json/draw; TraceSlice.summary carries the
+  parent's honesty banner.
+"""
+
+from __future__ import annotations
+
+import pytest
+import torch
+from torch import nn
+
+import torchlens as tl
+from torchlens._capture_honesty import capture_honesty_facts, honesty_banner_lines
+from torchlens._data_classes._nonfinite import _has_nonfinite
+from torchlens._runnable import PathFaithfulness
+
+ESC = "\x1b"
+
+
+class _NaNNet(nn.Module):
+    """Two-op model whose first op emits NaN/Inf."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = x / 0.0
+        return y * 2
+
+
+def _nan_trace() -> tl.Trace:
+    return tl.trace(_NaNNet(), torch.ones(2, 3))
+
+
+def _clean_trace() -> tl.Trace:
+    return tl.trace(nn.Sequential(nn.Linear(3, 4), nn.ReLU()), torch.randn(2, 3))
+
+
+# --- SF1: escape-free publishable text (LAUNCH BLOCKER) ---------------------
+
+
+# Kept: sole branch coverage of _data_classes/_nonfinite.py, _source_links.py, report/_trace_summary.py.
+def test_styled_link_registers_stay_opt_in() -> None:
+    """terminal/html remain available but only by explicit request."""
+
+    trace = _nan_trace()
+    assert ESC in trace.first_nonfinite(link_format="terminal")
+    assert "vscode://file/" in trace.first_nonfinite(link_format="html")
+
+
+# Kept: sole branch coverage of report/_explain.py, report/_health.py, stats/_stats_kernel.py and more.
+def test_explain_text_is_escape_free() -> None:
+    """explain() output is publishable data: no ESC bytes on any fixture."""
+
+    trace = _nan_trace()
+    # D14 (F09): explain serves the basis in hand and never scans; arm the
+    # evidence through the explicit spelling first.
+    assert trace.nonfinite_ops
+    report = trace.explain()
+    assert ESC not in report
+    # The non-finite evidence still names the site in plain text.
+    assert "truediv" in report
+
+
+# Kept: sole branch coverage of _data_classes/_trace_groups.py, _data_classes/interface.py, _data_classes/trace.py.
+def test_str_trace_is_escape_free() -> None:
+    """print(trace) inherits the plain-text default (OSC 8 leak regression)."""
+
+    assert ESC not in str(_nan_trace())
+
+
+# --- SF6: one-pass health-scan predicate ------------------------------------
+
+
+# Kept: sole branch coverage of _data_classes/_nonfinite.py.
+def test_predicate_unrunnable_dtype_returns_none() -> None:
+    """Dtypes with no isfinite kernel stay None (no evidence), never False."""
+
+    quantized = torch.quantize_per_tensor(torch.ones(3), scale=1.0, zero_point=0, dtype=torch.qint8)
+    assert _has_nonfinite(quantized) is None
+
+
+# --- SF4: log_value canonical home + read-back ------------------------------
+
+
+# Kept: sole branch coverage of observers.py.
+def test_log_value_lives_in_observers_only() -> None:
+    """observers owns log_value; tl.report carries no alias (U00 clean break)."""
+
+    import torchlens.report as report
+    from torchlens.observers import log_value
+
+    assert callable(log_value)
+    assert not hasattr(report, "log_value") and "log_value" not in report.__all__
+
+
+# Kept: sole branch coverage of _data_classes/trace.py, agent/_envelope.py, report/_agent_json.py and more.
+def test_log_value_read_back_and_renders() -> None:
+    """Logged values read back via Trace.logged_values and render in reports."""
+
+    class _Logging(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            tl.observers.log_value("gate_mean", 0.25)
+            return torch.relu(x)
+
+    trace = tl.trace(_Logging(), torch.randn(2, 3))
+    assert trace.logged_values == {"gate_mean": 0.25}
+    # Read-back is a copy, not a mutation door.
+    view = trace.logged_values
+    view["gate_mean"] = -1.0
+    assert trace.logged_values == {"gate_mean": 0.25}
+    report = trace.explain()
+    assert "Logged values" in report and "gate_mean = 0.25" in report
+    dump = trace.to_agent_json(max_ops=1)
+    assert dump["logged_values"] == {"gate_mean": 0.25}
+    assert "logged_values" in dump["guide"]["next_steps"]
+
+
+# Kept: sole branch coverage of report/_explain.py.
+def test_logged_values_render_is_bounded() -> None:
+    """Arbitrary logged objects render bounded: caps disclosed, never a spew."""
+
+    class _Logging(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            for index in range(15):
+                tl.observers.log_value(f"value_{index}", "x" * 500)
+            return torch.relu(x)
+
+    trace = tl.trace(_Logging(), torch.randn(2, 3))
+    report = trace.explain()
+    section = report[report.index("Logged values") :]
+    for line in section.splitlines():
+        assert len(line) < 120
+    assert "and 5 more" in section
+
+
+# --- SF3: agent-guide triage -------------------------------------------------
+
+
+# Kept: sole branch coverage of _capture/prepare/resolve.py.
+def test_guide_next_steps_are_conditional_on_state() -> None:
+    """State-dependent entries appear only when the trace can honor them."""
+
+    saved = _clean_trace().to_agent_json(max_ops=1)["guide"]["next_steps"]
+    assert saved["one_activation"] == "trace[<layer_label>].out"
+    with pytest.warns(UserWarning, match="matched zero sites"):
+        unsaved_trace = tl.trace(
+            nn.Sequential(nn.Linear(3, 4), nn.ReLU()),
+            torch.randn(2, 3),
+            save=tl.func("no_such_op"),
+        )
+    unsaved = unsaved_trace.to_agent_json(max_ops=1)["guide"]["next_steps"]
+    assert "one_activation" not in unsaved
+    assert "output_table" not in saved  # no decoded output on this capture
+
+
+# --- WT23: presenter refusals + poisoned/episode banners ---------------------
+
+
+# Kept: sole branch coverage of _capture_honesty.py, _trace_slice.py, report/_agent_json.py and more.
+def test_explain_and_agent_json_refuse_trace_slice_typed() -> None:
+    """A TraceSlice subject refuses typed instead of a hollow wrong report."""
+
+    trace = _clean_trace()
+    trace_slice = trace.between(trace.layer_labels[0], trace.layer_labels[-1])
+    with pytest.raises(tl.errors.InvalidArgumentError) as exc_info:
+        tl.Trace.explain(trace_slice)
+    assert exc_info.value.fields["code"] == "report_subject_unsupported"
+    with pytest.raises(tl.errors.InvalidArgumentError):
+        tl.Trace.to_agent_json(trace_slice)
+
+
+# Kept: sole branch coverage of report/_explain.py.
+def test_poisoned_trace_stops_rendering_clean() -> None:
+    """Poison facts surface on explain, agent_json, and the honesty banner."""
+
+    trace = _clean_trace()
+    trace._runnable.poisoned = True
+    trace._runnable.path_faithfulness = PathFaithfulness.DIVERGED
+
+    report = trace.explain()
+    assert "POISONED" in report and "NOT" in report
+    dump = trace.to_agent_json(max_ops=1)
+    assert dump["capture"]["poisoned"] is True
+    assert dump["capture"]["path_faithfulness"] == "diverged"
+    banner = honesty_banner_lines(trace)
+    assert any("POISONED" in line for line in banner)
+    facts = capture_honesty_facts(trace)
+    assert facts["poisoned"] is True
+
+
+# Kept: sole branch coverage of _visualization/render_execution.py.
+def test_poisoned_trace_draw_caption_carries_banner() -> None:
+    """draw() DOT source of a poisoned trace names the poison."""
+
+    trace = _clean_trace()
+    trace._runnable.poisoned = True
+    trace._runnable.path_faithfulness = PathFaithfulness.DIVERGED
+    dot_source = trace.draw().dot
+    assert "POISONED" in dot_source
+
+
+# Kept: sole branch coverage of _trace_slice.py.
+def test_trace_slice_summary_carries_parent_honesty_banner() -> None:
+    """A slice of a poisoned capture summarizes with the banner, not clean."""
+
+    trace = _clean_trace()
+    trace_slice = trace.between(trace.layer_labels[0], trace.layer_labels[-1])
+    assert "POISONED" not in trace_slice.summary()
+    trace._runnable.poisoned = True
+    trace._runnable.path_faithfulness = PathFaithfulness.DIVERGED
+    assert "POISONED" in trace_slice.summary()
+
+
+# --- SF2: bounded reprs ------------------------------------------------------
+
+
+# Kept: sole branch coverage of _doctor_types.py, backends/_scorecard_rows.py, compat/__init__.py and more.
+def test_compat_report_repr_is_designed_and_bounded() -> None:
+    """repr is bounded; str and show share the complete fixed-width table."""
+
+    report = tl.report.doctor(nn.Linear(3, 4), torch.randn(2, 3))
+    rendered = repr(report)
+    assert str(report) == report.show()
+    assert rendered.startswith("DoctorReport ")
+    assert rendered.endswith(" rows")
+    assert str(report).splitlines()[0] == rendered
+    assert ESC not in rendered
+    for line in rendered.splitlines():
+        assert len(line) <= 160
+    # The fixed-width table wraps long cells inside capped columns.
+    for line in report.show().splitlines():
+        assert len(line) <= 400
+    assert max(len(line) for line in report.show().splitlines()) < 500
+
+
+# Kept: sole branch coverage of _doctor_types.py.
+def test_capability_dump_moved_to_detail_accessor() -> None:
+    """The row cell carries the grouped summary; the accessor the full dump."""
+
+    report = tl.report.doctor(nn.Linear(3, 4), torch.randn(2, 3))
+    row = report.check("torch_capabilities")
+    assert "capabilities present" in row.details
+    snapshot = report.capability_snapshot()
+    assert isinstance(snapshot, dict) and len(snapshot) > 10
+    assert all(isinstance(value, bool) for value in snapshot.values())
+    # The compact absences-first format vs. the legacy full name=value dump
+    # (sumfam wave-0 item 2, ~1,900 chars for ALL ~70 flags with their
+    # values): a fixed byte budget doesn't scale across the declared
+    # torch>=2.1 matrix, where an old-floor build genuinely has far more
+    # absent (healthy-old-install) flags than current dev torch. Rebuild the
+    # cell's exact expected length from the same building blocks
+    # the environment capability probe uses (format_capability_summary plus the
+    # missing=/unprobed=/optional_absent= groupings), so the check tracks any honest
+    # absence count instead of a magic number -- it still catches a
+    # regression to the legacy verbose per-flag dump, which does not share
+    # this structure.
+    from torchlens.report._environment import _probe_torch_capabilities
+
+    assert row.details == _probe_torch_capabilities().detail
+    # Absent flags stay NAMED in the cell (absences-first doctrine).
+    for name, available in snapshot.items():
+        if not available:
+            assert name in row.details
+
+
+# Kept: sole branch coverage of report/_doctor.py.
+@pytest.mark.heavy  # doctor probe walk crossed the 7s smoke budget at T55 (7.2s cpu)
+def test_doctor_report_repr_is_bounded() -> None:
+    """DoctorReport repr names its scope and row count in one bounded line."""
+
+    doctor_report = tl.report.doctor()
+    rendered = repr(doctor_report)
+    assert rendered.startswith("DoctorReport environment:")
+    assert len(rendered.splitlines()) == 1
+    for line in rendered.splitlines():
+        assert len(line) <= 200
+    assert isinstance(doctor_report.capability_snapshot(), dict)
+
+
+# Kept: sole branch coverage of report/_explain.py.
+def test_episode_facts_surface_on_report_surfaces() -> None:
+    """An episode ledger (incl. forced-tokens basis) is visible in reports."""
+
+    trace = _clean_trace()
+    trace.annotations["episode"] = {
+        "header": {
+            "episode_id": "ep-1",
+            "capture_kind": "episode",
+            "stepped_module": "self",
+            "n_steps_declared": 3,
+            "entry_seed": 0,
+            "token_feed": "forced",
+            "provenance_tier": "exact",
+            "structure_only": False,
+            "escalated_from": None,
+            "reason": None,
+            "fidelity_basis": "forced",
+        },
+        "rows": [],
+    }
+    report = trace.explain()
+    assert "Episode capture" in report
+    assert "NON-VERIFYING" in report
+    dump = trace.to_agent_json(max_ops=1)
+    assert dump["capture"]["episode"]["fidelity_basis"] == "forced"
+    banner = honesty_banner_lines(trace)
+    assert any("episode capture" in line for line in banner)

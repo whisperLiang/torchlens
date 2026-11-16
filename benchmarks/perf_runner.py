@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import platform
 import random
+import resource
 import statistics
 import subprocess
 import sys
@@ -26,7 +28,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from benchmarks._memory import peak_rss_bytes  # noqa: E402
+from benchmarks.artifact_size import artifact_size_bytes  # noqa: E402
+from benchmarks.host_label import benchmark_host_label  # noqa: E402
 from benchmarks.perf_models import (  # noqa: E402
     build_tiny_dummy,
     input_summary,
@@ -153,7 +156,7 @@ def _env_metadata(device: str) -> dict[str, Any]:
     return {
         "python": sys.version.replace("\n", " "),
         "platform": platform.platform(),
-        "hostname": platform.node(),
+        "hostname": benchmark_host_label(),
         "cpu_model": _cpu_model(),
         "cpu_count": os.cpu_count(),
         "load_average_1m": load_average_1m,
@@ -303,7 +306,7 @@ def _select_fastlog_names(model: torch.nn.Module, x: Any, fraction: float) -> se
 
     import torchlens as tl
 
-    trace = tl.fastlog.dry_run(model, x, save=lambda _ctx: True)
+    trace = tl.recording.dry_run(model, x, save=lambda _ctx: True)
     names = [
         getattr(ctx, "func_name", "") for ctx in trace.contexts if getattr(ctx, "func_name", "")
     ]
@@ -339,7 +342,7 @@ def _fastlog_op_halt_index(model: torch.nn.Module, x: Any, fraction: float) -> i
 
     import torchlens as tl
 
-    trace = tl.fastlog.dry_run(model, x, save=lambda _ctx: True)
+    trace = tl.recording.dry_run(model, x, save=lambda _ctx: True)
     op_count = sum(1 for ctx in trace.contexts if getattr(ctx, "kind", None) == "op")
     return max(1, int(op_count * fraction))
 
@@ -377,10 +380,10 @@ def _record_no_save_invariant(trace: Any, state: dict[str, Any]) -> None:
     saved_activation_count = _saved_activation_count(trace)
     state["no_save_layers_to_save"] = "[]"
     state["no_save_num_ops"] = getattr(trace, "num_ops", None)
-    state["no_save_num_saved_ops"] = getattr(trace, "num_saved_ops", None)
+    state["no_save_num_saved_ops"] = len(trace.saved_ops) if hasattr(trace, "saved_ops") else None
     state["no_save_saved_activation_count"] = saved_activation_count
     state["no_save_invariant_passed"] = (
-        getattr(trace, "num_saved_ops", None) == 0 and saved_activation_count == 0
+        len(getattr(trace, "saved_ops", ())) == 0 and saved_activation_count == 0
     )
 
 
@@ -445,7 +448,7 @@ def _operation(
         def trace_profile() -> Any:
             """Run profiled trace and expose phase timings in benchmark metadata."""
 
-            trace = tl.trace(model, x, profile=True)
+            trace = tl.trace(model, x)
             state["phase_timings"] = getattr(trace, "_phase_timings", {})
             state["profile_enabled"] = getattr(trace, "profile_enabled", False)
             return trace
@@ -462,25 +465,27 @@ def _operation(
         import torchlens as tl
 
         _prime_target_model(model, x, device)
-        return lambda: tl.trace(model, x, intervention_ready=True)
+        return lambda: tl.trace(model, x, capture=tl.options.CaptureOptions(replayable=True))
     if operation == "tl_rerun":
         import torchlens as tl
 
-        trace = tl.trace(model, x, intervention_ready=True)
+        trace = tl.trace(model, x, capture=tl.options.CaptureOptions(replayable=True))
         state["rerun_policy"] = "steady_state"
-        return lambda: trace.rerun(model, x)
+        return lambda: trace.run(model, x)
     if operation in {"rerun_metadata_only", "rerun_no_save"}:
         import torchlens as tl
 
         trace = tl.trace(model, x, save=lambda _ctx: False)
         _record_no_save_invariant(trace, state)
         state["rerun_policy"] = "steady_state_new_inputs_not_interventions"
-        return lambda: trace.rerun(model, x)
+        return lambda: trace.run(model, x)
     if operation == "fastlog_module":
         import torchlens as tl
 
         _prime_target_model(model, x, device)
-        return lambda: tl.fastlog.record(model, x, default_op=False, default_module=True)
+        return lambda: tl.record(
+            model, x, recording=tl.options.RecordingOptions(default_op=False, default_module=True)
+        )
     if operation == "fastlog_zero":
         import torchlens as tl
 
@@ -488,12 +493,11 @@ def _operation(
         state["fastlog_zero_policy"] = (
             "save=False predicate, default_op=False, default_module=False"
         )
-        return lambda: tl.fastlog.record(
+        return lambda: tl.record(
             model,
             x,
             save=lambda _ctx: False,
-            default_op=False,
-            default_module=False,
+            recording=tl.options.RecordingOptions(default_op=False, default_module=False),
         )
     if operation.startswith("fastlog_halt_"):
         import torchlens as tl
@@ -507,7 +511,7 @@ def _operation(
             model,
             x,
             save=lambda _ctx: False,
-            halt=lambda ctx: (
+            stop_after=lambda ctx: (
                 ctx.kind == "op" and isinstance(ctx.raw_index, int) and ctx.raw_index >= halt_index
             ),
         )
@@ -517,12 +521,11 @@ def _operation(
         _prime_target_model(model, x, device)
         names = _select_fastlog_names(model, x, 0.10)
         state["fastlog_selected_func_names"] = sorted(names)
-        return lambda: tl.fastlog.record(
+        return lambda: tl.record(
             model,
             x,
             save=lambda ctx: getattr(ctx, "func_name", None) in names,
-            default_op=False,
-            default_module=False,
+            recording=tl.options.RecordingOptions(default_op=False, default_module=False),
         )
     if operation == "fastlog_op_50":
         import torchlens as tl
@@ -530,18 +533,19 @@ def _operation(
         _prime_target_model(model, x, device)
         names = _select_fastlog_names(model, x, 0.50)
         state["fastlog_selected_func_names"] = sorted(names)
-        return lambda: tl.fastlog.record(
+        return lambda: tl.record(
             model,
             x,
             save=lambda ctx: getattr(ctx, "func_name", None) in names,
-            default_op=False,
-            default_module=False,
+            recording=tl.options.RecordingOptions(default_op=False, default_module=False),
         )
     if operation == "fastlog_all":
         import torchlens as tl
 
         _prime_target_model(model, x, device)
-        return lambda: tl.fastlog.record(model, x, default_op=True, default_module=True)
+        return lambda: tl.record(
+            model, x, recording=tl.options.RecordingOptions(default_op=True, default_module=True)
+        )
     if operation == "aux_validate":
         import torchlens as tl
 
@@ -550,7 +554,7 @@ def _operation(
     if operation == "aux_compat_report":
         import torchlens as tl
 
-        return lambda: tl.compat.report(model, x)
+        return lambda: tl.report.doctor(model, x)
     if operation == "aux_save":
         import torchlens as tl
 
@@ -562,8 +566,8 @@ def _operation(
         def save_once() -> None:
             path = Path(parent.name) / f"trace_{counter['i']}.tlspec"
             counter["i"] += 1
-            tl.save(trace, str(path))
-            state["serialized_file_size_bytes"] = path.stat().st_size
+            trace.save(str(path))
+            state["serialized_file_size_bytes"] = artifact_size_bytes(path)
 
         return save_once
     if operation == "aux_load":
@@ -573,8 +577,8 @@ def _operation(
         parent = tempfile.TemporaryDirectory()
         state["_tempdir"] = parent
         path = Path(parent.name) / "trace_fixture.tlspec"
-        tl.save(trace, str(path))
-        state["serialized_file_size_bytes"] = path.stat().st_size
+        trace.save(str(path))
+        state["serialized_file_size_bytes"] = artifact_size_bytes(path)
         return lambda: tl.load(str(path))
     if operation == "peer_manual_hooks":
         return lambda: run_vanilla_hooks_manual_dict(model, x)
@@ -683,7 +687,7 @@ def _read_rss_high_water() -> int:
                     return int(line.split()[1])
     except (OSError, ValueError, IndexError):
         pass
-    return peak_rss_bytes() // 1024
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
 
 class _ConcurrentPeakSampler:
@@ -751,7 +755,10 @@ def _run_memory(fn: OperationFn, device: str, memory_runs: int) -> dict[str, Any
     -------
     dict[str, Any]
         Memory metrics. Peak fields are phase-local and cover transients
-        INSIDE the measured calls (r4 b6-sol R33): the RSS high-water mark
+        INSIDE the measured calls (r4 b6-sol R33). Collectable garbage is
+        freed before the baselines are read (``pre_phase_gc_collected``
+        counts the objects), so memory the process held only as garbage is
+        not in the baseline and cannot be released mid-phase. The RSS high-water mark
         is reset before the loop where the platform allows
         (``rss_high_water_phase_local`` reports which semantics apply), and
         a concurrent sampler thread polls RSS/USS during the runs, so an
@@ -761,6 +768,12 @@ def _run_memory(fn: OperationFn, device: str, memory_runs: int) -> dict[str, Any
     """
 
     metrics: dict[str, Any] = {"memory_run_count": memory_runs}
+    # Free garbage the process already holds before any baseline is read. A
+    # collection that runs inside the phase (the sampler thread's own
+    # allocations trigger them) would otherwise release memory that was resident
+    # at the reset, so a transient of the same size or smaller never lifts the
+    # high water above it and the phase peak reads 0.0.
+    metrics["pre_phase_gc_collected"] = gc.collect()
     try:
         import psutil
 
@@ -796,7 +809,8 @@ def _run_memory(fn: OperationFn, device: str, memory_runs: int) -> dict[str, Any
     if process is not None and baseline_rss is not None:
         sampled_rss_peak = max(sampler.rss_peak, baseline_rss)
         metrics["sampled_rss_peak_delta_mb"] = (sampled_rss_peak - baseline_rss) / 1024 / 1024
-    metrics["process_high_water_rss_mb"] = peak_rss_bytes() / 1024 / 1024
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    metrics["process_high_water_rss_mb"] = usage.ru_maxrss / 1024
     phase_rss_delta_kib = max(_read_rss_high_water() - rss_high_water_before, 0)
     metrics["phase_rss_high_water_delta_mb"] = phase_rss_delta_kib / 1024
     if device == "cuda":

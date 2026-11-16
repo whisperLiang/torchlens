@@ -9,7 +9,9 @@ from fractions import Fraction
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from .._utils._display_bounded import short_dataclass_repr
 from ._engine import (
+    _TAINT_BY_KIND,
     _concatenation_offsets,
     _geometry_memo,
     _graph_revision,
@@ -19,6 +21,7 @@ from ._engine import (
     _rule_result,
     _topological_operations,
 )
+from ._engine_causal import local_result, transpose_causal
 from ._engine_descriptor import _descriptor
 from ._engine_geometry import (
     _Affine,
@@ -27,13 +30,12 @@ from ._engine_geometry import (
     _compose,
     _Dissolved,
     _Full,
+    _has_no_units,
     _identity_map,
     _InputState,
     _Mapped,
-    _RuleApplication,
     _select_full_axes,
     _transpose_mapped,
-    _WindowMapping,
 )
 from ._errors import ReceptiveFieldConfigurationError, ReceptiveFieldUnavailableError
 from ._path import ancestor_labels, resolve_graph_point
@@ -41,8 +43,8 @@ from ._rules import _rf_rules_epoch, _RuleResult
 from ._types import ReceptiveField, ReceptiveFieldDirection, ReceptiveFieldStatus
 
 if TYPE_CHECKING:
-    from ..data_classes.op import Op
-    from ..data_classes.trace import Trace
+    from .._data_classes.op import Op
+    from .._data_classes.trace import Trace
 
 
 _TARGET_SOLUTION_CACHE_SIZE = 8
@@ -51,6 +53,8 @@ _TARGET_SOLUTION_CACHE_SIZE = 8
 @dataclass(frozen=True)
 class _ProjectiveFieldSolution:
     """Immutable target-anchored projective descriptor solution."""
+
+    __repr__ = short_dataclass_repr
 
     registry_epoch: int
     graph_revision: tuple[object, ...]
@@ -62,19 +66,16 @@ class _ProjectiveFieldSolution:
 
 def solve_projective(trace: Trace, target_ops: Iterable[Op | str]) -> _ProjectiveFieldSolution:
     """Solve projective descriptors from every target ancestor into target space.
-
     Parameters
     ----------
     trace:
         Captured TorchLens trace.
     target_ops:
         Non-empty iterable of target operations or exact pass-qualified labels.
-
     Returns
     -------
     _ProjectiveFieldSolution
         Immutable solution containing one descriptor per source and reachable target.
-
     Raises
     ------
     ValueError
@@ -121,9 +122,9 @@ def _canonical_targets(trace: Trace, target_ops: Iterable[Op | str]) -> tuple[Op
             "Projective descriptor solving requires at least one target operation."
         )
     targets = tuple(
-        op for op in trace.layer_list if op.label in resolved and _operation_is_live(op)
+        op for op in trace._layer_list if op.label in resolved and _operation_is_live(op)
     )
-    keys = [target.io_role or target.label for target in targets]
+    keys = [target.graph.io_role or target.label for target in targets]
     if len(keys) != len(set(keys)):
         raise ReceptiveFieldConfigurationError("Projective targets must have distinct result keys.")
     return targets
@@ -137,7 +138,7 @@ def _solve_projective_uncached(
 ) -> _ProjectiveFieldSolution:
     """Run the reverse dynamic program for one canonical target set."""
 
-    operations = tuple(op for op in trace.layer_list if _operation_is_live(op))
+    operations = tuple(op for op in trace._layer_list if _operation_is_live(op))
     by_reference = {
         reference: op
         for op in operations
@@ -150,7 +151,8 @@ def _solve_projective_uncached(
     states_by_op: dict[str, dict[str, _InputState]] = {}
 
     for op in reversed(_topological_operations(operations, by_reference)):
-        if op.label not in active_labels:
+        # An op with no units seeds no geometry as a target and relays none.
+        if op.label not in active_labels or _has_no_units(op):
             continue
         branches: dict[str, list[_InputState]] = defaultdict(list)
         target = target_by_label.get(op.label)
@@ -182,8 +184,6 @@ def _solve_projective_uncached(
     per_op: dict[str, Mapping[str, ReceptiveField]] = {}
     flattened_states: dict[tuple[str, str], _InputState] = {}
     for op in operations:
-        # Non-tensor boundary states must carry uncertainty through the graph,
-        # but have no source grid on which a public descriptor could be queried.
         if op.shape is None:
             continue
         op_descriptors: dict[str, ReceptiveField] = {}
@@ -213,10 +213,12 @@ def _seed_target(op: Op) -> _InputState:
 
     if op.shape is None:
         raise ReceptiveFieldUnavailableError(
-            f"Operation {op.label!r} has no tensor output grid to seed projective geometry."
+            f"{op.label}: no tensor output grid",
+            code="rf_tensor_grid_unavailable",
+            remedy="select a tensor-valued graph endpoint",
         )
     shape = tuple(op.shape)
-    role = op.io_role or op.label
+    role = op.graph.io_role or op.label
     identity = _identity_map()
     return _InputState(
         input_op_label=op.label,
@@ -238,46 +240,32 @@ def _transpose_rule(
 ) -> _InputState:
     """Transpose one child's local rule onto one parent branch."""
 
-    notes = state.notes + ((f"{child.label}: {result.note}",) if result.note else ())
-    if result.kind in {"data_dependent", "unknown", "unsupported"}:
-        status = {
-            "data_dependent": ReceptiveFieldStatus.DATA_DEPENDENT,
-            "unknown": ReceptiveFieldStatus.UNKNOWN,
-            "unsupported": ReceptiveFieldStatus.UNSUPPORTED,
-        }[result.kind]
-        if result.kind == "data_dependent":
-            notes += (f"{child.label}: data-dependent forward routing has no static transpose",)
-        return replace(state, axes=None, taint=status, notes=notes, rule=rule_name)
+    result, notes = local_result(child, parent, state, result)
     if parent.shape is None:
         return replace(
             state,
             axes=None,
-            taint=state.taint or ReceptiveFieldStatus.UNKNOWN,
+            taint=ReceptiveFieldStatus.UNKNOWN,
             notes=notes + (f"{parent.label}: no tensor output grid for the transpose",),
             rule=rule_name,
         )
+    if result.kind in _TAINT_BY_KIND:
+        status = _TAINT_BY_KIND[result.kind]
+        if result.kind == "data_dependent":
+            notes += (f"{child.label}: data-dependent forward routing has no static transpose",)
+        return replace(state, axes=None, taint=status, notes=notes, rule=rule_name)
     if state.taint is not None or state.axes is None:
         return replace(state, notes=notes, rule=rule_name)
-    application = _RuleApplication(result, rule_name, notes)
-    handler = {
-        "window": _transpose_window,
-        "window_edges": _transpose_window_edges,
-        "full": _transpose_full,
-        "axis_map": _transpose_axis_map,
-    }.get(result.kind)
-    if handler is not None:
-        return handler(child, parent, state, application)
-    return _transpose_unmapped_rule(child, parent, state, application)
-
-
-def _transpose_unmapped_rule(
-    child: Op, parent: Op, state: _InputState, application: _RuleApplication
-) -> _InputState:
-    """Transpose degradation or passthrough without an explicit coordinate map."""
-
-    result, rule_name, notes = application.result, application.name, application.notes
-    if state.axes is None:
-        return replace(state, notes=notes, rule=rule_name)
+    if result.kind == "window":
+        return _transpose_window(child, parent, state, result, rule_name, notes)
+    if result.kind == "window_edges":
+        return _transpose_window_edges(child, parent, state, result, rule_name, notes)
+    if result.kind == "full":
+        return _transpose_full(child, parent, state, result, rule_name, notes)
+    if result.kind == "axis_map":
+        return _transpose_axis_map(child, parent, state, result, rule_name, notes)
+    if result.kind == "causal_window":
+        return transpose_causal(child, parent, state, result, rule_name, notes, _transpose_full)
     if result.kind == "dissolve":
         axes = tuple(
             replace(
@@ -305,20 +293,21 @@ def _transpose_unmapped_rule(
             for axis in state.axes
         )
         return replace(state, axes=axes, notes=notes + (degradation,), rule=rule_name)
-    return _transpose_passthrough(child, parent, state, application)
+    return _transpose_passthrough(child, parent, state, result, rule_name, notes)
 
 
 def _transpose_passthrough(
     child: Op,
     parent: Op,
     state: _InputState,
-    application: _RuleApplication,
+    result: _RuleResult,
+    rule_name: str,
+    notes: tuple[str, ...],
     *,
     child_to_parent: Mapping[int, int] | None = None,
 ) -> _InputState:
     """Transpose identity and broadcast relations with explicit axis alignment."""
 
-    result, rule_name, notes = application.result, application.name, application.notes
     assert state.axes is not None
     if child_to_parent is None:
         parent_to_child = _passthrough_axis_map(child, parent, result)
@@ -406,11 +395,12 @@ def _transpose_window(
     child: Op,
     parent: Op,
     state: _InputState,
-    application: _RuleApplication,
+    result: _RuleResult,
+    rule_name: str,
+    notes: tuple[str, ...],
 ) -> _InputState:
     """Transpose a standard kernel/stride/padding/dilation recurrence."""
 
-    result = application.result
     kernels = _as_tuple(result.values["kernel"])
     rank = len(kernels)
     strides = _as_tuple(result.values.get("stride", 1), rank)
@@ -432,11 +422,10 @@ def _transpose_window(
         child,
         parent,
         state,
-        _WindowMapping(
-            local_maps,
-            channel_dependency=str(result.values.get("channel_dependency", "full_exact")),
-        ),
-        application,
+        local_maps,
+        rule_name,
+        notes,
+        channel_dependency=str(result.values.get("channel_dependency", "full_exact")),
     )
 
 
@@ -444,11 +433,12 @@ def _transpose_window_edges(
     child: Op,
     parent: Op,
     state: _InputState,
-    application: _RuleApplication,
+    result: _RuleResult,
+    rule_name: str,
+    notes: tuple[str, ...],
 ) -> _InputState:
     """Transpose registered raw two-edge maps or taint malformed metadata."""
 
-    result, rule_name, notes = application.result, application.name, application.notes
     raw_edges = result.values.get("per_axis_edges")
     if not isinstance(raw_edges, Sequence) or isinstance(raw_edges, (str, bytes)):
         return _malformed_window_state(child, state, rule_name, notes)
@@ -470,11 +460,10 @@ def _transpose_window_edges(
         child,
         parent,
         state,
-        _WindowMapping(
-            tuple(maps),
-            preserve_non_window_axes=bool(result.values.get("preserve_non_window_axes", False)),
-        ),
-        application,
+        tuple(maps),
+        rule_name,
+        notes,
+        preserve_non_window_axes=bool(result.values.get("preserve_non_window_axes", False)),
     )
 
 
@@ -499,15 +488,15 @@ def _transpose_window_maps(
     child: Op,
     parent: Op,
     state: _InputState,
-    window: _WindowMapping,
-    application: _RuleApplication,
+    local_maps: tuple[_Mapped, ...],
+    rule_name: str,
+    notes: tuple[str, ...],
+    *,
+    preserve_non_window_axes: bool = False,
+    channel_dependency: str = "full_exact",
 ) -> _InputState:
     """Transpose local window maps and mirror semantic axis inference."""
 
-    local_maps = window.maps
-    preserve_non_window_axes = window.preserve_non_window_axes
-    channel_dependency = window.channel_dependency
-    rule_name, notes = application.name, application.notes
     assert state.axes is not None
     spatial_rank = len(local_maps)
     parent_rank = len(parent.shape)
@@ -608,11 +597,12 @@ def _transpose_full(
     child: Op,
     parent: Op,
     state: _InputState,
-    application: _RuleApplication,
+    result: _RuleResult,
+    rule_name: str,
+    notes: tuple[str, ...],
 ) -> _InputState:
     """Transpose selected whole-parent-axis dependence into target-space fullness."""
 
-    result, rule_name, notes = application.result, application.name, application.notes
     assert state.axes is not None
     selected = _select_full_axes(result.values.get("axes"), parent, child)
     exact = bool(result.values.get("exact", True))
@@ -630,7 +620,9 @@ def _transpose_full(
         child,
         parent,
         state,
-        application,
+        result,
+        rule_name,
+        notes,
         child_to_parent=child_to_parent,
     )
     if passthrough.axes is None and all(axis.output_axis is None for axis in state.axes):
@@ -701,11 +693,12 @@ def _transpose_axis_map(
     child: Op,
     parent: Op,
     state: _InputState,
-    application: _RuleApplication,
+    result: _RuleResult,
+    rule_name: str,
+    notes: tuple[str, ...],
 ) -> _InputState:
     """Transpose an exact child-axis to parent-axis remapping."""
 
-    result, rule_name, notes = application.result, application.name, application.notes
     raw_mapping = result.values.get("out_to_parent_axis", {})
     if not isinstance(raw_mapping, Mapping):
         return replace(
@@ -741,8 +734,8 @@ def _transpose_axis_map(
             if edge is not None and isinstance(geometry, _Mapped):
                 # Walking child->parent, the new frame coordinate ``p`` maps
                 # to the old child coordinate ``(p - start) / step``; without
-                # this inverse-affine composition every slice offset was
-                # dropped from the transposed relation (disputed-r2 b6/R20-2).
+                # this inverse-affine composition every slice offset would be
+                # dropped from the transposed relation.
                 step, start = int(edge[0]), int(edge[1])
                 inverse_slope = Fraction(1, step)
                 local = _Mapped(
@@ -763,14 +756,16 @@ def _transpose_axis_map(
                     provenance=provenance,
                 )
             )
-    return _degrade_for_selected_axes(child, parent, state, application, axes)
+    return _degrade_for_selected_axes(child, parent, state, result, rule_name, notes, axes)
 
 
 def _degrade_for_selected_axes(
     child: Op,
     parent: Op,
     state: _InputState,
-    application: _RuleApplication,
+    result: _RuleResult,
+    rule_name: str,
+    notes: tuple[str, ...],
     axes: list[_AxisState],
 ) -> _InputState:
     """Widen a transposed axis-map state whose scalar-select drops real extent.
@@ -785,10 +780,9 @@ def _degrade_for_selected_axes(
     select also rebases batch indices across the boundary, so the known
     target batch axis widens to a whole-extent full claim, DECLARING the
     coupling geometrically instead of serving an identity pointwise claim
-    that misses the true mapping (disputed-r3 F2).
+    that misses the true mapping.
     """
 
-    result, rule_name, notes = application.result, application.name, application.notes
     raw_selected = result.values.get("selected_parent_axes", ())
     selected = (
         tuple(int(axis) for axis in raw_selected)

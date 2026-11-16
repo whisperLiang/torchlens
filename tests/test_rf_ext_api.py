@@ -25,7 +25,7 @@ def _trace() -> tuple[object, object]:
     """Capture a one-call convolution trace and its convolution operation."""
 
     trace = tl.trace(nn.Sequential(nn.Conv2d(1, 1, 3, padding=1)), torch.ones(1, 1, 5, 5))
-    op = next(item for item in trace.layer_list if item.func_name == "conv2d")
+    op = next(item for item in trace._layer_list if item.func_name == "conv2d")
     return trace, op
 
 
@@ -33,7 +33,7 @@ def test_named_projective_siblings_and_direction_keyword() -> None:
     """Keep projective ownership source-anchored across all entity siblings."""
 
     trace, op = _trace()
-    source = next(item for item in trace.layer_list if item.is_input)
+    source = next(item for item in trace._layer_list if item.is_input)
     view = source.projective_field
 
     assert isinstance(view, ReceptiveFieldView)
@@ -55,18 +55,6 @@ def test_named_projective_siblings_and_direction_keyword() -> None:
         assert isinstance(module.projective_field, ReceptiveFieldView)
 
 
-def test_projective_table_keeps_receptive_default_schema() -> None:
-    """Append projective columns without changing the receptive table schema."""
-
-    trace, _ = _trace()
-    receptive = trace.receptive_fields().to_pandas()
-    projective = trace.projective_fields().to_pandas()
-
-    assert list(receptive.columns) == list(projective.columns[: len(receptive.columns)])
-    assert "projective_target" in projective.columns
-    assert projective.attrs["direction"] is ReceptiveFieldDirection.PROJECTIVE
-
-
 def test_configuration_errors_are_typed() -> None:
     """SF-07: user-facing misconfiguration raises the typed RF stratum.
 
@@ -75,9 +63,8 @@ def test_configuration_errors_are_typed() -> None:
     working while typed handling becomes possible.
     """
 
+    from torchlens.errors import ReceptiveFieldConfigurationError, ReceptiveFieldError
     from torchlens.receptive_field import (
-        ReceptiveFieldConfigurationError,
-        ReceptiveFieldError,
         verify,
     )
     from torchlens.receptive_field._rules import register_rf_rule

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import pickle
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
@@ -12,17 +11,11 @@ import numpy as np
 import pytest
 
 import torchlens as tl
-from torchlens._io.bundle import _build_manifest, _write_payload_blob
 from torchlens._io.payload_codec import get_payload_codec
-from torchlens._io.scrub import scrub_for_save
 from torchlens._io.tensor_policy import FailReason, Ok
-from torchlens._io.tlspec import _TlSpecWriter
-from torchlens.backends import (
-    BackendRuntimeCompatibilityError,
-    BackendUnsupportedError,
-    get_backend_spec,
-)
+from torchlens._utils._record_group_table import record_member
 from torchlens.backends.jax import capabilities
+from torchlens.errors import BackendRuntimeCompatibilityError, BackendUnsupportedError
 
 jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
@@ -30,7 +23,7 @@ lax = pytest.importorskip("jax.lax")
 random = pytest.importorskip("jax.random")
 
 
-pytestmark = pytest.mark.backend_jax
+pytestmark = [pytest.mark.backend_jax, pytest.mark.rare]
 
 
 def _params() -> dict[str, Any]:
@@ -202,13 +195,24 @@ def _assert_named_sharding(value: Any, *, axis_name: str, device_count: int) -> 
     assert tuple(sharding.spec) == (axis_name,)
 
 
+_CAPTURE_OPTIONS_FIELD_NAMES = frozenset(tl.options.CaptureOptions().as_dict())
+
+
 def _trace(**kwargs: Any) -> Any:
     """Trace the shared tiny JAX model.
 
     Parameters
     ----------
     **kwargs
-        Public trace keyword overrides.
+        Public trace keyword overrides. Any name that is a ``CaptureOptions``
+        field (``layers_to_save``, ``save_grads``, ...) is routed through
+        ``capture=CaptureOptions(...)`` -- matching ``_trace_jax`` in
+        ``test_jax_backend_capture.py`` and ``_trace`` in
+        ``test_tinygrad_backend_capture.py``. The sprint removed every such
+        flat kwarg from ``trace()``'s own signature, so passing one directly
+        lands in ``**forward_kwargs`` and raises an unrelated "keyword(s) it
+        does not route" error instead of exercising the backend option it
+        names.
 
     Returns
     -------
@@ -216,6 +220,12 @@ def _trace(**kwargs: Any) -> Any:
         Captured JAX trace.
     """
 
+    capture_kwargs = {
+        name: kwargs.pop(name) for name in list(kwargs) if name in _CAPTURE_OPTIONS_FIELD_NAMES
+    }
+    if capture_kwargs:
+        assert "capture" not in kwargs, "combine capture= and flat capture kwargs by hand"
+        kwargs["capture"] = tl.options.CaptureOptions(**capture_kwargs)
     return tl.trace(
         cast(Any, _model),
         (_params(), jnp.ones((2, 3), dtype=jnp.float32)),
@@ -225,7 +235,7 @@ def _trace(**kwargs: Any) -> Any:
 
 
 def _write_jax_codec_fixture(path: Path) -> tuple[Any, np.ndarray]:
-    """Write a materialized JAX bundle through the private codec writer path.
+    """Save a JAX trace with its payloads as a format 3 artifact.
 
     Parameters
     ----------
@@ -239,60 +249,14 @@ def _write_jax_codec_fixture(path: Path) -> tuple[Any, np.ndarray]:
     """
 
     trace = _trace()
-    scrubbed_state, blob_specs, unsupported_tensors = scrub_for_save(
-        trace,
-        include_outs=True,
-        include_grads=False,
-        include_saved_args=False,
-        include_rng_states=False,
-        backend_name="jax",
-        payload_materialization=True,
-    )
-    if not blob_specs:
-        raise AssertionError("JAX codec fixture expected at least one saved payload.")
-
-    path.mkdir()
-    (path / "blobs").mkdir()
-    codec = get_payload_codec("jax")
-    tensor_entries = [
-        _write_payload_blob(tmp_path=path, blob_spec=blob_spec, codec=codec)
-        for blob_spec in blob_specs
-    ]
-    manifest = _build_manifest(
-        trace=trace,
-        tensor_entries=tensor_entries,
-        unsupported_tensors=unsupported_tensors,
-    )
-    _TlSpecWriter.write_trace_manifest(
-        path=path / "manifest.json",
-        trace=trace,
-        legacy_manifest=manifest,
-        save_level="portable",
-    )
-    with (path / "metadata.pkl").open("wb") as handle:
-        pickle.dump(scrubbed_state, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    _mark_fixture_manifest_materialized(path)
-    return trace, np.asarray(blob_specs[0].value)
-
-
-def _mark_fixture_manifest_materialized(path: Path) -> None:
-    """Patch a direct-writer fixture manifest to declare materialized payloads."""
-
-    manifest_path = path / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["body_format"] = "safetensors"
-    manifest["payload_policy"] = {
-        "policy": "array_payloads",
-        "materialization_supported": True,
-        "payload_kinds": sorted({entry["kind"] for entry in manifest["tensors"]}),
-    }
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    trace.save(path, level="portable")
+    return trace, np.asarray(_first_saved_op(trace).out)
 
 
 def _first_saved_op(trace: Any) -> Any:
     """Return the first op with a saved activation."""
 
-    for op in trace.layer_list:
+    for op in trace._layer_list:
         if op.has_saved_activation:
             return op
     raise AssertionError("trace has no saved activation op")
@@ -314,7 +278,7 @@ def _saved_op_by_func_name(trace: Any, func_name: str) -> Any:
         First matching saved op.
     """
 
-    for op in trace.layer_list:
+    for op in trace._layer_list:
         if op.func_name == func_name and op.has_saved_activation:
             return op
     raise AssertionError(f"trace has no saved {func_name!r} activation op")
@@ -347,7 +311,7 @@ def test_jax_payload_codec_encodes_numpy_manifest_fields() -> None:
 
 
 def test_jax_codec_fixture_loads_eager_payloads_as_jax_arrays(tmp_path: Path) -> None:
-    """Direct-writer JAX codec fixtures should load eager outs as JAX arrays."""
+    """Saved JAX payloads should load eagerly as JAX arrays."""
 
     path = tmp_path / "jax_codec_roundtrip.tlspec"
     _, expected = _write_jax_codec_fixture(path)
@@ -355,14 +319,14 @@ def test_jax_codec_fixture_loads_eager_payloads_as_jax_arrays(tmp_path: Path) ->
     loaded = tl.load(path)
     loaded_op = _first_saved_op(loaded)
 
-    assert loaded.backend == "jax"
+    assert loaded.provenance.backend == "jax"
     assert isinstance(loaded_op.out, jax.Array)
     assert getattr(loaded, "payload_load_status") == "loaded_device_best_effort"
     np.testing.assert_allclose(np.asarray(loaded_op.out), expected)
 
 
 def test_jax_codec_fixture_loads_lazy_refs_as_jax_arrays(tmp_path: Path) -> None:
-    """Lazy JAX codec fixtures should defer payload decode until materialization."""
+    """Lazily loaded JAX payloads should defer decode until materialization."""
 
     path = tmp_path / "jax_codec_lazy.tlspec"
     _, expected = _write_jax_codec_fixture(path)
@@ -371,9 +335,9 @@ def test_jax_codec_fixture_loads_lazy_refs_as_jax_arrays(tmp_path: Path) -> None
     loaded_op = _first_saved_op(loaded)
 
     assert loaded_op.out is None
-    assert loaded_op.out_ref is not None
-    assert loaded_op.out_ref.logical_backend == "jax"
-    materialized = loaded_op.out_ref.materialize()
+    assert loaded_op._out_ref is not None
+    assert loaded_op._out_ref.logical_backend == "jax"
+    materialized = loaded_op._out_ref.materialize()
     assert isinstance(materialized, jax.Array)
     np.testing.assert_allclose(np.asarray(materialized), expected)
 
@@ -409,9 +373,33 @@ def test_jax_codec_runtime_missing_loads_audit_only(
     assert getattr(loaded, "payload_load_status") == "audit_only_missing_runtime"
     assert loaded_op.has_saved_activation is True
     assert loaded_op.out is None
-    assert loaded_op.out_ref is not None
+    assert loaded_op._out_ref is not None
     with pytest.raises(BackendRuntimeCompatibilityError, match="jax runtime unavailable"):
-        loaded_op.out_ref.materialize()
+        loaded_op._out_ref.materialize()
+
+
+@pytest.mark.parametrize("location", ["cpu", "cpu:0"])
+def test_jax_payload_codec_explicit_cpu_does_not_use_default_backend(
+    monkeypatch: pytest.MonkeyPatch, location: str
+) -> None:
+    """CPU placement remains explicit when JAX's default backend is a GPU."""
+
+    from types import SimpleNamespace
+
+    original_devices = jax.devices
+    cpu_devices = original_devices("cpu")
+    codec = get_payload_codec("jax")
+    value = jnp.arange(6, dtype=jnp.float32).reshape(2, 3)
+    encoded = codec.to_numpy(value)
+    fields = codec.manifest_fields(value, encoded)
+    monkeypatch.setattr(
+        jax,
+        "devices",
+        lambda backend=None: cpu_devices if backend == "cpu" else [SimpleNamespace(platform="gpu")],
+    )
+    restored = codec.from_numpy(encoded.array, fields, map_location=location)
+    assert {device.platform for device in restored.devices()} == {"cpu"}
+    np.testing.assert_array_equal(np.asarray(restored), encoded.array)
 
 
 def test_jax_payload_codec_map_location_failure_raises_typed() -> None:
@@ -520,16 +508,24 @@ def test_jax_old_style_prng_key_tlspec_round_trips_as_uint32_array(tmp_path: Pat
     manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
     loaded = tl.load(path)
     loaded_key = _first_saved_op(loaded).out
+    # Format 3 indexes payloads by file in ``body_index`` (no layer label), so
+    # the input's entries are found through its lazy ref's payload file. The
+    # internal ``_raw`` capture sentinel is stripped from every preview layer
+    # label before it reaches a public surface; the real final label is bare.
+    input_ref = record_member(tl.load(path, lazy=True).ops["input_1_1:1"], "out_ref")
     input_entries = [
-        entry for entry in manifest["tensors"] if entry.get("label") in trace.input_ops.keys()
+        entry for entry in manifest["body_index"] if entry["filename"] == input_ref.relative_path
     ]
 
     assert str(loaded_key.dtype) == "uint32"
     assert loaded_key.shape == (2,)
     np.testing.assert_array_equal(np.asarray(loaded_key), np.asarray(key))
+    assert input_ref.logical_dtype == "uint32"
+    assert "jax_prng_key_typed" not in (input_ref.codec_metadata or {})
     assert input_entries
-    assert input_entries[0]["logical_dtype"] == "uint32"
-    assert "jax_prng_key_typed" not in input_entries[0]["codec_metadata"]
+    for entry in input_entries:
+        assert entry["logical_dtype"] == "uint32"
+        assert "jax_prng_key_typed" not in entry["codec_metadata"]
 
 
 def test_jax_sharded_array_tlspec_round_trips_value_with_audit_metadata(
@@ -562,7 +558,7 @@ def test_jax_sharded_array_tlspec_round_trips_value_with_audit_metadata(
         "mesh": {"axis_names": ["x"], "shape": {"x": device_count}},
         "partition_spec": ["x"],
     }
-    assert loaded.backend == "jax"
+    assert loaded.provenance.backend == "jax"
     assert isinstance(loaded_array, jax.Array)
     assert loaded_array.shape == sharded.shape
     assert loaded_array.dtype == sharded.dtype
@@ -600,7 +596,9 @@ def test_jax_sharded_array_explicit_sharding_hint_restores_requested_sharding(
     trace.save(path, level="portable")
     loaded = tl.load(
         path,
-        payload_hints=tl.PayloadLoadHints(jax=tl.JaxPayloadLoadHint(sharding=sharded.sharding)),
+        payload_hints=tl._io.PayloadLoadHints(
+            jax=tl._io.JaxPayloadLoadHint(sharding=sharded.sharding)
+        ),
     )
     loaded_array = _first_saved_op(loaded).out
 
@@ -622,8 +620,8 @@ def test_jax_sharded_array_reconstruct_hint_uses_saved_metadata(
     trace.save(path, level="portable")
     loaded = tl.load(
         path,
-        payload_hints=tl.PayloadLoadHints(
-            jax=tl.JaxPayloadLoadHint(reconstruct_sharding=True, platform="cpu")
+        payload_hints=tl._io.PayloadLoadHints(
+            jax=tl._io.JaxPayloadLoadHint(reconstruct_sharding=True, platform="cpu")
         ),
     )
     loaded_array = _first_saved_op(loaded).out
@@ -641,21 +639,23 @@ def test_jax_sharded_array_lazy_and_op_materialize_accept_payload_hints(
     sharded, expected, device_count = _named_sharded_array(platform="cpu")
     trace = tl.trace(cast(Any, _identity_array), (None, sharded), backend="jax")
     path = tmp_path / "jax_sharded_lazy_hint.tlspec"
-    hint = tl.PayloadLoadHints(jax=tl.JaxPayloadLoadHint(reconstruct_sharding=True, platform="cpu"))
+    hint = tl._io.PayloadLoadHints(
+        jax=tl._io.JaxPayloadLoadHint(reconstruct_sharding=True, platform="cpu")
+    )
 
     trace.save(path, level="portable")
     lazy_loaded = tl.load(path, lazy=True, payload_hints=hint)
     lazy_op = _first_saved_op(lazy_loaded)
-    assert lazy_op.out_ref is not None
-    direct_value = lazy_op.out_ref.materialize()
-    op_value = lazy_op.materialize_out()
+    assert lazy_op._out_ref is not None
+    direct_value = lazy_op._out_ref.materialize()
+    op_value = lazy_op.payload.materialize_out()
 
     override_loaded = tl.load(path, lazy=True)
     override_op = _first_saved_op(override_loaded)
-    assert override_op.out_ref is not None
-    override_op._internal_set("grad_ref", override_op.out_ref)
+    assert override_op._out_ref is not None
+    override_op._internal_set("grad_ref", override_op._out_ref)
     override_op._internal_set("grad", None)
-    grad_value = override_op.materialize_grad(payload_hints=hint)
+    grad_value = override_op.payload.materialize_grad(payload_hints=hint)
 
     for value in (direct_value, op_value, grad_value):
         _assert_named_sharding(value, axis_name="x", device_count=device_count)
@@ -673,8 +673,8 @@ def test_jax_sharded_array_unsatisfiable_hint_fails_closed(tmp_path: Path) -> No
     with pytest.raises(BackendRuntimeCompatibilityError, match="mesh axis names"):
         tl.load(
             path,
-            payload_hints=tl.PayloadLoadHints(
-                jax=tl.JaxPayloadLoadHint(
+            payload_hints=tl._io.PayloadLoadHints(
+                jax=tl._io.JaxPayloadLoadHint(
                     reconstruct_sharding=True,
                     mesh_axis_names=("wrong",),
                 )
@@ -702,7 +702,9 @@ def test_jax_sharding_reconstruction_rejects_unaddressable_metadata() -> None:
             np.asarray([1.0], dtype=np.float32),
             {"logical_dtype": "float32", "codec_metadata": metadata},
             map_location=None,
-            payload_hints=tl.PayloadLoadHints(jax=tl.JaxPayloadLoadHint(reconstruct_sharding=True)),
+            payload_hints=tl._io.PayloadLoadHints(
+                jax=tl._io.JaxPayloadLoadHint(reconstruct_sharding=True)
+            ),
             strict_runtime=True,
         )
 
@@ -821,12 +823,24 @@ def test_jax_rejects_nested_jaxpr_primitives(
 ) -> None:
     """Nested jaxpr control-flow primitives should name the unsupported primitive."""
 
+    # ``jax_control_flow`` is a ``CaptureOptions`` field, not a ``trace()``
+    # top-level parameter; a bare flat kwarg lands in ``**forward_kwargs`` and
+    # raises an unrelated "keyword(s) it does not route" error instead of
+    # exercising the control-flow rejection (see ``_trace``'s docstring above
+    # and ``_trace_jax`` in ``test_jax_backend_capture.py`` for the same
+    # established routing).
+    capture_kwargs = {
+        name: value for name, value in kwargs.items() if name in _CAPTURE_OPTIONS_FIELD_NAMES
+    }
+    trace_kwargs = {name: value for name, value in kwargs.items() if name not in capture_kwargs}
+    if capture_kwargs:
+        trace_kwargs["capture"] = tl.options.CaptureOptions(**capture_kwargs)
     with pytest.raises(ValueError, match=pattern):
         tl.trace(
             cast(Any, fn),
             (_params(), jnp.ones((2, 3), dtype=jnp.float32)),
             backend="jax",
-            **kwargs,
+            **trace_kwargs,
         )
 
 
@@ -860,10 +874,10 @@ def test_jax_accepts_default_unrolled_cond_and_while() -> None:
     while_trace = tl.trace(cast(Any, uses_while), args, backend="jax")
 
     assert any(
-        op.annotations.get("jax_capture_kind") == "cond_decision" for op in cond_trace.layer_list
+        op.annotations.get("jax_capture_kind") == "cond_decision" for op in cond_trace._layer_list
     )
     assert any(
-        op.annotations.get("jax_capture_kind") == "while_decision" for op in while_trace.layer_list
+        op.annotations.get("jax_capture_kind") == "while_decision" for op in while_trace._layer_list
     )
     assert cond_trace.validate_forward_pass([]) is True
     assert while_trace.validate_forward_pass([]) is True
@@ -903,7 +917,7 @@ def test_jax_accepts_custom_vjp_forward_region() -> None:
     )
     region_ops = [
         op
-        for op in trace.layer_list
+        for op in trace._layer_list
         if op.annotations.get("jax_region_primitive") == "custom_vjp_call"
     ]
 
@@ -1063,15 +1077,15 @@ def test_jax_rejects_callback_effects() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "pattern"),
     (
-        ({"layers_to_save": ["tanh"]}, "full-save only"),
+        ({"save": ["tanh"]}, "full-save only"),
         ({"lookback": 1}, "full-save only"),
         # Gated options refuse through the central capability gate, whose
         # canonical message names the owning flag and the refused option.
         (
             {"intervene": tl.when(tl.func("tanh"), tl.zero_ablate())},
-            "interventions=False.*intervene",
+            "can_intervene=False.*intervene",
         ),
-        ({"halt": tl.func("tanh")}, "interventions=False.*halt"),
+        ({"stop_after": tl.func("tanh")}, "can_intervene=False.*stop_after"),
         ({"save_grads": True}, "backward_capture=False.*save_grads"),
     ),
 )
@@ -1084,10 +1098,7 @@ def test_jax_rejects_save_shaping_kwargs(kwargs: dict[str, Any], pattern: str) -
 
 @pytest.mark.parametrize(
     ("kwargs", "pattern"),
-    (
-        ({"payload_policy": "full"}, "payload_policy.*not implemented"),
-        ({"save_preview": True}, "save_preview.*not implemented"),
-    ),
+    (({"payload_policy": "full"}, "payload_policy.*not implemented"),),
 )
 def test_jax_rejects_declared_future_public_options(
     kwargs: dict[str, Any],
@@ -1115,12 +1126,12 @@ def test_jax_module_predicate_selects_function_root() -> None:
 
     trace = _trace(save=tl.in_module("self"))
 
-    assert trace.num_saved_ops == len(trace.layer_list)
+    assert len(trace.saved_ops) == len(trace._layer_list)
     assert trace.validate_forward_pass([]) is True
 
 
-def test_jax_rejects_closed_over_array_params() -> None:
-    """Closed-over array parameters should be passed as explicit pytree leaves."""
+def test_jax_records_closed_over_array_params_as_constants() -> None:
+    """Closed-over arrays are ``constant`` ops with payloads, not a refusal."""
 
     hidden = jnp.ones((3, 2), dtype=jnp.float32)
 
@@ -1130,8 +1141,10 @@ def test_jax_rejects_closed_over_array_params() -> None:
         del params
         return x @ hidden
 
-    with pytest.raises(ValueError, match="closed-jaxpr constants.*explicit"):
-        tl.trace(cast(Any, uses_hidden), ({}, jnp.ones((2, 3))), backend="jax")
+    trace = tl.trace(cast(Any, uses_hidden), ({}, jnp.ones((2, 3))), backend="jax")
+    constants = [op for op in trace._layer_list if op.func_name == "constant"]
+    assert [tuple(op.out.shape) for op in constants] == [(3, 2)]
+    assert trace.validate_forward_pass([]) is True
 
 
 def test_jax_public_surface_matrix(tmp_path: Path) -> None:
@@ -1139,37 +1152,40 @@ def test_jax_public_surface_matrix(tmp_path: Path) -> None:
 
     trace = _trace()
 
-    assert trace.backend == "jax"
+    assert trace.provenance.backend == "jax"
     assert trace.validate_forward_pass([]) is True
     assert trace.validation_replay_status.state == "passed"
     assert trace.validation_replay_status.source == "live"
     assert isinstance(trace.summary(), str)
-    assert len(trace.to_pandas()) == len(trace.layer_list)
+    assert len(trace.to_pandas()) == len(trace._layer_list)
     assert trace.modules["self"].address == "self"
-    assert trace.module_identity_mode == "function_root"
-    assert trace.param_source == "pytree-derived"
+    assert trace.options.module_identity_mode == "function_root"
+    assert trace.provenance.param_source == "pytree-derived"
     assert set(trace.params.keys()) == {"w", "b"}
-    assert trace.has_backward_pass is False
-    assert trace.num_backward_passes == 0
-    assert trace.num_backward_edges is None
+    assert trace.autograd.has_backward_pass is False
+    # The public pass count is len(trace.autograd.backward_passes); a backend without
+    # backward capture refuses that read typed rather than reporting zero passes.
+    with pytest.raises(ValueError, match="do not capture true backward graphs"):
+        _ = trace.autograd.backward_passes
+    assert trace.autograd.num_backward_edges is None
 
     outpath = tmp_path / "jax_graph"
-    dot = trace.draw(vis_outpath=str(outpath), vis_save_only=True, vis_fileformat="dot")
+    dot = trace.draw(path=str(outpath), file_format="dot").dot
     assert isinstance(dot, str)
 
     audit_path = tmp_path / "jax_audit.tlspec"
     trace.save(audit_path, level="audit")
     loaded = tl.load(audit_path)
-    assert loaded.backend == "jax"
-    assert loaded.param_source == "pytree-derived"
-    assert all(op.out is None for op in loaded.layer_list)
+    assert loaded.provenance.backend == "jax"
+    assert loaded.provenance.param_source == "pytree-derived"
+    assert all(op.out is None for op in loaded._layer_list)
 
     portable_path = tmp_path / "jax_portable.tlspec"
     expected = np.asarray(trace[trace.output_layers[0]].out)
     trace.save(portable_path)
     loaded_portable = tl.load(portable_path)
     loaded_out = loaded_portable[loaded_portable.output_layers[0]].out
-    assert loaded_portable.backend == "jax"
+    assert loaded_portable.provenance.backend == "jax"
     assert getattr(loaded_portable, "payload_load_status") == "loaded_device_best_effort"
     assert isinstance(loaded_out, jax.Array)
     assert loaded_out.shape == expected.shape
@@ -1179,28 +1195,28 @@ def test_jax_public_surface_matrix(tmp_path: Path) -> None:
     loaded_status = loaded_portable.validate_forward_pass([])
     assert loaded_status is loaded_portable.validation_replay_status
     assert loaded_status.state == "unavailable"
-    assert loaded_status.available is False
+    assert loaded_status.is_available is False
     assert loaded_status.reason == "loaded_trace_runtime_capture_stripped"
     assert loaded_status.payload_load_status == "loaded_device_best_effort"
     with pytest.raises(TypeError, match="not a boolean"):
         bool(loaded_status)
     with pytest.raises(BackendUnsupportedError, match="backward capture.*derived_grads"):
-        trace.log_backward(cast(Any, trace[trace.output_layers[0]].out))
+        trace.backward(cast(Any, trace[trace.output_layers[0]].out))
     with pytest.raises(ValueError, match="derived_grads"):
-        _ = trace.backward_passes
+        _ = trace.autograd.backward_passes
     with pytest.raises(ValueError, match="derived_grads"):
-        _ = trace[0].grads
+        _ = trace[0].autograd.grads
 
 
 def test_jax_capability_flags_match_preview_contract() -> None:
     """JAX capability exports should match the M1 preview surface."""
 
-    spec = get_backend_spec("jax")
+    spec = tl.backends.spec("jax")
 
     assert spec.capabilities.backward_capture is False
-    assert spec.capabilities.validation_replay is True
+    assert spec.capabilities.has_validation_replay is True
     assert spec.capabilities.fastlog is False
-    assert spec.capabilities.interventions is False
+    assert spec.capabilities.can_intervene is False
     assert spec.capabilities.payload_materialization is True
     assert spec.capabilities.input_container_structure == "paths_only"
     assert spec.capabilities.output_container_structure == "paths_only"
@@ -1222,6 +1238,7 @@ def test_jax_capability_flags_match_preview_contract() -> None:
         "jax_control_flow",
         "jax_max_control_flow_unroll",
         "module_identity_mode",
+        "facets",
     )
 
 
@@ -1251,7 +1268,7 @@ def test_jax_builtin_output_pytree_container_reconstructs() -> None:
     trace = tl.trace(cast(Any, model), ({}, x), backend="jax")
     container = trace.ops[trace.output_layers[0]].container
 
-    assert isinstance(container, tl.Container)
+    assert isinstance(container, tl.types.Container)
     assert container.reconstructable is True
     rebuilt = container.reconstruct()
     assert set(rebuilt) == {"a", "b"}
@@ -1260,14 +1277,14 @@ def test_jax_builtin_output_pytree_container_reconstructs() -> None:
 
 
 def test_jax_end_to_end_bare_interventions_flip_refuses_typed() -> None:
-    """Sol probe, live: interventions=True flipped in place on the registered JAX
+    """Review probe, live: interventions=True flipped in place on the registered JAX
     spec must refuse typed at trace() — never return a trace with the
     intervention silently ignored.
     """
 
     import jax.numpy as jnp
 
-    from torchlens.backends import BackendCapabilityConformanceError, get_backend_spec
+    from torchlens.errors import BackendCapabilityConformanceError
 
     def model(x: Any) -> Any:
         """Return a tanh-projected input.
@@ -1285,8 +1302,8 @@ def test_jax_end_to_end_bare_interventions_flip_refuses_typed() -> None:
 
         return jnp.tanh(x @ jnp.ones((4, 3)))
 
-    spec = get_backend_spec("jax")
-    object.__setattr__(spec.capabilities, "interventions", True)
+    spec = tl.backends.spec("jax")
+    object.__setattr__(spec.capabilities, "can_intervene", True)
     try:
         with pytest.raises(BackendCapabilityConformanceError):
             tl.trace(
@@ -1296,4 +1313,4 @@ def test_jax_end_to_end_bare_interventions_flip_refuses_typed() -> None:
                 intervene=tl.when(tl.func("tanh"), tl.zero_ablate()),
             )
     finally:
-        object.__setattr__(spec.capabilities, "interventions", False)
+        object.__setattr__(spec.capabilities, "can_intervene", False)

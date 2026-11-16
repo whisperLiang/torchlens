@@ -17,8 +17,6 @@ import pytest
 
 from torchlens import _paddle_compat as compat
 
-pytestmark = pytest.mark.smoke
-
 _GUARD_ID = "torchlens.paddle_llvm.v1"
 _EXTENSION = "paddle.base.libpaddle"
 _EXTENSION_PATH = os.path.join("/mock", "site-packages", "paddle", "base", "libpaddle.so")

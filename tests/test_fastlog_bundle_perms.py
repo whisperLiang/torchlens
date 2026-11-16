@@ -20,8 +20,6 @@ from torch import nn
 
 import torchlens as tl
 
-pytestmark = pytest.mark.smoke
-
 
 class _TinyModel(nn.Module):
     def __init__(self) -> None:
@@ -45,12 +43,12 @@ def test_fastlog_bundle_tree_is_private_under_permissive_umask(tmp_path) -> None
             _TinyModel(),
             torch.randn(1, 4),
             save=tl.func("relu"),
-            streaming=tl.options.StreamingOptions(bundle_path=bundle),
+            storage=tl.options.StorageOptions(path=bundle),
         )
     finally:
         os.umask(old_umask)
 
-    final = Path(recording.bundle_path)
+    final = Path(recording.path)
     assert _mode(final) == 0o700
     assert _mode(final / "blobs") == 0o700
     for sidecar in (
@@ -72,9 +70,10 @@ def test_bundle_tlspec_tree_is_private_under_permissive_umask(tmp_path) -> None:
     """R59 parity: the tl.Bundle .tlspec writer tightens its dir + sidecars too.
 
     ``_TlSpecWriter.write_bundle`` created its directory and wrote its
-    body.safetensors / bundle.json / manifest.json under the ambient umask,
-    leaving them group/world-readable while the core bundle writer tightens its
-    outputs to 0o700/0o600. The same tightening now applies.
+    sidecars under the ambient umask, leaving them group/world-readable while
+    the core bundle writer tightens its outputs to 0o700/0o600. The same
+    tightening now applies to the whole 3.0 container: relations.json, the
+    manifest and every member artifact under ``members/``.
     """
 
     torch.manual_seed(0)
@@ -87,7 +86,13 @@ def test_bundle_tlspec_tree_is_private_under_permissive_umask(tmp_path) -> None:
         os.umask(old_umask)
 
     assert _mode(target) == 0o700
-    for sidecar in ("body.safetensors", "bundle.json", "manifest.json"):
+    for sidecar in ("relations.json", "manifest.json"):
         path = target / sidecar
         assert path.exists(), sidecar
         assert _mode(path) == 0o600, (sidecar, oct(_mode(path)))
+    members = sorted((target / "members").rglob("*"))
+    assert any(path.name == "manifest.json" for path in members)
+    for path in members:
+        expected = 0o700 if path.is_dir() else 0o600
+        assert _mode(path) == expected, (str(path.relative_to(target)), oct(_mode(path)))
+    assert _mode(target / "members") == 0o700

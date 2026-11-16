@@ -8,10 +8,12 @@ from typing import Any
 import torch
 
 from ... import _state
-from ...ir.intervention import FunctionEventInput
-from ...ir.semantics import BackendSemantics
-from ...utils.collections import index_nested
-from ...utils.tensor_utils import tensor_nanequal
+from ..._entry_refusals import refuse_aliasing_parent_not_in_call_args
+from ..._ir.intervention import FunctionEventInput
+from ..._ir.semantics import BackendSemantics
+from ..._utils._torch_symbols import tensor_read
+from ..._utils.collections import index_nested
+from ..._utils.tensor_utils import tensor_nanequal
 
 
 def detect_torch_alias_contract(
@@ -21,8 +23,8 @@ def detect_torch_alias_contract(
     grad_fn_class_name: str | None = None,
     autograd_memory: int | None = None,
     num_autograd_tensors: int | None = None,
-    bytes_delta_at_call: int | None = 0,
-    bytes_peak_at_call: int | None = 0,
+    bytes_delta_at_call: int | None = None,
+    bytes_peak_at_call: int | None = None,
 ) -> BackendSemantics:
     """Detect torch input mutation and output aliasing semantics.
 
@@ -84,8 +86,8 @@ def detect_torch_output_alias_contract(
     grad_fn_class_name: str | None = None,
     autograd_memory: int | None = None,
     num_autograd_tensors: int | None = None,
-    bytes_delta_at_call: int | None = 0,
-    bytes_peak_at_call: int | None = 0,
+    bytes_delta_at_call: int | None = None,
+    bytes_peak_at_call: int | None = None,
 ) -> BackendSemantics:
     """Detect cheap output-to-input aliasing without mutation comparisons.
 
@@ -348,10 +350,10 @@ def _tensors_alias(left: torch.Tensor, right: torch.Tensor) -> bool:
         with _state.pause_logging():
             if logging_enabled:
                 _state.next_func_call_id()
-            left_ptr = left.untyped_storage().data_ptr()
+            left_ptr = tensor_read(left, "untyped_storage")(left).data_ptr()
             if logging_enabled:
                 _state.next_func_call_id()
-            right_ptr = right.untyped_storage().data_ptr()
+            right_ptr = tensor_read(right, "untyped_storage")(right).data_ptr()
         return left_ptr == right_ptr
     except RuntimeError:
         return False
@@ -426,4 +428,4 @@ def get_parent_contents_for_contract_position(
     for position, label in parent_arg_positions["kwargs"].items():
         if label == parent_label:
             return index_nested(kwarg_copies, position)
-    raise ValueError("Parent layer not found in function arguments.")
+    refuse_aliasing_parent_not_in_call_args()

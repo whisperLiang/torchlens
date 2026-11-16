@@ -1,7 +1,7 @@
 """Import surface for TorchLens intervention selectors, hooks, reruns, and bundles.
 
-Two of this package's public names are resolved LAZILY through the module
-``__getattr__`` below rather than imported eagerly, because their modules import
+One of this package's public names is resolved LAZILY through the module
+``__getattr__`` below rather than imported eagerly, because its module imports
 BACK into modules whose own import pulls in ``torchlens.intervention``:
 
 * ``Bundle`` lives in :mod:`torchlens.bundle`, which imports
@@ -9,344 +9,146 @@ BACK into modules whose own import pulls in ``torchlens.intervention``:
   of those first executes THIS ``__init__``, so an eager ``from .bundle import
   Bundle`` here made ``import torchlens.bundle`` -- a PUBLIC module -- fail with a
   partially-initialized-module ``ImportError``.
-* ``rerun`` / ``run`` live in :mod:`torchlens.intervention.rerun`, which imports
-  ``torchlens._chunking``; ``_chunking`` imports ``.intervention.errors``, so an
-  eager ``from .rerun import ...`` here made ``import torchlens._chunking`` fail
-  the same way.
 
-Deferring exactly these three names keeps every module in the package standalone
+Deferring exactly this name keeps every module in the package standalone
 importable (gated by ``tests/test_module_import_isolation.py``) while leaving the
 public surface, ``__all__``, and static types unchanged.
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from .._selection.selectors import (
+    label_contains,
+    label_matches,
+    model_input,
+    model_output,
+)
+from ._affine_source import set_affine_coordinates
+
+# Surgery live lanes: the capture-free bound executor (``recipe.bind(model)``
+# returns a ``BoundModel`` whose ``.generate`` is the generation door; the
+# ``steer`` attribute is the helper from .helpers) and the region noun (derived
+# admissibility on the existing verbs).
+from ._binding import BindReport, BoundModel
+from ._compose import compose
+from ._directions import Direction, fit_direction
+from ._gradient_contract import keep_grad
+from ._helpers import (
+    _RESAMPLE_ABLATE_REDIRECT,
+    scramble_elements,
+)
 from ._metrics import (
-    METRIC_REGISTRY,
-    cosine_distance,
-    pearson_correlation_distance,
-    relative_l1_scalar,
-    relative_l2,
-    resolve_metric,
+    METRIC_REGISTRY as METRIC_REGISTRY,
+    pearson_correlation_distance as pearson_correlation_distance,
+    resolve_metric as resolve_metric,
 )
-from ._super.super_op import (
-    SuperAtenOp,
-    SuperLayer,
-    SuperLayerAccessor,
-    SuperOp,
-    SuperOpAccessor,
-    TraceAccessor,
+from ._population import Population, population
+from ._regions import RegionBoundary, RegionEdge, RegionInstance, RegionTarget
+
+# The PUBLIC immutable multi-clause spec
+# claims the package-level ``InterventionSpec`` name. The historical mutable
+# sticky-hook recipe keeps its identity at ``.types.InterventionSpec`` --
+# internal code and persisted pickles are untouched.
+from ._spec import (
+    Rule,
 )
-from ._topology.topology import (
-    Supergraph,
-    SupergraphNode,
-    TopologyDiff,
-    build_supergraph,
-    compare_topology,
-)
-from .errors import (
-    AppendBatchDependenceError,
-    AppendMismatchError,
-    AppendStateValidationWarning,
-    AppendStreamingNotSupportedError,
-    AxisAmbiguityError,
-    BaselineUndeterminedError,
-    BatchNormTrainModeWarning,
-    BundleMemberError,
-    BundleRelationshipError,
-    ControlFlowDivergenceError,
-    ControlFlowDivergenceWarning,
-    DeadParentError,
-    DirectActivationWriteWarning,
-    DirectWriteInExecutableSaveError,
-    EngineDispatchError,
-    GraphShapeMismatchError,
-    HelperMountError,
-    HookSignatureError,
-    HookSiteCoverageError,
-    HookValueError,
-    InterventionReadyConflictError,
-    LiveModeLabelError,
-    ModelMismatchError,
-    MultiMatchWarning,
-    MultiOutputModuleError,
-    MutateInPlaceWarning,
-    NoParentError,
-    OpaqueCallableInExecutableSaveError,
-    RecursiveTracingError,
-    ReplayPreconditionError,
-    SelectionError,
-    SelectorCompositionError,
-    SiteAmbiguityError,
-    SiteResolutionError,
-    SpecMutationError,
-    SpecPortabilityError,
-    SpliceModuleDeviceError,
-    SpliceModuleDtypeError,
-    UnclassifiedSelectorError,
-    UntrustedCallableError,
-)
-from .handles import HookHandle
-from .helpers import (
-    bwd_hook,
-    clamp,
-    grad_clamp,
-    grad_clip,
-    grad_noise,
-    grad_scale,
-    grad_zero,
-    mean_ablate,
-    noise,
-    patch_from,
-    project_off,
-    project_onto,
-    resample_ablate,
-    scale,
-    splice_module,
-    steer,
-    swap_with,
-    zero_ablate,
-)
-from .hooks import (
-    HookContext,
-    NormalizedHookEntry,
-    make_hook_context,
-    normalize_hook,
-    normalize_hook_plan,
-)
-from .predicates import add, replace_with, when
-from .replay import push, push_from, replay, replay_from
-from .resolver import SiteTable, resolve_sites
-from .runtime import do
-from .save import (
-    SaveLevel,
+from ._spec_compat import (
     SpecCompat,
     TargetManifestDiff,
     check_spec_compat,
-    load_intervention_spec,
-    save_intervention,
 )
-from .selectors import (
-    contains,
-    facet,
-    followed_by,
-    func,
-    func_transform,
-    grad_fn,
-    grad_fn_label,
-    grad_input,
-    grad_output,
-    head,
-    in_backward_pass,
-    in_module,
-    input_at,
-    intervening,
-    label,
-    module,
-    output,
-    output_at,
-    preceded_by,
-    regex,
-    where,
-    without_op,
+from ._subspace_edits import subspace_ablate, subspace_interchange
+from ._super.super_op import (
+    SuperLayer as SuperLayer,
+    SuperLayerAccessor as SuperLayerAccessor,
+    SuperOpAccessor as SuperOpAccessor,
+    TraceAccessor as TraceAccessor,
 )
-from .sites import SiteCollection, SiteSpec, sites
-from .types import (
-    ArgComponent,
-    CapturedArgTemplate,
-    ContainerSpec,
-    DataclassField,
-    DictKey,
-    EdgeUseRecord,
-    Edit,
+from ._topology.topology import (
+    Supergraph as Supergraph,
+    SupergraphNode as SupergraphNode,
+    TopologyDiff as TopologyDiff,
+    build_supergraph as build_supergraph,
+)
+from ._types import (
+    ArgComponent as ArgComponent,
     FireRecord,
-    ForkFieldPolicy,
-    FrozenInterventionSpec,
-    FrozenTargetSpec,
-    FunctionRegistryKey,
-    HelperSpec,
-    HFKey,
-    InterventionDecision,
-    InterventionSpec,
-    LiteralTensor,
-    LiteralValue,
-    NamedField,
-    ParentRef,
-    Relationship,
-    TargetSpec,
-    TensorSliceSpec,
-    TupleIndex,
-    Unsupported,
-    rebuild_container_from_spec,
+    FrozenInterventionSpec as FrozenInterventionSpec,
+    SamplingRecord,
 )
-
-if TYPE_CHECKING:  # typing-only mirror of the lazy names below
-    from .bundle import Bundle
-    from .rerun import rerun, run
+from .errors import (
+    BundleComparisonError,
+    SpecPortabilityError,
+)
+from .hooks import (
+    HookContext,
+    normalize_hook as normalize_hook,
+)
+from .stochastic import (
+    SamplingPlan,
+    permute_batch,
+    resample_rows_from,
+    sample_from,
+    set_direction_mean,
+)
 
 __all__ = [
-    "AppendBatchDependenceError",
-    "AppendMismatchError",
-    "AppendStateValidationWarning",
-    "AppendStreamingNotSupportedError",
-    "add",
-    "ArgComponent",
-    "AxisAmbiguityError",
-    "BaselineUndeterminedError",
-    "BatchNormTrainModeWarning",
-    "Bundle",
-    "BundleMemberError",
-    "BundleRelationshipError",
-    "CapturedArgTemplate",
-    "ContainerSpec",
-    "ControlFlowDivergenceError",
-    "ControlFlowDivergenceWarning",
-    "DataclassField",
-    "DeadParentError",
-    "DictKey",
-    "DirectActivationWriteWarning",
-    "DirectWriteInExecutableSaveError",
-    "EdgeUseRecord",
-    "EngineDispatchError",
+    "BindReport",
+    "BoundModel",
+    "BundleComparisonError",
     "FireRecord",
-    "ForkFieldPolicy",
-    "FrozenInterventionSpec",
-    "FrozenTargetSpec",
-    "FunctionRegistryKey",
-    "GraphShapeMismatchError",
-    "HFKey",
-    "Edit",
-    "HelperSpec",
-    "InterventionDecision",
-    "HookSignatureError",
-    "HelperMountError",
-    "HookHandle",
     "HookContext",
-    "HookSiteCoverageError",
-    "HookValueError",
-    "InterventionSpec",
-    "InterventionReadyConflictError",
-    "LiveModeLabelError",
-    "LiteralTensor",
-    "LiteralValue",
-    "METRIC_REGISTRY",
-    "ModelMismatchError",
-    "MultiMatchWarning",
-    "MultiOutputModuleError",
-    "MutateInPlaceWarning",
-    "NamedField",
-    "NoParentError",
-    "OpaqueCallableInExecutableSaveError",
-    "Relationship",
-    "RecursiveTracingError",
-    "ReplayPreconditionError",
-    "SaveLevel",
-    "ParentRef",
-    "SiteAmbiguityError",
-    "SiteCollection",
-    "SelectionError",
-    "SiteResolutionError",
-    "SiteSpec",
-    "SelectorCompositionError",
+    "Rule",
+    "RegionBoundary",
+    "RegionEdge",
+    "RegionInstance",
+    "RegionTarget",
     "SpecCompat",
-    "SpecMutationError",
     "SpecPortabilityError",
-    "SuperAtenOp",
-    "SiteTable",
-    "SpliceModuleDeviceError",
-    "SpliceModuleDtypeError",
-    "SuperLayer",
-    "SuperLayerAccessor",
-    "SuperOp",
-    "SuperOpAccessor",
-    "Supergraph",
-    "SupergraphNode",
     "TargetManifestDiff",
-    "TargetSpec",
-    "TensorSliceSpec",
-    "TopologyDiff",
-    "TraceAccessor",
-    "TupleIndex",
-    "Unsupported",
-    "bwd_hook",
-    "build_supergraph",
-    "clamp",
     "check_spec_compat",
-    "compare_topology",
-    "contains",
-    "cosine_distance",
-    "do",
-    "facet",
-    "func",
-    "func_transform",
-    "followed_by",
-    "grad_clamp",
-    "grad_clip",
-    "grad_fn",
-    "grad_fn_label",
-    "grad_input",
-    "head",
-    "label",
-    "grad_noise",
-    "grad_output",
-    "grad_scale",
-    "grad_zero",
-    "input_at",
-    "in_backward_pass",
-    "in_module",
-    "intervening",
-    "label",
-    "regex",
-    "load_intervention_spec",
-    "make_hook_context",
-    "mean_ablate",
-    "module",
-    "noise",
-    "normalize_hook",
-    "normalize_hook_plan",
-    "NormalizedHookEntry",
-    "output",
-    "output_at",
-    "preceded_by",
-    "pearson_correlation_distance",
-    "project_off",
-    "project_onto",
-    "replace_with",
-    "push",
-    "push_from",
-    "replay",
-    "replay_from",
-    "rerun",
-    "run",
-    "resample_ablate",
-    "relative_l1_scalar",
-    "relative_l2",
-    "resolve_metric",
-    "resolve_sites",
-    "save_intervention",
-    "scale",
-    "splice_module",
-    "sites",
-    "steer",
-    "swap_with",
-    "where",
-    "when",
-    "without_op",
-    "UnclassifiedSelectorError",
-    "UntrustedCallableError",
-    "patch_from",
-    "zero_ablate",
-    "rebuild_container_from_spec",
+    "compose",
+    "label_contains",
+    "Direction",
+    "fit_direction",
+    "model_input",
+    "label_matches",
+    "permute_batch",
+    "Population",
+    "population",
+    "SamplingPlan",
+    "SamplingRecord",
+    "model_output",
+    "resample_rows_from",
+    "sample_from",
+    "set_direction_mean",
+    "keep_grad",
+    "set_affine_coordinates",
+    "subspace_ablate",
+    "subspace_interchange",
+    "scramble_elements",
 ]
 
 # Names whose defining module imports back into a module that imports this
 # package; see the module docstring. Resolved on first attribute access, after
 # this ``__init__`` has finished executing, so no partially-initialized module is
 # ever observed.
-_LAZY_NAMES: dict[str, str] = {
-    "Bundle": ".bundle",
-    "rerun": ".rerun",
-    "run": ".rerun",
+_LAZY_NAMES: dict[str, str] = {}
+
+#: Removed spellings: each raises the typed ``facade_redirect`` error naming
+#: its replacement (clean break, no alias).
+_REDIRECTS: dict[str, str] = {
+    "resample_ablate": _RESAMPLE_ABLATE_REDIRECT,
+    "intervening": "use torchlens.without_op -- intervening was renamed",
+    "replay_from": "use Trace.do -- replay_from was removed",
+    "sites": (
+        "pass selectors to torchlens.experiment.sweep_sites(...) directly "
+        "-- torchlens.intervention.sites was removed"
+    ),
+    "SiteSpec": (
+        "pass selectors to torchlens.experiment.sweep_sites(...) directly "
+        "-- torchlens.intervention.SiteSpec was removed with torchlens.intervention.sites"
+    ),
 }
 
 
@@ -371,7 +173,11 @@ def __getattr__(name: str) -> Any:
 
     module_name = _LAZY_NAMES.get(name)
     if module_name is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+        from .._utils.facade import resolve_facade_attr
+
+        return resolve_facade_attr(
+            owner=__name__, name=name, module_globals=globals(), redirects=_REDIRECTS
+        )
     from importlib import import_module
 
     value = getattr(import_module(module_name, __name__), name)

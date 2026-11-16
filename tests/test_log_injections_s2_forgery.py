@@ -1,0 +1,403 @@
+"""Lane F44 stage 2: forged injected-op provenance REFUSES at load.
+
+Every structural violation of the persisted injected family -- the C07
+``Op.injection_provenance`` grammar, the codec envelope, host anchoring,
+graph entanglement, and the intervention-replacement carve-out theft -- is
+a typed load refusal, never a degradation. Degrade-to-unattested is for
+UNRESOLVABLE CALLABLES only; forged identity always refuses (foldA MEMO s5
+item 12: "forged provenance refuses").
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+import torch
+from torch import nn
+
+import torchlens as tl
+
+_LOGGED = tl.options.CaptureOptions(log_injections=True)
+
+
+class _Chain(nn.Module):
+    """fc1 -> relu -> fc2 -> tanh: minimal injected-op substrate."""
+
+    def __init__(self) -> None:
+        """Build the two linears."""
+
+        super().__init__()
+        self.fc1 = nn.Linear(4, 4)
+        self.fc2 = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the chain."""
+
+        return torch.tanh(self.fc2(torch.relu(self.fc1(x))))
+
+
+def _sae_like(out: torch.Tensor, *, ctx) -> torch.Tensor:
+    """SAE-style injected computation (multiple recordable calls)."""
+
+    z = torch.relu(out @ torch.eye(out.shape[-1]))
+    return torch.sigmoid(z)
+
+
+# The injected hooks are user callables, so the portable default refuses
+# intervention_spec_not_portable (saved_format_3.md section 5). Audit is
+# payload-free (no outs, no arg snapshots), which would void the payload and
+# replay-attestation guarantees under test; executable_with_callables is the
+# non-runnable level that keeps outs and arg snapshots, so the injected family
+# persists with its payloads exactly as the 2.x analysis save did.
+_SAVE_LEVEL = "executable_with_callables"
+_OP_TABLE = "records/op.json"
+_TUPLE_TAG = "tuple"
+
+
+class _TypedTuple(list):
+    """A saved typed tuple, opened as a mutable list for tampering."""
+
+
+def _decode_cell(cell):
+    """Open one op-table cell for tampering (typed tuples become mutable lists)."""
+
+    if isinstance(cell, dict) and cell.get("$tl") == _TUPLE_TAG:
+        return _TypedTuple(_decode_cell(item) for item in cell["items"])
+    if isinstance(cell, dict):
+        return {key: _decode_cell(item) for key, item in cell.items()}
+    if isinstance(cell, list):
+        return [_decode_cell(item) for item in cell]
+    return cell
+
+
+def _encode_cell(value, *, top: bool = False):
+    """Write one opened cell back in the table's typed-JSON vocabulary.
+
+    Typed tuples (and any sequence assigned to a column, the shape the writer
+    gives the dataflow columns) become typed tuples again, bytes the format's
+    encoded bytes cell, so a forgery reaches the injected-row validators instead of
+    the cell grammar in front of them.
+    """
+
+    if isinstance(value, (_TypedTuple, tuple)) or (top and isinstance(value, list)):
+        return {"$tl": _TUPLE_TAG, "items": [_encode_cell(item) for item in value]}
+    if isinstance(value, list):
+        return [_encode_cell(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _encode_cell(item) for key, item in value.items()}
+    if isinstance(value, (bytes, bytearray)):
+        from torchlens._io.format3.values import ValueEncoder
+
+        return ValueEncoder().encode(bytes(value), "tamper")
+    return value
+
+
+class _OpRow:
+    """Attribute view of one saved op row (the format 3 op table is columnar).
+
+    A read opens the stored cell (kept, so in-place edits of mapping cells
+    persist); an assignment replaces it. ``_flush`` writes every opened cell
+    back; the forged table is then re-digested, so the artifact's file and
+    record digests stay true and the load reaches the record validators.
+    """
+
+    def __init__(self, columns, index) -> None:
+        object.__setattr__(self, "_columns", columns)
+        object.__setattr__(self, "_index", index)
+        object.__setattr__(self, "_opened", {})
+        object.__setattr__(self, "_assigned", set())
+
+    def __getattr__(self, name):
+        columns = object.__getattribute__(self, "_columns")
+        opened = object.__getattribute__(self, "_opened")
+        if name not in columns:
+            raise AttributeError(name)
+        if name not in opened:
+            opened[name] = _decode_cell(columns[name][object.__getattribute__(self, "_index")])
+        return opened[name]
+
+    def __setattr__(self, name, value) -> None:
+        assert name in object.__getattribute__(self, "_columns"), f"no op column {name!r}"
+        object.__getattribute__(self, "_opened")[name] = value
+        object.__getattribute__(self, "_assigned").add(name)
+
+    def _flush(self) -> None:
+        columns = object.__getattribute__(self, "_columns")
+        index = object.__getattribute__(self, "_index")
+        assigned = object.__getattribute__(self, "_assigned")
+        for name, value in object.__getattribute__(self, "_opened").items():
+            columns[name][index] = _encode_cell(value, top=name in assigned)
+
+
+def _tampered_load(tmp_path, tamper):
+    """Save a logged capture, tamper its saved op rows, and load it back.
+
+    ``tamper(state)`` mutates the saved op rows (``state["_layer_list"]``,
+    every row of the op table) in place; the return value is whatever
+    ``tl.load`` does with the forged artifact.
+    """
+
+    from _format3_envelope import redigest
+
+    torch.manual_seed(0)
+    model = _Chain().eval()
+    x = torch.randn(2, 4)
+    logged = tl.trace(model, x, intervene=tl.when(tl.func("relu"), _sae_like), capture=_LOGGED)
+    path = tmp_path / "forged.tlspec"
+    logged.save(str(path), level=_SAVE_LEVEL)
+    table_path = path / _OP_TABLE
+    table = json.loads(table_path.read_text(encoding="utf-8"))
+    columns = table["columns"]
+    state = {"_layer_list": [_OpRow(columns, row) for row in range(table["rows"])]}
+    assert _injected_rows(state), "the fixture must persist injected op rows"
+    tamper(state)
+    for row in state["_layer_list"]:
+        row._flush()
+    table_path.write_text(json.dumps(table, separators=(",", ":"), ensure_ascii=False), "utf-8")
+    redigest(path, _OP_TABLE)
+    return tl.load(str(path))
+
+
+def _injected_rows(state):
+    """The forged artifact's injected op rows."""
+
+    return [
+        op for op in state["_layer_list"] if getattr(op, "injection_provenance", None) is not None
+    ]
+
+
+def _model_rows(state):
+    """The forged artifact's ordinary model op rows."""
+
+    return [op for op in state["_layer_list"] if getattr(op, "injection_provenance", None) is None]
+
+
+def _assert_refuses(tmp_path, tamper, code: str, reason: str | None = None) -> None:
+    """Assert one tamper refuses with the expected typed code (and reason)."""
+
+    with pytest.raises(Exception) as excinfo:
+        _tampered_load(tmp_path, tamper)
+    fields = getattr(excinfo.value, "fields", {}) or {}
+    assert fields.get("code") == code, (fields, str(excinfo.value)[:300])
+    if reason is not None:
+        assert fields.get("reason") == reason, fields
+
+
+def test_malformed_grammar_refuses(tmp_path) -> None:
+    """A provenance record missing a grammar field refuses record_schema."""
+
+    def tamper(state) -> None:
+        """Drop one closed-grammar key."""
+
+        del _injected_rows(state)[0].injection_provenance["output_slot"]
+
+    _assert_refuses(tmp_path, tamper, "artifact_injection_provenance_invalid", "record_schema")
+
+
+def test_host_site_key_must_exist_in_the_artifact(tmp_path) -> None:
+    """A provenance anchor naming no retained model op refuses host_missing."""
+
+    def tamper(state) -> None:
+        """Point the anchor at a site the artifact does not contain."""
+
+        for row in _injected_rows(state):
+            row.injection_provenance["host_site_key"] = "s1|nowhere/relu/0/0"
+
+    _assert_refuses(tmp_path, tamper, "artifact_injection_codec_invalid", "host_missing")
+
+
+def test_duplicate_durable_keys_refuse(tmp_path) -> None:
+    """Two rows sharing one durable identity key refuse record_duplicate."""
+
+    def tamper(state) -> None:
+        """Copy row 0's whole identity onto row 1."""
+
+        rows = _injected_rows(state)
+        rows[1].injection_provenance = dict(rows[0].injection_provenance)
+
+    _assert_refuses(tmp_path, tamper, "artifact_injection_codec_invalid", "record_duplicate")
+
+
+def test_carve_out_theft_refuses(tmp_path) -> None:
+    """An injected row wearing the intervention_replacement identity refuses.
+
+    The metadata-invariant exemption stays scoped to GENUINE user
+    interventions (the 2026-06-02 incident law): the injected family can
+    never launder a row into the placeholder carve-out.
+    """
+
+    def tamper(state) -> None:
+        """Dress an injected row as an intervention placeholder."""
+
+        row = _injected_rows(state)[0]
+        row.func_name = "intervention_replacement"
+
+    _assert_refuses(tmp_path, tamper, "artifact_injection_codec_invalid", "record_func")
+
+
+def test_replaced_stamp_on_injected_row_refuses(tmp_path) -> None:
+    """An injected row claiming is_edited refuses record_func."""
+
+    def tamper(state) -> None:
+        """Forge the replacement stamp."""
+
+        _injected_rows(state)[0].is_edited = True
+
+    _assert_refuses(tmp_path, tamper, "artifact_injection_codec_invalid", "record_func")
+
+
+def test_graph_entangled_injected_row_refuses(tmp_path) -> None:
+    """An injected row claiming model dataflow parents refuses."""
+
+    def tamper(state) -> None:
+        """Forge a dataflow edge onto the injected row."""
+
+        model_name = _model_rows(state)[0].layer_label
+        _injected_rows(state)[0].parents = [model_name]
+
+    _assert_refuses(tmp_path, tamper, "artifact_injection_codec_invalid", "record_graph_entangled")
+
+
+def test_model_op_referencing_injected_row_refuses(tmp_path) -> None:
+    """A model op wired to an injected label refuses record_referenced.
+
+    This also closes the op-hiding hole: stamping injection_provenance
+    onto a REAL model op cannot silently remove it from the graph, because
+    its neighbors still reference it.
+    """
+
+    def tamper(state) -> None:
+        """Wire a model op's children at an injected row's label."""
+
+        injected_label = _injected_rows(state)[0].layer_label
+        model_row = _model_rows(state)[0]
+        model_row.children = [*list(model_row.children or ()), injected_label]
+
+    _assert_refuses(tmp_path, tamper, "artifact_injection_codec_invalid", "record_referenced")
+
+
+def test_missing_codec_envelope_refuses(tmp_path) -> None:
+    """The identity slot only ships with its codec envelope (fail-closed)."""
+
+    def tamper(state) -> None:
+        """Strip the codec envelope."""
+
+        _injected_rows(state)[0].annotations = {}
+
+    _assert_refuses(tmp_path, tamper, "artifact_injection_codec_invalid", "codec_missing")
+
+
+def test_envelope_key_set_is_closed(tmp_path) -> None:
+    """An extra envelope key refuses codec_schema."""
+
+    def tamper(state) -> None:
+        """Smuggle an extra envelope key."""
+
+        row = _injected_rows(state)[0]
+        row.annotations["injection_codec_v1"]["extra"] = 1
+
+    _assert_refuses(tmp_path, tamper, "artifact_injection_codec_invalid", "codec_schema")
+
+
+def test_unknown_envelope_version_refuses(tmp_path) -> None:
+    """A future envelope version refuses codec_version (never normalizes)."""
+
+    def tamper(state) -> None:
+        """Claim an unknown codec version."""
+
+        _injected_rows(state)[0].annotations["injection_codec_v1"]["version"] = 2
+
+    _assert_refuses(tmp_path, tamper, "artifact_injection_codec_invalid", "codec_version")
+
+
+def test_label_must_extend_host_label(tmp_path) -> None:
+    """An injected label detached from its host label refuses codec_label."""
+
+    def tamper(state) -> None:
+        """Rename the row off its host."""
+
+        _injected_rows(state)[0].layer_label = "orphan/inj_1"
+
+    _assert_refuses(tmp_path, tamper, "artifact_injection_codec_invalid", "codec_label")
+
+
+def test_malformed_callable_key_refuses(tmp_path) -> None:
+    """A callable reference outside the closed registry-key shape refuses."""
+
+    def tamper(state) -> None:
+        """Forge a string-typed callable reference."""
+
+        row = _injected_rows(state)[0]
+        row.annotations["injection_codec_v1"]["callable"] = "os:system"
+
+    _assert_refuses(tmp_path, tamper, "artifact_injection_codec_invalid", "codec_callable")
+
+
+def test_malformed_encoded_arg_refuses(tmp_path) -> None:
+    """An encoded replay arg outside the closed grammar refuses codec_args."""
+
+    def tamper(state) -> None:
+        """Forge an unknown arg encoding kind."""
+
+        row = _injected_rows(state)[0]
+        envelope = row.annotations["injection_codec_v1"]
+        if envelope["args"]:
+            envelope["args"][0] = {"kind": "pickle", "value": b"boom"}
+        else:  # pragma: no cover - the fixture always snapshots args
+            envelope["args"] = [{"kind": "pickle", "value": b"boom"}]
+
+    _assert_refuses(tmp_path, tamper, "artifact_injection_codec_invalid", "codec_args")
+
+
+def test_internal_codec_guards_are_typed(tmp_path) -> None:
+    """The two defensive codec guards raise their declared codes.
+
+    Neither is reachable from lawful user input (the scrub always emits a
+    layer_list; the fire-time snapshotter admits only encodable values), so
+    they are provoked directly.
+    """
+
+    from torchlens._io.injection_codec import _encode_value, append_injected_op_rows
+
+    torch.manual_seed(0)
+    model = _Chain().eval()
+    logged = tl.trace(
+        model,
+        torch.randn(2, 4),
+        intervene=tl.when(tl.func("relu"), _sae_like),
+        capture=_LOGGED,
+    )
+    with pytest.raises(Exception) as excinfo:
+        append_injected_op_rows(
+            logged, {"_layer_list": None}, [], include_outs=True, backend_name="torch"
+        )
+    assert excinfo.value.fields["code"] == "injection_persist_state_invalid"
+    with pytest.raises(Exception) as excinfo:
+        _encode_value(object(), "x/inj_1", [], [0], "torch")
+    assert excinfo.value.fields["code"] == "injection_persist_arg_unencodable"
+
+
+def test_stream_finalize_door_refuses_on_records() -> None:
+    """The streamed-writer door refuses a trace carrying injected records.
+
+    End-to-end streaming of an intervened capture fails earlier today on
+    the pre-existing fire-counter portability gap, so the door is armed
+    defense-in-depth and provoked directly here.
+    """
+
+    from torchlens.intervention._injection import (
+        injection_state,
+        refuse_injection_logged_stream_finalize,
+    )
+
+    class _Holder:
+        """Minimal trace stand-in carrying one injected record."""
+
+    holder = _Holder()
+    injection_state(holder)["records"] = ["one-record"]
+    with pytest.raises(Exception) as excinfo:
+        refuse_injection_logged_stream_finalize(holder)
+    assert excinfo.value.fields["code"] == "injection_logged_stream_unsupported"
+    clean = _Holder()
+    refuse_injection_logged_stream_finalize(clean)

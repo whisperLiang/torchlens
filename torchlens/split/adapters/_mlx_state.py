@@ -191,7 +191,10 @@ class MlxStateBinding:
 
         parameters = self.parameters()
         if values.keys() != parameters.keys():
-            raise SplitUnsupportedError("MLX optimizer returned a different parameter inventory.")
+            raise SplitUnsupportedError(
+                "MLX optimizer returned a different parameter inventory.",
+                code=SplitUnsupportedError.code,
+            )
         for name, value in values.items():
             if (
                 not self.adapter.is_tensor(value)
@@ -199,7 +202,8 @@ class MlxStateBinding:
                 or value.dtype != parameters[name].dtype
             ):
                 raise SplitUnsupportedError(
-                    f"MLX optimizer changed parameter {name!r} shape or dtype."
+                    f"MLX optimizer changed parameter {name!r} shape or dtype.",
+                    code=SplitUnsupportedError.code,
                 )
         staged: dict[int, StateEntry] = {}
         for entry in self.state.entries():
@@ -308,4 +312,4 @@ class MlxStateBinding:
             self._local_updates = previous_updates
 
 
-__all__ = ["MlxStateBinding"]
+__all__ = ("MlxStateBinding",)

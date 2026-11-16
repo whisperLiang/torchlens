@@ -59,7 +59,6 @@ def _load_driver_module():
     return module
 
 
-@pytest.mark.smoke
 def test_arm_derivation_addresses_every_invariant_raise() -> None:
     """One arm mutant per ``raise MetadataInvariantError`` in every contract.
 
@@ -73,7 +72,7 @@ def test_arm_derivation_addresses_every_invariant_raise() -> None:
 
     import os
 
-    from torchlens.validation.invariants import METADATA_INVARIANT_CONTRACTS
+    from torchlens.validation._invariants import METADATA_INVARIANT_CONTRACTS
 
     driver = _load_driver_module()
     registry = {}
@@ -113,7 +112,6 @@ def test_arm_derivation_addresses_every_invariant_raise() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_arm_operator_disarms_exactly_one_arm(tmp_path: Path) -> None:
     """``neuter_raise_arm`` silences the targeted arm and ONLY that arm.
 
@@ -184,17 +182,15 @@ def test_deselect_ledger_entries_are_still_red() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_every_direct_check_entry_point_is_enrolled() -> None:
     """Check-shaped functions in the direct-target scope are all mutant targets.
 
     b9-sol round-5 R74-2: the direct roster covered exactly one validation
-    comparator and one postprocess checker while validation/core.py carried
-    five more raise-on-violation entry points and postprocess/__init__.py two
-    assert seams — claimed-exhaustive tripwire coverage derived from the
+    comparator while validation/_core.py carried five more raise-on-violation
+    entry points — claimed-exhaustive tripwire coverage derived from the
     metadata-contract registry alone. Registry contracts are enrolled by
     construction; this census makes the DIRECT scope structural too: a new
-    ``_check_*``/``_validate_*``/``_assert_*`` def in either file must join
+    ``_check_*``/``_validate_*``/``_assert_*`` def in that file must join
     MUTANTS or EXEMPT_MUTANTS (or a reasoned exclusion here) before it ships.
     """
 
@@ -205,8 +201,12 @@ def test_every_direct_check_entry_point_is_enrolled() -> None:
         (path, function) for path, function in driver.EXEMPT_MUTANTS.values()
     }
     # Reasoned exclusions only — every entry needs a why.
-    excluded: set[tuple[str, str]] = set()
-    scope = ("torchlens/validation/core.py", "torchlens/postprocess/__init__.py")
+    excluded: set[tuple[str, str]] = {
+        # The public validate_saved_outs entry's whole-run body, split out for its
+        # scratch-clearing finally; the reason lives in CORE_CHECK_EXCLUSIONS.
+        ("torchlens/validation/_core.py", "_validate_saved_outs_run"),
+    }
+    scope = ("torchlens/validation/_core.py",)
     unenrolled = []
     for rel in scope:
         source = (_REPO_ROOT / rel).read_text(encoding="utf-8")
@@ -220,7 +220,6 @@ def test_every_direct_check_entry_point_is_enrolled() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_while_exit_arms_take_the_break_operator(tmp_path: Path) -> None:
     """A raise inside a ``while`` body is disarmed with ``break``, not ``pass``.
 
@@ -274,7 +273,7 @@ def test_real_cycle_guard_arm_is_break_disarmed() -> None:
 
     import os
 
-    from torchlens.validation.invariants import METADATA_INVARIANT_CONTRACTS
+    from torchlens.validation._invariants import METADATA_INVARIANT_CONTRACTS
 
     driver = _load_driver_module()
     contract = next(c for c in METADATA_INVARIANT_CONTRACTS if c.name == "module_containment_logic")
@@ -287,7 +286,6 @@ def test_real_cycle_guard_arm_is_break_disarmed() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_direct_targets_exist_and_are_neuterable() -> None:
     """Every MUTANTS/EXEMPT_MUTANTS row names a real function in a real file."""
 
@@ -309,7 +307,6 @@ def test_direct_targets_exist_and_are_neuterable() -> None:
     assert not missing, f"stale mutation-roster rows: {missing}"
 
 
-@pytest.mark.smoke
 def test_run_suite_deadline_yields_timeout_sentinel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -335,12 +332,11 @@ def test_run_suite_deadline_yields_timeout_sentinel(
     assert result.seconds == 5.0
 
 
-@pytest.mark.smoke
 def test_core_check_roster_refuses_enrollment_drift(tmp_path: Path) -> None:
     """A core.py checker in neither ledger refuses the campaign loudly.
 
     b9-sol R74r5 finding 2: exhaustive-coverage claims rested on the
-    metadata-contract registry alone while ``validation/core.py`` carried
+    metadata-contract registry alone while ``validation/_core.py`` carried
     five verdict-steering checkers with no mutant. The derivation makes that
     drift a refusal, not a silent gap.
     """
@@ -352,7 +348,7 @@ def test_core_check_roster_refuses_enrollment_drift(tmp_path: Path) -> None:
         f"def {func}():\n    pass\n" for _, func in driver.CORE_CHECK_MUTANTS.values()
     )
     excluded = "\n".join(f"def {func}():\n    pass\n" for func in driver.CORE_CHECK_EXCLUSIONS)
-    (core_dir / "core.py").write_text(
+    (core_dir / "_core.py").write_text(
         enrolled + excluded + "\ndef _check_brand_new_thing():\n    pass\n",
         encoding="utf-8",
     )
@@ -360,11 +356,11 @@ def test_core_check_roster_refuses_enrollment_drift(tmp_path: Path) -> None:
         driver.derive_core_check_roster(tmp_path)
 
     # Without the stray def the same tree is accepted.
-    (core_dir / "core.py").write_text(enrolled + excluded, encoding="utf-8")
+    (core_dir / "_core.py").write_text(enrolled + excluded, encoding="utf-8")
     driver.derive_core_check_roster(tmp_path)
 
     # A ledger row pointing at a vanished def is refused too.
-    (core_dir / "core.py").write_text(enrolled, encoding="utf-8")
+    (core_dir / "_core.py").write_text(enrolled, encoding="utf-8")
     with pytest.raises(SystemExit, match="without a core.py def"):
         driver.derive_core_check_roster(tmp_path)
 
@@ -376,7 +372,6 @@ def test_core_check_roster_matches_the_real_tree() -> None:
     driver.derive_core_check_roster(_REPO_ROOT)
 
 
-@pytest.mark.smoke
 def test_empty_mutant_selection_refuses_vacuous_green() -> None:
     """r7 R79 (fable b10 MED): zero selected mutants is a refusal, not a pass.
 
@@ -401,12 +396,11 @@ def test_empty_mutant_selection_refuses_vacuous_green() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_mutation_workflow_rotation_contract() -> None:
     """r7 cluster 19: the rotation contract f9964208 claimed but never pinned.
 
     The scheduled leg's slot selection and family routing live in shell
-    inside ``mutation.yml``; nothing else checks that the families it names
+    inside weekly.yml's ``mutation`` job; nothing else checks that the families it names
     exist in the driver, that the rotation can only produce shards 1..4 of
     4, or that step outputs stay routed through ``env:`` (the zizmor
     template-injection class). Pin all three so a workflow edit that breaks
@@ -416,7 +410,14 @@ def test_mutation_workflow_rotation_contract() -> None:
 
     import re
 
-    workflow = (_REPO_ROOT / ".github" / "workflows" / "mutation.yml").read_text(encoding="utf-8")
+    weekly = (_REPO_ROOT / ".github" / "workflows" / "weekly.yml").read_text(encoding="utf-8")
+
+    def _job_text(text: str, job: str) -> str:
+        match = re.search(rf"^  {job}:\n.*?(?=^  [a-z0-9-]+:\n|\Z)", text, re.M | re.S)
+        assert match is not None, f"weekly.yml lost its {job} job"
+        return match.group(0)
+
+    workflow = _job_text(weekly, "mutation")
     driver = _load_driver_module()
 
     # Every family literal the workflow can route exists in the driver's
@@ -466,7 +467,7 @@ def test_mutation_workflow_rotation_contract() -> None:
     # unrelated upstream event makes historical verdicts incomparable.
     # Scoped to each leg's canonical-env install step (weekly.yml carries
     # other, unrelated torch pins for its floor-matrix jobs).
-    weekly = (_REPO_ROOT / ".github" / "workflows" / "weekly.yml").read_text(encoding="utf-8")
+    margin = _job_text(weekly, "mutation-margin")
 
     def _canonical_env_step(text: str, source: str) -> str:
         match = re.search(
@@ -480,18 +481,17 @@ def test_mutation_workflow_rotation_contract() -> None:
     for package in ("torch", "torchvision"):
         pins = {
             name: set(re.findall(rf'"{package}==([0-9][^"]*)"', _canonical_env_step(text, name)))
-            for name, text in (("mutation.yml", workflow), ("weekly.yml", weekly))
+            for name, text in (("mutation", workflow), ("mutation-margin", margin))
         }
         assert all(len(v) == 1 for v in pins.values()), (
             f"each mutation leg needs exactly one {package} pin in its canonical env step: {pins}"
         )
-        assert pins["mutation.yml"] == pins["weekly.yml"], (
+        assert pins["mutation"] == pins["mutation-margin"], (
             f"the mutation legs disagree on {package}: {pins} -- both must "
             "install the canonical pinned CPU pair"
         )
 
 
-@pytest.mark.smoke
 def test_armed_arm_count_is_a_visible_growing_ratchet() -> None:
     """r7 R74 F2 (opus MED): 'N of 161 arms armed' is a tracked number, not a discovery.
 
@@ -527,7 +527,6 @@ def test_armed_arm_count_is_a_visible_growing_ratchet() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_operator_label_matches_the_applied_disarm_keyword(tmp_path: Path) -> None:
     """r7 R74 F3 (opus LOW): the archived record labels the operator actually applied.
 
@@ -563,12 +562,11 @@ def test_operator_label_matches_the_applied_disarm_keyword(tmp_path: Path) -> No
     assert 'operator = f"pass replacing raise arm' not in driver_source
 
 
-@pytest.mark.smoke
 def test_executor_family_derivation_reaches_every_step() -> None:
     """r7 R74 (sol b9 HIGH): the postprocess executor is enrolled, DERIVED.
 
-    25 ``_run_step_*`` bodies plus the conditional gate predicates had no
-    mutation verdict while R74 explicitly scopes ``postprocess/``. The
+    The 25 ``_run_<step name>`` bodies plus the conditional gate predicates
+    had no mutation verdict while R74 explicitly scopes ``postprocess/``. The
     family derives from the module's defs, so a new step self-enrolls; run
     bodies neuter to ``return None`` (silent skip) and gate predicates to
     ``return False`` (never fires), each the dangerous direction.
@@ -576,17 +574,23 @@ def test_executor_family_derivation_reaches_every_step() -> None:
 
     driver = _load_driver_module()
     mutants = driver.derive_executor_mutants(_REPO_ROOT)
-    run_steps = {mid for mid in mutants if "#_run_step_" in mid}
-    gates = {mid for mid in mutants if "#_should_run_step_" in mid}
+    run_steps = {mid for mid in mutants if "#_run_" in mid}
+    gates = {mid for mid in mutants if "#_should_run_" in mid}
     assert len(run_steps) >= 20, f"only {len(run_steps)} run-step mutants derived"
     assert gates, "no gate-predicate mutants derived"
     for mid, (rel, func, value) in mutants.items():
-        assert rel == "torchlens/postprocess/_executor.py"
-        assert value == ("None" if func.startswith("_run_step_") else "False"), (mid, value)
-    # Cross-check against the live registry: every StepSpec.run is enrolled.
-    from torchlens.postprocess._executor import STEP_REGISTRY
+        assert rel == "torchlens/_postprocess/_executor.py"
+        assert value == ("None" if func.startswith("_run_") else "False"), (mid, value)
+    # Cross-check against the live pipeline: every step's run body and every
+    # named gate predicate is enrolled.
+    from torchlens._postprocess._pipeline import PIPELINE
 
-    registered_runs = {spec.run.__name__ for spec in STEP_REGISTRY}
+    registered = {step.run.__name__ for step in PIPELINE}
+    registered |= {
+        step.should_run.__name__
+        for step in PIPELINE
+        if step.should_run.__name__.startswith("_should_run_")
+    }
     enrolled_funcs = {func for _, func, _ in mutants.values()}
-    missing = registered_runs - enrolled_funcs
-    assert not missing, f"STEP_REGISTRY steps outside the executor family: {sorted(missing)}"
+    missing = registered - enrolled_funcs
+    assert not missing, f"PIPELINE steps outside the executor family: {sorted(missing)}"

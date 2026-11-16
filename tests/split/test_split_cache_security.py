@@ -16,14 +16,13 @@ from torchlens.split.errors import SplitBoundaryError
 from torchlens.split.ir import BoundarySchema
 from torchlens.split.shape import SymbolicShape
 
-pytestmark = pytest.mark.smoke
-
 
 @pytest.fixture(autouse=True)
 def private_signing_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the signing key outside the artifact and isolate it between tests."""
 
     monkeypatch.setenv("TORCHLENS_CACHE_DIR", str(tmp_path / "private-key-root"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "private-state"))
 
 
 @pytest.fixture
@@ -67,7 +66,7 @@ def test_boundary_cache_refuses_unsigned_or_tampered_pickle(
 ) -> None:
     """Neither a bare gadget nor a gadget retaining a valid old tag executes."""
 
-    from torchlens.user_funcs import _CAPTURE_CACHE_HEADER_BYTES
+    from torchlens._capture.prepare.cache import _CAPTURE_CACHE_HEADER_BYTES
 
     directory, _boundary = cached_boundary
     path = directory / "payload.pkl"
@@ -88,9 +87,10 @@ def test_boundary_cache_key_is_not_supplied_by_the_artifact(
     """Copying a key next to the payload does not authorize it under another root."""
 
     directory, _boundary = cached_boundary
-    key = tmp_path / "private-key-root" / "capture" / ".capture_cache_secret"
+    key = tmp_path / "private-state" / "torchlens" / "capture_cache_secret"
     (directory / ".capture_cache_secret").write_bytes(key.read_bytes())
     monkeypatch.setenv("TORCHLENS_CACHE_DIR", str(tmp_path / "different-private-root"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "different-private-state"))
     with (
         pytest.warns(UserWarning, match="NOT unpickled"),
         pytest.raises(SplitBoundaryError, match="authentication failed"),

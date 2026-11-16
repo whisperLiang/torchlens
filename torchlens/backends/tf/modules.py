@@ -10,9 +10,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
-from ...data_classes.param import Param
-from ...ir.events import ModuleFrame
-from ...ir.refs import DeviceRef, DtypeRef
+from ..._data_classes.param import Param
+from ..._ir.events import ModuleFrame
+from ..._ir.refs import DeviceRef, DtypeRef
 from .._finalize import numel_from_shape as _numel, value_nbytes as _nbytes
 
 
@@ -164,6 +164,25 @@ def patched_tf_module_stack(
         _restore_installed()
 
 
+def _variable_nbytes(variable: Any, shape: tuple[int, ...]) -> int:
+    """Return a TensorFlow variable's size in bytes from its shape and dtype.
+
+    Keras 3 variables spell ``dtype`` as a string (``"float32"``), which the
+    shared ``value_nbytes`` ladder cannot size, so the element size then comes
+    from ``tf.as_dtype``; the variable's value is never read.
+    """
+
+    nbytes = _nbytes(variable)
+    if nbytes:
+        return nbytes
+    import tensorflow as tf
+
+    try:
+        return _numel(shape) * int(tf.as_dtype(getattr(variable, "dtype", None)).size)
+    except (TypeError, ValueError):
+        return 0
+
+
 def tf_param_logs(tree: TFModuleTree, trace: Any) -> dict[str, Param]:
     """Build TorchLens parameter logs from warmed TensorFlow variables.
 
@@ -194,7 +213,7 @@ def tf_param_logs(tree: TFModuleTree, trace: Any) -> dict[str, Param]:
             shape=shape,
             dtype=dtype,  # type: ignore[arg-type]
             num_params=_numel(shape),
-            param_memory=_nbytes(variable) or 0,
+            param_memory=_variable_nbytes(variable, shape),
             trainable=bool(getattr(variable, "trainable", False)),
             address=address,
             barcode=f"tf:{address}",
@@ -205,7 +224,7 @@ def tf_param_logs(tree: TFModuleTree, trace: Any) -> dict[str, Param]:
         param.backend_address = f"object:{address}"
         param.resolver_status = "resolved"
         param._param_ref = variable
-        param.source_trace = trace
+        param.trace = trace
         param.all_module_addresses = list(
             tree.metadata.get(owner, {}).get("all_addresses", [owner])
         )
@@ -505,6 +524,8 @@ def _tf_param_maps(
     if not module_by_address:
         module_by_address = {"self": model}
     seen: set[int] = set()
+    module_addresses = set(metadata)
+    root_name = getattr(model, "name", None)
     for address, module in module_by_address.items():
         variables = getattr(module, "variables", ())
         for index, variable in enumerate(list(variables)):
@@ -513,14 +534,54 @@ def _tf_param_maps(
                 continue
             seen.add(variable_id)
             raw_name = str(getattr(variable, "path", getattr(variable, "name", f"var_{index}")))
-            name = raw_name.split(":")[0].replace("/", ".")
-            if "." not in name:
-                name = f"{address}.{name}" if address != "self" else name
-            owner = _owner_from_variable_name(name, set(metadata), address)
+            name, owner = _param_address_and_owner(
+                raw_name, root_name=root_name, module_addresses=module_addresses, fallback=address
+            )
             variables_by_id[variable_id] = variable
             param_address_by_id[variable_id] = name
             param_owner_by_address[name] = owner
     return param_owner_by_address, param_address_by_id, variables_by_id
+
+
+def _param_address_and_owner(
+    raw_name: str,
+    *,
+    root_name: Any,
+    module_addresses: set[str],
+    fallback: str,
+) -> tuple[str, str]:
+    """Return a TensorFlow variable's param address and owning module address.
+
+    Keras prefixes a variable path with the root model's name (``sequential_18/conv/kernel``),
+    a process-global counter rather than a module address, so the prefix is dropped before
+    the owner is inferred. The address is then ``<owner>.<leaf>`` (``<leaf>`` under the root
+    module), the param identity the saved format requires.
+
+    Parameters
+    ----------
+    raw_name
+        Variable ``path`` (or ``name``) as Keras or TensorFlow reports it.
+    root_name
+        The root model's ``name`` attribute, when it has one.
+    module_addresses
+        Known module addresses.
+    fallback
+        Address of the module whose ``variables`` listed this variable.
+
+    Returns
+    -------
+    tuple[str, str]
+        The param address and its owning module address.
+    """
+
+    name = raw_name.split(":")[0].replace("/", ".")
+    if isinstance(root_name, str) and root_name and name.startswith(f"{root_name}."):
+        name = name[len(root_name) + 1 :]
+    if "." not in name:
+        name = f"{fallback}.{name}" if fallback != "self" else name
+    owner = _owner_from_variable_name(name, module_addresses, fallback)
+    leaf = name.rsplit(".", 1)[-1]
+    return (leaf if owner == "self" else f"{owner}.{leaf}"), owner
 
 
 def _iter_module_addresses(model: Any) -> Iterator[tuple[Any, str]]:

@@ -4,11 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import copy
-from dataclasses import replace
-from typing import Any, Literal
-
-from ...ir.container import ContainerSpec, DictKey, TupleIndex
-from ...ir.op_record import amend_preview_output_parent_rebind
+from typing import Any
 
 
 def iter_arrays_with_paths(
@@ -52,95 +48,6 @@ def iter_arrays_with_paths(
             for leaf in iter_arrays_with_paths(item, is_tensor, (*path, key), sort_dict=sort_dict)
         ]
     return []
-
-
-def output_container_spec(
-    value: object, is_tensor: Callable[[object], bool]
-) -> ContainerSpec | None:
-    """Build a portable spec for builtin MLX output containers.
-
-    Parameters
-    ----------
-    value
-        Captured operation or model output.
-    is_tensor
-        Backend-owned MLX array predicate.
-    """
-
-    if is_tensor(value):
-        return None
-    if isinstance(value, tuple) and type(value) is tuple:
-        kind: Literal["tuple", "list", "dict"] = "tuple"
-        items = tuple(enumerate(value))
-    elif isinstance(value, list):
-        kind = "list"
-        items = tuple(enumerate(value))
-    elif isinstance(value, dict) and type(value) is dict:
-        kind = "dict"
-        items = tuple(value.items())
-    else:
-        return ContainerSpec(kind="literal", literal_value=value)
-    child_specs = tuple(
-        (DictKey(key) if kind == "dict" else TupleIndex(key), child_spec)
-        for key, item in items
-        if (child_spec := output_container_spec(item, is_tensor)) is not None
-    )
-    return ContainerSpec(
-        kind=kind,
-        length=len(value) if kind != "dict" else None,
-        keys=tuple(key for key, _item in items) if kind == "dict" else (),
-        child_specs=child_specs,
-    )
-
-
-def mark_output_occurrences(
-    backend: Any, trace: Any, output: object
-) -> tuple[tuple[object, ...], ...]:
-    """Mark output producers once while retaining every final container occurrence.
-
-    Parameters
-    ----------
-    backend
-        MLX backend owning the array label store.
-    trace
-        Capture whose output producer inventory is being populated.
-    output
-        Native model output, including repeated array objects.
-
-    Returns
-    -------
-    tuple[tuple[object, ...], ...]
-        Paths aligned with the occurrence-preserving ``trace.output_layers``.
-    """
-
-    spec = output_container_spec(output, backend.is_tensor)
-    paths: list[tuple[object, ...]] = []
-    marked: set[str] = set()
-    for value, path in iter_arrays_with_paths(output, backend.is_tensor):
-        label = backend.tensor_store.get_label(value)
-        if label is None:
-            continue
-        trace.output_layers.append(label)
-        paths.append(path)
-        if label in marked:
-            continue
-        marked.add(label)
-        event = trace.capture_events.op_event_by_label_raw.get(label)
-        if event is not None:
-            trace.capture_events.append_amendment(
-                amend_preview_output_parent_rebind(
-                    event.seq,
-                    label,
-                    is_output_parent=True,
-                    output=replace(
-                        event.output,
-                        container_path=path,
-                        in_multi_output=bool(path),
-                        container_spec=spec,
-                    ),
-                )
-            )
-    return tuple(paths)
 
 
 def rebuild_mlx_module(module: Any, template: dict[str, Any]) -> Any:
@@ -188,9 +95,7 @@ def rebuild_mlx_module(module: Any, template: dict[str, Any]) -> Any:
     return rebuild(module, template)
 
 
-__all__ = [
+__all__ = (
     "iter_arrays_with_paths",
-    "mark_output_occurrences",
-    "output_container_spec",
     "rebuild_mlx_module",
-]
+)

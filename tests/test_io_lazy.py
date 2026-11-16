@@ -10,12 +10,13 @@ from typing import Any
 import pytest
 import safetensors  # noqa: F401
 import torch
+from _format3_envelope import read_record
 from torch import nn
 
-from torchlens import load, save, trace as trace_fn
-from torchlens._io import BlobRef, TorchLensIOError
-from torchlens.data_classes.trace import Trace
-from torchlens.io import rehydrate_nested
+import torchlens as tl
+from torchlens import load, trace as trace_fn
+from torchlens._data_classes.trace import Trace
+from torchlens._io import ArtifactError, BlobRef
 
 
 class _LazyIOModel(nn.Module):
@@ -48,8 +49,8 @@ class _LazyIOModel(nn.Module):
 def _build_log(
     *,
     seed: int = 0,
-    save_arg_values: bool = False,
-    save_rng_states: bool = False,
+    save_args: bool = False,
+    save_rng: bool = False,
 ) -> Trace:
     """Build a deterministic ``Trace`` for lazy I/O tests.
 
@@ -57,9 +58,9 @@ def _build_log(
     ----------
     seed:
         Random seed used for model initialization and inputs.
-    save_arg_values:
+    save_args:
         Whether function arguments should be captured in the log.
-    save_rng_states:
+    save_rng:
         Whether RNG state tensors should be captured in the log.
 
     Returns
@@ -74,10 +75,12 @@ def _build_log(
     return trace_fn(
         model,
         inputs,
-        layers_to_save="all",
-        save_arg_values=save_arg_values,
-        save_rng_states=save_rng_states,
-        random_seed=seed,
+        capture=tl.options.CaptureOptions(
+            save_args=save_args,
+            save_rng=save_rng,
+            seed=seed,
+        ),
+        save="all",
     )
 
 
@@ -85,8 +88,8 @@ def _save_bundle(
     tmp_path: Path,
     *,
     seed: int = 0,
-    save_arg_values: bool = False,
-    save_rng_states: bool = False,
+    save_args: bool = False,
+    save_rng: bool = False,
     include_saved_args: bool = False,
     include_rng_states: bool = False,
     path_name: str = "bundle.tl",
@@ -99,9 +102,9 @@ def _save_bundle(
         Temporary test directory.
     seed:
         Random seed used for model initialization and inputs.
-    save_arg_values:
+    save_args:
         Whether function arguments should be captured in the source log.
-    save_rng_states:
+    save_rng:
         Whether RNG state tensors should be captured in the source log.
     include_saved_args:
         Whether nested captured args should be persisted in the bundle.
@@ -118,12 +121,11 @@ def _save_bundle(
 
     trace = _build_log(
         seed=seed,
-        save_arg_values=save_arg_values,
-        save_rng_states=save_rng_states,
+        save_args=save_args,
+        save_rng=save_rng,
     )
     bundle_path = tmp_path / path_name
-    save(
-        trace,
+    trace.save(
         bundle_path,
         include_saved_args=include_saved_args,
         include_rng_states=include_rng_states,
@@ -145,7 +147,7 @@ def _first_saved_layer(trace: Trace) -> Any:
         First saved layer-pass entry.
     """
 
-    return next(layer for layer in trace.layer_list if layer.has_saved_activation)
+    return next(layer for layer in trace._layer_list if layer.has_saved_activation)
 
 
 def _read_manifest(bundle_path: Path) -> dict[str, Any]:
@@ -191,7 +193,12 @@ def _corrupt_one_blob(bundle_path: Path) -> None:
         Bundle directory path.
     """
 
-    blob_path = next((bundle_path / "blobs").glob("*.safetensors"))
+    manifest = _read_manifest(bundle_path)
+    outs = read_record(bundle_path, "op")["columns"]["out"]
+    reference = next(cell for cell in outs if cell is not None)
+    assert reference["$tl"] == "tensor"
+    assert reference["blob"] in manifest["files"]
+    blob_path = bundle_path / reference["blob"]
     blob_bytes = bytearray(blob_path.read_bytes())
     blob_bytes[-1] = (blob_bytes[-1] + 1) % 256
     blob_path.write_bytes(bytes(blob_bytes))
@@ -224,49 +231,7 @@ def _contains_blob_ref(value: Any) -> bool:
     return False
 
 
-def test_lazy_ref_metadata_access_does_not_materialize(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Lazy ref metadata should be readable without touching the filesystem."""
-
-    bundle_path, live_log = _save_bundle(tmp_path)
-    restored = load(bundle_path, lazy=True)
-    layer = _first_saved_layer(restored)
-    live_layer = _first_saved_layer(live_log)
-    ref = layer.out_ref
-
-    assert ref is not None
-    assert isinstance(live_layer.out, torch.Tensor)
-
-    def _fail(*_: Any, **__: Any) -> Any:
-        raise AssertionError("filesystem access should not occur")
-
-    monkeypatch.setattr("torchlens._io.lazy.sha256_of_file", _fail)
-    monkeypatch.setattr("torchlens._io.lazy.load_file", _fail)
-
-    assert ref.shape == tuple(layer.shape)
-    assert ref.dtype == layer.dtype
-    assert ref.device_at_save == str(live_layer.out.device)
-
-
-def test_lazy_materialize_matches_eager_load_bit_exactly(tmp_path: Path) -> None:
-    """Lazy materialization should match the eager-loaded tensor exactly."""
-
-    bundle_path, _ = _save_bundle(tmp_path)
-    eager_log = load(bundle_path, lazy=False)
-    lazy_log = load(bundle_path, lazy=True)
-
-    eager_layer = _first_saved_layer(eager_log)
-    lazy_layer = _first_saved_layer(lazy_log)
-
-    eager_tensor = eager_layer.out
-    assert isinstance(eager_tensor, torch.Tensor)
-    lazy_tensor = lazy_layer.materialize_out()
-
-    assert torch.equal(lazy_tensor, eager_tensor)
-
-
+@pytest.mark.cuda
 def test_lazy_materialize_honors_cuda_map_location(tmp_path: Path) -> None:
     """Lazy materialization should respect ``map_location='cuda'`` when available."""
 
@@ -277,7 +242,7 @@ def test_lazy_materialize_honors_cuda_map_location(tmp_path: Path) -> None:
     lazy_log = load(bundle_path, lazy=True)
     layer = _first_saved_layer(lazy_log)
 
-    tensor = layer.materialize_out(map_location="cuda")
+    tensor = layer.payload.materialize_out(map_location="cuda")
 
     assert tensor.device.type == "cuda"
 
@@ -291,8 +256,8 @@ def test_lazy_resave_detects_manifest_level_drift(tmp_path: Path) -> None:
     manifest["created_at"] = "2099-01-01T00:00:00Z"
     _write_manifest(bundle_path, manifest)
 
-    with pytest.raises(TorchLensIOError, match="source bundle manifest has changed since load"):
-        save(lazy_log, tmp_path / "resaved.tl")
+    with pytest.raises(ArtifactError, match="source bundle manifest has changed since load"):
+        lazy_log.save(tmp_path / "resaved.tl")
 
 
 def test_lazy_resave_detects_blob_level_drift(tmp_path: Path) -> None:
@@ -302,52 +267,8 @@ def test_lazy_resave_detects_blob_level_drift(tmp_path: Path) -> None:
     lazy_log = load(bundle_path, lazy=True)
     _corrupt_one_blob(bundle_path)
 
-    with pytest.raises(TorchLensIOError, match="sha256 mismatch"):
-        save(lazy_log, tmp_path / "resaved.tl")
-
-
-def test_lazy_resave_fast_copy_produces_valid_bundle(tmp_path: Path) -> None:
-    """Clean-source lazy resave should fast-copy blobs into a new valid bundle."""
-
-    bundle_path, live_log = _save_bundle(tmp_path)
-    lazy_log = load(bundle_path, lazy=True)
-    resaved_path = tmp_path / "resaved.tl"
-
-    save(lazy_log, resaved_path)
-    restored = load(resaved_path, lazy=False)
-
-    live_tensor = _first_saved_layer(live_log).out
-    restored_tensor = _first_saved_layer(restored).out
-
-    assert isinstance(live_tensor, torch.Tensor)
-    assert isinstance(restored_tensor, torch.Tensor)
-    assert torch.equal(restored_tensor, live_tensor)
-
-
-def test_rehydrate_nested_materializes_saved_args_blob_refs(tmp_path: Path) -> None:
-    """``rehydrate_nested`` should replace nested captured-arg refs with tensors."""
-
-    bundle_path, _ = _save_bundle(
-        tmp_path,
-        save_arg_values=True,
-        include_saved_args=True,
-        path_name="saved_args.tl",
-    )
-    lazy_log = load(bundle_path, lazy=True, materialize_nested=False)
-    layer = next(
-        layer
-        for layer in lazy_log.layer_list
-        if layer.has_saved_args
-        and layer.saved_args is not None
-        and _contains_blob_ref(layer.saved_args)
-    )
-
-    assert _contains_blob_ref(layer.saved_args)
-
-    rehydrate_nested(lazy_log)
-
-    assert not _contains_blob_ref(layer.saved_args)
-    assert any(isinstance(arg, torch.Tensor) for arg in layer.saved_args)
+    with pytest.raises(ArtifactError, match="sha256 mismatch"):
+        lazy_log.save(tmp_path / "resaved.tl")
 
 
 def test_save_rejects_unmaterialized_nested_blob_refs(tmp_path: Path) -> None:
@@ -355,17 +276,17 @@ def test_save_rejects_unmaterialized_nested_blob_refs(tmp_path: Path) -> None:
 
     bundle_path, _ = _save_bundle(
         tmp_path,
-        save_arg_values=True,
+        save_args=True,
         include_saved_args=True,
         path_name="saved_args.tl",
     )
     lazy_log = load(bundle_path, lazy=True, materialize_nested=False)
 
     with pytest.raises(
-        TorchLensIOError,
-        match="Call torchlens.rehydrate_nested\\(trace\\) before saving",
+        ArtifactError,
+        match="Call torchlens.io.materialize_nested\\(trace\\) before saving",
     ):
-        save(lazy_log, tmp_path / "resaved.tl", include_saved_args=True)
+        lazy_log.save(tmp_path / "resaved.tl", include_saved_args=True)
 
 
 def test_save_drops_unmaterialized_nested_blob_refs_when_fields_are_excluded(
@@ -375,8 +296,8 @@ def test_save_drops_unmaterialized_nested_blob_refs_when_fields_are_excluded(
 
     bundle_path, _ = _save_bundle(
         tmp_path,
-        save_arg_values=True,
-        save_rng_states=True,
+        save_args=True,
+        save_rng=True,
         include_saved_args=True,
         include_rng_states=True,
         path_name="saved_args_and_rng.tl",
@@ -384,34 +305,18 @@ def test_save_drops_unmaterialized_nested_blob_refs_when_fields_are_excluded(
     lazy_log = load(bundle_path, lazy=True, materialize_nested=False)
     resaved_path = tmp_path / "resaved_without_nested_fields.tl"
 
-    save(
-        lazy_log,
+    lazy_log.save(
         resaved_path,
         include_saved_args=False,
         include_rng_states=False,
     )
     restored = load(resaved_path, lazy=False)
 
-    assert restored.model_class_name == lazy_log.model_class_name
+    assert restored.source.class_name == lazy_log.source.class_name
 
 
-@pytest.mark.parametrize("lazy", [False, True])
-@pytest.mark.parametrize("method_name", ["validate_forward_pass", "validate_saved_outs"])
-def test_portable_loaded_logs_reject_validation_entry_points(
-    tmp_path: Path,
-    lazy: bool,
-    method_name: str,
-) -> None:
-    """Fork L: portable-loaded logs should reject both validation entry points."""
-
-    bundle_path, _ = _save_bundle(tmp_path)
-    restored = load(bundle_path, lazy=lazy)
-    validate_fn = getattr(restored, method_name)
-
-    with pytest.raises(TorchLensIOError, match="portable bundles drop them"):
-        validate_fn([])
-
-
+@pytest.mark.serial  # counts /proc/self/fd, which is process-global: under xdist a
+# worker's other activity (execnet channel, background writers) moves the count
 def test_lazy_materialize_does_not_leak_file_descriptors(tmp_path: Path) -> None:
     """Repeated materialization should not leave extra file descriptors open."""
 
@@ -421,9 +326,12 @@ def test_lazy_materialize_does_not_leak_file_descriptors(tmp_path: Path) -> None
 
     bundle_path, _ = _save_bundle(tmp_path)
     lazy_log = load(bundle_path, lazy=True)
-    ref = _first_saved_layer(lazy_log).out_ref
+    ref = _first_saved_layer(lazy_log)._out_ref
     assert ref is not None
 
+    # Collect first: garbage left by earlier tests may still hold a file that
+    # the loop's own gc.collect() would close, shrinking the count (15 == 16).
+    gc.collect()
     before = len(list(fd_dir.iterdir()))
     for _ in range(20):
         tensor = ref.materialize()

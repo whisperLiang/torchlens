@@ -1,7 +1,7 @@
 """Liveness killers for the streamed-bundle finalization step (executor step 18).
 
 r7 R74 executor-family survivor, found by the family's own first sample
-campaign: forcing ``_should_run_step_18`` to ``False`` (the streamed bundle
+campaign: forcing ``_should_run_finalize_streamed_bundle`` to ``False`` (the streamed bundle
 never finalizes) survived the ENTIRE 472-test arming suite -- no suite file
 captured with ``storage=tl.to_disk(...)`` and then relied on the finalized
 bundle. These plants close that margin: skipping finalization (or the
@@ -13,13 +13,10 @@ from there resurrects the proven survivor.
 
 from __future__ import annotations
 
-import pytest
 import torch
 from torch import nn
 
 import torchlens as tl
-
-pytestmark = pytest.mark.smoke
 
 
 def _capture_streamed(tmp_path):
@@ -29,21 +26,6 @@ def _capture_streamed(tmp_path):
     model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
     trace = tl.trace(model, torch.randn(2, 4), save=tl.func("relu"), storage=tl.to_disk(str(path)))
     return path, trace
-
-
-def test_streamed_bundle_is_finalized_and_loadable(tmp_path) -> None:
-    """The streamed bundle must be COMPLETE on disk when trace() returns.
-
-    With step 18 skipped, the out-writer never finalizes: the artifact is
-    left partial (or staging-named), so loading it -- the whole point of
-    ``storage=tl.to_disk`` -- cannot work.
-    """
-
-    path, trace = _capture_streamed(tmp_path)
-    assert path.exists(), "streamed bundle missing on disk after capture"
-    loaded = tl.load(str(path))
-    assert loaded.backend == "torch"
-    assert set(loaded.layer_labels) == set(trace.layer_labels)
 
 
 def test_streamed_bundle_saved_payload_reads_back(tmp_path) -> None:

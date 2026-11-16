@@ -16,8 +16,6 @@ from torchlens._io.runnable_load import (
     _parse_input_binding,
 )
 
-pytestmark = pytest.mark.smoke
-
 
 def test_input_binding_io_role_closed_vocabulary() -> None:
     good = {

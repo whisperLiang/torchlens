@@ -24,6 +24,11 @@ class DevicePlacement:
     ``device is None`` means "wherever the capture already lives" — no state
     movement is performed and the segment behaves exactly as an unplaced
     runtime.
+
+    Examples
+    --------
+    >>> tl.split.DevicePlacement('cpu').device
+    'cpu'
     """
 
     device: Any = None
@@ -42,7 +47,14 @@ class DevicePlacement:
 
 @dataclass(frozen=True)
 class PlacementPlan:
-    """Declared placement for both split segments."""
+    """Declared placement for both split segments.
+
+    Examples
+    --------
+    >>> placement = tl.split.PlacementPlan(tl.split.DevicePlacement('cpu'), tl.split.DevicePlacement('cpu'))
+    >>> placement.is_heterogeneous
+    False
+    """
 
     prefix: DevicePlacement = field(default_factory=DevicePlacement)
     suffix: DevicePlacement = field(default_factory=DevicePlacement)
@@ -113,6 +125,7 @@ def require_placement_support(
             split_point=split_point,
             reason="unsupported segment state placement",
         ),
+        code=SplitUnsupportedError.code,
     )
 
 
@@ -145,10 +158,10 @@ def move_tree(
     return value
 
 
-__all__ = [
+__all__ = (
     "DevicePlacement",
     "PlacementPlan",
     "SegmentName",
     "move_tree",
     "require_placement_support",
-]
+)

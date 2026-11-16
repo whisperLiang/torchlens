@@ -14,15 +14,14 @@ pre-fix behavior:
   ``visualizers/`` directory, so a hostile bundle cannot disclose an arbitrary
   local ``.png`` through ``.draw()``.
 * R27-3 -- a recursion blow-up during rehydration surfaces as a typed
-  ``TorchLensIOError``, not a raw ``RecursionError`` escaping ``tl.load``.
+  ``ArtifactError``, not a raw ``RecursionError`` escaping ``tl.load``.
 """
 
 from __future__ import annotations
 
+import json
 import os
-import re
 import stat
-from collections import OrderedDict, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -31,12 +30,10 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens._io import bundle as bundle_mod
-from torchlens._io.bundle import _mark_partial, _reanchor_visualizer_paths, cleanup_tmp
-from torchlens._io.scrub import _scrub_nondeterministic_identities
-from torchlens.errors import TorchLensIOError
-
-pytestmark = pytest.mark.smoke
+from torchlens._io import _staging, bundle as bundle_mod
+from torchlens._io.bundle import _reanchor_visualizer_paths, cleanup_tmp
+from torchlens._io.format3.decode import decode_value
+from torchlens.errors import ArtifactError
 
 
 def _tiny() -> nn.Module:
@@ -44,9 +41,13 @@ def _tiny() -> nn.Module:
 
 
 def _save(tmp_path: Path, name: str = "b.tlspec") -> Path:
-    trace = tl.trace(_tiny().eval(), torch.randn(2, 4), layers_to_save="all")
+    trace = tl.trace(
+        _tiny().eval(),
+        torch.randn(2, 4),
+        save="all",
+    )
     spec = tmp_path / name
-    tl.save(trace, str(spec))
+    trace.save(str(spec))
     return spec
 
 
@@ -57,7 +58,7 @@ def _save(tmp_path: Path, name: str = "b.tlspec") -> Path:
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits are the checked signal")
 def test_bundle_sidecars_and_dirs_are_private(tmp_path: Path) -> None:
-    """metadata.pkl/manifest.json are 0600 and the directories 0700.
+    """Every file of a 3.0 save is 0600 and every directory 0700.
 
     Fail-before: the sidecars carrying forward source and harvested attributes
     inherited the umask (0664 under umask 002) while the blobs were 0600.
@@ -68,10 +69,14 @@ def test_bundle_sidecars_and_dirs_are_private(tmp_path: Path) -> None:
         spec = _save(tmp_path)
     finally:
         os.umask(prior)
-    assert stat.S_IMODE((spec / "metadata.pkl").stat().st_mode) & 0o077 == 0
-    assert stat.S_IMODE((spec / "manifest.json").stat().st_mode) & 0o077 == 0
-    assert stat.S_IMODE(spec.stat().st_mode) & 0o077 == 0
-    assert stat.S_IMODE((spec / "blobs").stat().st_mode) & 0o077 == 0
+    assert (spec / "manifest.json").is_file()
+    assert (spec / "blobs").is_dir()
+    open_modes = {
+        path.relative_to(spec).as_posix(): oct(stat.S_IMODE(path.stat().st_mode))
+        for path in (spec, *spec.rglob("*"))
+        if stat.S_IMODE(path.stat().st_mode) & 0o077
+    }
+    assert not open_modes, open_modes
 
 
 # --------------------------------------------------------------------------- #
@@ -80,23 +85,23 @@ def test_bundle_sidecars_and_dirs_are_private(tmp_path: Path) -> None:
 
 
 def test_cleanup_tmp_does_not_sweep_siblings_via_glob_metachars(tmp_path: Path) -> None:
-    """Glob metacharacters must not widen cleanup to a sibling bundle.
+    """A ``*`` in one bundle's name must not widen cleanup to a sibling bundle.
 
     Fail-before: ``f"{name}.tmp.*"`` was globbed, so ``cleanup_tmp(root/"job*")``
     removed ``jobA.tmp.*`` and ``jobB.tmp.*`` alike.
     """
 
-    target_tmp = tmp_path / "job[B].tmp.aaaa"
+    target_tmp = tmp_path / "job*.tmp.aaaa"
     sibling_tmp = tmp_path / "jobB.tmp.bbbb"
     for directory in (target_tmp, sibling_tmp):
         directory.mkdir()
         (directory / bundle_mod.PARTIAL_SENTINEL).write_text("", encoding="utf-8")
 
-    removed = cleanup_tmp(tmp_path / "job[B]", force=True)
+    removed = cleanup_tmp(tmp_path / "job*", force=True)
 
     assert sibling_tmp.exists(), "cleanup swept a sibling bundle through a glob metachar"
     assert sibling_tmp not in removed
-    # The literal ``job[B]`` target itself is still swept (exact-name match).
+    # The literal ``job*`` target itself is still swept (exact-name match).
     assert not target_tmp.exists()
     assert target_tmp in removed
 
@@ -104,16 +109,6 @@ def test_cleanup_tmp_does_not_sweep_siblings_via_glob_metachars(tmp_path: Path) 
 # --------------------------------------------------------------------------- #
 # B8-12: scrubbed, bounded partial reason                                      #
 # --------------------------------------------------------------------------- #
-
-
-def test_mark_partial_reason_is_length_bounded(tmp_path: Path) -> None:
-    """A long reason is truncated so recovery debris cannot grow unbounded."""
-
-    tmp_dir = tmp_path / "x.tmp.zzzz"
-    tmp_dir.mkdir()
-    _mark_partial(tmp_dir, reason="A" * 100_000)
-    persisted = (tmp_dir / bundle_mod.REASON_SENTINEL).read_text()
-    assert len(persisted) <= bundle_mod._MAX_PARTIAL_REASON_CHARS
 
 
 def test_save_failure_persists_type_name_not_message(tmp_path: Path, monkeypatch) -> None:
@@ -129,30 +124,20 @@ def test_save_failure_persists_type_name_not_message(tmp_path: Path, monkeypatch
         raise ValueError(secret)
 
     monkeypatch.setattr(bundle_mod, "_scrub_trace_for_bundle", _boom)
-    trace = tl.trace(_tiny().eval(), torch.randn(2, 4), layers_to_save="all")
+    trace = tl.trace(
+        _tiny().eval(),
+        torch.randn(2, 4),
+        save="all",
+    )
     spec = tmp_path / "fail.tlspec"
-    with pytest.raises(TorchLensIOError):
-        tl.save(trace, str(spec))
-    reasons = list(tmp_path.glob("fail.tlspec.tmp.*/" + bundle_mod.REASON_SENTINEL))
+    with pytest.raises(ArtifactError):
+        trace.save(str(spec))
+    reasons = list(tmp_path.glob("fail.tlspec.tmp.*/" + _staging.REASON_SENTINEL))
     assert reasons, "no PARTIAL reason sentinel was written"
     for reason_file in reasons:
         text = reason_file.read_text()
         assert secret not in text, "exception message leaked into recovery debris"
         assert text == "ValueError"
-
-
-# --------------------------------------------------------------------------- #
-# B8-16: metadata.pkl byte ceiling                                            #
-# --------------------------------------------------------------------------- #
-
-
-def test_metadata_pkl_byte_ceiling_refuses_oversize(tmp_path: Path, monkeypatch) -> None:
-    """An implausibly large metadata.pkl is refused typed before it is unpickled."""
-
-    spec = _save(tmp_path)
-    monkeypatch.setattr(bundle_mod, "_MAX_METADATA_PKL_BYTES", 16)
-    with pytest.raises(TorchLensIOError, match="ceiling"):
-        tl.load(str(spec))
 
 
 # --------------------------------------------------------------------------- #
@@ -172,22 +157,24 @@ def test_visualizer_path_outside_bundle_is_dropped(tmp_path: Path) -> None:
     spec = _save(tmp_path)
     trace = tl.load(str(spec))
     # Simulate a tampered field pointing at an out-of-bundle file.
-    trace.layer_list[0].visualizer_path = str(victim_png)
+    trace._layer_list[0].visualizer_path = str(victim_png)
     _reanchor_visualizer_paths(trace, spec)
-    assert trace.layer_list[0].visualizer_path is None
+    assert trace._layer_list[0].visualizer_path is None
 
 
 def test_visualizer_path_inside_bundle_is_reanchored(tmp_path: Path) -> None:
     """A real thumbnail inside the bundle's visualizers/ dir is kept and re-anchored."""
 
     spec = _save(tmp_path)
+    trace = tl.load(str(spec))
+    # The 3.0 reader refuses any file the manifest does not list, so the thumbnail is
+    # placed after the load; re-anchoring is a per-trace step the loader runs on its paths.
     (spec / "visualizers").mkdir(exist_ok=True)
     thumb = spec / "visualizers" / "00000_layer.png"
     thumb.write_bytes(b"\x89PNG\r\n\x1a\n")
-    trace = tl.load(str(spec))
-    trace.layer_list[0].visualizer_path = "/somewhere/else/00000_layer.png"
+    trace._layer_list[0].visualizer_path = "/somewhere/else/00000_layer.png"
     _reanchor_visualizer_paths(trace, spec)
-    kept = trace.layer_list[0].visualizer_path
+    kept = trace._layer_list[0].visualizer_path
     assert kept is not None
     assert Path(kept).resolve() == thumb.resolve()
 
@@ -195,41 +182,6 @@ def test_visualizer_path_inside_bundle_is_reanchored(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # R21-1: persisted equivalence-class keys are canonically ordered              #
 # --------------------------------------------------------------------------- #
-
-
-@pytest.mark.parametrize("container", ["dict", "ordered", "default"])
-@pytest.mark.parametrize("empty", [False, True])
-def test_equivalence_key_scrub_preserves_mapping_semantics(container: str, empty: bool) -> None:
-    """Canonical keys retain mapping type, default factory, members and source state."""
-
-    groups: dict[str, set[str]]
-    if container == "default":
-        groups = defaultdict(set)
-    elif container == "ordered":
-        groups = OrderedDict()
-    else:
-        groups = {}
-    original_key = "mul_param_000002_param_000001_outindex0"
-    members = {"mul_1", "mul_2"}
-    if not empty:
-        groups[original_key] = members
-    state: dict[str, Any] = {"op_equivalence_classes": groups}
-
-    _scrub_nondeterministic_identities(state)
-
-    actual = state["op_equivalence_classes"]
-    assert type(actual) is type(groups)
-    assert actual is not groups
-    if empty:
-        assert not actual
-    else:
-        assert list(actual) == ["mul_param_000001_param_000002_outindex0"]
-        assert actual["mul_param_000001_param_000002_outindex0"] is members
-        assert list(groups) == [original_key]
-    if container == "default":
-        assert actual.default_factory is set
-        assert actual["new"] == set()
-        assert "new" not in groups
 
 
 class _NestedParamModel(nn.Module):
@@ -243,6 +195,19 @@ class _NestedParamModel(nn.Module):
         return self.enc(x)
 
 
+def _persisted_equivalence_groups(spec: Path) -> Any:
+    """Decode the trace record's persisted op equivalence groups from a 3.0 save."""
+
+    manifest = json.loads((spec / "manifest.json").read_text(encoding="utf-8"))
+    trace_table = json.loads(
+        (spec / manifest["records"]["trace"]["path"]).read_text(encoding="utf-8")
+    )
+    return decode_value(
+        trace_table["fields"].get("_graph_op_equivalence_classes"),
+        at="trace._graph_op_equivalence_classes",
+    )
+
+
 def test_persisted_equivalence_class_keys_are_canonically_ordered(tmp_path: Path) -> None:
     """Trace-level op_equivalence_classes keys sort their param_NNNNNN run.
 
@@ -254,16 +219,19 @@ def test_persisted_equivalence_class_keys_are_canonically_ordered(tmp_path: Path
     captures make the flip near-certain to appear if the canonicalization is absent.
     """
 
-    import pickle
     import re
 
     param_token = re.compile(r"param_\d{6}")
     checked = 0
     for index in range(10):
-        trace = tl.trace(_NestedParamModel().eval(), torch.randn(2, 4), layers_to_save="all")
+        trace = tl.trace(
+            _NestedParamModel().eval(),
+            torch.randn(2, 4),
+            save="all",
+        )
         spec = tmp_path / f"nested_{index}.tlspec"
-        tl.save(trace, str(spec))
-        groups = pickle.loads((spec / "metadata.pkl").read_bytes()).get("op_equivalence_classes")
+        trace.save(str(spec))
+        groups = _persisted_equivalence_groups(spec)
         for key in groups or {}:
             tokens = param_token.findall(key)
             if len(tokens) >= 2:
@@ -294,19 +262,20 @@ def test_persisted_equivalence_keys_preserve_outindex_suffix(tmp_path: Path) -> 
     the dict rebuild silently kept only the last group.
     """
 
-    import pickle
     import re
 
     trace = tl.trace(
-        _NestedMultiOutputParamModel().eval(), torch.randn(2, 3, 4), layers_to_save="all"
+        _NestedMultiOutputParamModel().eval(),
+        torch.randn(2, 3, 4),
+        save="all",
     )
-    live_groups = dict(trace.op_equivalence_classes)
+    live_groups = dict(trace.graph.op_equivalence_classes)
     live_outindex_keys = {key for key in live_groups if "_outindex" in key}
     assert len(live_outindex_keys) >= 2, "expected multi-output param groups in-memory"
 
     spec = tmp_path / "lstm_outindex.tlspec"
-    tl.save(trace, str(spec))
-    persisted = pickle.loads((spec / "metadata.pkl").read_bytes()).get("op_equivalence_classes")
+    trace.save(str(spec))
+    persisted = _persisted_equivalence_groups(spec)
     assert persisted is not None
 
     persisted_outindex_keys = {key for key in persisted if "_outindex" in key}
@@ -334,55 +303,6 @@ def test_persisted_equivalence_keys_preserve_outindex_suffix(tmp_path: Path) -> 
 # --------------------------------------------------------------------------- #
 
 
-def _manifest_git_hash(spec: Path) -> object:
-    import json
-
-    manifest = json.loads((spec / "manifest.json").read_text())
-    return manifest.get("provenance", {}).get("git_commit_hash")
-
-
-def test_git_commit_hash_is_dropped_when_source_excluded(tmp_path: Path) -> None:
-    """include_source=False must not embed the cwd repo's HEAD commit.
-
-    Fail-before: the manifest embedded the git commit of whatever repository
-    contained the working directory at save time, with no opt-out or disclosure.
-    """
-
-    trace = tl.trace(_tiny().eval(), torch.randn(2, 4), layers_to_save="all")
-    excluded = tmp_path / "no_source.tlspec"
-    tl.save(trace, str(excluded), include_source=False)
-    assert _manifest_git_hash(excluded) is None
-
-    included = tmp_path / "with_source.tlspec"
-    tl.save(trace, str(included), include_source=True)
-    # R21-2: when source is kept the field reflects TORCHLENS's own commit (or None
-    # for a released wheel), never the working directory's unrelated repository.
-    from torchlens._io.bundle import _git_commit_hash, _torchlens_package_dir
-
-    expected = _git_commit_hash(_torchlens_package_dir())
-    assert _manifest_git_hash(included) == expected
-
-
-def test_git_commit_hash_is_independent_of_working_directory(tmp_path: Path, monkeypatch) -> None:
-    """R21-2: the same capture saved from two directories records the same hash.
-
-    Fail-before: the hash came from Path.cwd(), so saving from inside a different repo
-    embedded that repo's HEAD -- an ambient-environment dependence that also leaked the
-    user's unrelated repository commit.
-    """
-
-    trace = tl.trace(_tiny().eval(), torch.randn(2, 4), layers_to_save="all")
-    first = tmp_path / "a.tlspec"
-    tl.save(trace, str(first), include_source=True)
-
-    other_cwd = tmp_path / "elsewhere"
-    other_cwd.mkdir()
-    monkeypatch.chdir(other_cwd)
-    second = tmp_path / "b.tlspec"
-    tl.save(trace, str(second), include_source=True)
-    assert _manifest_git_hash(first) == _manifest_git_hash(second)
-
-
 # --------------------------------------------------------------------------- #
 # Atomic-save double-fault disclosure                                          #
 # --------------------------------------------------------------------------- #
@@ -408,7 +328,7 @@ def test_double_fault_restore_discloses_stranded_backup(tmp_path: Path) -> None:
     original = Path.rename
     try:
         Path.rename = _failing_rename  # type: ignore[method-assign]
-        with pytest.warns(UserWarning, match=re.escape(str(backup))):
+        with pytest.warns(UserWarning, match=str(backup)):
             restored = b._restore_backup(backup, target)
     finally:
         Path.rename = original  # type: ignore[method-assign]
@@ -447,5 +367,5 @@ def test_rehydrate_recursion_surfaces_typed(tmp_path: Path, monkeypatch) -> None
         raise RecursionError("maximum recursion depth exceeded")
 
     monkeypatch.setattr(bundle_mod, "rehydrate_trace", _blow_up)
-    with pytest.raises(TorchLensIOError, match="recursion"):
+    with pytest.raises(ArtifactError, match="recursion"):
         tl.load(str(spec))

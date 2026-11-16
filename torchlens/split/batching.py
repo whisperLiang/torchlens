@@ -14,6 +14,9 @@ from copy import copy
 from dataclasses import dataclass, fields, is_dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from torchlens.errors import ArgumentTypeError
+from torchlens.split.errors import SplitRequestError
+
 from .errors import SplitUnsupportedError
 from .shape_program import _escape_pointer, flatten_input_leaves
 
@@ -54,16 +57,29 @@ class BatchSpec:
 
         object.__setattr__(self, "axes", dict(self.axes))
         if self.canonical_batch_size < 1:
-            raise ValueError("canonical_batch_size must be a positive integer")
+            raise SplitRequestError(
+                "canonical_batch_size must be a positive integer",
+                code=SplitRequestError.code,
+            )
         if self.user_batch_size is not None and self.user_batch_size < 1:
-            raise ValueError("user_batch_size must be a positive integer when set")
+            raise SplitRequestError(
+                "user_batch_size must be a positive integer when set",
+                code=SplitRequestError.code,
+            )
         for path, axis in self.axes.items():
             if not isinstance(path, str) or not (
                 path.startswith("/args/") or path.startswith("/kwargs/")
             ):
-                raise ValueError("batch axis keys must be JSON Pointers rooted at /args or /kwargs")
+                raise SplitRequestError(
+                    "batch axis keys must be JSON Pointers rooted at /args or /kwargs",
+                    code=SplitRequestError.code,
+                )
             if not isinstance(axis, int):
-                raise TypeError("batch axis values must be integer axis indexes")
+                raise ArgumentTypeError(
+                    "batch axis values must be integer axis indexes",
+                    code="split_argument_type",
+                    remedy="pass the argument type required by the error message",
+                )
 
 
 def infer_user_batch_size(
@@ -178,7 +194,10 @@ def clone_dataclass_fields(value: Any, updates: Mapping[str, Any]) -> Any:
 
     cloned = copy(value)
     if cloned is value:
-        raise SplitUnsupportedError("Cannot independently clone dataclass input state.")
+        raise SplitUnsupportedError(
+            "Cannot independently clone dataclass input state.",
+            code=SplitUnsupportedError.code,
+        )
     for name, item in updates.items():
         object.__setattr__(cloned, name, item)
     return cloned
@@ -207,7 +226,7 @@ def _rebatch_tensor_leaves(
     alias_of: dict[str, str] = {}
     with pause_logging():
         if adapter.name == "torch":
-            from ..utils.alias_footprint import tensor_byte_footprint, touched_bytes_relation
+            from .._utils.alias_footprint import tensor_byte_footprint, touched_bytes_relation
 
             footprints = {leaf.path: tensor_byte_footprint(leaf.value) for leaf in leaves}
         for index, leaf in enumerate(leaves):
@@ -251,7 +270,8 @@ def _rebatch_tensor_leaves(
                     raise SplitUnsupportedError(
                         "Cannot preserve input alias relationship while rebatching "
                         f"{previous.path!r} and {leaf.path!r}; overlapping views must have "
-                        "identical geometry and batch axes. Use batch_axes={} for fixed-shape replay."
+                        "identical geometry and batch axes. Use batch_axes={} for fixed-shape replay.",
+                        code=SplitUnsupportedError.code,
                     )
                 alias_of[leaf.path] = previous.path
                 break
@@ -331,16 +351,23 @@ def infer_explicit_axes_from_example(
     unknown = tuple(path for path in explicit_axes if path not in by_path)
     if unknown:
         raise SplitUnsupportedError(
-            f"Unknown batch input paths: {unknown!r}; available paths are {tuple(by_path)!r}."
+            f"Unknown batch input paths: {unknown!r}; available paths are {tuple(by_path)!r}.",
+            code=SplitUnsupportedError.code,
         )
     axes: dict[str, int] = {}
     for path, axis in explicit_axes.items():
         shape = adapter.shape(by_path[path].value)
         if shape is None:
-            raise SplitUnsupportedError(f"Batch input {path!r} is not tensor-like.")
+            raise SplitUnsupportedError(
+                f"Batch input {path!r} is not tensor-like.",
+                code=SplitUnsupportedError.code,
+            )
         normalized = axis if axis >= 0 else len(shape) + axis
         if not 0 <= normalized < len(shape):
-            raise SplitUnsupportedError(f"Batch axis {axis} is invalid for {path!r} shape {shape}.")
+            raise SplitUnsupportedError(
+                f"Batch axis {axis} is invalid for {path!r} shape {shape}.",
+                code=SplitUnsupportedError.code,
+            )
         axes[path] = normalized
     return axes
 
@@ -410,7 +437,8 @@ def resolve_batch_spec(
         if len(declared_sizes) != 1:
             raise SplitUnsupportedError(
                 "Declared batch inputs disagree in the example inputs: "
-                f"{ {path: adapter.shape(by_path[path].value) for path in axes}!r}."
+                f"{ {path: adapter.shape(by_path[path].value) for path in axes}!r}.",
+                code=SplitUnsupportedError.code,
             )
         user_batch = int(next(iter(declared_sizes)))
         undeclared: dict[str, tuple[int, ...]] = {}
@@ -425,7 +453,8 @@ def resolve_batch_spec(
             raise SplitUnsupportedError(
                 "Explicit batch inputs are incomplete: undeclared tensor paths contain the "
                 f"example batch dimension {user_batch}: {undeclared!r}. Declare these paths "
-                "in SplitFeatures.batch_axes."
+                "in SplitFeatures.batch_axes.",
+                code=SplitUnsupportedError.code,
             )
         return BatchSpec(axes=axes, inference="explicit", user_batch_size=user_batch)
 
@@ -450,7 +479,8 @@ def resolve_batch_spec(
                 raise SplitUnsupportedError(
                     "Dynamic batch could not be inferred conservatively. Declare "
                     f"SplitFeatures.batch_axes using one of {available!r}, or use "
-                    "batch_axes={} to declare that all inputs are unbatched."
+                    "batch_axes={} to declare that all inputs are unbatched.",
+                    code=SplitUnsupportedError.code,
                 )
         return BatchSpec(axes={}, inference="auto", user_batch_size=None)
     inferred_batch = infer_user_batch_size(
@@ -478,7 +508,7 @@ def witness_probe_sizes(traced_batch_size: int) -> tuple[int, ...]:
     return ()
 
 
-__all__ = [
+__all__ = (
     "CANONICAL_TRACE_BATCH",
     "FALLBACK_TRACE_BATCH",
     "BatchSpec",
@@ -490,4 +520,4 @@ __all__ = [
     "rebatch_inputs",
     "rebatch_tree",
     "witness_probe_sizes",
-]
+)

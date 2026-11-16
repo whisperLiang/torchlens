@@ -1,0 +1,256 @@
+"""F29: discoverability -- taught spellings resolve, refusals teach (memo 3.10).
+
+The taught-spelling lint: every code span the surface teaches (guide
+snippets, api_map rows, breadcrumbs, error remedies) resolves in a fresh
+subprocess. Plus the facade repairs (tl._utils/tl.agent cold-resolve, the
+did-you-mean step-5 message) and the typed HF entry recovery.
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+import torchlens as tl
+
+REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+
+
+def _resolves_cold(spelling: str) -> None:
+    """Assert one dotted spelling resolves on a cold import in a subprocess."""
+
+    probe = (
+        "import sys\n"
+        f"sys.path.insert(0, {REPO_ROOT!r})\n"
+        "import torchlens as tl\n"
+        f"obj = eval({spelling!r})\n"
+        "assert obj is not None\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, cwd=REPO_ROOT
+    )
+    assert result.returncode == 0, (spelling, result.stderr[-400:])
+
+
+@pytest.mark.heavy
+def test_breadcrumb_spellings_resolve_cold() -> None:
+    """Every spelling the package docstring teaches resolves on a cold import."""
+
+    docstring = tl.__doc__ or ""
+    assert "to_agent_json" in docstring
+    assert "torchlens.agent.guide()" in docstring
+    assert "python -m torchlens" in docstring
+    for spelling in ("tl.Trace.to_agent_json", "tl.Trace.explain", "tl.agent.guide"):
+        _resolves_cold(spelling)
+
+
+@pytest.mark.heavy
+def test_docs_taught_facade_names_resolve_cold() -> None:
+    """tl._utils / tl.bridge / tl.backends / tl.callbacks / tl.agent cold-resolve."""
+
+    for spelling in ("tl.report.doctor", "tl.bridge", "tl.backends", "tl.callbacks", "tl.agent"):
+        _resolves_cold(spelling)
+
+
+def test_step5_did_you_mean_stays_a_plain_attributeerror() -> None:
+    """Step 5 keeps the PLAIN type; the message teaches close matches."""
+
+    with pytest.raises(AttributeError) as exc:
+        tl.trce  # noqa: B018 - the typo IS the test
+    assert type(exc.value) is AttributeError
+    assert "  candidates" in str(exc.value)
+    assert "trace" in str(exc.value)
+    # hasattr must never explode, and underscore probes stay silent-plain.
+    assert not hasattr(tl, "definitely_not_a_name")
+    with pytest.raises(AttributeError) as dunder_exc:
+        tl._not_a_private_name  # noqa: B018
+    assert "  candidates" not in str(dunder_exc.value)
+
+
+def test_hf_entry_recovery_is_typed_and_teaching() -> None:
+    """tl.trace(model, input_ids=...) refuses typed, naming both remedies."""
+
+    import torch
+    from torch import nn
+
+    model = nn.Linear(4, 4)
+    with pytest.raises(TypeError) as kwargs_exc:
+        tl.trace(model, input_ids=torch.ones(1, 4))
+    assert kwargs_exc.value.fields["code"] == "trace_forward_kwargs_unrouted"
+    assert "input_kwargs" in str(kwargs_exc.value)
+    assert "trace_text" in str(kwargs_exc.value)
+    # Bare tl.trace(model) is no longer a refusal: the quickstart input
+    # ladder (F17, landed law) owns that spelling as the zero-argument
+    # inferred rung, so the historical trace_inputs_missing site is gone.
+
+
+def test_option_field_keyword_names_its_options_class() -> None:
+    """A flat capture-option keyword on tl.trace names CaptureOptions, not input_kwargs."""
+
+    import torch
+    from torch import nn
+
+    with pytest.raises(TypeError) as exc:
+        tl.trace(nn.Linear(4, 4), torch.ones(1, 4), save_grads=True)
+    message = str(exc.value)
+    assert exc.value.fields["code"] == "trace_forward_kwargs_unrouted"
+    assert "capture=tl.options.CaptureOptions(save_grads=...)" in message
+    assert "input_kwargs={" not in message
+    with pytest.raises(TypeError) as near:
+        tl.trace(nn.Linear(4, 4), torch.ones(1, 4), save_grad=True)
+    assert "CaptureOptions(save_grads=...)" in str(near.value)
+
+
+def test_guessed_attribute_names_point_at_the_real_field() -> None:
+    """op.activation, trace.layer_list and op.parent_layers name .out/.layers/.parents."""
+
+    import torch
+    from torch import nn
+
+    trace = tl.trace(nn.Sequential(nn.Linear(4, 4), nn.ReLU()), torch.ones(1, 4))
+    layer = list(trace.layers)[1]
+    op = layer.ops[0]
+    for subject, name, field in (
+        (trace, "layer_list", "trace.layers"),
+        (layer, "activation", ".out"),
+        (op, "activation", ".out"),
+        (op, "parent_layers", ".parents"),
+        (op, "containing_module", ".module"),
+    ):
+        with pytest.raises(AttributeError) as exc:
+            getattr(subject, name)
+        assert field in str(exc.value), (name, str(exc.value))
+    assert not hasattr(layer, "tensor_contents")
+    # The Op fields the agent guide teaches resolve on a real op.
+    for name in ("label", "func_name", "module", "out", "parents", "children"):
+        getattr(op, name)
+    with pytest.raises(AttributeError) as plain:
+        getattr(op, "no_such_field_anywhere")
+    assert "no_such_field_anywhere" in str(plain.value)
+
+
+def test_hf_remedy_spelling_actually_works() -> None:
+    """The remedy the refusal teaches runs: input_kwargs routes keyword forwards."""
+
+    import torch
+    from torch import nn
+
+    class KeywordOnly(nn.Module):
+        """A forward that only accepts keyword inputs (the HF shape)."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.fc = nn.Linear(4, 4)
+
+        def forward(self, *, input_ids: torch.Tensor) -> torch.Tensor:
+            """Consume the keyword input."""
+
+            return self.fc(input_ids)
+
+    log = tl.trace(KeywordOnly(), (), input_kwargs={"input_ids": torch.randn(2, 4)})
+    assert log._num_ops >= 1
+
+
+#: The small transformer the guide's snippets name (``blocks.0.attn.out_proj`` and so on):
+#: an embedding, two pre-norm-free blocks with an inline softmax, and a head.
+_GUIDE_MODEL_SOURCE = """
+class Attn(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.qkv = nn.Linear(8, 24)
+        self.out_proj = nn.Linear(8, 8)
+
+    def forward(self, h):
+        q, k, v = self.qkv(h).chunk(3, dim=-1)
+        probs = torch.softmax(q @ k.transpose(-1, -2) / 8**0.5, dim=-1)
+        return self.out_proj(probs @ v)
+
+
+class Block(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.attn = Attn()
+        self.mlp = nn.Sequential(nn.Linear(8, 16), nn.ReLU(), nn.Linear(16, 8))
+
+    def forward(self, h):
+        h = h + self.attn(h)
+        return h + self.mlp(h)
+
+
+class Net(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embed = nn.Embedding(50, 8)
+        self.blocks = nn.ModuleList([Block(), Block()])
+        self.head = nn.Linear(8, 50)
+
+    def forward(self, ids):
+        h = self.embed(ids)
+        for block in self.blocks:
+            h = block(h)
+        return self.head(h)
+
+
+model = Net().eval()
+x = torch.randint(0, 50, (2, 6))
+"""
+
+
+@pytest.mark.heavy
+def test_guide_snippets_run_verbatim(tmp_path: Path) -> None:
+    """Every fenced snippet in the agent guide executes in a fresh subprocess."""
+
+    from tests.test_agent_surface_helpers import save_clean_artifact
+    from torchlens.agent import AGENT_GUIDE
+
+    artifact = save_clean_artifact(tmp_path)
+    snippets = re.findall(r"\n\n(    .+?)(?=\n\n\S|\n\n#|\Z)", AGENT_GUIDE, re.DOTALL)
+    assert snippets, "the guide lost its fenced snippets"
+    ran = 0
+    for index, snippet in enumerate(snippets):
+        code = "\n".join(line[4:] for line in snippet.splitlines())
+        if "tl.trace" in code and "model" in code and "import torchlens" not in code:
+            continue  # phase-1 fragments need a live model; composed below
+        if ".save(" in code:
+            # A saving snippet writes its OWN artifact (never onto the fixture).
+            code = code.replace("run.tlspec", str(tmp_path / f"snippet_{index}.tlspec"))
+        else:
+            code = code.replace("run.tlspec", str(artifact))
+        harness = (
+            "import sys\n"
+            f"sys.path.insert(0, {REPO_ROOT!r})\n"
+            "import torch\n"
+            "from torch import nn\n"
+            "torch.manual_seed(0)\n"
+            # A guide recipe that warns teaches agents to distrust a correct result.
+            "import warnings\n"
+            "from torchlens.errors import TorchLensWarning\n"
+            "warnings.simplefilter('error', TorchLensWarning)\n"
+            + _GUIDE_MODEL_SOURCE
+            + f"import os; os.chdir({str(tmp_path)!r})\n"
+            + code
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", harness], capture_output=True, text=True, cwd=REPO_ROOT
+        )
+        assert result.returncode == 0, (code, result.stderr[-600:])
+        ran += 1
+    assert ran >= 11, "the snippet lint stopped covering the guide"
+
+
+def test_next_operations_and_dump_next_steps_name_live_spellings(tmp_path: Path) -> None:
+    """Overview next_operations reference served tools; dump guide steps resolve."""
+
+    from tests.test_agent_surface_helpers import save_clean_artifact
+    from torchlens.agent import call_tool, tool_specs
+
+    artifact = save_clean_artifact(tmp_path)
+    served = {spec.name for spec in tool_specs()}
+    overview = call_tool("torchlens_overview", {"path": str(artifact)})
+    for step in overview["data"]["next_operations"].values():
+        named = re.findall(r"torchlens_[a-z_]+", step)
+        assert named and all(name in served for name in named), step

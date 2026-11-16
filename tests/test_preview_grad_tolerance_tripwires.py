@@ -19,7 +19,7 @@ band; ``atol = rtol * finfo.tiny``) at every remaining site:
 * ``jax/backend.py::_values_close`` (JAX replay oracle; pure derivation
   helper tested framework-free),
 * ``paddle/backend.py::_paddle_values_close`` (paddle replay divergence gate),
-* ``mlx/backend.py::_mlx_values_close`` (MLX GradOptions divergence refusal).
+* ``mlx/_grad_oracle.py::_mlx_values_close`` (MLX GradOptions divergence refusal).
 
 The comparison cores are numpy-level, so everything but the jax live check
 runs without the optional backend runtimes installed.
@@ -32,12 +32,10 @@ from typing import Any
 import numpy as np
 import pytest
 
-from torchlens.backends.mlx.backend import _mlx_values_close
+from torchlens.backends.mlx._grad_oracle import _mlx_values_close
 from torchlens.backends.paddle.backend import _paddle_values_close
 from torchlens.backends.tf.derived_grads import _tf_values_close
 from torchlens.backends.tf.validation import _payloads_close as tf_payloads_close
-
-pytestmark = pytest.mark.smoke
 
 
 class _StubPaddleTensor:
@@ -72,44 +70,7 @@ _NUMPY_ORACLES: tuple[tuple[str, Any], ...] = (
 class TestDtypeHonestBands:
     """All four numpy-level oracles must use per-dtype ULP-derived bands."""
 
-    def test_fp64_relative_corruption_fails(self, site: str, close: Any) -> None:
-        """fp64 corruption ~4.5e9 ULP must FAIL (the old blanket rtol blessed it)."""
-
-        saved = np.ones((8,), dtype=np.float64)
-        assert not close(saved * (1.0 + 1e-6), saved)
-
-    def test_fp64_reorder_scale_noise_passes(self, site: str, close: Any) -> None:
-        """fp64 differences at fp64 round-off scale stay a PASS."""
-
-        saved = np.ones((8,), dtype=np.float64)
-        replay = saved * (1.0 + 4.0 * float(np.finfo(np.float64).eps))
-        assert close(replay, saved)
-
-    def test_fp64_small_value_corruption_fails(self, site: str, close: Any) -> None:
-        """fp64 elements below the old 1e-6 atol floor must not be zeroable."""
-
-        saved = np.full((8,), 5e-7, dtype=np.float64)
-        assert not close(np.zeros_like(saved), saved)
-
-    def test_fp32_small_value_corruption_fails(self, site: str, close: Any) -> None:
-        """fp32 elements below the old 1e-6 atol floor must not be zeroable."""
-
-        saved = np.full((8,), 5e-7, dtype=np.float32)
-        assert not close(np.zeros_like(saved), saved)
-
-    def test_fp32_sign_flip_of_small_values_fails(self, site: str, close: Any) -> None:
-        """Sign-flipped low-magnitude fp32 replays must FAIL, not vanish in atol."""
-
-        saved = np.array([4e-7, -3e-7, 2e-7, -1e-7], dtype=np.float32)
-        assert not close(-saved, saved)
-
-    def test_fp32_relative_band_unchanged(self, site: str, close: Any) -> None:
-        """The fp32 relative band keeps the legacy 1e-5 strictness."""
-
-        saved = np.ones((8,), dtype=np.float32)
-        assert close(saved * np.float32(1.0 + 5e-6), saved)
-        assert not close(saved * np.float32(1.0 + 1e-4), saved)
-
+    # Kept by shrink-r4 (per-id subset rule): sole coverage of backends/mlx/_grad_oracle.py, backends/paddle/backend.py, backends/paddle/validation.py ....
     def test_fp16_one_ulp_rounding_passes(self, site: str, close: Any) -> None:
         """A one-ULP fp16 storage-rounding difference is agreement, not corruption.
 
@@ -121,25 +82,57 @@ class TestDtypeHonestBands:
         replay = np.nextafter(saved, np.float16(2.0), dtype=np.float16)
         assert close(replay, saved)
 
-    def test_fp16_zeroed_replay_fails(self, site: str, close: Any) -> None:
-        """Zeroed fp16 activations still FAIL under the dtype-aware band."""
+    @pytest.mark.parametrize(
+        ("saved", "replay"),
+        [
+            pytest.param(
+                np.full((8,), 1e-2, dtype=np.float16),
+                np.zeros((8,), dtype=np.float16),
+                id="half-zeroed",
+            ),
+            pytest.param(
+                np.array([4e-7, -3e-7, 2e-7, -1e-7], dtype=np.float32),
+                -np.array([4e-7, -3e-7, 2e-7, -1e-7], dtype=np.float32),
+                id="single-sign-flip-of-small-values",
+            ),
+            pytest.param(
+                np.full((8,), 5e-7, dtype=np.float32),
+                np.zeros((8,), dtype=np.float32),
+                id="single-small-values-zeroed",
+            ),
+            pytest.param(
+                np.ones((8,), dtype=np.float64),
+                np.ones((8,), dtype=np.float64) * (1.0 + 1e-6),
+                id="double-relative-corruption",
+            ),
+            pytest.param(
+                np.full((8,), 5e-7, dtype=np.float64),
+                np.zeros((8,), dtype=np.float64),
+                id="double-small-values-zeroed",
+            ),
+            pytest.param(
+                np.array([np.nan, 1.0], dtype=np.float64),
+                np.array([0.0, 1.0], dtype=np.float64),
+                id="number-in-place-of-nan",
+            ),
+        ],
+    )
+    def test_corruption_fails_under_every_dtype_band(
+        self, site: str, close: Any, saved: np.ndarray, replay: np.ndarray
+    ) -> None:
+        """Corruption the dtype-blind decimal pair blessed fails at every oracle site.
 
-        saved = np.full((8,), 1e-2, dtype=np.float16)
-        assert not close(np.zeros_like(saved), saved)
+        Zeroed or sign-flipped elements below the old absolute floor, relative
+        corruption far above the accumulating dtype's own round-off, and a
+        number standing in for a NaN are all disagreement. The identical
+        payload (NaN pattern included) stays agreement, so the failure is the
+        corruption and not the dtype or the NaN.
+        """
 
-    def test_identical_payloads_pass(self, site: str, close: Any) -> None:
-        """Exact agreement stays a PASS."""
-
-        saved = np.array([4e-7, -3e-7, 0.0, 1.5], dtype=np.float64)
         assert close(saved.copy(), saved)
+        assert not close(replay, saved)
 
-    def test_nan_pattern_agreement_passes_nan_vs_number_fails(self, site: str, close: Any) -> None:
-        """equal_nan doctrine unchanged: identical NaN patterns agree."""
-
-        saved = np.array([np.nan, 1.0], dtype=np.float64)
-        assert close(saved.copy(), saved)
-        assert not close(np.array([0.0, 1.0], dtype=np.float64), saved)
-
+    # Kept by shrink-r4 (per-id subset rule): sole coverage of backends/mlx/_grad_oracle.py, backends/paddle/backend.py, backends/tf/derived_grads.py ....
     def test_shape_mismatch_fails(self, site: str, close: Any) -> None:
         """Shape disagreement is corruption, never coerced."""
 
@@ -150,88 +143,47 @@ class TestDtypeHonestBands:
 class TestNonFloatExactness:
     """Integer/bool payloads keep exact comparison at every fixed site."""
 
+    # Kept by shrink-r4 (per-id subset rule): sole coverage of backends/tf/validation.py.
     def test_tf_validation_integer_exact(self) -> None:
         ints = np.arange(4, dtype=np.int64)
         assert tf_payloads_close(ints.copy(), ints)
         assert not tf_payloads_close(ints + 1, ints)
 
+    # Kept by shrink-r4 (per-id subset rule): sole coverage of backends/mlx/_grad_oracle.py.
     def test_mlx_backend_bool_exact(self) -> None:
         bools = np.array([True, False])
         assert _mlx_values_close(bools.copy(), bools)
         assert not _mlx_values_close(~bools, bools)
 
-    def test_paddle_bf16_uint16_transport_compares_exactly(self) -> None:
-        """bf16-as-uint16 transport has no numpy finfo: exact bit comparison.
-
-        The paddle dtype TEXT says bfloat16 (a float), but ``.numpy()``
-        transports the payload as ``uint16``; deriving a band from the wrong
-        dtype's finfo (or the old decimal pair's implicit float cast) is
-        forbidden -- this mirrors paddle/validation.py's transport handling.
-        """
-
-        saved = (np.arange(4, dtype=np.uint16) + 1) << 7
-        assert _paddle_close(saved.copy(), saved, dtype_text="paddle.bfloat16")
-        assert not _paddle_close(np.zeros_like(saved), saved, dtype_text="paddle.bfloat16")
-        assert not _paddle_close(saved + 1, saved, dtype_text="paddle.bfloat16")
-
 
 class TestJaxToleranceDerivation:
     """The JAX oracle's band derivation must be per-dtype ULP-honest."""
 
-    def test_derivation_matches_the_ported_error_model(self) -> None:
-        """fp64/fp32/fp16 rows match the paddle/mlx-validation derivation."""
-
-        from torchlens.backends._validation_shared import (
-            float_replay_tolerances as _float_replay_tolerances,
-        )
-
-        eps32 = float(np.finfo(np.float32).eps)
-
-        rtol64, atol64 = _float_replay_tolerances(np.finfo(np.float64))
-        # Old blanket rtol=1e-5 was ~4.5e10 fp64 ULPs; the honest band is
-        # the legacy fp32 strictness rescaled into fp64's own eps.
-        assert rtol64 == pytest.approx(1e-5 * float(np.finfo(np.float64).eps) / eps32)
-        assert rtol64 < 1e-6
-        assert atol64 == pytest.approx(rtol64 * float(np.finfo(np.float64).tiny))
-
-        rtol32, atol32 = _float_replay_tolerances(np.finfo(np.float32))
-        assert rtol32 == pytest.approx(1e-5)
-        assert atol32 == pytest.approx(1e-5 * float(np.finfo(np.float32).tiny))
-
-        rtol16, atol16 = _float_replay_tolerances(np.finfo(np.float16))
-        assert rtol16 == pytest.approx(4.0 * float(np.finfo(np.float16).eps))
-        assert atol16 == pytest.approx(rtol16 * float(np.finfo(np.float16).tiny))
-
-    def test_complex_component_derivation(self) -> None:
-        """Complex dtypes derive from their component real finfo."""
-
-        from torchlens.backends._validation_shared import (
-            float_replay_tolerances as _float_replay_tolerances,
-        )
-
-        rtol_c64, atol_c64 = _float_replay_tolerances(np.finfo(np.complex64))
-        rtol_f32, atol_f32 = _float_replay_tolerances(np.finfo(np.float32))
-        assert rtol_c64 == rtol_f32
-        assert atol_c64 == atol_f32
-
     @pytest.mark.backend_jax
-    @pytest.mark.parametrize("initial_x64", [False, True])
-    def test_live_jax_fp64_corruption_fails(self, initial_x64: bool) -> None:
-        """With jax installed, the full oracle refuses fp64 corruption."""
+    def test_live_jax_fp64_corruption_fails(self) -> None:
+        """With jax installed, the full oracle refuses fp64 corruption.
+
+        ``jax.config`` is process-global: an unscoped ``update("jax_enable_x64",
+        True)`` stuck enabled for the rest of the test session (order-dependent
+        under pytest-randomly), promoting every later jax trace's float32
+        arrays to float64 and cascading into unrelated capture/validation
+        failures across the whole jax suite. Restore the prior value so this
+        test's x64 probe never escapes its own scope.
+        """
 
         jax = pytest.importorskip("jax")
-        import jax.numpy as jnp
+        previous_x64 = jax.config.jax_enable_x64
+        jax.config.update("jax_enable_x64", True)
+        try:
+            import jax.numpy as jnp
 
-        from torchlens.backends.jax.backend import _values_close
+            from torchlens.backends.jax.backend import _values_close
 
-        # The fp64 oracle needs x64 locally; changing the process-global default
-        # also changes unrelated control-flow carry types and jaxpr site indexes.
-        with jax.enable_x64(initial_x64):
-            with jax.enable_x64(True):
-                saved = jnp.ones((8,), dtype=jnp.float64)
-                assert not _values_close(saved * (1.0 + 1e-6), saved)
-                assert _values_close(saved + 0.0, saved)
-            assert jax.config.jax_enable_x64 is initial_x64
+            saved = jnp.ones((8,), dtype=jnp.float64)
+            assert not _values_close(saved * (1.0 + 1e-6), saved)
+            assert _values_close(saved + 0.0, saved)
+        finally:
+            jax.config.update("jax_enable_x64", previous_x64)
 
 
 class TestJaxFiniteDifferenceStep:

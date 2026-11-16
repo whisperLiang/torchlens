@@ -1,0 +1,69 @@
+"""Typed errors for the one-backward read surface.
+
+One public error class with stable ``fields["code"]`` values -- consumers
+branch on codes or structured fields, never message text. Spellings are
+DOCUMENTED-UNSTABLE pending the naming sprint; the codes are the contract
+(rows in ``docs/reference/error_refusal_contract.md``).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ...errors._base import TorchLensError
+
+__all__ = ["ReadError", "ReadInternalError"]
+
+
+class ReadError(TorchLensError, ValueError):
+    """Raised for invalid or unserviceable one-backward read requests.
+
+    Every raise site carries a stable ``code=`` plus structured fields; the
+    closed reason vocabularies ride ``fields`` (for example
+    ``fields["reason"]`` on addressing refusals).
+
+    Examples
+    --------
+    >>> issubclass(tl.errors.ReadError, tl.errors.TorchLensError)
+    True
+    >>> issubclass(tl.errors.ReadError, ValueError)
+    True
+    """
+
+
+class ReadInternalError(TorchLensError, RuntimeError):
+    """Raised when a read-side internal tripwire detects self-contamination.
+
+    Fires only on TorchLens contract breaches (suppression leak, engine
+    result-shape drift), never on user input.
+
+    Examples
+    --------
+    >>> issubclass(tl.errors.ReadInternalError, tl.errors.TorchLensError)
+    True
+    >>> issubclass(tl.errors.ReadInternalError, RuntimeError)
+    True
+    """
+
+
+def require_pandas() -> Any:
+    """Import pandas, refusing with the TorchLens tabular-extra message when it is absent.
+
+    Returns
+    -------
+    Any
+        The imported pandas module.
+
+    Raises
+    ------
+    ImportError
+        Naming ``pip install torchlens[tabular]`` when pandas is not installed.
+    """
+
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise ImportError(
+            "pandas is required for this feature. Install with `pip install torchlens[tabular]`."
+        ) from exc
+    return pd

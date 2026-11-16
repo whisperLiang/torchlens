@@ -14,6 +14,9 @@ from enum import Enum
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Literal
 
+from torchlens.errors import ArgumentTypeError
+from torchlens.split.errors import SplitRequestError
+
 from .placement import DevicePlacement, PlacementPlan
 
 if TYPE_CHECKING:
@@ -22,7 +25,13 @@ if TYPE_CHECKING:
 
 
 class SplitVerificationStatus(str, Enum):
-    """Verification level for a lowered split component."""
+    """Verification level for a lowered split component.
+
+    Examples
+    --------
+    >>> tl.SplitVerificationStatus.EXACT.value
+    'exact'
+    """
 
     EXACT = "exact"
     REGION_VERIFIED = "region_verified"
@@ -37,6 +46,12 @@ class BackendHandle:
 
     ``payload`` is intentionally excluded from :meth:`as_dict`; it may be a
     callable, a JAX jaxpr, a TensorFlow graph object, or a lazy UOp graph.
+
+    Examples
+    --------
+    >>> handle = tl.split.BackendHandle('torch', 'callable', payload=torch.relu)
+    >>> handle.as_dict()
+    {'backend': 'torch', 'kind': 'callable', 'location': None}
     """
 
     backend: str
@@ -52,7 +67,14 @@ class BackendHandle:
 
 @dataclass(frozen=True)
 class ShapeConstraint:
-    """One symbolic shape relation used during replay."""
+    """One symbolic shape relation used during replay.
+
+    Examples
+    --------
+    >>> constraint = tl.split.ShapeConstraint('batch', 'batch_axis', ('v:1',), (0,))
+    >>> constraint.as_dict()['kind']
+    'batch_axis'
+    """
 
     constraint_id: str
     kind: Literal[
@@ -94,7 +116,14 @@ class ShapeConstraint:
 
 @dataclass(frozen=True)
 class ValueIR:
-    """A value flowing through a backend-neutral split graph."""
+    """A value flowing through a backend-neutral split graph.
+
+    Examples
+    --------
+    >>> value = tl.split.ValueIR('v:1', 'input', shape=(1, 3), dtype='torch.float32')
+    >>> value.value_id, value.kind
+    ('v:1', 'input')
+    """
 
     value_id: str
     kind: Literal[
@@ -135,7 +164,15 @@ class ValueIR:
 
 @dataclass(frozen=True)
 class OpIR:
-    """A normal replayable operation and its value dependencies."""
+    """A normal replayable operation and its value dependencies.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> operation = graph.graph_ir.ops[0]
+    >>> operation.replayable, bool(operation.output_value_ids)
+    (True, True)
+    """
 
     node_id: str
     op_type: str
@@ -170,7 +207,15 @@ class OpIR:
 
 @dataclass(frozen=True)
 class RegionIR:
-    """An opaque or structured backend region such as JAX control flow."""
+    """An opaque or structured backend region such as JAX control flow.
+
+    Examples
+    --------
+    >>> region = tl.split.RegionIR('region:1', 'native', ('v:1',), ('v:2',),
+    ...     None, True, False, False, tl.SplitVerificationStatus.EXACT)
+    >>> region.region_kind, region.output_value_ids
+    ('native', ('v:2',))
+    """
 
     node_id: str
     region_kind: str
@@ -205,7 +250,14 @@ class RegionIR:
 
 @dataclass(frozen=True)
 class StateIR:
-    """Parameter, buffer, RNG, mutable-state, and alias declarations."""
+    """Parameter, buffer, RNG, mutable-state, and alias declarations.
+
+    Examples
+    --------
+    >>> state = tl.split.StateIR(parameter_value_ids=('parameter:weight',))
+    >>> state.parameter_value_ids, state.buffer_value_ids
+    (('parameter:weight',), ())
+    """
 
     parameter_value_ids: tuple[str, ...] = ()
     buffer_value_ids: tuple[str, ...] = ()
@@ -238,7 +290,14 @@ BoundaryRole = Literal[
 
 @dataclass(frozen=True)
 class BoundarySchema:
-    """Stable ABI metadata for one split boundary value."""
+    """Stable ABI metadata for one split boundary value.
+
+    Examples
+    --------
+    >>> schema = tl.BoundarySchema('v:1', (), 'activation', (2, 3), 'torch.float32')
+    >>> schema.value_id, schema.shape
+    ('v:1', (2, 3))
+    """
 
     value_id: str
     container_path: tuple[Any, ...]
@@ -286,7 +345,14 @@ class BoundarySchema:
 
 @dataclass(frozen=True)
 class SplitGraphIR:
-    """Normalized graph shared by planners, capability analysis, and lowerers."""
+    """Normalized graph shared by planners, capability analysis, and lowerers.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> graph.graph_ir.backend, bool(graph.graph_ir.ops)
+    ('torch', True)
+    """
 
     backend: str
     graph_hash: str | None
@@ -529,6 +595,12 @@ class SplitFeatures:
     Explicit ``False`` supports Torch inference and training. Compact training
     retains live state and replay recipes, but never an ordinary activation
     archive or a reusable captured autograd graph.
+
+    Examples
+    --------
+    >>> features = tl.SplitFeatures(training=True, retain_trace=False)
+    >>> features.training, features.retain_trace
+    (True, False)
     """
 
     replay: bool = True
@@ -543,14 +615,25 @@ class SplitFeatures:
         """Validate declared batch-axis semantics."""
 
         if self.retain_trace is not None and not isinstance(self.retain_trace, bool):
-            raise TypeError("retain_trace must be a bool or None")
+            raise ArgumentTypeError(
+                "retain_trace must be a bool or None",
+                code="split_argument_type",
+                remedy="set retain_trace to True, False, or None",
+            )
         for path, axis in (self.batch_axes or {}).items():
             if not isinstance(path, str) or not (
                 path.startswith("/args/") or path.startswith("/kwargs/")
             ):
-                raise ValueError("batch_axes keys must be JSON Pointers rooted at /args or /kwargs")
+                raise SplitRequestError(
+                    "batch_axes keys must be JSON Pointers rooted at /args or /kwargs",
+                    code=SplitRequestError.code,
+                )
             if not isinstance(axis, int):
-                raise TypeError("batch_axes values must be integer axis indexes")
+                raise ArgumentTypeError(
+                    "batch_axes values must be integer axis indexes",
+                    code="split_argument_type",
+                    remedy="use integer axis indexes as batch_axes values",
+                )
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize requested feature flags for capability diagnostics."""
@@ -574,6 +657,12 @@ class GraphPartition:
     The planner checks dependency closure and keeps every native call atomic.
     IDs refer to ``SplitTraceNode.canonical_id``, including pass qualification;
     display labels, module aliases and partial native calls are not accepted.
+
+    Examples
+    --------
+    >>> partition = tl.split.GraphPartition(frozenset({'v:2', 'v:5'}))
+    >>> sorted(partition.prefix_node_ids)
+    ['v:2', 'v:5']
     """
 
     prefix_node_ids: frozenset[str]
@@ -582,10 +671,18 @@ class GraphPartition:
         """Freeze the selection and reject invalid ID representations."""
 
         if isinstance(self.prefix_node_ids, (str, bytes)):
-            raise TypeError("prefix_node_ids must be a collection of canonical node IDs")
+            raise ArgumentTypeError(
+                "prefix_node_ids must be a collection of canonical node IDs",
+                code="split_argument_type",
+                remedy="use a collection of non-empty canonical node ID strings",
+            )
         ids = frozenset(self.prefix_node_ids)
         if any(not isinstance(node_id, str) or not node_id for node_id in ids):
-            raise TypeError("prefix_node_ids must contain non-empty canonical node ID strings")
+            raise ArgumentTypeError(
+                "prefix_node_ids must contain non-empty canonical node ID strings",
+                code="split_argument_type",
+                remedy="use a collection of non-empty canonical node ID strings",
+            )
         object.__setattr__(self, "prefix_node_ids", ids)
 
     def as_boundary(self) -> str:
@@ -597,7 +694,14 @@ class GraphPartition:
 
 @dataclass(frozen=True)
 class SplitRequest:
-    """Public v2 request for preparing a split runtime."""
+    """Public v2 request for preparing a split runtime.
+
+    Examples
+    --------
+    >>> request = tl.SplitRequest(tl.split.GraphPartition(frozenset()))
+    >>> request.partition.prefix_node_ids
+    frozenset()
+    """
 
     partition: GraphPartition
     backend: str | None = None
@@ -612,15 +716,32 @@ class SplitRequest:
         """Validate request-level policy."""
 
         if not isinstance(self.partition, GraphPartition):
-            raise TypeError("partition must be a GraphPartition")
+            raise ArgumentTypeError(
+                "partition must be a GraphPartition",
+                code="split_argument_type",
+                remedy="pass a GraphPartition created by dag.to_partition",
+            )
         if self.validation not in {"strict", "permissive"}:
-            raise ValueError("validation must be 'strict' or 'permissive'")
+            raise SplitRequestError(
+                "validation must be 'strict' or 'permissive'",
+                code=SplitRequestError.code,
+            )
         if self.device_policy != "runtime":
-            raise ValueError("device_policy must be 'runtime'")
+            raise SplitRequestError(
+                "device_policy must be 'runtime'",
+                code=SplitRequestError.code,
+            )
         if not self.batch_symbol:
-            raise ValueError("batch_symbol must be non-empty")
+            raise SplitRequestError(
+                "batch_symbol must be non-empty",
+                code=SplitRequestError.code,
+            )
         if not isinstance(self.placement, PlacementPlan):
-            raise TypeError("placement must be a PlacementPlan")
+            raise ArgumentTypeError(
+                "placement must be a PlacementPlan",
+                code="split_argument_type",
+                remedy="pass a PlacementPlan instance as placement",
+            )
 
     @property
     def boundary(self) -> str:
@@ -646,7 +767,14 @@ SplitModelLoader = Callable[..., Any]
 
 @dataclass(frozen=True)
 class SplitModelProfile:
-    """Pinned metadata describing a real-model test/load profile."""
+    """Pinned metadata describing a real-model test/load profile.
+
+    Examples
+    --------
+    >>> profile = tl.SplitModelProfile('doc_example', 'torch', 'mlp')
+    >>> profile.id, profile.backend
+    ('doc_example', 'torch')
+    """
 
     id: str
     backend: str
@@ -663,19 +791,29 @@ class SplitModelProfile:
         """Validate pinned checkpoint metadata when a source is declared."""
 
         if not self.id.strip() or not self.backend.strip() or not self.family.strip():
-            raise ValueError("model profile id, backend, and family must be non-empty")
+            raise SplitRequestError(
+                "model profile id, backend, and family must be non-empty",
+                code=SplitRequestError.code,
+            )
         if self.test_tier not in {"pr", "nightly"}:
-            raise ValueError("model profile test_tier must be 'pr' or 'nightly'")
+            raise SplitRequestError(
+                "model profile test_tier must be 'pr' or 'nightly'",
+                code=SplitRequestError.code,
+            )
         if self.checkpoint_source is not None and (
             not self.checkpoint_revision or not self.checkpoint_sha256
         ):
-            raise ValueError(
-                "checkpoint_source requires a fixed checkpoint_revision and checkpoint_sha256"
+            raise SplitRequestError(
+                "checkpoint_source requires a fixed checkpoint_revision and checkpoint_sha256",
+                code=SplitRequestError.code,
             )
         if self.checkpoint_sha256 is not None:
             digest = self.checkpoint_sha256.lower()
             if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
-                raise ValueError("checkpoint_sha256 must be a 64-character hexadecimal digest")
+                raise SplitRequestError(
+                    "checkpoint_sha256 must be a 64-character hexadecimal digest",
+                    code=SplitRequestError.code,
+                )
 
     @property
     def profile_hash(self) -> str:
@@ -801,7 +939,7 @@ def _shape_tuple(shape: Any) -> tuple[Any, ...] | None:
         return None
 
 
-__all__ = [
+__all__ = (
     "BackendHandle",
     "BoundaryRole",
     "BoundarySchema",
@@ -818,4 +956,4 @@ __all__ = [
     "SplitVerificationStatus",
     "StateIR",
     "ValueIR",
-]
+)

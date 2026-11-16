@@ -11,7 +11,7 @@ from torch import nn
 import torchlens as tl
 from torchlens.intervention.errors import AppendBatchDependenceError, ControlFlowDivergenceWarning
 from torchlens.io import load_intervention_spec
-from torchlens.options import CaptureOptions, ReplayOptions
+from torchlens.options import CaptureOptions
 
 
 class _AppendSemanticsModel(nn.Module):
@@ -54,7 +54,7 @@ def _first_batch_out(trace: tl.Trace) -> torch.Tensor:
         First batched saved output.
     """
 
-    for layer in trace.layer_list:
+    for layer in trace._layer_list:
         if isinstance(layer.out, torch.Tensor) and layer.out.ndim > 0:
             return layer.out
     raise AssertionError("no batched output found")
@@ -67,19 +67,19 @@ def test_is_appended_resets_on_non_append_rerun() -> None:
     trace = tl.trace(
         model,
         torch.randn(2, 3),
-        capture=CaptureOptions(intervention_ready=True),
+        capture=CaptureOptions(replayable=True),
     )
-    trace.run(model, torch.randn(1, 3), replay=ReplayOptions(append=True))
+    trace.append(torch.randn(1, 3), model=model)
 
-    assert trace.is_appended is True
+    assert trace.provenance.is_appended is True
     assert trace._append_sequence_id == 1
 
     with pytest.warns(ControlFlowDivergenceWarning, match="raw-event shape hash diverged"):
-        trace.run(model, torch.randn(4, 3))
+        trace = trace.run(model, torch.randn(4, 3))
 
-    assert trace.is_appended is False
+    assert trace.provenance.is_appended is False
     assert trace._append_sequence_id == 0
-    assert trace.append_history == []
+    assert trace._append_history == []
     assert _first_batch_out(trace).shape[0] == 4
 
 
@@ -90,16 +90,16 @@ def test_repeated_appends_increment_sequence_id_and_history() -> None:
     trace = tl.trace(
         model,
         torch.randn(2, 3),
-        capture=CaptureOptions(intervention_ready=True),
+        capture=CaptureOptions(replayable=True),
     )
 
-    trace.run(model, torch.randn(1, 3), replay=ReplayOptions(append=True))
-    trace.run(model, torch.randn(3, 3), replay=ReplayOptions(append=True))
+    trace.append(torch.randn(1, 3), model=model)
+    trace.append(torch.randn(3, 3), model=model)
 
-    assert trace.is_appended is True
+    assert trace.provenance.is_appended is True
     assert trace._append_sequence_id == 2
-    assert [record["append_sequence_id"] for record in trace.append_history] == [1, 2]
-    assert [record["chunk_size"] for record in trace.append_history] == [1, 3]
+    assert [record["append_sequence_id"] for record in trace._append_history] == [1, 2]
+    assert [record["chunk_size"] for record in trace._append_history] == [1, 3]
     assert _first_batch_out(trace).shape[0] == 6
 
 
@@ -110,9 +110,9 @@ def test_intervention_save_append_state_consistency(tmp_path: Path) -> None:
     trace = tl.trace(
         model,
         torch.randn(2, 3),
-        capture=CaptureOptions(intervention_ready=True),
+        capture=CaptureOptions(replayable=True),
     )
-    trace.run(model, torch.randn(1, 3), replay=ReplayOptions(append=True))
+    trace.append(torch.randn(1, 3), model=model)
 
     spec_path = tmp_path / "append_state.tlspec"
     trace.save_intervention(spec_path, level="audit")
@@ -133,12 +133,12 @@ def test_append_train_mode_no_helper_grad_message() -> None:
         model,
         torch.randn(2, 3),
         capture=CaptureOptions(
-            intervention_ready=True,
+            replayable=True,
             save_grads=True,
             backward_ready=True,
         ),
     )
-    trace.log_backward(trace[trace.output_layers[0]].out.sum(), retain_graph=True)
+    trace.backward(trace[trace.output_layers[0]].out.sum(), retain_graph=True)
 
     with pytest.raises(AppendBatchDependenceError, match="batch-independent helper"):
-        trace.run(model, torch.randn(1, 3), replay=ReplayOptions(append=True))
+        trace.append(torch.randn(1, 3), model=model)

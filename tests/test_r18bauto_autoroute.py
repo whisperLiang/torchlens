@@ -6,7 +6,7 @@ the guard and crashed deep in the capture pipeline with an opaque torch error in
 clean ``UnsupportedTensorVariantError`` up front.
 
 Item 1 (A3-05 double-construction reuse) is a deferred patch request routed to the bridge/hf.py
-owner; it is documented in .research/prelaunch-triage/R18BAUTO_REPORT.md and not tested here because
+owner; it is documented in the private R18BAUTO triage report and not tested here because
 its fix lives in an off-lease file.
 """
 
@@ -25,7 +25,6 @@ class _AddOne(nn.Module):
         return x + 1
 
 
-@pytest.mark.smoke
 def test_record_rejects_meta_tensor_like_trace() -> None:
     model = _AddOne()
     # trace already rejects; record must match.
@@ -35,7 +34,6 @@ def test_record_rejects_meta_tensor_like_trace() -> None:
         tl.record(model, torch.randn(4, device="meta"), save=tl.func("add"))
 
 
-@pytest.mark.smoke
 def test_record_rejects_sparse_tensor_like_trace() -> None:
     model = _AddOne()
     with pytest.raises(UnsupportedTensorVariantError):
@@ -44,7 +42,6 @@ def test_record_rejects_sparse_tensor_like_trace() -> None:
         tl.record(model, torch.randn(4).to_sparse(), save=tl.func("add"))
 
 
-@pytest.mark.smoke
 def test_record_rejects_sparse_in_keyword_input() -> None:
     """Guard walks keyword inputs too (sibling boundary trace() covers)."""
 
@@ -57,7 +54,6 @@ def test_record_rejects_sparse_in_keyword_input() -> None:
         tl.record(model, [], input_kwargs={"x": torch.randn(4).to_sparse()}, save=tl.func("add"))
 
 
-@pytest.mark.smoke
 def test_record_accepts_dense_cpu_input() -> None:
     """Control: a normal dense CPU input still records without error."""
     model = _AddOne()

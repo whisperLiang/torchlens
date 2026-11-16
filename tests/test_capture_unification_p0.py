@@ -10,8 +10,9 @@ import torch
 from torch import nn
 
 import torchlens as tl
-import torchlens.postprocess._materialize as materialize_mod
-from torchlens.ir import DeviceRef, DtypeRef
+import torchlens._postprocess._materialize as materialize_mod
+from torchlens._ir import DeviceRef, DtypeRef
+from torchlens._utils._record_group_table import record_member
 
 
 @dataclass(slots=True)
@@ -130,12 +131,12 @@ def test_phase0_op_event_fields_are_populated(monkeypatch: pytest.MonkeyPatch) -
     # does not exist on decomposed OpRecords (strict-protocol default None).
     index_handle = snapshot.grad_fn_handles_by_label_raw.get(add_event.label_raw)
     assert index_handle is not None
-    from torchlens.ir.events import OpEvent as _OpEvent
+    from torchlens._ir.events import OpEvent as _OpEvent
 
     if isinstance(add_event, _OpEvent):
         assert add_event.grad_fn_handle is index_handle
     else:
-        assert getattr(add_event, "grad_fn_handle", None) is None
+        assert record_member(add_event, "grad_fn_handle", None) is None
     assert add_event.parent_params == ()
     assert add_event.equivalence_class
     assert add_event.is_output_parent is True
@@ -149,7 +150,7 @@ def test_phase0_op_event_fields_are_populated(monkeypatch: pytest.MonkeyPatch) -
     assert {edge.arg_kind for edge in add_event._edge_uses} == {"positional", "keyword"}
     assert any(parent.arg_position == (0, 0) for parent in cat_event.parents)
     assert any(
-        parent.arg_position == "other" and parent.edge_use == "kwarg"
+        parent.arg_position == "other" and parent._edge_use == "kwarg"
         for parent in add_event.parents
     )
 
@@ -212,7 +213,7 @@ def test_phase0_dtype_device_refs_round_trip(monkeypatch: pytest.MonkeyPatch) ->
     assert isinstance(DeviceRef.from_value(output_op.out.device), DeviceRef)
     assert output_op.dtype_ref == DtypeRef.from_value(output_op.dtype)
     assert output_op.device_ref == DeviceRef.from_value(output_op.out.device)
-    assert output_op.backend_address == output_op.address
+    assert output_op.backend_address == output_op.buffer_address
     assert output_op.resolver_status == "resolved"
     assert trace.layers[output_op.layer_label].dtype_ref == output_op.dtype_ref
     assert trace.layers[output_op.layer_label].device_ref == output_op.device_ref
@@ -227,9 +228,9 @@ def test_phase0_trace_param_source_and_neutral_param_refs() -> None:
     x = torch.randn(2, 3)
     trace = tl.trace(model, x)
 
-    assert trace.backend == "torch"
-    assert trace.module_identity_mode == "torch_module"
-    assert trace.param_source == "native-module"
+    assert trace.provenance.backend == "torch"
+    assert trace.options.module_identity_mode == "torch_module"
+    assert trace.provenance.param_source == "native-module"
     param = trace.params["linear.weight"]
     assert param.dtype_ref == DtypeRef.from_value(param.dtype)
     assert param.device_ref is None
@@ -245,8 +246,8 @@ def test_phase0_neutral_refs_default_fill_legacy_object_state() -> None:
     trace = tl.trace(model, x)
 
     trace_state = trace.__getstate__()
-    trace_state.pop("module_identity_mode")
-    trace_state.pop("param_source")
+    trace_state.pop("_options_module_identity_mode")
+    trace_state.pop("_provenance_param_source")
     loaded = type(trace).__new__(type(trace))
     loaded.__setstate__(trace_state)
 
@@ -264,8 +265,8 @@ def test_phase0_neutral_refs_default_fill_legacy_object_state() -> None:
     loaded_param = type(param).__new__(type(param))
     loaded_param.__setstate__(param_state)
 
-    assert loaded.module_identity_mode == "torch_module"
-    assert loaded.param_source == "native-module"
+    assert loaded.options.module_identity_mode == "torch_module"
+    assert loaded.provenance.param_source == "native-module"
     assert loaded_op.dtype_ref == DtypeRef.from_value(loaded_op.dtype)
     assert loaded_op.resolver_status == "resolved"
     assert loaded_param.dtype_ref == DtypeRef.from_value(loaded_param.dtype)

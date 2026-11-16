@@ -21,6 +21,16 @@ class ParameterOwnership:
     Named IDs use qualified model names and retain all tied aliases. Anonymous
     IDs use canonical replay occurrences. IDs are scoped to ``graph_id`` and
     never expose process-local object addresses.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> partition = graph.compute_dag().to_partition(())
+    >>> analysis = graph.analyze(partition)
+    >>> runtime = graph.materialize(analysis)
+    >>> owners = runtime.parameter_ownership()
+    >>> bool(owners), all(row.kind == 'parameter' for row in owners)
+    (True, True)
     """
 
     state_id: str
@@ -38,7 +48,15 @@ class ParameterOwnership:
 
 @dataclass(frozen=True)
 class StateMigration:
-    """Describe movement and external optimizer responsibilities for one source."""
+    """Describe movement and external optimizer responsibilities for one source.
+
+    Examples
+    --------
+    >>> migration = tl.split.StateMigration('parameter:weight', 'parameter',
+    ...     ('prefix',), ('suffix',), (('prefix', 'cpu'),), (('suffix', 'cpu'),), True, 'keep')
+    >>> migration.identity_preserved, migration.optimizer_action
+    (True, 'keep')
+    """
 
     state_id: str
     kind: StateKind
@@ -53,7 +71,18 @@ class StateMigration:
 
 @dataclass(frozen=True)
 class StateMigrationPlan:
-    """A description only: TorchLens neither moves optimizer state nor steps it."""
+    """A description only: TorchLens neither moves optimizer state nor steps it.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> partition = graph.compute_dag().to_partition(())
+    >>> analysis = graph.analyze(partition)
+    >>> runtime = graph.materialize(analysis)
+    >>> migration = runtime.plan_state_migration(partition)
+    >>> migration.supported, migration.optimizer_owner
+    (True, 'caller')
+    """
 
     graph_id: str | None
     source_partition: str
@@ -80,6 +109,7 @@ def _require_torch(runtime: Any) -> None:
                 split_point=runtime.request.boundary,
                 reason="state_ownership_unsupported",
             ),
+            code=SplitUnsupportedError.code,
         )
 
 
@@ -379,11 +409,11 @@ def plan_state_migration(runtime: Any, partition: GraphPartition) -> StateMigrat
         )
 
 
-__all__ = [
+__all__ = (
     "ParameterOwnership",
     "StateMigration",
     "StateMigrationPlan",
     "parameter_bindings",
     "parameter_ownership",
     "plan_state_migration",
-]
+)

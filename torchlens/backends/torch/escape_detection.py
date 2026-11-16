@@ -1,5 +1,4 @@
 """Opt-in shadow detection for stale detached torch callable invocations.
-
 The detector is diagnostic only in this rollout. It reports exact callable/code
 identity escapes and marks the Trace unverified; it does not enforce capture
 completeness without the separate dispatcher witness.
@@ -7,7 +6,6 @@ completeness without the separate dispatcher witness.
 
 from __future__ import annotations
 
-import contextlib
 import inspect
 import sys
 import threading
@@ -16,14 +14,21 @@ import traceback
 import types
 import warnings
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 import torch
 
 from ... import _state
-from ..._errors import TorchLensCaptureGapWarning
+from ..._constants import get_orig_torch_funcs
+from ..._entry_refusals import refuse_if_exemptions_over_budget
+from ..._errors import CaptureGapWarning
+from ..._utils._display_bounded import short_dataclass_repr
+from ..._utils.display import user_stacklevel
+from ..._utils.introspection import nested_getattr
+from ...errors._base import transparent_contextmanager
+from ._escape_detection_fields import _RECORDING_DIAGNOSTIC_FIELDS
 
 EscapeDetectorMode = Literal["off", "shadow"]
 """Supported callable escape-detector rollout modes."""
@@ -159,8 +164,7 @@ AUDITED_ESCAPE_EXEMPTIONS: tuple[AuditedEscapeExemption, ...] = (
 )
 """Reviewable exact exemptions; additions require a regression test and reason."""
 
-if len(AUDITED_ESCAPE_EXEMPTIONS) > MAX_AUDITED_EXEMPTIONS:
-    raise RuntimeError("TorchLens callable escape exemption budget exceeded.")
+refuse_if_exemptions_over_budget(len(AUDITED_ESCAPE_EXEMPTIONS), MAX_AUDITED_EXEMPTIONS)
 
 
 @dataclass(frozen=True)
@@ -174,6 +178,10 @@ class DetectorTables:
     tensor_method_name_to_raw_ids: Mapping[str, tuple[int, ...]]
     export_sites: Mapping[int, tuple[str, ...]]
     excluded_raw_ids: frozenset[int]
+
+
+_OUTPUT_SCOPED_CREDIT_PREFIX = "module_forward:"
+"""Wrapper-name prefix whose boundary credit is scoped to the boundary tensors."""
 
 
 @dataclass
@@ -193,11 +201,28 @@ class ExpectedOriginalToken:
     capture_accounted: bool | None = None
     capture_accounted_outputs: dict[int, tuple[torch.Tensor, str]] = field(default_factory=dict)
     capture_callsite: tuple[str, int, str] | None = None
+    boundary_credit_is_output_scoped: bool = field(init=False, default=False)
+    """Whether boundary-backed credit covers only the dispatches that built boundary tensors.
+
+    Derived from ``wrapper_name`` in ``__post_init__`` (true for a ``module_forward:``
+    wrapper), so no construction site can leave it unset and fail open, and the
+    per-dispatch hot path reads one attribute. A module-forward token owns every dispatch in the
+    module body that no inner wrapper owns, so an untraced module output must not credit
+    unrelated raw ops in that body. A raw replacement-hook token keeps whole-interval
+    credit: a genuine user replacement's construction is opaque by design.
+    """
+
+    def __post_init__(self) -> None:
+        self.boundary_credit_is_output_scoped = self.wrapper_name.startswith(
+            _OUTPUT_SCOPED_CREDIT_PREFIX
+        )
 
 
 @dataclass
 class _GuardState:
     """Per-forward detector state installed only in the capture owner thread."""
+
+    __repr__ = short_dataclass_repr
 
     trace: Any
     tables: DetectorTables
@@ -240,9 +265,6 @@ def _safe_qualname(value: Any) -> str:
 
 def _build_export_sites() -> dict[int, tuple[str, ...]]:
     """Build exact raw-id to currently registered torch export-site names."""
-
-    from ...constants import get_orig_torch_funcs
-    from ...utils.introspection import nested_getattr
 
     sites: dict[int, list[str]] = {}
     for namespace_name, func_name in get_orig_torch_funcs():
@@ -352,7 +374,6 @@ def expected_original_call(
     census_scope: Literal["owned", "expected_opaque"] = "owned",
 ) -> AbstractContextManager[ExpectedOriginalToken]:
     """Authorize exactly one immediate wrapper-to-original profiler event.
-
     Parameters
     ----------
     original:
@@ -368,7 +389,6 @@ def expected_original_call(
     census_scope:
         Whether dispatcher work belongs to a prospective captured op or an
         exact documented opaque boundary.
-
     Returns
     -------
     AbstractContextManager[ExpectedOriginalToken]
@@ -566,7 +586,7 @@ def _report_escape(
         "storage_hint": _storage_hint(callsite),
         "owner_thread_id": guard.owner_thread_id,
         "guard_pass_index": guard.guard_pass_index,
-        "capture_mode": getattr(guard.trace, "capture_mode", None),
+        "capture_mode": guard.trace._options_mode,
         "exhaustive_pass": guard.trace._wrapper_runtime_ws.in_exhaustive_pass,
         "stack": tuple(traceback.format_stack(callsite, limit=5)),
         "witness_corroborated": False,
@@ -574,17 +594,18 @@ def _report_escape(
     }
     reports = guard.trace.__dict__.setdefault("escape_diagnostics", [])
     reports.append(detail)
-    guard.trace.escape_detector_verified = False
-    guard.trace.capture_verified = False
-    guard.trace.capture_verification_reason = "callable_escape_shadow_report"
+    guard.trace._health_escape_detector_verified = False
+    guard.trace._provenance_verified = False
+    guard.trace._provenance_verification_reason = "callable_escape_shadow_report"
     callable_name = _safe_qualname(original)
     warnings.warn(
         "TorchLens shadow detector observed a raw torch callable outside its registered "
         f"wrapper edge: {callable_name} at {detail['file']}:{detail['line']} in "
         f"{detail['function']} (storage hint: {detail['storage_hint']}). The Trace is marked "
-        "capture_verified=False. Rebind after tl.wrap_torch() or use a live torch "
+        "trace.provenance.verified=False. Rebind after torchlens.backends.torch.wrappers"
+        ".wrap_torch() or use a live torch "
         "namespace lookup; escapes with a signal are recovered by the rescue re-run.",
-        TorchLensCaptureGapWarning,
+        CaptureGapWarning,
         stacklevel=2,
     )
 
@@ -643,7 +664,7 @@ def _install_setprofile(guard: _GuardState) -> None:
             "TorchLens found its escape-detector profile hook stranded by a previous "
             "capture's failed teardown and reclaimed it. Any host profiler that was "
             "active below it was already non-functional and is not restored.",
-            TorchLensCaptureGapWarning,
+            CaptureGapWarning,
             stacklevel=2,
         )
         prior = None
@@ -654,10 +675,10 @@ def _install_setprofile(guard: _GuardState) -> None:
 def _uninstall_setprofile(guard: _GuardState) -> None:
     """Restore the profile slot only when it still holds OUR callback.
 
-    The codebase's profile-slot standard (rng.py e08cab94, rescue.py): a
+    The codebase's profile-slot standard (see rng.py and rescue.py): a
     foreign profiler installed over the detector mid-window must not be
     clobbered by an unconditional restore -- leave the slot to its current
-    owner instead (grind-r5 b8 R56).
+    owner instead.
     """
 
     if sys.getprofile() is _profile_callback:
@@ -671,7 +692,7 @@ def _find_monitoring_tool_id(monitoring: Any) -> int:
     DEBUGGER (0) / COVERAGE (1) / PROFILER (2) / OPTIMIZER (5) slots invited
     silent contention -- legacy ``sys.setprofile`` (the RNG monitor's belt)
     rides tool id 2 without consulting ``use_tool_id`` reservations, so a
-    detector parked there stopped seeing events (grind-r5 b8 R57).
+    detector parked there stopped seeing events.
     """
 
     candidates = (4, 3)
@@ -799,36 +820,12 @@ def _copy_recording_diagnostics(trace: Any) -> None:
     recording = getattr(trace, "_fastlog_recording", None)
     if recording is None:
         return
-    for field_name in (
-        "escape_detector_mode",
-        "escape_detector_verified",
-        "completeness_witness_mode",
-        "completeness_witness_verified",
-        "capture_owner_thread_id",
-        "capture_owner_thread_qualified",
-        "capture_thread_count_start",
-        "capture_thread_count_end",
-        "capture_thread_activity_detected",
-        "capture_verified",
-        "capture_verification_reason",
-        "escape_detector_backward_coverage",
-        "escape_diagnostics",
-        "escape_detector_event_count",
-        "escape_detector_callback_ns",
-        "completeness_diagnostics",
-        "completeness_decompositions",
-        "completeness_witness_event_count",
-        "completeness_witness_accounted_count",
-        "completeness_witness_expected_opaque_count",
-        "completeness_witness_unaccounted_count",
-        "completeness_witness_callback_ns",
-        "capture_guard_passes",
-    ):
-        if hasattr(trace, field_name):
-            object.__setattr__(recording, field_name, getattr(trace, field_name))
+    for recording_name, trace_name in _RECORDING_DIAGNOSTIC_FIELDS:
+        if hasattr(trace, trace_name):
+            object.__setattr__(recording, recording_name, getattr(trace, trace_name))
 
 
-@contextmanager
+@transparent_contextmanager
 def capture_escape_guard(trace: Any) -> Iterator[None]:
     """Record owner-thread qualification and optionally arm shadow detection.
 
@@ -852,33 +849,32 @@ def capture_escape_guard(trace: Any) -> Iterator[None]:
     guard_passes.append(
         {
             "guard_pass_index": guard_pass_index,
-            "capture_mode": getattr(trace, "capture_mode", None),
+            "capture_mode": trace._options_mode,
             "owner_thread_id": owner_thread_id,
         }
     )
     guard = _GuardState(trace, tables, owner_thread_id, mode, guard_pass_index)
-    trace.escape_detector_mode = mode
-    if not hasattr(trace, "escape_detector_verified"):
-        trace.escape_detector_verified = True if mode == "shadow" else None
-    trace.capture_owner_thread_id = owner_thread_id
-    trace.capture_owner_thread_qualified = True
-    trace.capture_thread_count_start = thread_count_start
-    trace.capture_thread_activity_detected = False
-    trace.escape_detector_backward_coverage = "not_armed"
+    trace._health_escape_detector_mode = mode
+    if "_health_escape_detector_verified" not in trace.__dict__:
+        trace._health_escape_detector_verified = True if mode == "shadow" else None
+    trace._provenance_owner_thread_id = owner_thread_id
+    trace._provenance_owner_thread_qualified = True
+    trace._provenance_thread_count_start = thread_count_start
+    trace._provenance_thread_activity_detected = False
+    trace._autograd_escape_detector_backward_coverage = "not_armed"
     trace.__dict__.setdefault("escape_diagnostics", [])
-    trace.__dict__.setdefault("rescue_rerun", None)
-    trace.capture_verified = False if mode == "shadow" else None
-    trace.capture_verification_reason = "shadow_diagnostic_mode" if mode == "shadow" else None
+    trace.__dict__.setdefault("_rescue_rerun", None)
+    trace._provenance_verified = False if mode == "shadow" else None
+    trace._provenance_verification_reason = "shadow_diagnostic_mode" if mode == "shadow" else None
     _THREAD_STATE.guard = guard
     try:
         if mode == "shadow":
             _install_detector(guard)
         yield
     finally:
-        # Clear the thread-local guard BEFORE the uninstall and fence the uninstall
-        # itself: a raise inside ``_uninstall_detector`` used to skip
-        # ``_THREAD_STATE.guard = None`` and every diagnostic write below it, stranding a
-        # torn-down guard as this thread's live guard for the rest of the process.
+        # Clear the thread-local guard BEFORE the uninstall and fence the uninstall itself: a raise
+        # in ``_uninstall_detector`` used to skip ``_THREAD_STATE.guard = None`` and every
+        # diagnostic write below, leaving a torn-down guard as this thread's live guard for good.
         _THREAD_STATE.guard = None
         _THREAD_STATE.tokens = []
         if mode == "shadow":
@@ -890,13 +886,13 @@ def capture_escape_guard(trace: Any) -> Iterator[None]:
                 # blessed verdict. Disclose, demote every authority field this guard
                 # owns, and best-effort clear the one residual we can still see.
                 if sys.getprofile() is _profile_callback:
-                    with contextlib.suppress(Exception):
+                    with suppress(Exception):
                         sys.setprofile(guard.prior_profile)
-                trace.escape_detector_verified = False
-                if getattr(trace, "completeness_witness_verified", None) is True:
-                    trace.completeness_witness_verified = False
-                trace.capture_verified = False
-                trace.capture_verification_reason = "escape_detector_teardown_failed"
+                trace._health_escape_detector_verified = False
+                if trace.__dict__.get("_health_completeness_verified") is True:
+                    trace._health_completeness_verified = False
+                trace._provenance_verified = False
+                trace._provenance_verification_reason = "escape_detector_teardown_failed"
                 reports = trace.__dict__.setdefault("escape_diagnostics", [])
                 reports.append(
                     {
@@ -909,34 +905,34 @@ def capture_escape_guard(trace: Any) -> Iterator[None]:
                 )
                 warnings.warn(
                     "TorchLens failed to uninstall its escape detector "
-                    f"({teardown_exc!r}). The Trace is marked capture_verified=False "
+                    f"({teardown_exc!r}). The Trace is marked trace.provenance.verified=False "
                     "(reason: escape_detector_teardown_failed); a leaked hook may still "
                     "be active in this process.",
-                    TorchLensCaptureGapWarning,
-                    stacklevel=2,
+                    CaptureGapWarning,
+                    stacklevel=user_stacklevel(),
                 )
         thread_count_end = threading.active_count()
-        trace.capture_thread_count_end = thread_count_end
-        trace.capture_thread_activity_detected = thread_count_end != thread_count_start
-        trace.escape_detector_event_count = (
-            int(getattr(trace, "escape_detector_event_count", 0)) + guard.event_count
+        trace._provenance_thread_count_end = thread_count_end
+        trace._provenance_thread_activity_detected = thread_count_end != thread_count_start
+        trace._health_num_escape_detector_events = (
+            int(trace.__dict__.get("_health_num_escape_detector_events", 0)) + guard.event_count
         )
-        trace.escape_detector_callback_ns = (
-            int(getattr(trace, "escape_detector_callback_ns", 0)) + guard.callback_ns
+        trace._health_escape_detector_callback_ns = (
+            int(trace.__dict__.get("_health_escape_detector_callback_ns", 0)) + guard.callback_ns
         )
-        if trace.capture_thread_activity_detected:
+        if trace._provenance_thread_activity_detected:
             if mode == "shadow":
-                trace.escape_detector_verified = False
-            if getattr(trace, "completeness_witness_verified", None) is True:
-                trace.completeness_witness_verified = False
-            trace.capture_verified = False
-            trace.capture_verification_reason = "owner_thread_tripwire_changed"
+                trace._health_escape_detector_verified = False
+            if trace.__dict__.get("_health_completeness_verified") is True:
+                trace._health_completeness_verified = False
+            trace._provenance_verified = False
+            trace._provenance_verification_reason = "owner_thread_tripwire_changed"
             warnings.warn(
                 "TorchLens observed a thread-count change during capture. The supported proof "
                 "domain is the capture-owner thread; move model tensor work into that thread "
                 "or treat this Trace as unverified.",
-                TorchLensCaptureGapWarning,
-                stacklevel=2,
+                CaptureGapWarning,
+                stacklevel=user_stacklevel(),
             )
         if getattr(trace, "_raw_dynamo_region_detected", False):
             # A bypassed torch.compile region is the ROOT cause of the incompleteness and
@@ -946,6 +942,6 @@ def capture_escape_guard(trace: Any) -> Iterator[None]:
             # unlogged compiled region is honest-but-misleading, so name the real cause.
             # This is the last verdict site in the capture scope, hence the unconditional
             # override; it only ever ceilings the verdict, never lifts one.
-            trace.capture_verified = False
-            trace.capture_verification_reason = "dynamo_region_not_logged"
+            trace._provenance_verified = False
+            trace._provenance_verification_reason = "dynamo_region_not_logged"
         _copy_recording_diagnostics(trace)

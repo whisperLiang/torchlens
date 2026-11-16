@@ -1,11 +1,89 @@
-"""Traversal, operand addressing, and structural signatures for tinygrad UOp graphs."""
+"""UOp-graph walks the tinygrad capture records ops from.
+
+Extracted from ``backend`` so that module stays under its size ceiling.
+:func:`_data_flow_uops` picks the UOps a capture records: those whose value
+reaches an output as data.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any, cast
+
+
+def _uop_argument_sources(uop: Any) -> tuple[Any, ...]:
+    """Return call operands, excluding an unbound function or kernel body."""
+
+    sources = tuple(getattr(uop, "src", ()) or ())
+    return sources[1:] if _uop_name(uop) in {"FUNCTION", "CALL"} else sources
+
+
+def _uop_parent_paths(
+    uop: Any, labels: Mapping[int, str]
+) -> tuple[tuple[int | tuple[int, ...], str], ...]:
+    """Find tensor operands through native function and tuple containers.
+
+    Parameters
+    ----------
+    uop
+        Value-producing UOp whose incoming data edges are being recorded.
+    labels
+        Already emitted tensor UOps, including capture inputs.
+
+    Returns
+    -------
+    tuple
+        Direct indices or nested operand paths, paired with raw labels.
+    """
+
+    parents: list[tuple[int | tuple[int, ...], str]] = []
+    stack: list[tuple[tuple[int, ...], Any]] = [
+        ((index,), source) for index, source in reversed(tuple(enumerate(uop.src)))
+    ]
+    while stack:
+        path, source = stack.pop()
+        if (label := labels.get(id(source))) is not None:
+            parents.append((path[0] if len(path) == 1 else path, label))
+        elif (name := _uop_name(source)) in {"FUNCTION", "CALL", "TUPLE"}:
+            stack.extend(
+                ((*path, index), child)
+                for index, child in reversed(tuple(enumerate(source.src)))
+                if index != 0 or name not in {"FUNCTION", "CALL"}
+            )
+    return tuple(parents)
+
+
+def _uop_source_at_path(uop: Any, position: int | tuple[int, ...]) -> Any:
+    """Resolve a native operand occurrence, including non-tensor call containers."""
+
+    path = (position,) if isinstance(position, int) else position
+    if not isinstance(path, tuple) or not path:
+        raise ValueError(f"tinygrad parent arg position {position!r} is invalid.")
+    current = uop
+    for index in path:
+        sources = tuple(getattr(current, "src", ()) or ())
+        if not isinstance(index, int) or not 0 <= index < len(sources):
+            raise ValueError(f"tinygrad parent arg position {position!r} is invalid.")
+        current = sources[index]
+    return current
+
+
+def _replace_uop_source_at_path(uop: Any, position: int | tuple[int, ...], replacement: Any) -> Any:
+    """Bind one native operand by rebuilding only its immutable ancestor path."""
+
+    _uop_source_at_path(uop, position)
+    path = (position,) if isinstance(position, int) else position
+    ancestors = [uop]
+    for index in path[:-1]:
+        ancestors.append(ancestors[-1].src[index])
+    result = replacement
+    for parent, index in zip(reversed(ancestors), reversed(path), strict=True):
+        sources = list(parent.src)
+        sources[index] = result
+        result = parent.replace(src=tuple(sources))
+    return result
 
 
 def _unique_uops(outputs: Sequence[Any]) -> tuple[Any, ...]:
@@ -24,13 +102,6 @@ def _unique_uops(outputs: Sequence[Any]) -> tuple[Any, ...]:
 
     seen: set[int] = set()
     ordered: list[Any] = []
-
-    def callable_arguments(uop: Any) -> tuple[Any, ...]:
-        """Traverse call arguments, never an unbound function/kernel body."""
-
-        src = tuple(getattr(uop, "src", ()) or ())
-        return src[1:] if _uop_name(uop) in {"FUNCTION", "CALL"} else src
-
     for output in outputs:
         stack = [(cast(Any, output).uop, False)]
         while stack:
@@ -42,99 +113,20 @@ def _unique_uops(outputs: Sequence[Any]) -> tuple[Any, ...]:
                 ordered.append(uop)
             else:
                 stack.append((uop, True))
-                stack.extend((source, False) for source in reversed(callable_arguments(uop)))
+                stack.extend((source, False) for source in reversed(_uop_argument_sources(uop)))
     return tuple(ordered)
-
-
-def _uop_parent_paths(
-    uop: Any, labels: Mapping[int, str]
-) -> tuple[tuple[int | tuple[int, ...], str], ...]:
-    """Find labeled tensor operands through non-tensor UOp containers.
-
-    Parameters
-    ----------
-    uop:
-        Value-producing UOp whose incoming dataflow edges are being recorded.
-    labels:
-        Already emitted tensor UOps, including public input sources.
-
-    Returns
-    -------
-    tuple
-        Direct integer positions or nested source-index paths and raw labels.
-    """
-
-    parents: list[tuple[int | tuple[int, ...], str]] = []
-
-    def visit(node: Any, path: tuple[int, ...]) -> None:
-        """Stop at a labeled tensor and bypass only non-tensor containers."""
-
-        if (label := labels.get(id(node))) is not None:
-            parents.append((path[0] if len(path) == 1 else path, label))
-            return
-        if _uop_name(node) not in {"FUNCTION", "CALL", "TUPLE"}:
-            return
-        for index, source in enumerate(getattr(node, "src", ()) or ()):
-            if index == 0 and _uop_name(node) in {"FUNCTION", "CALL"}:
-                continue
-            visit(source, (*path, index))
-
-    for index, source in enumerate(getattr(uop, "src", ()) or ()):
-        visit(source, (index,))
-    return tuple(parents)
-
-
-def _uop_source_at_path(uop: Any, position: int | tuple[int, ...]) -> Any:
-    """Resolve a checked direct or nested UOp source address.
-
-    Parameters
-    ----------
-    uop:
-        Captured or replay UOp root.
-    position:
-        Direct source index or non-empty nested source-index path.
-    """
-
-    path = (position,) if isinstance(position, int) else position
-    if not isinstance(path, tuple) or not path:
-        raise ValueError(f"tinygrad parent arg position {position!r} is invalid.")
-    current = uop
-    for index in path:
-        src = tuple(getattr(current, "src", ()) or ())
-        if not isinstance(index, int) or not 0 <= index < len(src):
-            raise ValueError(f"tinygrad parent arg position {position!r} is invalid.")
-        current = src[index]
-    return current
-
-
-def _replace_uop_source_at_path(uop: Any, position: int | tuple[int, ...], replacement: Any) -> Any:
-    """Replace one checked UOp operand without mutating captured graph nodes.
-
-    Parameters
-    ----------
-    uop:
-        Replay UOp root.
-    position:
-        Direct source index or nested source-index path.
-    replacement:
-        Runtime tensor UOp to bind at that occurrence.
-    """
-
-    _uop_source_at_path(uop, position)
-    path = (position,) if isinstance(position, int) else position
-    ancestors = [uop]
-    for index in path[:-1]:
-        ancestors.append(ancestors[-1].src[index])
-    result = replacement
-    for parent, index in zip(reversed(ancestors), reversed(path)):
-        src = list(parent.src)
-        src[index] = result
-        result = parent.replace(src=tuple(src))
-    return result
 
 
 def _is_materializable_uop(uop: Any) -> bool:
     """Return whether a UOp can be saved as a tinygrad Tensor payload.
+
+    A structural test: nothing is realized here (realize-once capture takes
+    every payload from one later evaluation). The UOp must give a tinygrad
+    Tensor with a shape and a dtype that has a host format. The host-only
+    ``NPY`` device holds numpy-backed buffers and has no renderer: its buffers
+    are readable, but a view over one (a ``RESHAPE`` before the copy to the
+    compute device) has no value of its own until copied, so it is not a
+    payload.
 
     Parameters
     ----------
@@ -152,12 +144,12 @@ def _is_materializable_uop(uop: Any) -> bool:
 
         tensor = Tensor(uop)
         tuple(tensor.shape)
-        if getattr(tensor.dtype.base, "fmt", None) is None:
-            return False
-        tensor.tolist()
+        device = str(tensor.device)
     except Exception:
         return False
-    return True
+    if getattr(tensor.dtype.base, "fmt", None) is None:
+        return False
+    return not device.startswith("NPY") or _uop_name(uop) == "BUFFER"
 
 
 def _uop_name(uop: Any) -> str:
@@ -176,6 +168,90 @@ def _uop_name(uop: Any) -> str:
 
     op = getattr(uop, "op", None)
     return str(getattr(op, "name", op)).removeprefix("Ops.")
+
+
+def _op_func_name(observed_names: Sequence[str], op_name: str) -> str:
+    """The function name an op is recorded under.
+
+    The observer reports the callable tinygrad passed to ``Tensor._apply_uop``.
+    tinygrad routes most ops through internal helpers (``_mop`` for movement
+    ops, ``_rop`` for reductions, a ``lambda`` for elementwise math), and those
+    names do not say what the op computes. The last observed name that is not
+    such a helper is used; otherwise the UOp's op name (``add``, ``reshape``,
+    ``reduce``).
+
+    Parameters
+    ----------
+    observed_names
+        Names the observer recorded for the UOp, in call order.
+    op_name
+        The UOp's op name (:func:`_uop_name`).
+
+    Returns
+    -------
+    str
+        The recorded function name.
+    """
+
+    informative = [name for name in observed_names if not name.startswith(("_", "<"))]
+    return informative[-1] if informative else op_name.lower()
+
+
+def _data_flow_uops(
+    uops: Sequence[Any],
+    outputs: Sequence[Any],
+    source_ids: Collection[int],
+    *,
+    boundary_ids: Collection[int] = frozenset(),
+) -> tuple[Any, ...]:
+    """Return the UOps whose values reach an output as data, in ``uops`` order.
+
+    The walk starts at the outputs and follows ``src`` edges through
+    materializable UOps only, stopping at the capture's sources (``source_ids``,
+    the input UOps). A non-materializable UOp ends the walk: it carries no
+    tensor value, so what feeds it is not data of the forward. That leaves out
+    the scalar ``CONST`` elements of a movement op's shape vector and the
+    storage ``BUFFER`` behind an input, which a plain topological sort reaches
+    but which no recorded op consumes. The same rule decides which ops torch
+    keeps: a value no output depends on and no input produces is an orphan.
+
+    Parameters
+    ----------
+    uops
+        UOps reachable from the outputs, in topological order (:func:`_unique_uops`).
+    outputs
+        tinygrad output tensors.
+    source_ids
+        ``id()`` of every source UOp (the capture's inputs).
+    boundary_ids
+        ``id()`` of UOps recorded whole: kept when reached, but the walk does
+        not continue into what produced them (a pre-forward random weight's
+        generator subgraph, see ``_realize_once``).
+
+    Returns
+    -------
+    tuple[Any, ...]
+        The data-flow UOps, sources excluded, each materializable.
+    """
+
+    materializable: dict[int, bool] = {}
+    kept: set[int] = set()
+    stack = [cast(Any, output).uop for output in outputs]
+    while stack:
+        uop = stack.pop()
+        key = id(uop)
+        if key in kept or key in source_ids:
+            continue
+        if key not in materializable:
+            materializable[key] = _is_materializable_uop(uop)
+        if not materializable[key]:
+            if _uop_name(uop) in {"FUNCTION", "CALL", "TUPLE"}:
+                stack.extend(_uop_argument_sources(uop))
+            continue
+        kept.add(key)
+        if key not in boundary_ids:
+            stack.extend(_uop_argument_sources(uop))
+    return tuple(uop for uop in uops if id(uop) in kept)
 
 
 def _uop_signature(uop: Any, memo: dict[int, str] | None = None) -> str:
@@ -215,38 +291,3 @@ def _uop_signature(uop: Any, memo: dict[int, str] | None = None) -> str:
         encoded = json.dumps(fields, ensure_ascii=True, separators=(",", ":")).encode("ascii")
         signatures[key] = "sha256:" + hashlib.sha256(encoded).hexdigest()
     return signatures[id(uop)]
-
-
-def _tinygrad_signature_key(
-    *,
-    uop_signature: str,
-    ordinal: int,
-    parent_signatures: tuple[str, ...],
-    shape: tuple[int, ...],
-    dtype: str,
-) -> tuple[Any, ...]:
-    """Return the conservative key used for tinygrad T1 matching.
-
-    Parameters
-    ----------
-    uop_signature
-        Bounded structural UOp digest.
-    ordinal
-        Legacy topological ordinal retained in the internal call signature for
-        compatibility. tinygrad 0.13's graph normalization introduces
-        unobserved UOps, so this value is intentionally excluded from matching.
-    parent_signatures
-        Direct parent structural digests.
-    shape
-        Tensor shape.
-    dtype
-        Tensor dtype string.
-
-    Returns
-    -------
-    tuple[Any, ...]
-        Hashable conservative match key.
-    """
-
-    del ordinal
-    return (uop_signature, parent_signatures, shape, dtype)

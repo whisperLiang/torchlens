@@ -2,60 +2,48 @@
 
 from __future__ import annotations
 
+import contextlib
+import inspect
 import sys
+from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
 
 from ... import _state
-from ._tl import (
+from ..._utils._record_group_table import record_member
+from ..._utils._tensor_label import (
     get_tensor_label,
     get_tensor_meta,
     is_tensor_data_alias,
 )
+from ..._utils.tensor_utils import _is_uninitialized_lazy_tensor
+from ._consumer_kind import _classify_consumer_kind, _source_unreadable
 from .buffer_writes import session_validated_buffer_address
 from .escape_detection import (
     ExpectedOriginalToken,
 )
 
-if TYPE_CHECKING:
-    from .completeness_witness import (
-        _BUFFER_STATE_VIEW_OPERATORS,
-        _DISPATCH_TENSOR_ORIGINS,
-        _FRAMEWORK_FILENAME_VERDICTS,
-        _FRAMEWORK_FILENAME_VERDICTS_MAX_ENTRIES,
-        _HOST_ESCAPE_BOOL_SOURCE_LABELS,
-        _HOST_ESCAPE_SOURCE_LABELS,
-        _HOST_ESCAPE_STATE_SOURCE_LABELS,
-        _HOST_ESCAPE_STATE_SOURCE_NAMES,
-        _HOST_ESCAPE_UNATTRIBUTABLE_BOOL,
-        _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE,
-        _ORIGIN_LABEL_PREFIX,
-        _ORIGIN_RNG,
-        _ORIGIN_STATE_PREFIX,
-        _ORIGIN_UNINIT,
-        _ORIGIN_UNKNOWN,
-        _TORCH_ROOT,
-        _TORCHLENS_ROOT,
-        _DispatchCallsite,
-        _escape_source_is_torchlens_internal,
-        _operand_origins,
-        _param_derived_addresses,
-        _record_escape_label_fallback,
-        internal_scalar_read,
-    )
+#: Resolved path of stdlib ``contextlib``, whose ``__exit__`` frames sit between
+#: a TorchLens context manager and the caller (see ``_external_warning_stacklevel``).
+_CONTEXTLIB_FILE = Path(contextlib.__file__).resolve()
 
 __all__ = (
     "_resolved_dispatch_origins",
     "_record_escape_source_tensor",
+    "_tally_plain_scalar_escape",
     "_operator_name",
     "_operator_base_name",
     "_is_aten_operator",
     "_is_mutating_operator",
     "_is_buffer_state_view_dispatch",
     "_dispatch_callsite",
+    "_first_scalar_escape_source",
+    "_scalar_escape_advisory_texts",
+    "_external_warning_stacklevel",
+    "_iter_dispatch_tensors",
 )
 
 
@@ -82,8 +70,8 @@ def _resolved_dispatch_origins(
     Returns ``None`` -- the caller MUST fail closed -- when the source's propagated
     origin set contains ``unknown`` (an operand the census could not attribute),
     ``rng`` (raw seeded-RNG output; the torch-RNG nets own that class, and value
-    attribution through it would launder nondeterminism), or ``uninit`` (r53
-    hon_2: uninitialized allocator bytes are not a function of the recorded
+    attribution through it would launder nondeterminism), or ``uninit``
+    (uninitialized allocator bytes are not a function of the recorded
     computation, so attributing through them would launder nondeterminism as a
     deterministic chain). An empty origin pair is a positive result: the value
     derives from a literal-only deterministic chain that replays identically, so
@@ -128,15 +116,15 @@ def _record_escape_source_tensor(
     (``aten._local_scalar_dense`` scalar escapes) — feed the SAME per-trace side
     tables so the runnable descriptor witnesses every source class -- input, internal op, bound/unbound param, bound/unbound buffer --
     by its capture-time digest through one uniform pass. Side tables are mutated via
-    GIL-atomic ``set.add``/``dict`` writes (CPython), so cross-thread recording (r41)
+    GIL-atomic ``set.add``/``dict`` writes (CPython), so cross-thread recording
     needs no extra locking.
 
-    ``fail_closed`` (r41 hon2_1/F): ``False`` -- the FOREIGN (pre-existing) thread
+    ``fail_closed``: ``False`` -- the FOREIGN (pre-existing) thread
     posture -- skips exactly the two unattributable rungs (the fail-closed bool/opaque
     records), so an unattributable foreign-thread read never ceilings the capture while
     every POSITIVE rung (label, registered-state alias, dispatch origin) still records.
 
-    ``resolve_origins`` (r41): ``False`` skips the dispatch-origin resolution rung and
+    ``resolve_origins``: ``False`` skips the dispatch-origin resolution rung and
     the leaf-origin fallback recording, both of which take ``pause_logging`` (a GLOBAL
     toggle a non-owner thread must never flip mid-forward). An absent fallback entry is
     consumed by the producer exactly like the fail-closed ``None`` marker (an
@@ -159,18 +147,18 @@ def _record_escape_source_tensor(
     label = None if data_alias else get_tensor_label(source)
     if not isinstance(label, str):
         # An UNLABELLED escape source (a ``.data`` alias, a raw-dispatch product):
-        # r37 INV-1 single-exit attribution ladder. Every rung is a POSITIVE
+        # Single-exit attribution ladder. Every rung is a POSITIVE
         # attribution to a witnessable source; the fallthrough IS the fail-closed
         # record. Banned forever as discharge mechanisms: scalar value equality
-        # (hon2_2), ``.item()`` re-extraction on unknown-arity operands (hon2_1),
-        # and any autograd-graph structural purity argument (hon2_3 / exp1).
+        # ``.item()`` re-extraction on unknown-arity operands,
+        # and any autograd-graph structural purity argument.
         if is_bool:
             # A pruned, unlabelled bool predicate is covered by NO net -> fail closed
             # (skipped for a foreign thread: no attribution, no ceiling).
             if fail_closed:
                 _HOST_ESCAPE_UNATTRIBUTABLE_BOOL.add(trace)
             return
-        # Rung 1 (r18): direct registered-param storage alias -- witnessed by the
+        # Rung 1: direct registered-param storage alias -- witnessed by the
         # param state slot (``self.w.tolist()`` directly on a param carries no label).
         param_addresses = _param_derived_addresses(trace, source)
         if param_addresses:
@@ -180,7 +168,7 @@ def _record_escape_source_tensor(
                 _HOST_ESCAPE_STATE_SOURCE_NAMES[trace] = state_names
             state_names |= param_addresses
             return
-        # Rung 2 (r37 mechanism A): positive dispatch-origin propagation. The census
+        # Rung 2: positive dispatch-origin propagation. The census
         # registered this tensor's value origins at its producing dispatch; resolve
         # them to witnessable raw labels (tensor-op/input sources -> PASS B digest)
         # and state names (param/buffer sources -> PASS A digest). Multi-element and
@@ -213,7 +201,7 @@ def _record_escape_source_tensor(
             # baked value replays identically -- positively attributed, witness-free.
             return
         # Fallthrough: no positive attribution -> fail closed (INCOMPLETE). This is
-        # the ONLY other exit; there is no third state (INV-1). A foreign thread
+        # the ONLY other exit; there is no third state. A foreign thread
         # (``fail_closed=False``) skips the record: no attribution, no ceiling.
         if fail_closed:
             _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE.add(trace)
@@ -223,10 +211,10 @@ def _record_escape_source_tensor(
         sources = set()
         _HOST_ESCAPE_SOURCE_LABELS[trace] = sources
     sources.add(label)
-    # r37 mechanism A: record the leaf-origin fallback basis NOW (the live tensor and
+    # Record the leaf-origin fallback basis NOW (the live tensor and
     # its propagated origins exist only during capture). Consumed by the producer only
-    # if this label turns out orphan-pruned. Skipped on non-owner threads (r41,
-    # ``resolve_origins=False``): an absent entry reads exactly like the fail-closed
+    # if this label turns out orphan-pruned. Skipped on non-owner threads
+    # (``resolve_origins=False``): an absent entry reads exactly like the fail-closed
     # marker if the label is later orphan-pruned -- never weaker.
     if resolve_origins:
         _record_escape_label_fallback(trace, label, source)
@@ -247,8 +235,8 @@ def _record_escape_source_tensor(
     # even when the state ALSO feeds a traced graph op -- bound-ness never exempts the
     # escape witness).
     meta = get_tensor_meta(source)
-    address = getattr(meta, "address", None) if meta is not None else None
-    # r18 + r19-C: a PARAMETER host escape resolves by state slot exactly like a buffer. A buffer
+    address = record_member(meta, "address", None) if meta is not None else None
+    # A PARAMETER host escape resolves by state slot exactly like a buffer. A buffer
     # keeps a graph SOURCE node, so its ``.detach()`` host read survives orphan-pruning and witnesses
     # by its kept op; a parameter carries NO source node, so a param-rooted read op is orphan-pruned
     # and its raw label resolves to no final op -> the escape would fail closed (INCOMPLETE_SCALAR_
@@ -256,8 +244,8 @@ def _record_escape_source_tensor(
     # state slot(s) so the read-only escape is witnessed by the param's capture-time digest (value-
     # correct -- an unchanged param re-digests identically -> VERIFIED; a changed param -> UNVERIFIABLE),
     # the same honest read/write distinction the buffer path draws. ``_param_derived_addresses`` covers
-    # both a DIRECT param alias (r18: ``self.w.detach()``, ``self.w[0]``) and a DERIVED pruned read
-    # rooted purely in params (r19-C: ``self.w.sum()``, ``float(self.w.max())``). A genuine host WRITE
+    # both a DIRECT param alias (``self.w.detach()``, ``self.w[0]``) and a DERIVED pruned read
+    # rooted purely in params (``self.w.sum()``, ``float(self.w.max())``). A genuine host WRITE
     # is caught independently by the parameter whole-storage byte tripwire
     # (``buffer_writes._reconcile_params`` -> ``_HOST_ESCAPE_MUTABLE_WRITEBACK``), so read resolution
     # never blesses a mutated param.
@@ -390,9 +378,15 @@ def _is_buffer_state_view_dispatch(
       value-affecting in-place drop can never be credited here.
     * ``aten.detach`` / ``aten.alias`` only -- pure aliasing views. A dropped value-producing
       op (``aten.add``/``aten.mul``/...) on the buffer is NOT in this set and stays unaccounted.
-    * ``args[0]`` is a REGISTERED BUFFER whose stamp is SESSION-VALIDATED (r81:
-      current-session object + live storage identity -- a stale or input-rebound
+    * ``args[0]`` is a REGISTERED BUFFER whose stamp is SESSION-VALIDATED
+      (current-session object + live storage identity -- a stale or input-rebound
       stamp is never credited as a benign state view).
+    * or ``args[0]`` is a PENDING LAZY slot (``UninitializedParameter`` /
+      ``UninitializedBuffer``): torch's in-place materialization reads the slot's
+      ``.data`` for its device and dtype before assigning storage, and the wrapper
+      passes those calls through unlogged (they are constructor plumbing, not model
+      dataflow). A pending slot holds no value, so the view can carry nothing that a
+      dropped op could have produced (wave-3 stress case 3).
 
     Parameters
     ----------
@@ -420,10 +414,11 @@ def _is_buffer_state_view_dispatch(
     if not args:
         return False
     source = args[0]
-    return (
-        isinstance(source, torch.Tensor)
-        and session_validated_buffer_address(trace, source) is not None
-    )
+    if not isinstance(source, torch.Tensor):
+        return False
+    if _is_uninitialized_lazy_tensor(source):
+        return True
+    return session_validated_buffer_address(trace, source) is not None
 
 
 def _dispatch_callsite() -> _DispatchCallsite:
@@ -463,3 +458,222 @@ def _dispatch_callsite() -> _DispatchCallsite:
         fallback.f_lineno,
         fallback.f_code.co_name,
     )
+
+
+def _first_scalar_escape_source() -> tuple[str | None, int | None]:
+    """Return the first non-TorchLens frame for a scalar escape call.
+
+    Returns
+    -------
+    tuple[str | None, int | None]
+        Source filename and line, or ``(None, None)`` if no user frame is visible.
+    """
+    frame = inspect.currentframe()
+    try:
+        frame = frame.f_back if frame is not None else None
+        while frame is not None:
+            raw = frame.f_code.co_filename
+            if raw.startswith("<") and raw.endswith(">"):
+                # A pseudo-filename (``<stdin>``, ``<string>``, a cell name) is
+                # never TorchLens and names no file: resolving it would invent
+                # a path under the working directory.
+                return raw, frame.f_lineno
+            filename = Path(raw).resolve()
+            try:
+                filename.relative_to(_TORCHLENS_ROOT)
+            except ValueError:
+                return str(filename), frame.f_lineno
+            frame = frame.f_back
+    finally:
+        del frame
+    return None, None
+
+
+#: Branch-test consumer kinds postprocess step 5 records as conditionals
+#: (``_postprocess.control_flow._BRANCH_CONTEXT_KINDS``; a test pins the two equal).
+_RECORDED_CONDITIONAL_TEST_KINDS = frozenset({"if_test", "elif_test", "ifexp"})
+
+
+def _tally_plain_scalar_escape(state: Any, tensor: torch.Tensor, name: str) -> None:
+    """Count one labelled plain-capture scalar escape unless step 5 records it.
+
+    A 0-dim ``torch.bool`` read by ``__bool__`` at an ``if`` / ``elif`` test or a
+    conditional expression is not a lost dependence: step 5 records it as a
+    ``Conditional`` (same receiver rule, ``is_scalar_bool``, and the same AST
+    lookup). Every other read counts, including ``if x.sum():`` truthiness,
+    ``while`` and ``assert`` tests, and reads the lookup cannot tie to one test.
+    Such a bool read in code with no readable source (a string passed to
+    ``exec`` and not registered in ``linecache``, stdin, a cell name reused for
+    different text) counts AND is tallied apart: step 5 cannot
+    record its branch either, and the advisory names that cause.
+
+    Parameters
+    ----------
+    state:
+        Per-capture ``_PlainScalarEscapeState`` aggregate.
+    tensor:
+        Labelled receiver of the escape method.
+    name:
+        Scalar-protocol method name.
+    """
+
+    if name == "__bool__" and tensor.dtype is torch.bool and tensor.ndim == 0:
+        filename, line = _first_scalar_escape_source()
+        if filename is not None and line is not None:
+            kind = _classify_consumer_kind(filename, line)
+            if kind in _RECORDED_CONDITIONAL_TEST_KINDS:
+                return
+            if _source_unreadable(filename):
+                state.unreadable_source_count += 1
+    state.count += 1
+    if state.first_file is None:
+        state.first_file, state.first_line = _first_scalar_escape_source()
+
+
+def _scalar_escape_advisory_texts(state: Any, location: str) -> tuple[str, str]:
+    """Return the persisted row message and the warning text for one capture.
+
+    Both say what is missing: the trace keeps the ops that produced the value,
+    but whatever Python then computed or decided with it has no edge back to
+    the tensor, and a branch it decided is not a recorded conditional. When
+    some reads were bool tests in code whose source cannot be read, the text
+    names that cause: without the source TorchLens cannot tell an ``if`` test
+    (whose branch it records from a ``.py`` file) from a ``while`` or ``assert``.
+
+    Parameters
+    ----------
+    state:
+        Per-capture ``_PlainScalarEscapeState`` aggregate (``count`` >= 1).
+    location:
+        Display form of the first escape site.
+
+    Returns
+    -------
+    tuple[str, str]
+        ``(row_message, warning_text)``.
+    """
+
+    missing = (
+        "what Python computed or decided with the value has no edge back to the "
+        "tensor, and a branch it decided is not in trace.graph.conditionals"
+    )
+    unreadable = ""
+    if state.unreadable_source_count:
+        unreadable = (
+            f"; {state.unreadable_source_count} of these reads are bool tests in code with no "
+            "readable source file (exec of a string not registered in linecache, stdin, "
+            "or a cell name reused for different text), so TorchLens could not tell "
+            "whether they are if tests, whose branches it records; run the code from a "
+            ".py file to record those branches"
+        )
+    row_message = (
+        f"tensor-to-Python scalar escape(s) observed during capture; {missing}{unreadable}"
+    )
+    warning_text = (
+        f"TorchLens observed {state.count} tensor-to-Python scalar escape(s) during "
+        f"capture; first at {location}. In the trace, {missing}{unreadable}. Keep the "
+        "value as a tensor or pass it as an explicit input."
+    )
+    return row_message, warning_text
+
+
+def _external_warning_stacklevel() -> int:
+    """Return a warning stack level that resolves outside the TorchLens package.
+
+    Returns
+    -------
+    int
+        Stack level suitable for :func:`warnings.warn`.
+    """
+    level = 1
+    frame = inspect.currentframe()
+    try:
+        frame = frame.f_back if frame is not None else None
+        while frame is not None:
+            # A ``contextlib`` frame is the ``__exit__`` of a TorchLens context
+            # manager, never the caller's line: skip it like a package frame,
+            # or every advisory would point at ``contextlib.py``.
+            if not _is_package_or_contextlib_frame(frame.f_code.co_filename):
+                return level
+            level += 1
+            frame = frame.f_back
+    finally:
+        del frame
+    return level
+
+
+def _is_package_or_contextlib_frame(filename: str) -> bool:
+    """Return whether a frame's file is inside TorchLens or is stdlib ``contextlib``.
+
+    Parameters
+    ----------
+    filename:
+        The frame's ``co_filename``.
+
+    Returns
+    -------
+    bool
+        ``True`` for a TorchLens source file or the ``contextlib`` module file.
+    """
+    path = Path(filename).resolve()
+    if path == _CONTEXTLIB_FILE:
+        return True
+    try:
+        path.relative_to(_TORCHLENS_ROOT)
+    except ValueError:
+        return False
+    return True
+
+
+def _iter_dispatch_tensors(
+    args: tuple[Any, ...], kwargs: dict[str, Any] | None
+) -> Iterator[torch.Tensor]:
+    """Yield every ``torch.Tensor`` operand of a dispatch, flattening list/tuple containers.
+
+    Aten operands are tensors, scalars, or (for ``cat`` / ``stack`` / ``_foreach_*``) lists/tuples
+    of tensors; this walks those one-deep-or-more without importing a pytree so the per-consumption
+    watch can see every tensor an op reads.
+    """
+
+    stack: list[Any] = list(args)
+    if kwargs:
+        stack.extend(kwargs.values())
+    while stack:
+        item = stack.pop()
+        if isinstance(item, torch.Tensor):
+            yield item
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+
+
+# Late imports: the split modules of this package import one another (cycles), so each
+# imports its siblings once every definition above exists.
+from ._completeness_escape_state import (  # noqa: E402
+    _record_escape_label_fallback,
+)
+from ._completeness_origins import (  # noqa: E402
+    _escape_source_is_torchlens_internal,
+    _operand_origins,
+    _param_derived_addresses,
+    internal_scalar_read,
+)
+from .completeness_witness import (  # noqa: E402
+    _BUFFER_STATE_VIEW_OPERATORS,
+    _DISPATCH_TENSOR_ORIGINS,
+    _FRAMEWORK_FILENAME_VERDICTS,
+    _FRAMEWORK_FILENAME_VERDICTS_MAX_ENTRIES,
+    _HOST_ESCAPE_BOOL_SOURCE_LABELS,
+    _HOST_ESCAPE_SOURCE_LABELS,
+    _HOST_ESCAPE_STATE_SOURCE_LABELS,
+    _HOST_ESCAPE_STATE_SOURCE_NAMES,
+    _HOST_ESCAPE_UNATTRIBUTABLE_BOOL,
+    _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE,
+    _ORIGIN_LABEL_PREFIX,
+    _ORIGIN_RNG,
+    _ORIGIN_STATE_PREFIX,
+    _ORIGIN_UNINIT,
+    _ORIGIN_UNKNOWN,
+    _TORCH_ROOT,
+    _TORCHLENS_ROOT,
+    _DispatchCallsite,
+)

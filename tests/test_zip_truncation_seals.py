@@ -14,7 +14,9 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens.bundle._deltas import _output_layer_pairs
 from torchlens.errors import BundleMemberError
+from torchlens.intervention.errors import BundleComparisonError
 
 
 class _OneOutputModel(nn.Module):
@@ -40,48 +42,50 @@ class _TwoOutputModel(nn.Module):
         return torch.relu(y), torch.sigmoid(y)
 
 
-@pytest.mark.smoke
 def test_bundle_output_delta_refuses_output_arity_mismatch() -> None:
     """A member missing an output must refuse, not report only the survivor."""
 
     torch.manual_seed(3)
     x = torch.randn(2, 3)
-    two = tl.trace(_TwoOutputModel(), x, intervention_ready=True)
-    one = tl.trace(_OneOutputModel(), x, intervention_ready=True)
-    bundle = tl.bundle({"baseline": two, "lost_output": one}, baseline="baseline")
+    two = tl.trace(_TwoOutputModel(), x, capture=tl.options.CaptureOptions(replayable=True))
+    one = tl.trace(_OneOutputModel(), x, capture=tl.options.CaptureOptions(replayable=True))
+    bundle = tl.Bundle({"baseline": two, "lost_output": one}, baseline="baseline")
 
+    # The comparison gate now refuses the pair first (the two graphs are not
+    # one model's); the arity guard below it stays the second line of defence.
+    with pytest.raises(BundleComparisonError) as excinfo:
+        bundle._output_delta("baseline")
+    assert excinfo.value.fields["code"] == "bundle_gate_model_axis_unmet"
     with pytest.raises(BundleMemberError, match="structurally divergent"):
-        bundle.output_delta("baseline")
+        _output_layer_pairs(two, one)
 
 
-@pytest.mark.smoke
 def test_bundle_output_delta_still_works_on_matching_arity() -> None:
     """Equal output arity keeps the comparison green."""
 
     torch.manual_seed(4)
     x = torch.randn(2, 3)
-    first = tl.trace(_TwoOutputModel(), x, intervention_ready=True)
-    second = tl.trace(_TwoOutputModel(), x, intervention_ready=True)
-    bundle = tl.bundle({"baseline": first, "other": second}, baseline="baseline")
+    first = tl.trace(_TwoOutputModel(), x, capture=tl.options.CaptureOptions(replayable=True))
+    second = tl.trace(_TwoOutputModel(), x, capture=tl.options.CaptureOptions(replayable=True))
+    bundle = tl.Bundle({"baseline": first, "other": second}, baseline="baseline")
 
-    delta = bundle.output_delta("baseline")
+    delta = bundle._output_delta("baseline")
     assert set(delta) == {"baseline", "other"}
     assert len(delta["other"]) == 2, "expected one delta row per output"
 
 
-@pytest.mark.smoke
 def test_fast_run_refuses_slot_label_parity_tamper(tmp_path) -> None:
     """A descriptor with fewer op_labels than output slots must refuse the
     fast iteration typed instead of silently skipping the trailing guards."""
 
     model = _OneOutputModel()
     x = torch.randn(2, 3)
-    trace = tl.trace(model, x, capture=tl.options.CaptureOptions(intervention_ready=True))
+    trace = tl.trace(model, x, capture=tl.options.CaptureOptions(replayable=True))
     bundle = tmp_path / "runnable.tlspec"
-    tl.save(trace, str(bundle), level="runnable", include_weights=True)
+    trace.save(str(bundle), level="runnable", include_weights=True)
     loaded = tl.load(str(bundle))
 
-    loaded.run(inputs=x, fast=True)  # first fast run = ordinary verified run
+    loaded.run_transaction(inputs=x, fast=True)  # first fast run = ordinary verified run
 
     descriptor = None
     for holder in vars(loaded).values():
@@ -92,7 +96,7 @@ def test_fast_run_refuses_slot_label_parity_tamper(tmp_path) -> None:
             descriptor = calls
             break
     if descriptor is None:
-        from torchlens._runnable_seam import runnable_trace_state
+        from torchlens._runnable.seam import runnable_trace_state
 
         descriptor = runnable_trace_state(loaded).descriptor.calls
     tampered = [call for call in descriptor if getattr(call, "output_slot_ids", ())]
@@ -100,4 +104,4 @@ def test_fast_run_refuses_slot_label_parity_tamper(tmp_path) -> None:
     object.__setattr__(tampered[-1], "op_labels", ())
 
     with pytest.raises(Exception, match="op label|parity|tampered"):
-        loaded.run(inputs=x, fast=True)
+        loaded.run_transaction(inputs=x, fast=True)

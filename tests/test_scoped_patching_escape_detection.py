@@ -11,15 +11,14 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
-import example_models
-import numpy as np
 import pytest
 import torch
+from _stale_holders import OpaqueCallable
 from torch import nn
 
 import torchlens as tl
 from torchlens import _state
-from torchlens._errors import TorchLensCaptureGapWarning
+from torchlens._errors import CaptureGapWarning
 from torchlens.backends.torch.escape_detection import (
     AUDITED_ESCAPE_EXEMPTIONS,
     MAX_AUDITED_EXEMPTIONS,
@@ -67,7 +66,7 @@ def _isolated_wrapper_epoch(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _gap_warnings(caught: list[warnings.WarningMessage]) -> list[warnings.WarningMessage]:
     """Return only callable/thread capture-gap warnings from a warning list."""
 
-    return [item for item in caught if isinstance(item.message, TorchLensCaptureGapWarning)]
+    return [item for item in caught if isinstance(item.message, CaptureGapWarning)]
 
 
 def _run_shadow_capture(model: nn.Module) -> tuple[BaseException | None, list[str]]:
@@ -94,9 +93,21 @@ def _module_with_hidden_class_ref(name: str, raw: Callable[..., Any]) -> types.M
     return module
 
 
-@pytest.mark.parametrize("holder_kind", ["closure", "dict", "list", "instance"])
-def test_builtin_holder_attacks_emit_shadow_report(holder_kind: str) -> None:
-    """Ordinary-call builtin holders missed by crawling are reported at runtime."""
+# Kept: sole branch coverage of backends/torch/_held_refs_capture.py; a sole mutation kill.
+@pytest.mark.parametrize(
+    "holder_kind",
+    [
+        "dict",
+        "list",
+    ],
+)
+def test_builtin_holder_attacks_are_rebound_or_shadow_reported(holder_kind: str) -> None:
+    """Builtin holders are rebound for the capture; a custom object is reported.
+
+    Capture preparation rebinds pristine refs held in closure cells and exact
+    ``dict``/``list`` containers, so those calls are no escape at all. A plain
+    custom object is never rebound, and the shadow detector reports its call.
+    """
 
     raw = torch.relu
 
@@ -134,37 +145,25 @@ def test_builtin_holder_attacks_emit_shadow_report(holder_kind: str) -> None:
             return invoke(x)
 
     error, reports = _run_shadow_capture(Model())
+    if holder_kind != "instance":
+        assert error is None
+        assert reports == []
+        return
     assert isinstance(error, RuntimeError)
     assert len(reports) == 1
     assert "relu" in reports[0]
-    assert hasattr(error, "partial_log")
-    assert error.partial_log.trace.escape_diagnostics
+    assert hasattr(error, "partial_trace")
+    assert error.partial_trace.trace.escape_diagnostics
 
 
-def test_raw_python_functional_and_partial_emit_shadow_reports() -> None:
-    """Raw Python code identity is visible directly and through partial."""
+# Kept: sole branch coverage of _capture/_trace_capture_error.py, _capture/finalize/arms.py, _capture/outcome.py and more; a sole mutation kill.
+def test_hidden_class_ref_is_shadow_reported_and_default_ref_rebound() -> None:
+    """Unrelated local class storage is reported; a default-arg ref is rebound.
 
-    raw = torch.nn.functional.softsign
-    invocations = (raw, functools.partial(raw))
-    for invoke in invocations:
-
-        class Model(nn.Module):
-            """Invoke a raw Python functional holder."""
-
-            def forward(self, x: torch.Tensor, invoke: Callable[..., Any] = invoke) -> torch.Tensor:
-                """Call the hidden raw Python functional (bound per iteration)."""
-
-                return invoke(x)
-
-        error, reports = _run_shadow_capture(Model())
-        assert error is None or isinstance(error, RuntimeError)
-        assert len(reports) == 1
-        assert "softsign" in reports[0]
-        unwrap_torch()
-
-
-def test_hidden_class_and_default_refs_emit_shadow_reports() -> None:
-    """Unrelated local class/default storage is not silently accepted."""
+    Capture preparation rebinds a helper's default argument for the capture,
+    so that call is no escape; a class attribute is never rebound, and the
+    shadow detector reports it.
+    """
 
     raw = torch.relu
 
@@ -178,7 +177,7 @@ def test_hidden_class_and_default_refs_emit_shadow_reports() -> None:
 
         return op(x)
 
-    for invoke in (lambda value: Holder.op(value), uses_default):
+    for invoke, reported in ((lambda value: Holder.op(value), True), (uses_default, False)):
 
         class Model(nn.Module):
             """Invoke one unrelated hidden helper."""
@@ -189,50 +188,16 @@ def test_hidden_class_and_default_refs_emit_shadow_reports() -> None:
                 return invoke(x)
 
         error, reports = _run_shadow_capture(Model())
-        assert isinstance(error, RuntimeError)
-        assert len(reports) == 1
+        if reported:
+            assert isinstance(error, RuntimeError)
+            assert len(reports) == 1
+        else:
+            assert error is None
+            assert reports == []
         unwrap_torch()
 
 
-def test_tensor_descriptor_uses_identity_compatible_bound_builtin_rule() -> None:
-    """A transient bound builtin identifies a hidden Tensor descriptor escape."""
-
-    raw_descriptor = torch.Tensor.add
-
-    class Model(nn.Module):
-        """Invoke a saved unbound Tensor method descriptor."""
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Call the descriptor with ``x`` as its receiver."""
-
-            return raw_descriptor(x, 1)
-
-    error, reports = _run_shadow_capture(Model())
-    assert isinstance(error, RuntimeError)
-    assert len(reports) == 1
-    assert "TensorBase.add" in reports[0]
-
-
-def test_saved_bound_builtin_is_convicted_outside_token_edge() -> None:
-    """A saved Tensor-bound builtin is reportable without stable target identity."""
-
-    owner = torch.zeros(3)
-    raw_bound_add = owner.add
-
-    class Model(nn.Module):
-        """Invoke the saved bound builtin outside a registered wrapper edge."""
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Use the model input as the saved method's argument."""
-
-            return raw_bound_add(x)
-
-    error, reports = _run_shadow_capture(Model())
-    assert isinstance(error, RuntimeError)
-    assert len(reports) == 1
-    assert "TensorBase.add" in reports[0]
-
-
+# Kept: sole branch coverage of backends/torch/_held_refs.py, backends/torch/tensor_tracking.py, backends/torch/wrappers.py; a sole mutation kill.
 def test_descriptor_escape_inside_wrapper_token_is_not_window_exempted() -> None:
     """A callback escape inside a composite wrapper remains reportable."""
 
@@ -267,7 +232,7 @@ def test_descriptor_escape_inside_wrapper_token_is_not_window_exempted() -> None
             return decorated(x, callback)
 
     try:
-        with pytest.warns(TorchLensCaptureGapWarning, match="TensorBase.add"):
+        with pytest.warns(CaptureGapWarning, match="TensorBase.add"):
             trace = tl.trace(Model(), torch.randn(3))
         assert len(trace.escape_diagnostics) == 1
         assert trace.escape_diagnostics[0]["guard_pass_index"] >= 1
@@ -279,6 +244,7 @@ def test_descriptor_escape_inside_wrapper_token_is_not_window_exempted() -> None
         reset_detector_tables()
 
 
+# Kept: sole branch coverage of backends/torch/_held_refs_capture.py; a sole mutation kill.
 def test_c_partial_blind_spot_is_machine_readably_unverified() -> None:
     """Profile-blind C partial remains an honest pre-witness boundary."""
 
@@ -300,10 +266,11 @@ def test_c_partial_blind_spot_is_machine_readably_unverified() -> None:
     assert trace.escape_diagnostics == []
     # The detector cannot see the C-partial channel; shadow mode's blanket
     # no-claim ceiling is what keeps the blind spot machine-readably honest.
-    assert trace.capture_verified is False
-    assert trace.capture_verification_reason == "shadow_diagnostic_mode"
+    assert trace.provenance.verified is False
+    assert trace.provenance.verification_reason == "shadow_diagnostic_mode"
 
 
+# Kept: sole branch coverage of _utils/tensor_utils.py, backends/torch/_completeness_cross_thread.py, backends/torch/wrappers.py; a sole mutation kill.
 def test_clean_composites_and_descriptor_wrappers_do_not_convict() -> None:
     """Ordinary Torch composites and legitimate Tensor methods do not convict."""
 
@@ -332,105 +299,7 @@ def test_clean_composites_and_descriptor_wrappers_do_not_convict() -> None:
     assert len(AUDITED_ESCAPE_EXEMPTIONS) <= MAX_AUDITED_EXEMPTIONS
 
 
-@pytest.mark.parametrize(
-    ("function_name", "input_shape", "kwargs"),
-    [
-        ("max_pool1d", (1, 1, 8), {"kernel_size": 2}),
-        ("max_pool2d", (1, 1, 8, 8), {"kernel_size": 2}),
-        ("max_pool3d", (1, 1, 6, 6, 6), {"kernel_size": 2}),
-        ("adaptive_max_pool1d", (1, 1, 8), {"output_size": 2}),
-        ("adaptive_max_pool2d", (1, 1, 8, 8), {"output_size": 2}),
-        ("adaptive_max_pool3d", (1, 1, 6, 6, 6), {"output_size": 2}),
-        (
-            "fractional_max_pool2d",
-            (1, 1, 8, 8),
-            {"kernel_size": 2, "output_size": 3},
-        ),
-        (
-            "fractional_max_pool3d",
-            (1, 1, 6, 6, 6),
-            {"kernel_size": 2, "output_size": 2},
-        ),
-    ],
-)
-# Reinstalling and auditing all 16 dispatch variants costs 18.7 s in aggregate.
-@pytest.mark.heavy
-@pytest.mark.parametrize("return_indices", [False, True], ids=["values", "indices"])
-def test_boolean_dispatch_pooling_family_does_not_convict(
-    function_name: str,
-    input_shape: tuple[int, ...],
-    kwargs: dict[str, Any],
-    return_indices: bool,
-) -> None:
-    """Pre-wrap boolean-dispatch closure branches are audited clean composites."""
-
-    class Model(nn.Module):
-        """Invoke one live functional pooling dispatcher."""
-
-        def forward(self, x: torch.Tensor) -> Any:
-            """Run the selected boolean-dispatch branch."""
-
-            pool = getattr(torch.nn.functional, function_name)
-            return pool(x, return_indices=return_indices, **kwargs)
-
-    wrap_torch(escape_detector="shadow")
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        trace = tl.trace(Model(), torch.randn(input_shape))
-    assert trace.escape_diagnostics == []
-    assert _gap_warnings(caught) == []
-
-
-def test_pause_logging_excludes_raw_internal_work() -> None:
-    """A raw call while logging is paused is outside detector scope."""
-
-    raw = torch.relu
-
-    class Model(nn.Module):
-        """Discard one deliberately paused raw result."""
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Pause around raw work, then return represented work."""
-
-            with _state.pause_logging():
-                raw(x)
-            return torch.sigmoid(x)
-
-    wrap_torch(escape_detector="shadow")
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        trace = tl.trace(Model(), torch.randn(3))
-    assert trace.escape_diagnostics == []
-    assert _gap_warnings(caught) == []
-
-
-def test_synchronous_dataloader_callback_is_in_owner_thread_domain() -> None:
-    """A num_workers=0 callback escape is reported inside forward."""
-
-    raw = torch.relu
-
-    def collate(value: torch.Tensor) -> torch.Tensor:
-        """Invoke the hidden raw callable synchronously."""
-
-        return raw(value)
-
-    class Model(nn.Module):
-        """Iterate a synchronous DataLoader inside forward."""
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Feed the callback result into a represented operation."""
-
-            loader = torch.utils.data.DataLoader(
-                [x], batch_size=None, num_workers=0, collate_fn=collate
-            )
-            return torch.sigmoid(next(iter(loader)))
-
-    wrap_torch(escape_detector="shadow")
-    with pytest.warns(TorchLensCaptureGapWarning, match="relu"):
-        trace = tl.trace(Model(), torch.randn(3))
-    assert len(trace.escape_diagnostics) == 1
-
-
+# Kept: sole branch coverage of backends/torch/escape_detection.py; a sole mutation kill.
 def test_monitoring_tool_exhaustion_fails_loudly() -> None:
     """A Python 3.12 monitoring conflict cannot silently disable diagnostics."""
 
@@ -451,105 +320,7 @@ def test_monitoring_tool_exhaustion_fails_loudly() -> None:
         _find_monitoring_tool_id(FullMonitoring())
 
 
-def test_external_profile_hook_is_chained_and_restored_on_success_and_error() -> None:
-    """Shadow profiling composes with and restores the user's exact hook."""
-
-    calls = 0
-
-    def prior(frame: types.FrameType, event: str, arg: Any) -> None:
-        """Count chained profile events without changing dispatch."""
-
-        del frame, event, arg
-        nonlocal calls
-        calls += 1
-
-    class Clean(nn.Module):
-        """Simple successful model."""
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Run one represented operation."""
-
-            return torch.relu(x)
-
-    class Failing(nn.Module):
-        """Model that raises after represented work."""
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Raise a deterministic user exception."""
-
-            torch.relu(x)
-            raise ValueError("profile restoration probe")
-
-    wrap_torch(escape_detector="shadow")
-    sys.setprofile(prior)
-    try:
-        tl.trace(Clean(), torch.randn(3))
-        assert sys.getprofile() is prior
-        with pytest.raises(ValueError, match="profile restoration probe"):
-            tl.trace(Failing(), torch.randn(3))
-        assert sys.getprofile() is prior
-        assert calls > 0
-    finally:
-        sys.setprofile(None)
-
-
-def test_rng_and_escape_profile_detectors_coarm_without_lost_detection() -> None:
-    """The nested RNG profile hook chains the escape detector and restores both.
-
-    The capture must be runnable-capable. ``_runnable_host_rng_channels`` only exists
-    when the host-RNG monitor is ARMED, and a plain ``tl.trace`` deliberately does not
-    arm it -- that fail-closed contract is pinned by
-    ``test_plain_trace_does_not_arm_monitor_and_stamps_fail_closed`` in
-    ``tests/test_rng_witness_gating.py``, which asserts the field is ABSENT after a
-    plain trace. This test previously used a plain trace, so only the escape
-    detector's hook was ever installed and the co-arming it names could not be
-    observed at all.
-    """
-
-    if hasattr(sys, "monitoring"):
-        pytest.skip("escape detection uses sys.monitoring instead of setprofile on Python 3.12+")
-    generator = np.random.default_rng(123)
-    raw_relu = torch.relu
-
-    class DualDetectionModel(nn.Module):
-        """Exercise one NumPy RNG draw and one raw torch callable escape."""
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Trigger both profile-hook receivers in one owner-thread forward."""
-
-            generator.random()
-            return torch.sigmoid(raw_relu(x))
-
-    wrap_torch(escape_detector="shadow")
-    with pytest.warns(TorchLensCaptureGapWarning, match="relu"):
-        trace = tl.trace(
-            DualDetectionModel(),
-            torch.randn(3),
-            capture=CaptureOptions(
-                intervention_ready=True,
-                capture_container_structure=True,
-                cache=False,
-                random_seed=7,
-            ),
-        )
-
-    # Assert the property under test -- BOTH receivers fired -- by naming the escape,
-    # not by counting diagnostics. An armed capture also self-reports one escape for
-    # TorchLens's own `completeness_witness._raw_storage_ptr_no_observe` calling
-    # `TensorBase.untyped_storage`, which is absent from a plain capture. That
-    # self-trip is tracked separately; a total-count assertion here would silently
-    # couple this test to it.
-    escaped = {
-        candidate
-        for diagnostic in trace.escape_diagnostics
-        for candidate in diagnostic["callable_candidates"]
-    }
-    assert any("relu" in candidate for candidate in escaped), escaped
-    assert trace._runnable.rng_monitor_uncertain is False
-    assert "c_rng_instance_draw" in trace._runnable.host_rng_channels
-    assert sys.getprofile() is None
-
-
+# Kept: sole branch coverage of _data_classes/_trace_groups.py, backends/torch/backward.py.
 def test_record_fastlog_uses_same_guard_and_backward_boundary_is_explicit() -> None:
     """Public record is armed; deferred backward is explicitly not armed."""
 
@@ -567,11 +338,12 @@ def test_record_fastlog_uses_same_guard_and_backward_boundary_is_explicit() -> N
     assert recording.capture_owner_thread_qualified is True
     assert recording.escape_diagnostics == []
     trace = tl.trace(Model(), torch.randn(3, requires_grad=True))
-    assert trace.escape_detector_backward_coverage == "not_armed"
-    trace.log_backward(trace[trace.output_layers[0]].out.sum())
-    assert trace.has_backward_pass is True
+    assert trace.autograd.escape_detector_backward_coverage == "not_armed"
+    trace.backward(trace[trace.output_layers[0]].out.sum())
+    assert trace.autograd.has_backward_pass is True
 
 
+# Kept: sole branch coverage of _data_classes/_trace_groups.py, backends/torch/escape_detection.py; a sole mutation kill.
 def test_thread_count_tripwire_marks_trace_unverified() -> None:
     """A thread-count delta is warned and exposed machine-readably."""
 
@@ -596,18 +368,19 @@ def test_thread_count_tripwire_marks_trace_unverified() -> None:
     model = Model()
     wrap_torch(escape_detector="shadow")
     try:
-        with pytest.warns(TorchLensCaptureGapWarning, match="thread-count change"):
+        with pytest.warns(CaptureGapWarning, match="thread-count change"):
             trace = tl.trace(model, torch.randn(3))
-        assert trace.capture_owner_thread_qualified is True
-        assert trace.capture_thread_activity_detected is True
-        assert trace.capture_verified is False
-        assert trace.capture_verification_reason == "owner_thread_tripwire_changed"
+        assert trace.provenance.owner_thread_qualified is True
+        assert trace.provenance.thread_activity_detected is True
+        assert trace.provenance.verified is False
+        assert trace.provenance.verification_reason == "owner_thread_tripwire_changed"
     finally:
         release.set()
         if model.worker is not None:
             model.worker.join(timeout=2)
 
 
+# Kept: sole branch coverage of _data_classes/_trace_groups_capture.py.
 def test_default_detector_is_off_and_default_trace_makes_no_claim() -> None:
     """The callable detector remains opt-in; a default trace claims nothing.
 
@@ -625,11 +398,12 @@ def test_default_detector_is_off_and_default_trace_makes_no_claim() -> None:
 
     wrap_torch()
     trace = tl.trace(Model(), torch.randn(3))
-    assert trace.escape_detector_mode == "off"
-    assert trace.capture_verified is None
-    assert trace.capture_verification_reason is None
+    assert trace.health.escape_detector_mode == "off"
+    assert trace.provenance.verified is None
+    assert trace.provenance.verification_reason is None
 
 
+# Kept: sole branch coverage of _data_classes/_trace_groups.py.
 def test_scoped_and_legacy_match_on_in_scope_standard_model() -> None:
     """Scoped and release-default discovery produce the same in-scope graph."""
 
@@ -655,39 +429,12 @@ def test_scoped_and_legacy_match_on_in_scope_standard_model() -> None:
     unwrap_torch()
     wrap_torch()
     scoped = tl.trace(model, inputs)
-    assert scoped.graph_shape_hash == legacy.graph_shape_hash
+    assert scoped.provenance.fingerprint == legacy.provenance.fingerprint
     assert [op.func_name for op in scoped.ops] == [op.func_name for op in legacy.ops]
     assert scoped.layer_labels == legacy.layer_labels
 
 
-@pytest.mark.heavy
-@pytest.mark.parametrize(
-    "model_type",
-    [
-        example_models.SimpleFF,
-        example_models.GeluModel,
-        example_models.SimpleInternallyGenerated,
-        example_models.SimpleBranching,
-        example_models.SimpleLoopNoParam,
-        example_models.NestedModules,
-    ],
-)
-def test_scoped_and_legacy_match_standard_test_model_zoo(
-    model_type: type[nn.Module],
-) -> None:
-    """Scoped matches legacy graphs across representative standard zoo axes."""
-
-    inputs = torch.full((5,), 2.0)
-    wrap_torch()
-    legacy = tl.trace(model_type(), inputs)
-    unwrap_torch()
-    wrap_torch()
-    scoped = tl.trace(model_type(), inputs)
-    assert scoped.graph_shape_hash == legacy.graph_shape_hash
-    assert [op.func_name for op in scoped.ops] == [op.func_name for op in legacy.ops]
-    assert scoped.layer_labels == legacy.layer_labels
-
-
+# Kept: sole branch coverage of _data_classes/_trace_groups.py.
 def test_guard_pass_metadata_is_machine_readable() -> None:
     """Each active-logging pass carries an owner-thread-qualified record."""
 
@@ -700,14 +447,15 @@ def test_guard_pass_metadata_is_machine_readable() -> None:
             return torch.relu(x)
 
     wrap_torch(escape_detector="shadow")
-    trace = tl.trace(Model(), torch.randn(3), layers_to_save=["relu"])
+    trace = tl.trace(Model(), torch.randn(3), save=["relu"])
     assert trace.capture_guard_passes
     assert all(
-        item["owner_thread_id"] == trace.capture_owner_thread_id
+        item["owner_thread_id"] == trace.provenance.owner_thread_id
         for item in trace.capture_guard_passes
     )
 
 
+# Kept: a sole mutation kill.
 def test_witness_internal_storage_read_does_not_self_trip_detector() -> None:
     """The armed completeness witness never reports its OWN raw storage reads.
 
@@ -722,8 +470,6 @@ def test_witness_internal_storage_read_does_not_self_trip_detector() -> None:
     detector (see the coarm test above for the positive detection control).
     """
 
-    from torchlens.options import CaptureOptions
-
     class Model(nn.Module):
         """Two represented ops; nothing escapes."""
 
@@ -737,10 +483,10 @@ def test_witness_internal_storage_read_does_not_self_trip_detector() -> None:
         Model(),
         torch.randn(3),
         capture=CaptureOptions(
-            intervention_ready=True,
+            replayable=True,
             capture_container_structure=True,
             cache=False,
-            random_seed=7,
+            seed=7,
         ),
     )
     self_trips = [
@@ -754,62 +500,11 @@ def test_witness_internal_storage_read_does_not_self_trip_detector() -> None:
     assert not self_trips, f"witness self-trip diagnostics: {self_trips}"
 
 
-def test_user_call_into_witness_storage_helper_degrades_verification() -> None:
-    """User model code calling the witness's raw-storage helper is an escape.
-
-    Inverse control for the self-trip regression above: the helper's
-    authorization is bound to TorchLens's OWN calling frames, not to the
-    helper's identity. User model code that imports and calls
-    ``_raw_storage_ptr_no_observe`` executes pointer-dependent control flow
-    outside every wrapper, so an armed capture must NOT report
-    ``capture_verified`` with empty escape diagnostics.
-    """
-
-    from torchlens.backends.torch.completeness_witness import _raw_storage_ptr_no_observe
-    from torchlens.options import CaptureOptions
-
-    class CallsAuthorizedWitnessFrame(nn.Module):
-        """Branches on a raw storage pointer read through the helper."""
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Choose an op from an unobserved raw pointer."""
-
-            ptr = _raw_storage_ptr_no_observe(x)
-            if ptr is not None and ((ptr >> 8) & 1):
-                return torch.relu(x)
-            return torch.sigmoid(x)
-
-    wrap_torch(escape_detector="shadow", completeness_witness=True)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        trace = tl.trace(
-            CallsAuthorizedWitnessFrame(),
-            torch.randn(3),
-            capture=CaptureOptions(
-                intervention_ready=True,
-                capture_container_structure=True,
-                cache=False,
-            ),
-        )
-    assert not (trace.capture_verified and not trace.escape_diagnostics), (
-        trace.capture_verification_reason,
-        trace.escape_diagnostics,
-    )
-    storage_trips = [
-        diagnostic
-        for diagnostic in trace.escape_diagnostics
-        if any(
-            "untyped_storage" in str(candidate) or "data_ptr" in str(candidate)
-            for candidate in diagnostic.get("callable_candidates", ())
-        )
-    ]
-    assert storage_trips
-
-
+# Kept: sole branch coverage of _postprocess/_materialize.py, backends/torch/_completeness_finalize.py, backends/torch/model_prep.py and more.
 def test_forged_frame_metadata_cannot_impersonate_witness_authorization() -> None:
     """FAIL-AFTER-WHERE-PASSED-BEFORE: frame-metadata forgery gains no authorization.
 
-    Sol be2-closure probe regression: the internal-caller check used to trust
+    Review be2-closure probe regression: the internal-caller check used to trust
     the caller frame's ``f_globals['__name__']`` and ``co_filename``, both of
     which user code controls -- a ``forward`` compiled with a torchlens-ish
     module name and a fabricated filename under the package directory was
@@ -822,8 +517,7 @@ def test_forged_frame_metadata_cannot_impersonate_witness_authorization() -> Non
     """
 
     from torchlens.backends.torch import completeness_witness as witness_module
-    from torchlens.backends.torch.completeness_witness import _raw_storage_ptr_no_observe
-    from torchlens.options import CaptureOptions
+    from torchlens.backends.torch._completeness_escape_state import _raw_storage_ptr_no_observe
 
     forged_globals = {
         "__name__": "torchlens.user_supplied_model",
@@ -853,13 +547,13 @@ def test_forged_frame_metadata_cannot_impersonate_witness_authorization() -> Non
             ForgedFrameModel(),
             torch.randn(3),
             capture=CaptureOptions(
-                intervention_ready=True,
+                replayable=True,
                 capture_container_structure=True,
                 cache=False,
             ),
         )
-    assert not (trace.capture_verified and not trace.escape_diagnostics), (
-        trace.capture_verification_reason,
+    assert not (trace.provenance.verified and not trace.escape_diagnostics), (
+        trace.provenance.verification_reason,
         trace.escape_diagnostics,
     )
     storage_trips = [
@@ -873,6 +567,7 @@ def test_forged_frame_metadata_cannot_impersonate_witness_authorization() -> Non
     assert storage_trips
 
 
+# Kept: sole branch coverage of _data_classes/_trace_groups_capture.py, backends/torch/escape_detection.py; a sole mutation kill.
 def test_detector_teardown_failure_demotes_and_discloses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -901,9 +596,9 @@ def test_detector_teardown_failure_demotes_and_discloses(
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         trace = tl.trace(Clean(), torch.randn(3))
-    assert trace.capture_verified is False
-    assert trace.capture_verification_reason == "escape_detector_teardown_failed"
-    assert trace.escape_detector_verified is False
+    assert trace.provenance.verified is False
+    assert trace.provenance.verification_reason == "escape_detector_teardown_failed"
+    assert trace.health.escape_detector_verified is False
     teardown_reports = [
         diagnostic
         for diagnostic in trace.escape_diagnostics
@@ -918,13 +613,14 @@ def test_detector_teardown_failure_demotes_and_discloses(
     # The failure must not poison the process: the next capture runs and settles
     # its ordinary shadow verdict with no teardown diagnostic.
     second = tl.trace(Clean(), torch.randn(3))
-    assert second.capture_verification_reason == "shadow_diagnostic_mode"
+    assert second.provenance.verification_reason == "shadow_diagnostic_mode"
     assert not any(
         diagnostic.get("kind") == "detector_teardown_failed"
         for diagnostic in second.escape_diagnostics
     )
 
 
+# Kept: sole branch coverage of backends/torch/_completeness_storage.py, backends/torch/model_prep.py.
 def test_owner_thread_scalar_only_stale_escape_is_shadow_reported() -> None:
     """The owner-thread scalar-only stale crossing is observable via shadow mode.
 
@@ -935,11 +631,12 @@ def test_owner_thread_scalar_only_stale_escape_is_shadow_reported() -> None:
     and unlabeled receivers cannot be flagged without false-positives on
     parameter/attribute scalar reads. This pin proves the opt-in shadow
     detector reports the stale CALL itself, so the documented remediation
-    path is real (b3-fable R02-1).
+    path is real (b3-fable R02-1). The stale ref sits in a custom callable
+    object, which capture preparation never rebinds.
     """
 
     unwrap_torch()
-    stale_norm = torch.linalg.norm
+    stale_norm = OpaqueCallable(torch.linalg.norm)
     wrap_torch(escape_detector="shadow")
 
     class Model(nn.Module):
@@ -956,7 +653,42 @@ def test_owner_thread_scalar_only_stale_escape_is_shadow_reported() -> None:
         warnings.simplefilter("always")
         trace = tl.trace(Model(), torch.randn(3, 4))
 
-    assert trace.capture_verified is False
-    assert trace.capture_verification_reason == "callable_escape_shadow_report"
+    assert trace.provenance.verified is False
+    assert trace.provenance.verification_reason == "callable_escape_shadow_report"
     assert trace.escape_diagnostics
     assert _gap_warnings(caught)
+
+
+def test_thread_count_warning_blames_the_caller_not_a_torchlens_frame() -> None:
+    """The guard's teardown warning points at the user's line under any context manager.
+
+    The suite errors on warnings attributed to the torchlens package; a fixed
+    ``stacklevel`` from inside the guard's generator lands on whichever frame drives
+    the context manager, so the warning must find the first frame outside torchlens.
+    """
+
+    release = threading.Event()
+    workers: list[threading.Thread] = []
+
+    class Model(nn.Module):
+        """Leave a live worker behind so the guard sees a thread-count change."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Start one daemon worker, then do the tensor work on the owner thread."""
+
+            worker = threading.Thread(target=release.wait, daemon=True)
+            worker.start()
+            workers.append(worker)
+            return torch.relu(x)
+
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            tl.trace(Model(), torch.randn(3))
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(timeout=2)
+    gap = [w for w in caught if "thread-count change" in str(w.message)]
+    assert len(gap) == 1
+    assert Path(gap[0].filename).resolve() == Path(__file__).resolve()

@@ -1,0 +1,177 @@
+"""F08 config grammar: typed refusals, typed conflicts, nothing silent.
+
+Summary memo 3.10: unknown names teach with a nearest match; contradictory
+axes raise ``summary_option_conflict``; the removed legacy spellings refuse
+typed naming their successor (pinned in test_summary_removed_spellings.py);
+the fma1 convention is honored or refused typed, never accepted-and-ignored.
+"""
+
+from __future__ import annotations
+
+import pytest
+import torch
+from torch import nn
+
+import torchlens as tl
+from torchlens._errors import ArgumentConflictError, InvalidArgumentError, ShapeInferenceError
+from torchlens.report._summary_config import resolve_config
+
+
+class _Toy(nn.Module):
+    """Two-Linear toy with an orphan relu."""
+
+    def __init__(self) -> None:
+        """Two Linears."""
+
+        super().__init__()
+        self.fc1 = nn.Linear(8, 16)
+        self.fc2 = nn.Linear(16, 8)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """fc1 -> relu -> fc2."""
+
+        return self.fc2(torch.relu(self.fc1(x)))
+
+
+@pytest.fixture(scope="module")
+def toy_trace():
+    """One finished toy trace for the whole module."""
+
+    trace = tl.trace(_Toy(), torch.randn(2, 8))
+    try:
+        yield trace
+    finally:
+        trace.cleanup()
+
+
+def test_unknown_option_teaches_with_nearest_match(toy_trace) -> None:
+    """An unknown option names itself and the valid grammar."""
+
+    with pytest.raises(InvalidArgumentError, match="colums") as excinfo:
+        toy_trace.summary(colums=["name"])
+    assert excinfo.value.fields["code"] == "summary_option_invalid"
+    assert "columns" in str(excinfo.value)  # the did-you-mean
+
+
+def test_unknown_view_refuses_typed(toy_trace) -> None:
+    """view= is a closed vocabulary with a teaching refusal."""
+
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        toy_trace.summary(view="overveiw")
+    assert excinfo.value.fields["code"] == "summary_option_invalid"
+    assert "overview" in str(excinfo.value)  # the did-you-mean
+
+
+def test_op_level_conflicts_with_depth(toy_trace) -> None:
+    """level='op' + depth= contradict; the refusal teaches the fix."""
+
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        toy_trace.summary(level="op", depth=2)
+    assert excinfo.value.fields["code"] == "summary_option_conflict"
+
+
+def test_buffer_rows_refuse_until_qualified_names(toy_trace) -> None:
+    """buffers='rows' is gated on qualified-name plumbing (memo 3.10)."""
+
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        toy_trace.summary(buffers="rows")
+    assert excinfo.value.fields["code"] == "summary_option_invalid"
+    assert "qualified" in str(excinfo.value)
+
+
+def test_columns_bundle_exact_and_deltas(toy_trace) -> None:
+    """columns= accepts a bundle name, an exact list, or +/- deltas."""
+
+    bundle = toy_trace.summary(columns="compute")
+    assert "macs" in bundle
+    exact = toy_trace.summary(columns=["name", "params"])
+    assert "fwd flops" not in exact
+    delta = toy_trace.summary(columns=["+macs", "-params_pct"])
+    assert "macs" in delta
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        toy_trace.summary(columns=["name", "watts"])
+    assert excinfo.value.fields["code"] == "summary_option_invalid"
+
+
+def test_filter_discloses_coverage_and_preserves_totals(toy_trace) -> None:
+    """Filters are presentation-only: coverage named, totals whole-model."""
+
+    filtered = toy_trace.summary(where="fc1")
+    assert "showing" in filtered
+    assert "visible coverage" in filtered
+    full = toy_trace.summary()
+    assert filtered.total_params == full.total_params
+    assert filtered.total_flops_forward == full.total_flops_forward
+
+
+def test_fma1_renders_from_the_two_term_record(toy_trace) -> None:
+    """flop_convention='fma1' recounts totals; fma2 stays the default."""
+
+    fma2 = toy_trace.summary()
+    fma1 = toy_trace.summary(flop_convention="fma1")
+    assert "(fma=2)" in fma2
+    assert "(fma=1)" in fma1
+    assert "1 MAC = 2 FLOPs" in fma2
+    assert "1 MAC = 1 FLOP" in fma1
+    assert "1 MAC = 2 FLOPs" not in fma1
+    assert fma1.total_flops_forward == fma2.total_flops_forward  # raw data unchanged
+
+
+def test_one_call_only_kwargs_refuse_on_trace_summary(toy_trace) -> None:
+    """input_size/execution_mode/grad_mode are one-call-only spellings."""
+
+    for kwargs in ({"input_shape": (2, 8)}, {"execution_mode": "eval"}, {"grad_mode": "off"}):
+        with pytest.raises(InvalidArgumentError) as excinfo:
+            toy_trace.summary(**kwargs)
+        assert excinfo.value.fields["code"] == "summary_one_call_only"
+        assert "tl.summary" in str(excinfo.value)
+
+
+def test_input_args_xor_input_size() -> None:
+    """The one-call door refuses mixed input spellings (ladder rung law, F17)."""
+
+    with pytest.raises(ArgumentConflictError) as excinfo:
+        tl.summary(_Toy(), torch.randn(2, 8), input_shape=(2, 8))
+    assert excinfo.value.fields["code"] == "input_rung_conflict"
+
+
+def test_zero_input_inference_failure_teaches_the_real_input_spelling() -> None:
+    """An uninferrable model refuses typed and names both remedies."""
+
+    class _Uninferrable(nn.Module):
+        """Rejects every probe input the inference ladder can synthesize."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Refuse all inputs so shape inference cannot succeed."""
+
+            raise RuntimeError("no synthetic input satisfies this forward")
+
+    with pytest.raises(ShapeInferenceError) as excinfo:
+        tl.summary(_Uninferrable())
+    assert excinfo.value.fields["code"] == "input_inference_failed"
+    assert "input_shape=" in str(excinfo.value.fields["remedy"])
+
+
+def test_input_size_synthesizes_and_discloses() -> None:
+    """input_shape= builds a seeded synthetic input and says so."""
+
+    report = tl.summary(_Toy(), input_shape=(2, 8))
+    assert "synthetic input" in str(report)
+    assert "input_shape=(2, 8)" in str(report)
+    assert report.total_params == (8 * 16 + 16) + (16 * 8 + 8)
+
+
+def test_invalid_view_ranks_all_candidates_and_aligns_remedy() -> None:
+    """Summary refusals use the shared ranking and complete card layout."""
+
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        resolve_config(view="cmpt")
+    message = str(excinfo.value)
+    candidates = next(line for line in message.splitlines() if line.startswith("  candidates"))
+    remedy = next(line for line in message.splitlines() if line.startswith("  remedy"))
+    assert (
+        candidates.index("'compute'") < candidates.index("'stats'") < candidates.index("'overview'")
+    )
+    assert candidates.index("'compute'") == remedy.index("pass one of:")
+    assert excinfo.value.fields["code"] == "summary_option_invalid"
+    assert excinfo.value.fields["remedy"] == "pass one of: overview, compute, stats"

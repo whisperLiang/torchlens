@@ -1,0 +1,90 @@
+"""The read-only agent inspection surface: one tool registry exposed through Python (:func:`call_tool`), the MCP server (``torchlens.bridge.mcp``) and the CLI (``python -m torchlens``).
+
+Every tool is read-only and idempotent; nothing here executes user code, writes files, or mutates artifacts. Reach it as ``tl.agent``; it is deliberately not in ``torchlens.__all__``."""
+
+from __future__ import annotations
+
+import importlib
+from typing import TYPE_CHECKING, Any
+
+from ._envelope import build_envelope, build_error_envelope, canonical_dumps, json_safe
+from ._guide_text import AGENT_GUIDE, guide
+from ._registry import AgentToolSpec, call_tool, call_tool_envelope, spec_for, tool_specs
+
+__all__ = [
+    "AGENT_GUIDE",
+    "AgentToolSpec",
+    "build_envelope",
+    "build_error_envelope",
+    "call_tool",
+    "call_tool_envelope",
+    "canonical_dumps",
+    "guide",
+    "json_safe",
+    "list_tools",
+    "spec_for",
+    "tool_specs",
+]
+
+
+def list_tools() -> list[dict[str, Any]]:
+    """Return the served tool declarations exactly as MCP ``list_tools`` serves them.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        One declaration per tool: name, description, input/output schema,
+        annotations, CLI verb, and default limits -- the field-parity gate
+        compares real served output against these rows.
+
+    Examples
+    --------
+    >>> tools = list_tools()
+    >>> "torchlens_doctor" in [tool["name"] for tool in tools]
+    True
+    >>> tools[0]["annotations"]["readOnlyHint"]
+    True
+    """
+
+    return [
+        {
+            "name": spec.name,
+            "description": spec.description,
+            "input_schema": spec.input_schema,
+            "output_schema": spec.output_schema,
+            "annotations": {"readOnlyHint": spec.read_only, "idempotentHint": spec.idempotent},
+            "tool_class": spec.tool_class,
+            "cli_verb": spec.cli_verb,
+            "default_limits": dict(spec.default_limits),
+        }
+        for spec in tool_specs()
+    ]
+
+
+# Runtime only: under TYPE_CHECKING a module ``__getattr__`` would make every
+# name on this module type-check as Any.
+if not TYPE_CHECKING:
+
+    def __getattr__(name: str) -> Any:
+        """Refuse a submodule path that 3.0 made private, typed; miss plainly otherwise.
+
+        Parameters
+        ----------
+        name:
+            Attribute normal lookup did not find.
+
+        Raises
+        ------
+        AttributeError
+            Always; ``FacadeTeachingError`` (``facade_redirect``) for a private
+            submodule's old public spelling.
+        """
+
+        # Resolved at call time, and only for a public spelling: importing torchlens._utils
+        # runs its package init, which reaches torch, and the tier-0 verbs stay torch-free
+        # (``from torchlens.agent import _cli`` asks this hook for ``_cli`` first).
+        if not name.startswith("_"):
+            importlib.import_module("torchlens._private_submodules").refuse_private_submodule(
+                __name__, name
+            )
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

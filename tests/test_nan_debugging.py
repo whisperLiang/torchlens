@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import warnings
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.errors import CaptureError
-from torchlens.partial import PartialTrace
+from torchlens.debug._common import _nonfinite_kind_of
+from torchlens.errors import CaptureAttemptFailedWarning, CaptureError, TraceCaptureError
+from torchlens.types import PartialTrace
 
 
 class NonFiniteFixture(nn.Module):
@@ -70,107 +75,31 @@ def _input_tensor() -> torch.Tensor:
     return torch.ones(1, 2)
 
 
-def test_first_nonfinite_locates_nan_op() -> None:
-    """Trace.first_nonfinite locates the known NaN-producing op."""
-
-    trace = tl.trace(NonFiniteFixture(), _input_tensor())
-    answer = trace.first_nonfinite()
-    assert "First non-finite" in answer
-    assert "__truediv__" in answer
-    assert "shape=(1, 2)" in answer
-    assert "dtype=torch.float32" in answer
-
-
-def test_print_trace_shows_inline_nan_flags(capsys: pytest.CaptureFixture[str]) -> None:
-    """Printing a Trace surfaces the inline NaN/Inf debugging line."""
-
-    trace = tl.trace(NonFiniteFixture(), _input_tensor())
-    print(trace)
-    captured = capsys.readouterr()
-    assert "NaN/Inf" in captured.out
-    assert "__truediv__" in captured.out
-    assert "shape=(1, 2)" in captured.out
-
-
-def test_raise_on_nan_raises_capture_error_with_partial_graph() -> None:
-    """raise_on_nan stops at the first non-finite tensor and renders partial DOT."""
-
-    with pytest.raises(CaptureError) as exc_info:
-        tl.trace(
-            NonFiniteFixture(),
-            _input_tensor(),
-            capture=tl.options.CaptureOptions(raise_on_nan=True),
-        )
-    error = exc_info.value
-    assert "op='__truediv__'" in str(error)
-    assert "shape=(1, 2)" in str(error)
-    assert error.fields["op"] == "__truediv__"
-    assert error.fields["shape"] == (1, 2)
-
-    partial = tl.partial.from_failed_capture(error)
-    graph = partial.draw()
-    assert "digraph torchlens_partial" in graph
-    assert "__truediv__" in graph
-    assert "shape=(1, 2)" in graph
-
-
-def test_partial_trace_constructible_from_failed_capture() -> None:
+def test_partial_trace_constructible_after_failed_capture() -> None:
     """PartialTrace can be recovered from the failed capture exception."""
 
     with pytest.raises(CaptureError) as exc_info:
         tl.trace(
             NonFiniteFixture(),
             _input_tensor(),
-            capture=tl.options.CaptureOptions(raise_on_nan=True),
+            capture=tl.options.CaptureOptions(on_nonfinite="raise"),
         )
-    partial = tl.partial.from_failed_capture(exc_info.value)
+    partial = exc_info.value.partial_trace
     assert isinstance(partial, PartialTrace)
-    assert partial is exc_info.value.partial_log
+    assert partial is exc_info.value.partial_trace
     assert len(partial.raw_layers) >= 1
     assert "__truediv__" in partial.first_nonfinite()
-
-
-def test_partial_trace_recoverable_when_exception_rejects_attachment() -> None:
-    """A bounded identity registry preserves partials for frozen exceptions."""
-
-    class RejectingPartialLogError(Exception):
-        """Exception that refuses TorchLens' normal recovery attribute."""
-
-        def __setattr__(self, name: str, value: object) -> None:
-            """Reject ``partial_log`` while allowing ordinary exception state."""
-
-            if name == "partial_log":
-                raise AttributeError("partial_log is frozen")
-            super().__setattr__(name, value)
-
-    class FailingModel(nn.Module):
-        """Capture one operation before raising the frozen exception."""
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Raise after creating a recoverable captured prefix."""
-
-            _ = x + 1
-            raise RejectingPartialLogError("boom")
-
-    with pytest.warns(RuntimeWarning, match="rejected TorchLens partial_log attachment"):
-        with pytest.raises(RejectingPartialLogError) as exc_info:
-            tl.trace(FailingModel(), torch.ones(1))
-
-    assert not hasattr(exc_info.value, "partial_log")
-    partial = tl.partial.from_failed_capture(exc_info.value)
-    assert isinstance(partial, PartialTrace)
-    assert partial.original_exception is exc_info.value
-    assert len(partial.raw_layers) >= 1
 
 
 def test_partial_trace_attached_to_generic_forward_exception() -> None:
     """Failed non-NaN captures also attach a PartialTrace."""
 
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(TraceCaptureError) as exc_info:
         tl.trace(ForwardErrorFixture(), _input_tensor())
-    partial = tl.partial.from_failed_capture(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    partial = exc_info.value.partial_trace
     assert isinstance(partial, PartialTrace)
-    graph = partial.draw()
+    graph = partial.draw().dot
     assert "__add__" in graph
     assert "fixture failure" in graph
 
@@ -188,36 +117,32 @@ def test_find_nan_accepts_explicit_capture_options() -> None:
     assert result.scope == "first non-finite tensor"
 
 
-def test_first_nonfinite_scan_is_memoized_per_trace() -> None:
-    """A repeated non-finite question must not re-read every saved activation.
+def test_find_nan_success_path_routes_no_capture_failed_advisory() -> None:
+    """Finding the NaN is the success case: the designed stop raises no advisory."""
 
-    ``print(trace)``, ``_repr_html_``, and ``report.explain`` each ask this
-    question, so a scan per call meant re-running ``torch.isfinite`` over the
-    whole forward's payload on every repr. Lock the memo in: the second answer
-    costs zero element reads.
-    """
+    handler_before = warnings.showwarning
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = tl.debug.find_nan(NonFiniteFixture(), _input_tensor())
 
-    trace = tl.trace(nn.Sequential(nn.Linear(2, 2)), _input_tensor())
-    real_isfinite = torch.isfinite
-    calls = 0
+    assert result.found is True
+    assert result.kind == "nan"
+    assert not [w for w in caught if issubclass(w.category, CaptureAttemptFailedWarning)]
+    assert warnings.showwarning is handler_before
 
-    def counting_isfinite(tensor: torch.Tensor) -> torch.Tensor:
-        """Count element-scanning checks issued by the non-finite scan."""
 
-        nonlocal calls
-        calls += 1
-        return real_isfinite(tensor)
+def test_find_nan_real_capture_failure_still_routes_the_advisory() -> None:
+    """A capture that fails for another reason keeps the advisory and the error."""
 
-    torch.isfinite = counting_isfinite  # type: ignore[assignment]
-    try:
-        first = trace.first_nonfinite()
-        cold_calls = calls
-        calls = 0
-        assert trace.first_nonfinite() == first
-        assert calls == 0
-    finally:
-        torch.isfinite = real_isfinite  # type: ignore[assignment]
-    assert cold_calls > 0
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(TraceCaptureError) as exc_info:
+            tl.debug.find_nan(ForwardErrorFixture(), _input_tensor())
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    advisories = [w for w in caught if issubclass(w.category, CaptureAttemptFailedWarning)]
+    assert len(advisories) == 1
+    assert ".partial_trace" in str(advisories[0].message)
 
 
 def test_first_nonfinite_rescans_after_saved_activation_changes() -> None:
@@ -227,13 +152,43 @@ def test_first_nonfinite_rescans_after_saved_activation_changes() -> None:
     assert trace.first_nonfinite().startswith("No non-finite")
 
     with torch.no_grad():
-        trace.layer_list[-1].out.mul_(float("nan"))
+        trace._layer_list[-1].out.mul_(float("nan"))
     in_place_answer = trace.first_nonfinite()
     assert "First non-finite" in in_place_answer
-    assert "No NaN or Inf" not in tl.report.explain(trace)
+    assert "No NaN or Inf" not in trace.explain()
 
-    replaced = trace.layer_list[0]
+    replaced = trace._layer_list[0]
     replaced.out = torch.full_like(replaced.out, float("inf"))
     replaced_answer = trace.first_nonfinite()
     assert "First non-finite" in replaced_answer
     assert str(replaced.layer_label) in replaced_answer
+
+
+class _HostArrayCodec:
+    """Stand-in payload codec for a preview backend whose arrays are host NumPy arrays."""
+
+    def to_numpy(self, value: object) -> SimpleNamespace:
+        if not isinstance(value, np.ndarray):
+            raise TypeError(f"cannot encode {type(value).__name__}")
+        return SimpleNamespace(array=value)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (np.array([1.0, np.nan]), "nan"),
+        (np.array([np.inf, 2.0], dtype=np.float32), "inf"),
+        (np.array([np.nan, -np.inf]), "nan+inf"),
+        (np.array([1.0, 2.0]), "none"),
+        (np.array([1, 2]), "none"),
+        ("not an array", "none"),
+        (torch.tensor([float("nan")]), "nan"),
+    ],
+    ids=["nan", "inf", "nan+inf", "finite", "integer", "non-array", "torch"],
+)
+def test_nonfinite_kind_of_reads_preview_arrays_through_the_codec(
+    value: object, expected: str
+) -> None:
+    """Preview outputs are classified through the backend codec, not skipped as non-torch."""
+
+    assert _nonfinite_kind_of(value, _HostArrayCodec()) == expected

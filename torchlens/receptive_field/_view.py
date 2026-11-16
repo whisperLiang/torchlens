@@ -5,16 +5,19 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from fractions import Fraction
 from importlib import import_module
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from .._selection.graph import _DEFAULT_PROBE_BUDGET, _influence
+from .._selection.selection import _find_act_ops, units as _units
 from ._errors import (
     AmbiguousInputError,
-    AmbiguousTargetError,
     ReceptiveFieldError,
     ReceptiveFieldUnavailableError,
 )
+from ._path import _select_target_descriptor
 from ._types import (
-    GradientReceptiveField,
+    GradReceptiveField,
     GridLayout,
     ReceptiveField,
     ReceptiveFieldAxis,
@@ -25,9 +28,13 @@ from ._types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    import torch
     from PIL import Image
 
-    from ..data_classes.op import Op
+    from .._data_classes.op import Op
+    from .._selection.selection import Selection
     from ._engine import _ReceptiveFieldSolution
     from ._engine_forward import _ProjectiveFieldSolution
 
@@ -64,8 +71,49 @@ def _optional_callable(module_name: str, function_name: str, feature: str) -> An
         ) from exc
 
 
+def _module_regions(trace: Any, item: object) -> list[object]:
+    """Return the regions one ``within`` item stands for.
+
+    A string that names no op, layer or io role but is a module address (or a
+    module pass label) stands for that module's output ops, read through
+    ``trace.modules``; ``Module`` and ``ModuleCall`` records are read the same
+    way. Every other region passes through unchanged.
+    """
+
+    record = item
+    if isinstance(item, str):
+        if _find_act_ops(trace, item) or item not in trace.modules:
+            return [item]
+        record = trace.modules[item]
+    if hasattr(record, "__selection__"):
+        return [item]
+    if hasattr(record, "calls"):
+        return [label for call in record.calls.values() for label in call.output_ops]
+    output_ops = getattr(record, "output_ops", None)
+    return [item] if output_ops is None else list(output_ops)
+
+
+def _module_outputs(trace: Any, within: object | None) -> list[object] | None:
+    """Replace module addresses and module records in ``within`` by their output ops."""
+
+    if within is None:
+        return None
+    items = list(within) if isinstance(within, (list, tuple, set, frozenset)) else [within]
+    return [region for item in items for region in _module_regions(trace, item)]
+
+
 class ReceptiveFieldView:
-    """Lazy query surface for one operation's per-input receptive fields."""
+    """Lazy query surface for one operation's per-input receptive fields.
+
+    Examples
+    --------
+    >>> trace = tl.trace(model, x)
+    >>> view = trace["conv2d_2_3"].receptive_field
+    >>> (isinstance(view, ReceptiveFieldView), view.size)
+    (True, (5, 5))
+    >>> view.at((4, 4)).exact
+    True
+    """
 
     __slots__ = ("_op", "_solution", "_direction", "per_input")
 
@@ -105,7 +153,7 @@ class ReceptiveFieldView:
             Projective view targeting all reachable model outputs by default.
         """
 
-        from ._engine_forward import solve_projective
+        from ._engine_forward import solve_projective  # deferred: cycle receptive_field
 
         return cls(
             op,
@@ -123,8 +171,8 @@ class ReceptiveFieldView:
     def _projective_solution(self, target: object | None) -> _ProjectiveFieldSolution:
         """Return a target-anchored solution for a projective query."""
 
-        from ._engine_forward import solve_projective
-        from ._path import resolve_graph_point
+        from ._engine_forward import solve_projective  # deferred: cycle receptive_field
+        from ._path import resolve_graph_point  # deferred: cycle receptive_field
 
         if target is None:
             return (
@@ -162,12 +210,12 @@ class ReceptiveFieldView:
                 return descriptor
         raise KeyError(key)
 
-    def _descriptor(self, input: Op | str | None = None) -> ReceptiveField:
+    def _descriptor(self, input_op: Op | str | None = None) -> ReceptiveField:
         """Resolve one descriptor and reject ambiguous convenience access.
 
         Parameters
         ----------
-        input:
+        input_op:
             Optional exact IO role or graph endpoint operation.
 
         Returns
@@ -182,23 +230,21 @@ class ReceptiveFieldView:
             are reachable.
         AmbiguousTargetError
             If this is a projective view, no target is selected, and several
-            are reachable.
+            are reachable without one being the primary output beside caches.
         ReceptiveFieldError
             If no endpoint is reachable or the requested one is not reachable.
         """
 
         projective = self._direction is ReceptiveFieldDirection.PROJECTIVE
-        if input is None:
+        if input_op is None:
             if len(self.per_input) > 1:
                 roles = ", ".join(self.per_input)
                 if projective:
-                    raise AmbiguousTargetError(
-                        f"Source {self._op.label!r} has multiple reachable targets: "
-                        f"{roles}. Select one with view[target_op] or target=<io_role>."
-                    )
+                    order = cast("_ProjectiveFieldSolution", self._solution).target_labels
+                    return _select_target_descriptor(self.per_input, None, order, self._op.label)
                 raise AmbiguousInputError(
                     f"Target {self._op.label!r} has multiple reachable inputs: {roles}. "
-                    "Select one with view[input_op] or input=<io_role>."
+                    "Select one with view[input_op] or input_op=<io_role>."
                 )
             if not self.per_input:
                 if projective:
@@ -210,9 +256,9 @@ class ReceptiveFieldView:
                 )
             return next(iter(self.per_input.values()))
         try:
-            return self[input]
+            return self[input_op]
         except KeyError as exc:
-            identity = input if isinstance(input, str) else input.label
+            identity = input_op if isinstance(input_op, str) else input_op.label
             if projective:
                 raise ReceptiveFieldError(
                     f"Target {identity!r} is not reachable from source {self._op.label!r}."
@@ -222,9 +268,34 @@ class ReceptiveFieldView:
             ) from exc
 
     @property
-    def status(self) -> ReceptiveFieldStatus:
-        """Return status for the only reachable input."""
+    def status(self) -> ReceptiveFieldStatus | Mapping[str, ReceptiveFieldStatus]:
+        """Return the field status, one per endpoint when several are reachable.
 
+        A status classifies each reachable endpoint on its own, so a view with
+        several reachable targets (projective) or inputs (receptive) answers
+        for every one instead of refusing: a read-only mapping from the
+        endpoint's IO role (the ``per_input`` keys) to its status. A projective
+        view of a GPT-2 activation, for example, reaches ``output.logits`` and
+        the cached keys and values of every later block. The geometry
+        accessors (``size``, ``jump``, ``center0``, ``axes``, ``axis_roles``)
+        still need one endpoint selected with ``view[role]``.
+
+        Returns
+        -------
+        ReceptiveFieldStatus or Mapping[str, ReceptiveFieldStatus]
+            The status for the only reachable endpoint, or the per-endpoint
+            mapping in reachability order when there are several.
+
+        Raises
+        ------
+        ReceptiveFieldError
+            If no endpoint is reachable.
+        """
+
+        if len(self.per_input) > 1:
+            return MappingProxyType(
+                {role: descriptor.status for role, descriptor in self.per_input.items()}
+            )
         return self._descriptor().status
 
     @property
@@ -252,10 +323,10 @@ class ReceptiveFieldView:
         return self._descriptor().center0
 
     @property
-    def layout(self) -> GridLayout:
+    def axis_roles(self) -> GridLayout:
         """Return the derived layout for the only reachable input."""
 
-        return self._descriptor().layout
+        return self._descriptor().axis_roles
 
     def _center_unit(self, descriptor: ReceptiveField) -> tuple[int, ...]:
         """Return windowed-axis midpoint coordinates for the ``"center"`` selector.
@@ -267,37 +338,17 @@ class ReceptiveFieldView:
         """
 
         if descriptor.axes is None:
-            raise ReceptiveFieldError("Geometric axes are unavailable; use .gradient() instead.")
+            raise ReceptiveFieldError("Geometric axes are unavailable; use .probe_grad() instead.")
         output_axes = sorted(
             cast(int, axis.output_axis) for axis in descriptor.axes if axis.kind == "windowed"
         )
         return tuple(int(self._op.shape[axis]) // 2 for axis in output_axes)
 
-    def _projective_query_unit(
-        self,
-        solution: _ProjectiveFieldSolution,
-        unit: tuple[int, ...] | Literal["center"],
-        target: object | None,
-    ) -> Sequence[int]:
-        """Resolve the projective midpoint only after selecting its target descriptor."""
-
-        if unit != "center":
-            return cast(Sequence[int], unit)
-        from ._forward_query import _select_target_descriptor
-
-        descriptors = solution.per_op.get(self._op.label)
-        if not descriptors:
-            raise ReceptiveFieldError(
-                f"No projective-field solution is available from source {self._op.label!r}."
-            )
-        descriptor = _select_target_descriptor(descriptors, cast("Op | str | None", target))
-        return self._center_unit(descriptor)
-
     def at(
         self,
         unit: tuple[int, ...] | Literal["center"],
         *,
-        input: Op | str | None = None,
+        input_op: Op | str | None = None,
         source: object | None = None,
         direction: ReceptiveFieldDirection | str | None = None,
         target: object | None = None,
@@ -309,9 +360,9 @@ class ReceptiveFieldView:
         ----------
         unit:
             Windowed-axis coordinates, or ``"center"`` for their midpoint.
-            Coordinates must be non-negative and in range; unlike ``.gradient()``
+            Coordinates must be non-negative and in range; unlike ``.probe_grad()``
             and ``.check()``, negative indices are rejected rather than wrapped.
-        input:
+        input_op:
             Optional exact IO role or model-input operation.
         source:
             Optional ancestor graph point. When given, the returned box is in the
@@ -320,8 +371,8 @@ class ReceptiveFieldView:
             Optional per-call receptive/projective direction override. ``None``
             uses the view's bound direction.
         target:
-            Optional descendant graph point selecting the far endpoint of a
-            projective query. Not permitted together with ``source``.
+            Descendant graph point or output IO role for a projective query (not with
+            ``source``); ``None`` picks the primary output when the other targets are caches.
         clip:
             Whether bounds are clipped to captured input extents.
 
@@ -332,15 +383,27 @@ class ReceptiveFieldView:
         """
 
         resolved_direction = self._direction_for(direction)
-        if input is not None and source is not None:
+        if input_op is not None and source is not None:
             raise TypeError("input and source cannot be supplied together.")
         if resolved_direction is ReceptiveFieldDirection.PROJECTIVE:
-            if input is not None or source is not None:
+            if input_op is not None or source is not None:
                 raise TypeError("Projective queries select their far endpoint with target=.")
             from ._forward_query import box_for_source_unit
 
             projective_solution = self._projective_solution(target)
-            source_unit = self._projective_query_unit(projective_solution, unit, target)
+            source_unit: Sequence[int]
+            if unit == "center":
+                descriptors = projective_solution.per_op.get(self._op.label)
+                if not descriptors:
+                    raise ReceptiveFieldError(
+                        f"No projective-field solution is available from source {self._op.label!r}."
+                    )
+                proj_descriptor = _select_target_descriptor(
+                    descriptors, cast("Op | str | None", target), projective_solution.target_labels
+                )
+                source_unit = self._center_unit(proj_descriptor)
+            else:
+                source_unit = cast(Sequence[int], unit)
             return box_for_source_unit(
                 projective_solution,
                 self._op,
@@ -353,13 +416,13 @@ class ReceptiveFieldView:
                 raise TypeError("source and target cannot be supplied together.")
             source = target
 
-        from . import _engine
-        from ._path import require_path, resolve_graph_point
-        from ._query import box_for_unit
+        from . import _engine  # deferred: cycle receptive_field
+        from ._path import require_path, resolve_graph_point  # deferred: cycle receptive_field
+        from ._query import box_for_unit  # deferred: cycle receptive_field
 
         source_op: Op | None = None
         solution = self._solution
-        selected_input = input
+        selected_input = input_op
         if source is not None:
             source_op = resolve_graph_point(self._op.source_trace, source)
             require_path(source_op, self._op, "receptive")
@@ -396,30 +459,98 @@ class ReceptiveFieldView:
             cast("_ReceptiveFieldSolution", solution),
             self._op,
             selected,
-            input=selected_input,
+            input_op=selected_input,
             source=source_op,
             clip=clip,
         )
 
-    def gradient(
+    def of(
+        self,
+        units: Iterable[tuple[int, ...] | int] | torch.Tensor,
+        *,
+        within: object | None = None,
+        method: Literal["geometric", "gradient"] = "geometric",
+        probe_budget: int = _DEFAULT_PROBE_BUDGET,
+    ) -> Selection:
+        """Return the field of a SET of this operation's units as a selection.
+
+        The many-unit form beside :meth:`at`: the union of the units' fields
+        (projective: what they reach; receptive: what reaches them) at every
+        site of ``within``.
+
+        Parameters
+        ----------
+        units:
+            What ``tl.units(site, indices)`` takes as ``indices``, over this
+            operation's FULL output shape (batch and channel included, unlike
+            ``.at()``'s windowed-axis coordinates): a bool mask, or an iterable
+            of coordinate tuples.
+        within:
+            Where the answer lives: one region or a list of them (an op or layer
+            label, a module address such as ``"layer3"``, an ``Op``, ``Layer``,
+            ``Module`` or ``ModuleCall``, or any selection). ``None`` means the
+            model outputs for a projective view and the model inputs for a
+            receptive view.
+        method:
+            ``"geometric"`` (the field engine's index geometry, the default) or
+            ``"gradient"`` (one autograd probe per unit and site; needs a trace
+            captured with ``backward_ready=True`` and ``save_mode="reference"``).
+            Through a fused kernel with no second derivative (fused attention)
+            a projective probe instead runs one backward pass per element of
+            the site, and only for a site of at most ``probe_budget`` elements.
+        probe_budget:
+            Most autograd probes (units times sites) ``"gradient"`` may run.
+
+        Returns
+        -------
+        Selection
+            Bound to this trace, one entry per ``within`` site, usable in
+            ``trace.do``, ``trace.subgraph`` and ``& | - ~``; each entry's
+            ``provenance`` states ``relation``, ``basis`` and ``field_status``.
+
+        Raises
+        ------
+        SelectionError
+            ``influence_geometry_unavailable`` when a site pair has no per-unit
+            geometry (use ``method="gradient"``), ``influence_probe_budget``
+            when the gradient method would exceed ``probe_budget``, and
+            ``selection_unresolvable`` for a seed or region that does not
+            resolve on this trace.
+        """
+
+        return self._units_field(units, within, method=method, probe_budget=probe_budget)
+
+    def _units_field(self, units: Any, within: object | None, **options: Any) -> Selection:
+        """Resolve :meth:`of`'s influence query (``method``, ``probe_budget``) on this trace."""
+
+        trace = self._op.source_trace
+        query = _influence(
+            _units(self._op.label, units),
+            _module_outputs(trace, within),
+            direction=self._direction.value,
+            **options,
+        )
+        return query._resolve(trace)
+
+    def probe_grad(
         self,
         unit: tuple[int, ...],
         *,
-        input: Op | str | None = None,
+        input_op: Op | str | None = None,
         source: object | None = None,
         direction: ReceptiveFieldDirection | str | None = None,
         target: object | None = None,
         atol: float = 0.0,
         rtol: float = 0.0,
         retain_graph: bool = False,
-    ) -> GradientReceptiveField | Mapping[str, GradientReceptiveField]:
+    ) -> GradReceptiveField | Mapping[str, GradReceptiveField]:
         """Probe empirical influence for one complete output-element index.
 
         Parameters
         ----------
         unit:
             Complete target output-element index.
-        input:
+        input_op:
             Optional exact IO role or model-input operation.
         source:
             Reserved ancestor graph point for layer-to-layer receptive probes.
@@ -427,8 +558,8 @@ class ReceptiveFieldView:
             Optional per-call receptive/projective direction override. ``None``
             uses the view's bound direction.
         target:
-            Optional descendant graph point selecting the far endpoint of a
-            projective query. Not permitted together with ``source``.
+            Descendant graph point or output IO role for a projective query (not with
+            ``source``); ``None`` picks the primary output when the other targets are caches.
         atol, rtol:
             Non-negative gradient support thresholds.
         retain_graph:
@@ -436,27 +567,27 @@ class ReceptiveFieldView:
 
         Returns
         -------
-        GradientReceptiveField or Mapping[str, GradientReceptiveField]
+        GradReceptiveField or Mapping[str, GradReceptiveField]
             One selected result, or the mapping over all reachable inputs.
         """
 
         resolved_direction = self._direction_for(direction)
 
-        if input is not None and source is not None:
+        if input_op is not None and source is not None:
             raise TypeError("input and source cannot be supplied together.")
         if resolved_direction is ReceptiveFieldDirection.PROJECTIVE:
-            if input is not None or source is not None:
+            if input_op is not None or source is not None:
                 raise TypeError("Projective queries select their far endpoint with target=.")
             projective_gradient = _optional_callable(
                 "._gradient_forward", "projective_gradient_for_unit", "projective gradient support"
             )
             return cast(
-                GradientReceptiveField | Mapping[str, GradientReceptiveField],
+                GradReceptiveField | Mapping[str, GradReceptiveField],
                 projective_gradient(
                     self._op, unit, target=target, atol=atol, rtol=rtol, retain_graph=retain_graph
                 ),
             )
-        from ._gradient import gradient_for_unit
+        from ._gradient import gradient_for_unit  # deferred: cycle receptive_field
 
         if target is not None:
             if source is not None:
@@ -464,7 +595,7 @@ class ReceptiveFieldView:
             source = target
         if source is not None:
             return cast(
-                GradientReceptiveField | Mapping[str, GradientReceptiveField],
+                GradReceptiveField | Mapping[str, GradReceptiveField],
                 cast(Any, gradient_for_unit)(
                     self._op,
                     unit,
@@ -477,7 +608,7 @@ class ReceptiveFieldView:
         return gradient_for_unit(
             self._op,
             unit,
-            input=input,
+            input_op=input_op,
             atol=atol,
             rtol=rtol,
             retain_graph=retain_graph,
@@ -487,7 +618,7 @@ class ReceptiveFieldView:
         self,
         unit: tuple[int, ...],
         *,
-        input: Op | str | None = None,
+        input_op: Op | str | None = None,
         source: object | None = None,
         direction: ReceptiveFieldDirection | str | None = None,
         target: object | None = None,
@@ -501,14 +632,14 @@ class ReceptiveFieldView:
         ----------
         unit:
             Complete target output-element index.
-        input:
+        input_op:
             Optional exact IO role or model-input operation.
         source:
             Optional ancestor graph point for layer-to-layer receptive validation.
         direction:
             Receptive or projective containment direction.
         target:
-            Optional descendant graph point for projective validation.
+            Optional descendant graph point, or output IO role, for projective validation.
         atol, rtol:
             Accepted for compatibility and ignored. Validation always uses exact
             finite nonzero gradient support.
@@ -526,7 +657,7 @@ class ReceptiveFieldView:
         """
 
         resolved_direction = self._direction_for(direction)
-        if input is not None and source is not None:
+        if input_op is not None and source is not None:
             raise TypeError("input and source cannot be supplied together.")
         check_for_unit = _optional_callable("._validation", "check_for_unit", "validation")
         return cast(
@@ -534,7 +665,7 @@ class ReceptiveFieldView:
             check_for_unit(
                 self._op,
                 unit,
-                input=input,
+                input_op=input_op,
                 source=source,
                 direction=resolved_direction,
                 target=target,
@@ -548,7 +679,7 @@ class ReceptiveFieldView:
         self,
         *,
         batch_index: int | None = None,
-        input: Op | str | None = None,
+        input_op: Op | str | None = None,
     ) -> tuple[int, ...]:
         """Resolve the complete centered output index without guessing a sample.
 
@@ -556,7 +687,7 @@ class ReceptiveFieldView:
         ----------
         batch_index:
             Required index for the derived batch-like output axis.
-        input:
+        input_op:
             Optional exact IO role or model-input operation.
 
         Returns
@@ -570,7 +701,7 @@ class ReceptiveFieldView:
             If batch semantics are unknown or ``batch_index`` is invalid or omitted.
         """
 
-        descriptor = self._descriptor(input)
+        descriptor = self._descriptor(input_op)
         state = self._solution.states.get((self._op.label, descriptor.io_role))
         if state is None or state.axes is None or state.batch_axis is None:
             raise ReceptiveFieldError(
@@ -602,13 +733,13 @@ class ReceptiveFieldView:
         self,
         unit: tuple[int, ...] | None = None,
         *,
-        input: Op | str | None = None,
+        input_op: Op | str | None = None,
         direction: ReceptiveFieldDirection | str | None = None,
         target: object | None = None,
         image: object | None = None,
-        gradient: bool = False,
+        grad: bool = False,
         retain_graph: bool = False,
-        slice: object | None = None,
+        plane: object | None = None,
         box_color: str = "#FF3B30",
         alpha: float = 0.6,
         cmap: str = "magma",
@@ -619,23 +750,23 @@ class ReceptiveFieldView:
         ----------
         unit:
             Optional complete target output-element index.
-        input:
+        input_op:
             Optional exact IO role or model-input operation.
         direction:
             Optional per-call receptive/projective direction override. ``None``
             uses the view's bound direction.
         target:
-            Optional descendant graph point selecting the far endpoint of a
-            projective overlay.
+            Optional descendant graph point, or output IO role, naming the far
+            endpoint of a projective overlay.
         image:
             Optional source image override.
-        gradient:
+        grad:
             Whether to include empirical gradient magnitude.
         retain_graph:
             Whether the empirical gradient probe retains autograd buffers, so
-            repeated ``show(gradient=True)`` or later ``gradient()`` calls over
+            repeated ``show(grad=True)`` or later ``gradient()`` calls over
             the same captured graph stay possible.
-        slice:
+        plane:
             Required plane selector for three-dimensional inputs.
         box_color:
             Geometric-box overlay color.
@@ -657,13 +788,13 @@ class ReceptiveFieldView:
             show(
                 self,
                 unit,
-                input=input,
+                input_op=input_op,
                 direction=self._direction_for(direction),
                 target=target,
                 image=cast("Image.Image | None", image),
-                gradient=gradient,
+                grad=grad,
                 retain_graph=retain_graph,
-                slice=cast("tuple[int, int] | None", slice),
+                plane=cast("tuple[int, int] | None", plane),
                 box_color=box_color,
                 alpha=alpha,
                 cmap=cmap,

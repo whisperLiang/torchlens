@@ -15,7 +15,7 @@ for every membership appearing in two or more rank cores and audits:
 4. A conflicted membership refuses STRUCTURALLY
    (``group_lifetime_evidence_conflict``): no uid of that membership may join
    and no unmatched uid of it may become a presence gap. Enforcing that is the
-   caller's (the C1 merge engine's) obligation; this module only renders the
+   caller's (the merge engine's) obligation; this module only renders the
    verdicts.
 
 The audit is a pure function of the presented evidence so the merge engine can
@@ -33,7 +33,7 @@ from ._ledger import GroupLifecycleLedger, InstallEpoch, LineageVector
 __all__ = [
     "GROUP_LIFETIME_EVIDENCE_CONFLICT",
     "MembershipLineageVerdict",
-    "audit_membership_lineages",
+    "verify_membership_lineages",
 ]
 
 GROUP_LIFETIME_EVIDENCE_CONFLICT = "group_lifetime_evidence_conflict"
@@ -136,7 +136,7 @@ def _mixed_case_compatible(agreed: LineageVector, candidate: LineageVector) -> t
     return True, "seed discharged against one-generation complete witness"
 
 
-def audit_membership_lineages(
+def verify_membership_lineages(
     rank_ledgers: Mapping[int, GroupLifecycleLedger],
     rank_install_epochs: Mapping[int, InstallEpoch] | None = None,
 ) -> dict[str, MembershipLineageVerdict]:
@@ -167,6 +167,12 @@ def audit_membership_lineages(
     that the ranks PRESENT cannot be proven to describe the same communicator
     lineage. The remedy a conflict names is arming before any group creation
     (``torchlens.distributed.arm``).
+
+    Examples
+    --------
+    >>> verified = tl.distributed.verify_membership_lineages({})
+    >>> type(verified).__name__, len(verified)
+    ('dict', 0)
     """
 
     per_membership: dict[str, dict[int, LineageVector]] = {}

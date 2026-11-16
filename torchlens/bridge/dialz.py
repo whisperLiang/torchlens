@@ -1,128 +1,76 @@
-"""dialz bridge helpers."""
+"""dialz converter.
+
+Turns a TorchLens :class:`~torchlens.intervention.Direction` (built by
+``torchlens.intervention.fit_direction``) into a real
+``dialz.SteeringVector``. Nothing is recomputed here: the vector is the
+direction's own, as float32, keyed by the decoder layer ``SteeringModel``
+wraps, so ``set_control(vector, scalar=m)`` adds ``m * direction.vector`` to
+that block's output, as ``direction.steer(m)`` does.
+"""
 
 from __future__ import annotations
 
-import inspect
-from collections.abc import Iterable
 from typing import Any
 
-from ._utils import tensor_layers
+from .._errors import InvalidArgumentError
+from .._utils._numpy_bridge import tensor_to_numpy
 
 
-def analyze(
-    log: Any,
-    *,
-    sites: Iterable[Any] | None = None,
-    analyzer: Any | None = None,
-    **kwargs: Any,
-) -> dict[str, Any]:
-    """Run a dialz analyzer over saved TorchLens outs.
+def from_direction(
+    direction: Any, *, layer: int | None = None, model_type: str | None = None
+) -> Any:
+    """Return a ``dialz.SteeringVector`` holding ``direction.vector``.
 
     Parameters
     ----------
-    log:
-        TorchLens ``Trace``.
-    sites:
-        Optional sites to include. Defaults to all non-input tensor layers.
-    analyzer:
-        Optional analyzer callable or object exposing ``analyze``.
-    **kwargs:
-        Additional keyword arguments forwarded to the analyzer.
+    direction:
+        A TorchLens ``Direction``.
+    layer:
+        Decoder layer ``SteeringModel`` applies it to; defaults to the trailing
+        index of the direction's site label (see ``Direction.library_layer``).
+    model_type:
+        ``SteeringVector.model_type``; defaults to ``direction.model_type``.
 
     Returns
     -------
-    dict[str, Any]
-        Contract payload containing labels, outs, and downstream result.
+    Any
+        A real ``dialz.SteeringVector``.
 
     Raises
     ------
     ImportError
         If dialz is unavailable.
-    RuntimeError
-        If no supported analyzer is exposed.
+    InvalidArgumentError
+        ``direction_model_type_unknown`` when no model type is given or recorded.
+
+    Examples
+    --------
+    >>> # requires: dialz
+    >>> net = nn.Sequential(nn.Linear(4, 4)).eval()
+    >>> pos = tl.trace(net, torch.randn(3, 4))
+    >>> neg = tl.trace(net, torch.randn(3, 4))
+    >>> direction = tl.intervention.fit_direction(pos, neg, "linear", read_token_index=None)
+    >>> vector = tl.bridge.dialz.from_direction(direction, layer=1, model_type="tiny")
+    >>> list(vector.directions)
+    [1]
     """
 
     try:
-        import dialz as dialz_module
+        import dialz
     except ImportError as exc:
         raise ImportError(
             "dialz bridge requires the `dialz` extra: install torchlens[dialz]."
         ) from exc
-
-    layers = tensor_layers(log, sites)
-    labels = [str(getattr(layer, "layer_label", "layer")) for layer in layers]
-    outs = [getattr(layer, "out") for layer in layers]
-    runner = _resolve_analyzer(dialz_module, analyzer)
-    result = _call_analyzer(runner, outs=outs, labels=labels, **kwargs)
-    return {
-        "schema": "torchlens.dialz.v1",
-        "labels": labels,
-        "outs": outs,
-        "result": result,
-    }
+    index = direction.library_layer(layer)
+    found = model_type if model_type is not None else direction.model_type
+    if not isinstance(found, str):
+        raise InvalidArgumentError(
+            "The direction records no model type and none was given",
+            code="direction_model_type_unknown",
+            remedy="pass model_type= (for example 'llama')",
+        )
+    values = tensor_to_numpy(direction.vector.detach().cpu().float())
+    return dialz.SteeringVector(model_type=found, directions={index: values})
 
 
-def _resolve_analyzer(module: Any, analyzer: Any | None) -> Any:
-    """Return a dialz analyzer callable.
-
-    Parameters
-    ----------
-    module:
-        Imported ``dialz`` module.
-    analyzer:
-        Optional explicit analyzer.
-
-    Returns
-    -------
-    Any
-        Analyzer callable or object.
-
-    Raises
-    ------
-    RuntimeError
-        If no analyzer is available.
-    """
-
-    if analyzer is not None:
-        return analyzer
-    for attr_name in ("analyze", "Analyzer", "Dialz"):
-        candidate = getattr(module, attr_name, None)
-        if candidate is None:
-            continue
-        # An analyzer CLASS must be instantiated: passing the class straight to
-        # ``_call_analyzer`` would invoke ``Class.analyze(outs, ...)`` as an unbound
-        # method and misbind ``self`` to the outs list (a crash, or silent wrong
-        # results when ``analyze`` has defaulted parameters).
-        if inspect.isclass(candidate):
-            return candidate()
-        if callable(candidate):
-            return candidate
-    raise RuntimeError("Installed dialz does not expose analyze, Analyzer, or Dialz.")
-
-
-def _call_analyzer(runner: Any, *, outs: list[Any], labels: list[str], **kwargs: Any) -> Any:
-    """Call a dialz analyzer in function or object form.
-
-    Parameters
-    ----------
-    runner:
-        Analyzer callable or object exposing ``analyze``.
-    outs:
-        Saved outs.
-    labels:
-        TorchLens layer labels.
-    **kwargs:
-        Additional analyzer keyword arguments.
-
-    Returns
-    -------
-    Any
-        Downstream analyzer result.
-    """
-
-    if hasattr(runner, "analyze"):
-        return runner.analyze(outs, labels=labels, **kwargs)
-    return runner(outs, labels=labels, **kwargs)
-
-
-__all__ = ["analyze"]
+__all__ = ["from_direction"]

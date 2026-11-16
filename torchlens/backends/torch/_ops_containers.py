@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from ...ir.container import (
+from ..._ir.container import (
     ContainerSpec,
     DataclassField,
     DictKey,
@@ -21,32 +21,26 @@ from ...ir.container import (
     namedtuple_type_can_carry_instance_state,
     reconstruction_is_lossy,
 )
-from ...ir.container_registry import OUTPUT_TREE_MAX_DEPTH
-from ...utils.introspection import (
+from ..._ir.container_registry import OUTPUT_TREE_MAX_DEPTH
+from ..._ir.distribution_container import (
+    DISTRIBUTION_CONTAINER_KIND,
+    DISTRIBUTION_STATE_UNRECORDABLE,
+    distribution_children,
+    distribution_layout,
+    is_distribution,
+)
+from ..._utils.introspection import (
     get_vars_of_type_from_obj,
 )
 
 if TYPE_CHECKING:
     pass
 
-if TYPE_CHECKING:
-    from .ops import (
-        _UNSUPPORTED_OUTPUT_CONTAINER_WARNED,
-        _container_type_ref,
-        _fallback_address_to_path,
-        _is_hf_model_output,
-        _is_namedtuple_instance,
-        _iter_sequence_items,
-        _leaf_is_reconstructable,
-        _literal_value_supported,
-        _mapping_reconstruction,
-        _torch_return_type_fields,
-        _try_build_container_spec,
-    )
 
 __all__ = (
     "_build_container_spec",
     "_build_container_spec_unguarded",
+    "_distribution_container_spec",
     "_known_output_container_children",
     "_walk_supported_output_container",
     "_prove_runnable_output_lossless",
@@ -65,7 +59,7 @@ def _build_container_spec(
     """Build a replay container spec for a supported output container.
 
     Over-deep and self-referential subtrees degrade to the honest ``opaque``
-    lane (r-b4 R27-4) instead of exhausting the interpreter stack; the cycle
+    lane instead of exhausting the interpreter stack; the cycle
     guard is path-scoped so DAG-shaped outputs keep one spec per occurrence.
 
     Parameters
@@ -109,22 +103,9 @@ def _build_container_spec_unguarded(
     child_specs: list[tuple[OutputPathComponent, ContainerSpec]] = []
     registered = get_registered_container(type(value))
     if registered is not None:
-        children, aux_data = registered.flatten(value)
-        for index, item in enumerate(children):
-            child_spec = _try_build_container_spec(
-                item, _depth=_depth + 1, _in_progress=_in_progress
-            )
-            if child_spec is not None:
-                child_specs.append((TupleIndex(index), child_spec))
-        module, qualname = _container_type_ref(value)
-        return ContainerSpec(
-            kind="registered",
-            length=len(children),
-            type_module=module,
-            type_qualname=qualname,
-            child_specs=tuple(child_specs),
-            aux_data=aux_data,
-        )
+        return _registered_container_spec(value, registered, _depth, _in_progress)
+    if is_distribution(value):
+        return _distribution_container_spec(value, _depth=_depth, _in_progress=_in_progress)
     if _is_hf_model_output(value):
         keys = tuple(value.keys())
         reconstructable = True
@@ -153,7 +134,7 @@ def _build_container_spec_unguarded(
         )
     torch_fields = _torch_return_type_fields(value)
     if type(value).__module__ == "torch.return_types" and not torch_fields:
-        # r35 hon1_4: a structseq whose field declaration cannot be PROVEN
+        # A structseq whose field declaration cannot be PROVEN
         # (no valid __match_args__, no identity bijection) is recorded opaque
         # so the runnable producer refuses it typed -- never silently recorded
         # as a plain positional tuple (a lossy type substitution).
@@ -183,7 +164,7 @@ def _build_container_spec_unguarded(
             type_module=module,
             type_qualname=qualname,
             child_specs=tuple(child_specs),
-            # r37 secB_1 capture-side parity with dataclass/hf: the inert
+            # Capture-side parity with dataclass/hf: the inert
             # ``tuple.__new__`` rebuild drops non-field instance state.
             lossy_reconstruction=namedtuple_extra_instance_state(value),
         )
@@ -290,6 +271,69 @@ def _build_container_spec_unguarded(
     return None
 
 
+def _registered_container_spec(
+    value: Any, registered: Any, _depth: int, _in_progress: set[int]
+) -> ContainerSpec:
+    """Build the spec for a registered container through its ``flatten`` hook."""
+
+    child_specs: list[tuple[OutputPathComponent, ContainerSpec]] = []
+    children, aux_data = registered.flatten(value)
+    for index, item in enumerate(children):
+        child_spec = _try_build_container_spec(item, _depth=_depth + 1, _in_progress=_in_progress)
+        if child_spec is not None:
+            child_specs.append((TupleIndex(index), child_spec))
+    module, qualname = _container_type_ref(value)
+    return ContainerSpec(
+        kind="registered",
+        length=len(children),
+        type_module=module,
+        type_qualname=qualname,
+        child_specs=tuple(child_specs),
+        aux_data=aux_data,
+    )
+
+
+def _distribution_container_spec(
+    value: Any,
+    *,
+    _depth: int,
+    _in_progress: set[int],
+) -> ContainerSpec:
+    """Build the spec for a ``torch.distributions`` output.
+
+    Each recorded attribute is a ``NamedField`` child (a tensor leaf or a nested
+    distribution's spec); literal state and tensor aliases ride in ``aux_data``.
+    An attribute the contract cannot record flags the spec lossy; the attribute
+    paths stay addressable.
+    """
+
+    layout = distribution_layout(value)
+    instance_dict = vars(value)
+    child_specs: list[tuple[OutputPathComponent, ContainerSpec]] = []
+    lossy = bool(layout.lossy_reason)
+    for name in layout.fields:
+        child_spec = _try_build_container_spec(
+            instance_dict[name], _depth=_depth + 1, _in_progress=_in_progress
+        )
+        if child_spec is not None:
+            child_specs.append((NamedField(name), child_spec))
+            if child_spec.kind == "opaque":
+                module, qualname = _container_type_ref(value)
+                return ContainerSpec(kind="opaque", type_module=module, type_qualname=qualname)
+            lossy = lossy or child_spec.lossy_reconstruction
+    module, qualname = _container_type_ref(value)
+    return ContainerSpec(
+        kind=DISTRIBUTION_CONTAINER_KIND,
+        length=len(layout.fields),
+        fields=layout.fields,
+        type_module=module,
+        type_qualname=qualname,
+        child_specs=tuple(child_specs),
+        aux_data=layout.aux_data(),
+        lossy_reconstruction=lossy,
+    )
+
+
 def _known_output_container_children(
     out: Any,
 ) -> list[tuple[OutputPathComponent, Any]] | None:
@@ -305,6 +349,8 @@ def _known_output_container_children(
     if registered is not None:
         children, _aux_data = registered.flatten(out)
         return [(TupleIndex(index), item) for index, item in enumerate(children)]
+    if is_distribution(out):
+        return [(NamedField(name), child) for name, child in distribution_children(out)]
     if _is_hf_model_output(out):
         return [(HFKey(key), out[key]) for key in out.keys()]
     torch_fields = _torch_return_type_fields(out)
@@ -336,7 +382,7 @@ def _walk_supported_output_container(
 ) -> Iterator[tuple[torch.Tensor, tuple[OutputPathComponent, ...], ContainerSpec | None]]:
     """Yield tensors from a supported output container.
 
-    Bounded by the same ceiling/cycle policy as the spec builders (r-b4 R27-4):
+    Bounded by the same ceiling/cycle policy as the spec builders:
     an over-deep or self-referential subtree is treated exactly like an
     unrecognized container -- its tensors are yielded at the opaque boundary
     path by the fallback below, matching the ``opaque`` spec node the builder
@@ -415,7 +461,7 @@ def _prove_runnable_output_lossless(
     _depth: int = 0,
     _in_progress: set[int] | None = None,
 ) -> tuple[bool, str]:
-    """Positively prove one MODEL-output subtree is losslessly reconstructable (r35 I1).
+    """Positively prove one MODEL-output subtree is losslessly reconstructable.
 
     A runnable claim requires refuse-unless-proved: the proof establishes an exact
     root kind, recursively supported child kinds, and fully encodable literal
@@ -439,7 +485,7 @@ def _prove_runnable_output_lossless(
         return False, f"unordered_container:{type(value).__qualname__}"
     if _literal_value_supported(value) or isinstance(value, torch.Size):
         return True, ""
-    # r-b4 R27-4: refuse-unless-proved makes the guard trivial -- an over-deep or
+    # refuse-unless-proved makes the guard trivial -- an over-deep or
     # self-referential subtree simply cannot be proved lossless.
     if _in_progress is None:
         _in_progress = set()
@@ -466,23 +512,9 @@ def _prove_runnable_output_lossless_unguarded(
 
     registered = get_registered_container(type(value))
     if registered is not None:
-        if not getattr(registered, "state_complete", False):
-            instance_dict = getattr(value, "__dict__", None)
-            if isinstance(instance_dict, dict) and any(
-                item is not None for item in instance_dict.values()
-            ):
-                # r37 3-ADJ-3: registration without the explicit state_complete
-                # declaration cannot prove the hooks round-trip this instance's
-                # extra state -- refuse at save rather than drop it on replay.
-                return False, f"registered_container_instance_state:{type(value).__qualname__}"
-        children, _aux = registered.flatten(value)
-        for item in children:
-            proved, reason = _prove_runnable_output_lossless(
-                item, _depth=_depth + 1, _in_progress=_in_progress
-            )
-            if not proved:
-                return False, reason
-        return True, ""
+        return _prove_registered_lossless(value, registered, _depth, _in_progress)
+    if is_distribution(value):
+        return _prove_distribution_lossless(value, _depth, _in_progress)
     if _is_hf_model_output(value):
         for key in value.keys():
             proved, reason = _prove_runnable_output_lossless(
@@ -497,10 +529,10 @@ def _prove_runnable_output_lossless_unguarded(
         if type(value).__module__ == "torch.return_types" and not torch_fields:
             return False, "structseq_fields_unprovable"
         if namedtuple_type_can_carry_instance_state(type(value)):
-            # r39 corr1-1: refuse at save any namedtuple TYPE capable of carrying dropped
+            # Refuse at save any namedtuple TYPE capable of carrying dropped
             # instance state (an unslotted subclass), even when THIS instance's ``__dict__``
-            # is currently empty -- load cannot see the original instance and secB_1 forbids
-            # trusting a persisted "no extras" flag, so instance-emptiness is unprovable at
+            # is currently empty -- load cannot see the original instance and must not
+            # trust a persisted "no extras" flag, so instance-emptiness is unprovable at
             # load. This is the SAME structural type-level criterion the load-time gate
             # (``_spec_node_reconstruction_lossy`` -> ``namedtuple_type_can_carry_instance_state``)
             # applies, closing the producer/consumer disagreement that let an unslotted
@@ -528,7 +560,7 @@ def _prove_runnable_output_lossless_unguarded(
         if recon is None:
             return False, f"unreconstructable_mapping:{type(value).__qualname__}"
         if mapping_extra_instance_state(value):
-            # r37 3-ADJ-2: OrderedDict/defaultdict instances can carry attributes
+            # OrderedDict/defaultdict instances can carry attributes
             # the key/value rebuild drops -- refuse at save.
             return False, f"mapping_instance_state:{type(value).__qualname__}"
         for key in value.keys():
@@ -557,11 +589,65 @@ def _prove_runnable_output_lossless_unguarded(
     return False, f"opaque_leaf:{type(value).__qualname__}"
 
 
+def _prove_registered_lossless(
+    value: Any, registered: Any, _depth: int, _in_progress: set[int]
+) -> tuple[bool, str]:
+    """Prove a registered container's instance state and children lossless."""
+
+    if not getattr(registered, "state_complete", False):
+        instance_dict = getattr(value, "__dict__", None)
+        if isinstance(instance_dict, dict) and any(
+            item is not None for item in instance_dict.values()
+        ):
+            # Registration without the explicit state_complete
+            # declaration cannot prove the hooks round-trip this instance's
+            # extra state -- refuse at save rather than drop it on replay.
+            return False, f"registered_container_instance_state:{type(value).__qualname__}"
+    children, _aux = registered.flatten(value)
+    for item in children:
+        proved, reason = _prove_runnable_output_lossless(
+            item, _depth=_depth + 1, _in_progress=_in_progress
+        )
+        if not proved:
+            return False, reason
+    return True, ""
+
+
+def _prove_distribution_lossless(
+    value: Any, _depth: int, _in_progress: set[int]
+) -> tuple[bool, str]:
+    """Prove a ``torch.distributions`` output's recorded state and children lossless."""
+
+    layout = distribution_layout(value)
+    if layout.lossy_reason:
+        return False, layout.lossy_reason
+    instance_dict = vars(value)
+    for name in layout.fields:
+        proved, reason = _prove_runnable_output_lossless(
+            instance_dict[name], _depth=_depth + 1, _in_progress=_in_progress
+        )
+        if not proved:
+            return False, reason
+    return True, ""
+
+
+def lossy_distribution_output_reason(output: Any) -> str:
+    """Return the lossy reason when ``output`` holds a ``torch.distributions`` object
+    capture cannot record losslessly, else an empty string."""
+
+    if output is None or isinstance(output, torch.Tensor):
+        return ""
+    proved, reason = _prove_runnable_output_lossless(output)
+    if proved or not reason.startswith(DISTRIBUTION_STATE_UNRECORDABLE):
+        return ""
+    return reason
+
+
 def runnable_output_losslessness(
     out: Any,
     output_entries: Sequence[tuple[torch.Tensor, tuple[OutputPathComponent, ...], Any]],
 ) -> dict[str, Any]:
-    """Build the explicit model-output traversal proof result (r35 I1, decision B).
+    """Build the explicit model-output traversal proof result.
 
     Combines the positive structural losslessness proof with the tensor-leaf /
     typed-path bijection over the walked output entries: duplicate paths, a
@@ -593,7 +679,7 @@ def runnable_output_losslessness(
     lossless = proved and not duplicate_paths and not used_fallback
     if not lossless and not reason:
         reason = "duplicate_output_paths" if duplicate_paths else "fallback_traversal"
-    # r39 corr2_5: an EXPLICIT closed root kind, so the live provider never INFERS a bare
+    # an EXPLICIT closed root kind, so the live provider never INFERS a bare
     # tensor from "one leaf, no spec, no path" -- an opaque set/frozenset/custom container the
     # traversal fell back on produces that SAME signature. ``bare_tensor_root`` is the single
     # positive fact the live bare-tensor fast path is gated on; a non-tensor opaque root is
@@ -667,3 +753,24 @@ def _walk_output_tensors_with_paths(
         return
 
     yield from _walk_supported_output_container(out, root_spec=root_spec, path=())
+
+
+# Late imports: the split modules of this package import one another (cycles), so each
+# imports its siblings once every definition above exists.
+from ._ops_arguments import (  # noqa: E402
+    _literal_value_supported,
+)
+from ._ops_container_base import (  # noqa: E402
+    _container_type_ref,
+    _fallback_address_to_path,
+    _is_hf_model_output,
+    _is_namedtuple_instance,
+    _iter_sequence_items,
+    _leaf_is_reconstructable,
+    _mapping_reconstruction,
+    _torch_return_type_fields,
+    _try_build_container_spec,
+)
+from .ops import (  # noqa: E402
+    _UNSUPPORTED_OUTPUT_CONTAINER_WARNED,
+)

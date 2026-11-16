@@ -1,0 +1,441 @@
+"""The one-call paper number: ``flops``.
+
+Both doors -- the model door (one safe capture under the summary
+execution contract: eval mode, ``no_grad``, module flags and RNG restored
+bit-identically) and the retroactive trace door -- feed ONE detached
+builder. The report never auto-prints, its numeric fields are plain ints
+or ``None``, and it holds no reference to the model or trace.
+
+The first screen, in order: (1) actual-path analytic forward FLOPs
+under a NAMED FMA convention, true MACs, non-MAC FLOPs, batch/token scope
+when derivable; (2) coverage counts, the evidence mix over knowns, named
+unknowns, and lower-bound language that "COMPLETE, not a lower bound"
+must EARN; (3) the parameter contract verbatim (unique / trainable /
+frozen / executed / unexecuted, ties named); (4) the always-visible
+backward STATUS line; (5) the 6ND comparator facts; (6) an optional
+module breakdown from the same cost-tree rows. No timing, no throughput,
+no MFU in the default report. The model door holds the fused MHA /
+TransformerEncoder fast path off during its capture so every matmul stays
+visible to the cost rules; the breakdown block lists depth-1 INCLUSIVE
+mass that partitions the forward total exactly.
+
+The comparator's D is the HF-as-implemented numel of the main input
+-- padding included (measured: D=numel matches the executed dense body
+within 0.2%; mask-based D lands tens of percent low with batch-dependent
+magnitude). Applicability mirrors HF's own: ``main_input_name`` present
+and a parameter count available -- otherwise the line is OMITTED, never
+guessed. Analytic FLOP counts are "actual-path analytic", never
+"measured".
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+from .._errors import InvalidArgumentError
+from .._utils._torch_compat import force_mha_slow_path
+from ._cost_backward import backward_status
+from ._cost_tree import build_cost_tree
+from ._factcore import factcore
+from ._summary_columns import attention_full_square_line, counted_attention_ops
+
+if TYPE_CHECKING:
+    from .._data_classes.trace import Trace
+
+
+@dataclass(frozen=True)
+class SixNDFacts:
+    """The 6ND comparator block: reproduces what HF Trainer logs.
+
+    ``d_numel`` is the numel of the main input AS IMPLEMENTED by HF --
+    padding included. ``two_nd`` (= 2*N*D) is the forward-body heuristic
+    compared against the actual-path analytic forward
+    (heuristic-vs-exact); ``six_nd`` (= 6*N*D) is the full training
+    heuristic, printed as a fact, never compared against an executed
+    quantity unless the hypothetical backward door was invoked.
+
+    Examples
+    --------
+    >>> report = tl.report.flops(tl.trace(model, x), main_input_numel=x.numel())
+    >>> facts = report.six_nd
+    >>> facts.d_numel
+    192
+    >>> facts.six_nd == 3 * facts.two_nd
+    True
+    """
+
+    num_params: int
+    d_numel: int
+    two_nd: int
+    six_nd: int
+    forward_delta_fraction: float | None
+
+    def lines(self) -> list[str]:
+        """Render the comparator facts."""
+
+        delta = (
+            "n/a"
+            if self.forward_delta_fraction is None
+            else f"{100.0 * self.forward_delta_fraction:+.3f}%"
+        )
+        return [
+            f"6ND comparator (HF-as-implemented): N={self.num_params} params, "
+            f"D={self.d_numel} main-input elements (pads counted)",
+            f"  2ND forward-body heuristic = {self.two_nd} "
+            f"(analytic forward vs 2ND: {delta}, heuristic-vs-exact)",
+            f"  6ND training heuristic = {self.six_nd}",
+        ]
+
+
+@dataclass(frozen=True)
+class FlopsReport:
+    """The detached one-call cost report. Raw ints or None only.
+
+    Examples
+    --------
+    >>> report = tl.report.flops(model, x)
+    >>> report.forward_flops > 0
+    True
+    >>> "forward compute" in str(report)
+    True
+    """
+
+    convention: str
+    forward_flops: int | None
+    true_macs: int | None
+    non_mac_flops: int | None
+    batch_size: int | None
+    tokens_per_item: int | None
+    coverage_known: int
+    coverage_zero_by_rule: int
+    coverage_not_applicable: int
+    coverage_unknown: int
+    unknown_op_names: tuple[str, ...]
+    evidence_formula_exact: int
+    evidence_estimated: int
+    is_lower_bound: bool
+    params_unique: int | None
+    params_trainable: int | None
+    params_frozen: int | None
+    params_executed: int | None
+    params_unexecuted: int | None
+    tied_param_groups: tuple[tuple[str, ...], ...]
+    backward_state: str
+    backward_status_line: str
+    six_nd: SixNDFacts | None
+    breakdown: tuple[str, ...]
+    attention_full_square_ops: int = 0
+
+    def __repr__(self) -> str:
+        """Bounded identity card: blocks point, never dump.
+
+        The lower-bound honesty mark is never dropped: an incomplete
+        coverage renders ``>=`` on the headline figure.
+        """
+
+        bound = ">=" if self.is_lower_bound else ""
+        return (
+            f"FlopsReport({self.convention}: forward_flops{bound}={self.forward_flops}, "
+            f"{self.coverage_unknown} unknown op(s); print() for the report, "
+            f"read .breakdown)"
+        )
+
+    def _coverage_lines(self) -> list[str]:
+        """Block 2: coverage counts, evidence mix, earned completeness."""
+
+        total_rows = (
+            self.coverage_known
+            + self.coverage_zero_by_rule
+            + self.coverage_not_applicable
+            + self.coverage_unknown
+        )
+        lines = [
+            f"coverage: {self.coverage_known + self.coverage_zero_by_rule}/"
+            f"{total_rows - self.coverage_not_applicable} compute rows covered "
+            f"({self.coverage_zero_by_rule} zero-by-rule); "
+            f"{self.coverage_unknown} unknown",
+            f"  evidence over knowns: {self.evidence_formula_exact} formula-exact, "
+            f"{self.evidence_estimated} estimated",
+        ]
+        if self.is_lower_bound:
+            shown = ", ".join(self.unknown_op_names[:5])
+            extra = (
+                ""
+                if len(self.unknown_op_names) <= 5
+                else f" (+{len(self.unknown_op_names) - 5} more)"
+            )
+            lines.append(
+                f"  totals are a LOWER BOUND: unknown-cost ops present ({shown}{extra}); "
+                "remedy: torchlens._capture.flops.register_op_rule"
+            )
+        else:
+            lines.append("  coverage is COMPLETE, not a lower bound (0 unknown-cost ops)")
+        return lines
+
+    def _parameter_lines(self) -> list[str]:
+        """The parameters block: the available counts, then each tied group."""
+
+        param_bits = []
+        for name, value in (
+            ("unique", self.params_unique),
+            ("trainable", self.params_trainable),
+            ("frozen", self.params_frozen),
+            ("executed", self.params_executed),
+            ("unexecuted", self.params_unexecuted),
+        ):
+            if value is not None:
+                param_bits.append(f"{value} {name}")
+        lines = ["parameters: " + (", ".join(param_bits) if param_bits else "unavailable")]
+        lines.extend(f"  tied: {' == '.join(group)}" for group in self.tied_param_groups)
+        return lines
+
+    def __str__(self) -> str:
+        """Render the six-block first screen."""
+
+        lines = [
+            # actual-path analytic, never "measured".
+            f"forward compute (actual-path analytic, {self.convention} convention: "
+            f"one MAC = 2 FLOPs): {self.forward_flops if self.forward_flops is not None else '-'}"
+        ]
+        if self.true_macs is not None:
+            lines.append(f"  true MACs: {self.true_macs}")
+        if self.non_mac_flops is not None:
+            lines.append(f"  non-MAC FLOPs: {self.non_mac_flops}")
+        if self.attention_full_square_ops:
+            lines.append(f"  {attention_full_square_line(self.attention_full_square_ops)}")
+        if self.batch_size is not None:
+            scope = f"  scope: batch={self.batch_size}"
+            if self.tokens_per_item is not None:
+                scope += f", tokens/item={self.tokens_per_item}"
+            lines.append(scope)
+        lines.extend(self._coverage_lines())
+        lines.extend(self._parameter_lines())
+        lines.append(self.backward_status_line)
+        if self.six_nd is not None:
+            lines.extend(self.six_nd.lines())
+        if self.breakdown:
+            lines.append(
+                "breakdown (top module calls by inclusive known FLOPs; rows sum to forward):"
+            )
+            lines.extend(f"  {line}" for line in self.breakdown)
+        return "\n".join(lines)
+
+
+def _input_scope(trace: Any) -> tuple[int | None, int | None]:
+    """Derive (batch, tokens/item) from the first captured input, if clear."""
+
+    for op in getattr(trace, "input_ops", ()) or ():
+        shape = tuple(getattr(op, "shape", None) or ())
+        if len(shape) >= 2:
+            return int(shape[0]), int(shape[1])
+        if len(shape) == 1:
+            return int(shape[0]), None
+    return None, None
+
+
+def _main_input_numel(trace: Any, model: Any | None) -> int | None:
+    """The 6ND D under HF's own applicability rule, else None."""
+
+    main_input_name = getattr(model, "main_input_name", None) if model is not None else None
+    if not main_input_name:
+        return None
+    for op in getattr(trace, "input_ops", ()) or ():
+        shape = getattr(op, "shape", None)
+        if shape:
+            numel = 1
+            for dim in shape:
+                numel *= int(dim)
+            return numel
+    return None
+
+
+def _build_report(
+    trace: Trace,
+    *,
+    model: Any | None,
+    main_input_numel: int | None,
+    breakdown_top_k: int,
+) -> FlopsReport:
+    """Assemble the detached report from the ONE aggregation."""
+
+    core = factcore(trace)
+    agg = core.compute
+    macs_total = int(agg.macs_total)
+    forward = int(agg.partition_total)
+    non_mac = forward - 2 * macs_total if not agg.coverage.macs_unknown_split else None
+    exact = sum(
+        1 for row in agg.rows if row.coverage_class == "known" and row.evidence == "formula_exact"
+    )
+    estimated = sum(
+        1 for row in agg.rows if row.coverage_class == "known" and row.evidence == "estimated"
+    )
+    attention_ops = counted_attention_ops(agg)
+    batch, tokens = _input_scope(trace)
+    d_numel = main_input_numel
+    if d_numel is None:
+        d_numel = _main_input_numel(trace, model)
+    six_nd: SixNDFacts | None = None
+    if d_numel is not None and core.params.total is not None:
+        two_nd = 2 * core.params.total * d_numel
+        six_nd = SixNDFacts(
+            num_params=core.params.total,
+            d_numel=d_numel,
+            two_nd=two_nd,
+            six_nd=6 * core.params.total * d_numel,
+            forward_delta_fraction=((forward - two_nd) / two_nd if two_nd else None),
+        )
+    status = backward_status(trace)
+    breakdown: tuple[str, ...] = ()
+    if breakdown_top_k:
+        tree = build_cost_tree(trace, k=breakdown_top_k, max_depth=1, aggregation=agg)
+        # Depth-1 rows carry their INCLUSIVE mass: a call row's subtree
+        # (its own ops plus everything nested below the depth cutoff), the
+        # root-direct remainder, and the top-k remainder. Together they
+        # partition forward_flops exactly, so nested-module mass can never
+        # vanish from the block (an exclusive ``self_flops`` read would show
+        # only 136 of 2376 FLOPs for a Sequential of two blocks plus a head,
+        # with no remainder line).
+        breakdown = tuple(
+            f"{row.label}: {row.subtree_flops} FLOPs"
+            for row in tree.rows
+            if row.depth == 1 and (row.subtree_flops or 0) > 0
+        )
+    return FlopsReport(
+        convention=agg.convention,
+        forward_flops=forward,
+        true_macs=macs_total,
+        non_mac_flops=non_mac,
+        batch_size=batch,
+        tokens_per_item=tokens,
+        coverage_known=agg.coverage.known,
+        coverage_zero_by_rule=agg.coverage.zero_by_rule,
+        coverage_not_applicable=agg.coverage.not_applicable,
+        coverage_unknown=agg.coverage.unknown,
+        unknown_op_names=agg.coverage.unknown_ops,
+        evidence_formula_exact=exact,
+        evidence_estimated=estimated,
+        is_lower_bound=agg.coverage.unknown > 0,
+        params_unique=core.params.total,
+        params_trainable=core.params.trainable,
+        params_frozen=core.params.frozen,
+        params_executed=core.params.executed,
+        params_unexecuted=core.params.unexecuted,
+        tied_param_groups=core.params.tied_groups,
+        backward_state=status.state,
+        backward_status_line=status.status_line,
+        six_nd=six_nd,
+        breakdown=breakdown,
+        attention_full_square_ops=attention_ops,
+    )
+
+
+def flops(
+    subject: Any,
+    inputs: Any = None,
+    input_kwargs: dict[str, Any] | None = None,
+    *,
+    main_input_numel: int | None = None,
+    breakdown_k: int = 5,
+) -> FlopsReport:
+    """Build the one-call cost report from a trace OR a model.
+
+    Parameters
+    ----------
+    subject:
+        A finished :class:`~torchlens._data_classes.trace.Trace` (the
+        retroactive door), or an ``nn.Module`` (the model door -- runs
+        ONE capture under the summary execution contract: eval mode,
+        ``torch.no_grad()``, module training flags and RNG state restored
+        bit-identically afterwards).
+    inputs / input_kwargs:
+        Model-door inputs; refused on the trace door.
+    main_input_numel:
+        Explicit 6ND ``D`` for the trace door (the comparator's HF
+        applicability cannot be established from a trace alone; the line
+        is OMITTED without it, never guessed).
+    breakdown_k:
+        Depth-1 module rows in the optional breakdown block (0 disables).
+
+    Examples
+    --------
+    >>> trace = tl.trace(model, x)
+    >>> tl.report.flops(trace).forward_flops == tl.report.flops(model, x).forward_flops
+    True
+    >>> try:
+    ...     tl.report.flops(model)
+    ... except tl.errors.InvalidArgumentError as err:
+    ...     print(type(err).__name__)
+    InvalidArgumentError
+    """
+
+    import torch.nn as nn
+
+    if isinstance(subject, nn.Module):
+        if inputs is None:
+            raise InvalidArgumentError(
+                "the model door needs example inputs to run its one capture.",
+                code="flops_report_inputs_required",
+                remedy="Call tl.report.flops(model, example_inputs).",
+            )
+        trace = _capture_for_report(subject, inputs, input_kwargs)
+        try:
+            return _build_report(
+                trace,
+                model=subject,
+                main_input_numel=main_input_numel,
+                breakdown_top_k=breakdown_k,
+            )
+        finally:
+            trace.cleanup()
+    if inputs is not None or input_kwargs:
+        raise InvalidArgumentError(
+            "inputs/input_kwargs are model-door arguments; the trace door takes none.",
+            code="flops_report_trace_door_inputs",
+            remedy=(
+                "Call tl.report.flops(trace) on a finished trace, or pass the model "
+                "itself as the first argument to run the one-capture model door."
+            ),
+        )
+    return _build_report(
+        subject,
+        model=None,
+        main_input_numel=main_input_numel,
+        breakdown_top_k=breakdown_k,
+    )
+
+
+def _capture_for_report(model: Any, input_args: Any, input_kwargs: dict[str, Any] | None) -> Any:
+    """Run the model door's ONE capture under the summary execution contract.
+
+    The fused ``nn.MultiheadAttention`` / ``nn.TransformerEncoderLayer`` fast
+    path is held OFF for the capture through
+    :func:`torchlens._utils._torch_compat.force_mha_slow_path`. Under eval +
+    ``no_grad`` those modules otherwise dispatch to
+    ``_native_multi_head_attention`` / ``_transformer_encoder_layer_fwd``:
+    ONE opaque op each with no cost rule, so the report read 0 FLOPs
+    (lower bound) for exactly the matmuls the unfused path counts
+    formula-exact. The arithmetic is identical on both
+    paths; only its visibility to the cost rules differs. On torch builds
+    predating the public ``torch.backends.mha`` switch (2.1-2.2,
+    ``HAS_MHA_FASTPATH_SWITCH`` is ``False``), the helper falls back to
+    flipping the affected modules' own ``training`` flag -- a real fallback,
+    not a degradation, since both fused fast paths check ``self.training``
+    on every supported torch version.
+    """
+
+    import torch
+
+    from .._user_public_impls import trace as _trace
+    from .._utils.rng import log_current_rng_states, set_rng_from_saved_states
+
+    saved_training_flags = [(module, module.training) for module in model.modules()]
+    rng_snapshot = log_current_rng_states()
+    try:
+        model.eval()
+        with force_mha_slow_path(model), torch.no_grad():
+            return _trace(model, input_args, input_kwargs=input_kwargs or {})
+    finally:
+        for module, was_training in saved_training_flags:
+            module.training = was_training
+        set_rng_from_saved_states(rng_snapshot)

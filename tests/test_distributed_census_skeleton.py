@@ -21,60 +21,21 @@ pytestmark = pytest.mark.skipif(
     reason="torch.distributed gloo unavailable",
 )
 
-from support.census_harness import (  # noqa: E402
-    run_census_criterion_1,
-    run_census_criterion_2,
+from torchlens._distributed import _lifecycle as lifecycle  # noqa: E402
+from torchlens.distributed import (  # noqa: E402
+    is_vetted_build,
 )
 
-from torchlens.distributed import _lifecycle as lifecycle  # noqa: E402
-
-
-class TestCensusSkeleton:
-    def test_criterion_1_green_on_dense_model(self):
-        result = run_census_criterion_1(
-            lambda: nn.Sequential(nn.Linear(4, 4), nn.ReLU()),
-            lambda: torch.randn(2, 4),
-        )
-        assert result.green and result.outputs_bit_identical
-        assert result.criteria_run == (1,)
-        # The ground-truth stream is real, not empty (aten ops recorded).
-        assert any("addmm" in op or "mm" in op for op in result.ground_truth_ops)
-
-    def test_criterion_1_is_falsifiable(self):
-        # A model whose factory differs between legs must go RED: the census
-        # can never be vacuous about non-perturbation.
-        calls = {"n": 0}
-
-        def factory():
-            calls["n"] += 1
-            model = nn.Linear(4, 4)
-            if calls["n"] > 1:
-                with torch.no_grad():
-                    model.weight.add_(1.0)
-            return model
-
-        result = run_census_criterion_1(factory, lambda: torch.randn(2, 4))
-        assert not result.green
-        assert any("not bit-identical" in failure for failure in result.failures)
-
-    def test_criteria_2_through_4_refuse_without_plane_p(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Wave-1 form of the skeleton honesty pin: the criteria BODIES exist
-        now (C2 recording lane), but an UNARMED capture carries no plane-P
-        journal, so requesting them still raises -- a green can never be
-        vacuous about which criteria actually ran."""
-
-        import torchlens as tl
-
-        lifecycle.disarm()
-        # An initialized process group from another test would auto-arm at
-        # capture entry. Keep this assertion on the unarmed branch.
-        monkeypatch.setattr(lifecycle, "maybe_auto_arm", lambda: None)
-        log = tl.trace(nn.Linear(4, 4), torch.randn(2, 4))
-        with pytest.raises(NotImplementedError, match="C2"):
-            run_census_criterion_2([], log)
-        assert not lifecycle.is_armed()
+# F1 ruling (Lead, 2026-10-01; test_distributed_census_topologies.py): full
+# collective arming only runs where a census-vetted torch build exists; on an
+# unvetted torch, arm() fails closed with UncapturedCollectiveOpError inside
+# the spawned worker, which mp.spawn re-raises as ProcessRaisedException.
+# _p2p_worker (below) arms unconditionally, so the same gate applies here.
+requires_vetted_snapshot = pytest.mark.skipif(
+    not is_vetted_build(),
+    reason="full collective arming requires a census-vetted torch build "
+    "(torchlens.distributed.is_vetted_build() is False here)",
+)
 
 
 def _p2p_worker(rank: int, world_size: int, init_file: str, out_dir: str) -> None:
@@ -120,6 +81,7 @@ def _p2p_worker(rank: int, world_size: int, init_file: str, out_dir: str) -> Non
 
 @pytest.mark.slow
 class TestP2PChannelSim:
+    @requires_vetted_snapshot
     def test_sender_and_receiver_derive_the_same_channel(self, tmp_path):
         import torch.multiprocessing as mp
 

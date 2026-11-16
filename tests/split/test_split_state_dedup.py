@@ -159,6 +159,7 @@ def test_inherited_replicas_pool_the_effective_updated_value(
     torch.testing.assert_close(source, torch.ones(4), atol=0, rtol=0)
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA placement requires a GPU.")
 def test_same_source_on_distinct_devices_has_distinct_replicas() -> None:
     """The shared pool must not serve a CPU value to a CUDA segment."""

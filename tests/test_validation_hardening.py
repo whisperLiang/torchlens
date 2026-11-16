@@ -35,30 +35,27 @@ import warnings
 import pytest
 import torch
 import torch.nn as nn
+from _record_fakes import FlatGroups, FlatNamespace
+from _validation_capture import _capture, _quiet_validate
+from example_models import BufferRewriteModel
 
 import torchlens as tl
-from torchlens import validate_forward_pass
+from torchlens._state import pause_logging
+from torchlens._utils._record_group_table import op_attr
+from torchlens.backends.torch import rescue
+from torchlens.errors import TraceNotReproducibleWarning
 from torchlens.options import CaptureOptions
-from torchlens.validation.core import validate_saved_outs
-from torchlens.validation.exemptions import _multiplicative_zero_annihilator_decision
-from torchlens.validation.invariants import (
+from torchlens.validation import validate_forward_pass
+from torchlens.validation._core import validate_saved_outs
+from torchlens.validation._exemptions import (
+    _addcmul_zero_annihilator_decision,
+    _check_norm_zero_weight_annihilates,
+    _multiplicative_zero_annihilator_decision,
+)
+from torchlens.validation._invariants import (
     MetadataInvariantError,
     check_metadata_invariants,
 )
-
-
-def _capture(model: nn.Module, x: torch.Tensor, seed: int = 0):
-    """Capture a trace the way validate_forward_pass does, plus ground truth."""
-
-    torch.manual_seed(seed)
-    ground_truth = model(x)
-    torch.manual_seed(seed)
-    trace = tl.trace(
-        model,
-        x,
-        capture=CaptureOptions(layers_to_save="all", save_arg_values=True, random_seed=seed),
-    )
-    return trace, ground_truth
 
 
 def _plant_forged_intervention_edit(trace, event):
@@ -87,14 +84,6 @@ def _plant_forged_intervention_edit(trace, event):
     events.intervention_events.append(event)
 
 
-def _quiet_validate(model: nn.Module, x) -> bool:
-    """Public-path validation with provenance warnings silenced."""
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        return bool(validate_forward_pass(model, x))
-
-
 # ---------------------------------------------------------------------------
 # W3-1: dropped parent edge in a diamond (inverse orphan-arg sweep)
 # ---------------------------------------------------------------------------
@@ -113,8 +102,8 @@ class _Diamond(nn.Module):
 def _drop_diamond_edge(trace) -> None:
     """Consistently drop the p->c1 edge exactly as a capture bug would."""
 
-    p_op = [op for op in trace.layer_list if op.func_name == "__mul__"][0]
-    c1_op = [op for op in trace.layer_list if op.func_name == "__add__"][0]
+    p_op = [op for op in trace._layer_list if op.func_name == "__mul__"][0]
+    c1_op = [op for op in trace._layer_list if op.func_name == "__add__"][0]
     p_labels = {p_op.label, p_op.layer_label}
     c1_labels = {c1_op.label, c1_op.layer_label}
     assert p_op.layer_label in c1_op.parents
@@ -122,7 +111,7 @@ def _drop_diamond_edge(trace) -> None:
     c1_op.parents = [v for v in c1_op.parents if v not in p_labels]
     p_op.children = [v for v in p_op.children if v not in c1_labels]
     for domain in ("args", "kwargs"):
-        positions = c1_op.parent_arg_positions.get(domain, {})
+        positions = c1_op.call.parent_arg_positions.get(domain, {})
         for key in [k for k, v in positions.items() if v in p_labels]:
             del positions[key]
     for holder in (c1_op, p_op):
@@ -138,7 +127,7 @@ def _drop_diamond_edge(trace) -> None:
             ]
     for key in [k for k in list(p_op.out_versions_by_child) if k in c1_labels]:
         del p_op.out_versions_by_child[key]
-    p_op.has_children = len(p_op.children) > 0
+    p_op._graph_has_children = len(p_op.children) > 0
 
 
 def test_w31_diamond_baseline_passes() -> None:
@@ -185,16 +174,16 @@ def test_w32_forged_placeholder_in_plain_capture_fails() -> None:
 
     An op stamped with exactly the attributes the placeholder synthesizer
     writes (``func=None``, ``func_name='intervention_replacement'``,
-    ``intervention_replaced=True``) passed replay AND invariants on a PLAIN
+    ``is_edited=True``) passed replay AND invariants on a PLAIN
     capture before this hardening. With no replacement event in the
     trace-level ledger, both nets must now fail it.
     """
 
     trace, ground_truth = _capture(_Tiny(), torch.randn(3, 4))
-    relu_op = [op for op in trace.layer_list if op.func_name == "relu"][0]
+    relu_op = [op for op in trace._layer_list if op.func_name == "relu"][0]
     object.__setattr__(relu_op, "func", None)
     object.__setattr__(relu_op, "func_name", "intervention_replacement")
-    object.__setattr__(relu_op, "intervention_replaced", True)
+    object.__setattr__(relu_op, "is_edited", True)
     # No journal edit record exists for a plain capture: the forged per-op
     # stamps below have no corroborating InterventionAppliedEvent.
     assert not getattr(getattr(trace, "_capture_events", None), "intervention_events", ())
@@ -215,7 +204,7 @@ def test_w32_genuine_raw_hook_replacement_still_validates() -> None:
     """
 
     def raw_hook(module, inputs, output):  # type: ignore[no-untyped-def]
-        return torch.ops.aten.mul.Tensor(output, torch.tensor(0.5))
+        return torch._C._VariableFunctions.mul(output, torch.tensor(0.5))
 
     model = _Tiny()
     model.lin.register_forward_hook(raw_hook)
@@ -236,17 +225,15 @@ def test_w32_genuine_intervene_capture_keeps_exemption() -> None:
     trace = tl.trace(
         model,
         x,
-        layers_to_save="all",
-        save_arg_values=True,
         intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
+        capture=tl.options.CaptureOptions(save_args=True),
+        save="all",
     )
-    replaced_ops = [op for op in trace.layer_list if getattr(op, "intervention_replaced", False)]
+    replaced_ops = [op for op in trace._layer_list if getattr(op, "is_edited", False)]
     assert replaced_ops, "zero_ablate must stamp its site"
     assert getattr(trace, "_intervention_spec", None) is not None
     assert any(
-        getattr(record, "replaced", False)
-        for op in replaced_ops
-        for record in (op.interventions or [])
+        getattr(record, "replaced", False) for op in replaced_ops for record in (op.edits or [])
     )
     assert check_metadata_invariants(trace) is True
     ground_truth = [trace[label].out for label in trace.output_layers]
@@ -262,15 +249,15 @@ def test_w32_stale_fire_leak_in_plain_capture_stays_refused() -> None:
     ``_tl_live_fire_results`` leak cannot launder a placeholder.
     """
 
-    from torchlens.intervention.types import FireRecord
-    from torchlens.validation.invariants import (
+    from torchlens.intervention._types import FireRecord
+    from torchlens.validation._invariants_backward_flow import (
         _intervention_spec_is_armed,
         op_has_genuine_replacement_evidence,
     )
 
     trace, _ground_truth = _capture(_Tiny(), torch.randn(3, 4))
-    relu_op = [op for op in trace.layer_list if op.func_name == "relu"][0]
-    relu_op.interventions.append(FireRecord(target_label=relu_op.label, replaced=True))
+    relu_op = [op for op in trace._layer_list if op.func_name == "relu"][0]
+    relu_op.edits.append(FireRecord(target_label=relu_op.label, replaced=True))
     # A plain capture may own an EMPTY InterventionSpec object; that must not
     # count as an armed spec for the fallback.
     assert _intervention_spec_is_armed(getattr(trace, "_intervention_spec", None)) is False
@@ -279,28 +266,33 @@ def test_w32_stale_fire_leak_in_plain_capture_stays_refused() -> None:
 
 def test_raw_hook_recontainer_does_not_mint_replacement_evidence() -> None:
     """Returning an already-traced tensor only rewires the module boundary."""
-    from torchlens.validation.core import _is_intentional_intervention_replacement
+    from torchlens.validation._core import _is_intentional_intervention_replacement
 
     model = nn.Linear(4, 4)
     handle = model.register_forward_hook(lambda _module, _args, out: (out,))
     try:
-        trace = tl.trace(model, torch.randn(3, 4), layers_to_save="all", save_arg_values=True)
+        trace = tl.trace(
+            model,
+            torch.randn(3, 4),
+            capture=tl.options.CaptureOptions(save_args=True),
+            save="all",
+        )
     finally:
         handle.remove()
 
-    linear_op = next(op for op in trace.layer_list if op.func_name == "linear")
-    assert linear_op.intervention_replaced is False
+    linear_op = next(op for op in trace._layer_list if op.func_name == "linear")
+    assert linear_op.is_edited is False
     assert _is_intentional_intervention_replacement(linear_op) is False
 
 
 def test_callable_op_needs_own_live_fire_to_use_replacement_exemption() -> None:
     """A raw-hook ledger stamp alone cannot exempt a replayable callable op."""
     from torchlens.backends.torch.model_prep import _note_replacement_event
-    from torchlens.validation.core import _is_intentional_intervention_replacement
+    from torchlens.validation._core import _is_intentional_intervention_replacement
 
     trace, _ground_truth = _capture(_Tiny(), torch.randn(3, 4))
-    relu_op = next(op for op in trace.layer_list if op.func_name == "relu")
-    relu_op.intervention_replaced = True
+    relu_op = next(op for op in trace._layer_list if op.func_name == "relu")
+    relu_op.is_edited = True
     _note_replacement_event(trace, relu_op._label_raw)
 
     assert relu_op.func is not None
@@ -322,11 +314,11 @@ def test_w33_arg_map_naming_non_parent_now_fails() -> None:
     """
 
     trace, _ = _capture(_Diamond(), torch.randn(3, 4))
-    relu_op = [op for op in trace.layer_list if op.func_name == "relu"][0]
-    add_ops = [op for op in trace.layer_list if op.func_name == "__add__"]
+    relu_op = [op for op in trace._layer_list if op.func_name == "relu"][0]
+    add_ops = [op for op in trace._layer_list if op.func_name == "__add__"]
     foreign = add_ops[-1].layer_label
     assert foreign not in relu_op.parents
-    relu_op.parent_arg_positions["args"][1] = foreign
+    relu_op.call.parent_arg_positions["args"][1] = foreign
 
     with pytest.raises(MetadataInvariantError) as exc_info:
         check_metadata_invariants(trace)
@@ -337,9 +329,9 @@ def test_w33_has_children_corruption_still_caught() -> None:
     """The stored has_children flag check (the one real flag check) survives."""
 
     trace, _ = _capture(_Diamond(), torch.randn(3, 4))
-    p_op = [op for op in trace.layer_list if op.func_name == "__mul__"][0]
+    p_op = [op for op in trace._layer_list if op.func_name == "__mul__"][0]
     assert p_op.children
-    p_op.has_children = False
+    p_op._graph_has_children = False
 
     with pytest.raises(MetadataInvariantError) as exc_info:
         check_metadata_invariants(trace)
@@ -350,10 +342,10 @@ def test_w33_derived_flag_properties_are_read_only_truths() -> None:
     """Documented ground truth: the removed comparisons were tautologies."""
 
     trace, _ = _capture(_Diamond(), torch.randn(3, 4))
-    op_type = type(trace.layer_list[1])
+    op_type = type(trace._layer_list[1])
     for name in ("has_parents", "has_siblings", "has_co_parents"):
-        assert isinstance(getattr(op_type, name), property)
-    assert not isinstance(getattr(op_type, "has_children", None), property)
+        assert isinstance(getattr(op_type, op_attr(name)), property)
+    assert not isinstance(getattr(op_type, op_attr("has_children")), property)
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +356,7 @@ def test_w33_derived_flag_properties_are_read_only_truths() -> None:
 def _op_by_layer_label(trace, layer_label: str):
     """Return the raw op record (stored labels, no canonicalizing view)."""
 
-    for record in trace.layer_list:
+    for record in trace._layer_list:
         if record.layer_label == layer_label:
             return record
     raise KeyError(layer_label)
@@ -437,25 +429,25 @@ def test_module_call_stack_is_single_fact_containment() -> None:
     """
 
     trace, _ = _capture(_Nested(), torch.randn(2, 4))
-    by_label = {op.layer_label: op for op in trace.layer_list}
+    by_label = {op.layer_label: op for op in trace._layer_list}
 
     # Top-level ops (the model input, an op between modules) run in NO module
     # call: the stack must be empty, not the fed call's stack.
-    assert tuple(by_label["input_1"].module_call_stack) == ()
-    assert tuple(by_label["sigmoid_1_3"].module_call_stack) == ()
+    assert tuple(by_label["input_1"].module_context.call_stack) == ()
+    assert tuple(by_label["sigmoid_1_3"].module_context.call_stack) == ()
     # The fed-call fact lives on input_to_module_calls, un-conflated.
-    assert tuple(by_label["input_1"].input_to_module_calls) == ("a:1", "a.0:1")
-    assert tuple(by_label["sigmoid_1_3"].input_to_module_calls) == ("l2:1",)
+    assert tuple(by_label["input_1"].module_context.input_to_module_calls) == ("a:1", "a.0:1")
+    assert tuple(by_label["sigmoid_1_3"].module_context.input_to_module_calls) == ("l2:1",)
 
     # Interior and module-output ops carry root-first ModuleCall LABELS
     # (pass-qualified), not bare addresses.
-    assert tuple(by_label["linear_1_1"].module_call_stack) == ("a:1", "a.0:1")
-    assert tuple(by_label["relu_1_2"].module_call_stack) == ("a:1", "a.1:1")
+    assert tuple(by_label["linear_1_1"].module_context.call_stack) == ("a:1", "a.0:1")
+    assert tuple(by_label["relu_1_2"].module_context.call_stack) == ("a:1", "a.1:1")
 
     # The three facts are tied on every op: stack == modules, depth == len.
-    for op in trace.layer_list:
-        assert tuple(op.module_call_stack) == tuple(op.modules)
-        assert op.module_call_depth == len(op.module_call_stack)
+    for op in trace._layer_list:
+        assert tuple(op.module_context.call_stack) == tuple(op.modules)
+        assert op.module_context.call_depth == len(op.module_context.call_stack)
 
 
 def test_module_call_stack_corruption_fails_invariants() -> None:
@@ -469,7 +461,7 @@ def test_module_call_stack_corruption_fails_invariants() -> None:
     trace, _ = _capture(_Nested(), torch.randn(2, 4))
     input_op = _op_by_layer_label(trace, "input_1")
     assert tuple(input_op.modules) == ()
-    input_op.module_call_stack = ("a", "a.0")  # the retired fed-call fact
+    input_op._module_context_call_stack = ("a", "a.0")  # the retired fed-call fact
 
     with pytest.raises(MetadataInvariantError) as exc_info:
         check_metadata_invariants(trace)
@@ -485,8 +477,8 @@ def test_parent_arg_positions_foreign_domain_fails() -> None:
     """
 
     trace, _ = _capture(_Diamond(), torch.randn(3, 4))
-    relu_op = [op for op in trace.layer_list if op.func_name == "relu"][0]
-    relu_op.parent_arg_positions["nosuchop_9_9"] = {"args": [0]}
+    relu_op = [op for op in trace._layer_list if op.func_name == "relu"][0]
+    relu_op.call.parent_arg_positions["nosuchop_9_9"] = {"args": [0]}
 
     with pytest.raises(MetadataInvariantError) as exc_info:
         check_metadata_invariants(trace)
@@ -503,11 +495,11 @@ class _RawAten(nn.Module):
     """A directly-dispatched aten op TorchLens silently fails to capture."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = torch.ops.aten.mul.Tensor(x, 2.0)
+        h = torch._C._VariableFunctions.mul(x, 2.0)
         return torch.relu(h)
 
 
-def test_w34_dropped_aten_op_trace_method_now_fails() -> None:
+def test_w34_dropped_aten_op_trace_method_now_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     """FAIL-AFTER-WHERE-PASSED-BEFORE: the Trace-method entrypoint is armed.
 
     Before this hardening ``Trace.validate_forward_pass`` returned True for
@@ -521,12 +513,15 @@ def test_w34_dropped_aten_op_trace_method_now_fails() -> None:
     model = _RawAten()
     x = torch.randn(3, 4)
     ground_truth = model(x)
+    # Keep the primary capture: the rescue re-run's aten recording recovers the stand-in.
+    monkeypatch.setattr(rescue, "_escape_signal", lambda trace: None)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         trace = tl.trace(
             model,
             x,
-            capture=CaptureOptions(layers_to_save="all", save_arg_values=True),
+            capture=CaptureOptions(save_args=True),
+            save="all",
         )
     assert "relu_1_1" in trace.layer_labels and len(trace.layer_labels) == 3
 
@@ -549,18 +544,18 @@ def test_w34_public_path_census_still_fails_dropped_aten_op() -> None:
 def test_w34_census_unverified_outcome_is_recorded_not_discarded() -> None:
     """An unverified census outcome now leaves an auditable diagnostic."""
 
-    from torchlens.validation.diagnostics import get_validation_diagnostics
+    from torchlens.validation._diagnostics import get_validation_diagnostics
 
     # Bind the model: replay reads parameters through TorchLens' weak model
     # reference, so a temporary model can be collected mid-test and turn the
-    # replay into PostTraceParamUnavailable.
+    # replay into ParamReleasedError.
     model = _Tiny()
     trace, ground_truth = _capture(model, torch.randn(3, 4))
     status = validate_saved_outs(trace, [ground_truth], validate_metadata=False)
     assert status.state == "passed"
     diagnostics = get_validation_diagnostics(trace)
     assert any(
-        diagnostic.check == "completeness_census_unverified"
+        diagnostic.check_name == "completeness_census_unverified"
         and diagnostic.extra.get("reason") == "dispatch_op_count_not_collected"
         for diagnostic in diagnostics
     )
@@ -597,20 +592,26 @@ def test_w34_factory_internal_sources_keep_exemption() -> None:
     assert _quiet_validate(_Factories(), torch.randn(3, 4)) is True
 
 
-def test_w34_outside_tensor_consumer_with_traced_parent_still_validates() -> None:
-    """Control (no new FP): the locked global-payload pattern stays green.
+def test_w34_outside_tensor_consumer_with_traced_parent_fails_source_provenance() -> None:
+    """A tensor the capture never saw, beside a traced input, fails forward validation.
 
-    A model consuming a genuinely outside tensor alongside a traced input has
-    known partial provenance; it warns but validates (locked behavior).
+    A pre-forward global is a recorded ``constant`` source, so the gap is planted
+    with a tensor built mid-forward while logging is paused. It warns (no
+    graph/source provenance) and fails on ``source_provenance`` rather than on
+    the graph_connectivity invariant: the traced parent keeps the consumer connected.
     """
 
     outside = torch.randn(3, 4)
 
     class _GlobalTensor(nn.Module):
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return x + outside
+            with pause_logging():
+                unseen = outside.clone()
+            return x + unseen
 
-    assert _quiet_validate(_GlobalTensor(), torch.randn(3, 4)) is True
+    assert _quiet_validate(_GlobalTensor(), torch.randn(3, 4)) is False
+    failure = tl.validation.last_validation_failure()
+    assert failure is not None and failure.check_name == "source_provenance"
 
 
 def test_w34_unused_input_model_still_validates() -> None:
@@ -661,6 +662,641 @@ def test_f2_inplace_zero_mask_validates() -> None:
     assert _quiet_validate(_InplaceZeroMask(), torch.randn(3, 4)) is True
 
 
+def test_addcmul_zero_gain_validates() -> None:
+    """``addcmul(x, zero_gain, branch)`` (timm GRN/LayerScale spelling) must
+    pass validation, matching the existing ``mul``/``multiply`` annihilator
+    proof.
+
+    ``torch.addcmul(input, tensor1, tensor2, value=1)`` computes
+    ``input + value * tensor1 * tensor2``: when ``tensor1`` is provably
+    all-zero, ``tensor2``'s value can never reach the output, exactly the
+    annihilator case ``_multiplicative_zero_annihilator_decision`` already
+    proves for plain ``mul``/``multiply`` -- but that function only
+    recognizes a 2-operand op at positions {0, 1}, so ``addcmul`` (operands
+    at positions {1, 2}, with position 0 the additive, never-multiplied
+    ``input``) falls through to the generic ``perturbation_insensitive``
+    failure instead. timm's ConvNeXtV2 GRN layer initializes its gain
+    exactly this way (``nn.Parameter(torch.zeros(...))``), so every freshly
+    constructed ConvNeXtV2 model hits this at random init.
+    """
+
+    class _ZeroGainAddcmul(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.gain = nn.Parameter(torch.zeros(4))
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            branch = x * 2.0
+            return torch.addcmul(x, self.gain, branch)
+
+    assert _quiet_validate(_ZeroGainAddcmul(), torch.randn(3, 4)) is True
+
+
+def test_addcmul_zero_annihilator_refuses_unproved_cases() -> None:
+    """Armed-proof: the addcmul annihilator fires only on a provably zero factor.
+
+    A non-zero sibling multiplied operand, a non-zero ``value=``, and a
+    perturbed additive ``input`` (args[0], never multiplied) must all stay
+    strict, so an addcmul whose perturbed parent genuinely fails to reach the
+    output still fails validation.
+    """
+
+    class _FakeAddcmulOp(FlatGroups):
+        func_name = "addcmul"
+        out = torch.zeros(2)  # a finite saved output
+
+        def __init__(self, saved_kwargs: dict | None = None) -> None:
+            self.saved_kwargs = saved_kwargs or {}
+            self.parent_arg_positions = {
+                "args": {0: "input_label", 1: "gain_label", 2: "branch_label"},
+                "kwargs": {},
+            }
+
+    base = torch.randn(3, 4)
+    branch = torch.randn(3, 4)
+    zero_gain = torch.zeros(4)
+    nonzero_gain = torch.full((4,), 1e-6)
+
+    layer = _FakeAddcmulOp()
+    # Zero sibling factor: the branch cannot reach the output.
+    assert (
+        _addcmul_zero_annihilator_decision(
+            layer, ["branch_label"], (base, zero_gain, branch)
+        ).exempt
+        is True
+    )
+    # A tiny but non-zero sibling factor carries the branch: never exempt.
+    assert (
+        _addcmul_zero_annihilator_decision(
+            layer, ["branch_label"], (base, nonzero_gain, branch)
+        ).exempt
+        is False
+    )
+    # The additive input is never multiplied: never exempt, even with a zero factor.
+    assert (
+        _addcmul_zero_annihilator_decision(layer, ["input_label"], (base, zero_gain, branch)).exempt
+        is False
+    )
+    # value=0 annihilates both factors; any non-zero value does not.
+    assert (
+        _addcmul_zero_annihilator_decision(
+            _FakeAddcmulOp({"value": 0}), ["branch_label"], (base, nonzero_gain, branch)
+        ).exempt
+        is True
+    )
+    assert (
+        _addcmul_zero_annihilator_decision(
+            _FakeAddcmulOp({"value": 0.5}), ["branch_label"], (base, nonzero_gain, branch)
+        ).exempt
+        is False
+    )
+    # Two perturbed parents at once are outside the single-parent proof.
+    assert (
+        _addcmul_zero_annihilator_decision(
+            layer, ["gain_label", "branch_label"], (base, zero_gain, branch)
+        ).exempt
+        is False
+    )
+
+
+def test_nan_multiplication_proof_still_covers_plain_mul() -> None:
+    """The addcmul branch must not displace the plain-mul NaN locality proof.
+
+    ``x * nan_operand`` is all-NaN for every finite ``x``; the proof that
+    already covered plain ``mul`` must still be reached from the value-proof
+    dispatcher after the addcmul branch was added beside it.
+    """
+
+    from torchlens.validation._exemptions import _posthoc_value_proof_decision
+
+    class _FakeMulOp(FlatGroups):
+        func_name = "mul"
+        saved_kwargs: dict = {}
+
+        def __init__(self) -> None:
+            self.parent_arg_positions = {"args": {0: "x_label"}, "kwargs": {}}
+            self.out = torch.full((3,), float("nan"))
+
+    nan_operand = torch.full((3,), float("nan"))
+    decision = _posthoc_value_proof_decision(
+        _FakeMulOp(), ["x_label"], (torch.randn(3), nan_operand)
+    )
+    assert decision.exempt is True
+    assert decision.reason == "locally_constant_by_construction"
+
+
+def test_batch_norm_zero_init_last_weight_validates() -> None:
+    """Eval-mode batch_norm whose ``weight`` (gamma) is exactly zero must validate.
+
+    ``batch_norm``'s output is
+    ``((input - running_mean) / sqrt(running_var + eps)) * weight + bias``:
+    an exactly-zero ``weight`` annihilates the whole normalized term, leaving
+    output == bias regardless of input, running_mean, or running_var -- the
+    same zero-annihilator shape already proved for mul/addcmul. timm's
+    "zero_init_last" convention zero-initializes exactly the LAST BatchNorm's
+    weight in every residual block of many ResNet-family architectures, so an
+    untrained (``pretrained=False``) instance hits this at validation time.
+
+    Reproduced on real timm models: ``botnet26t_256`` failed perturbing the
+    ``running_mean`` buffer of ``stages.3.1.conv3_1x1.bn`` (weight all zero),
+    and ``cs3darknet_focus_l`` failed the same way on
+    ``stages.0.blocks.0.conv2.bn``. In both, the perturbed parents attributed
+    to the op were input/running_mean/running_var (args 0/3/4).
+    """
+
+    bn = nn.BatchNorm2d(4)
+    with torch.no_grad():
+        bn.weight.zero_()
+    bn.eval()
+    assert _quiet_validate(bn, torch.randn(2, 4, 8, 8)) is True
+
+
+def test_batch_norm_zero_init_last_weight_validates_training_mode() -> None:
+    """The zero-weight annihilation holds in training mode too.
+
+    The normalized term vanishes regardless of mode (only the SEPARATE
+    running_mean/running_var training-mode carve-out above is itself
+    mode-gated; this one is not, since weight=0 nullifies the term in both
+    the batch-statistics (training) and running-buffer (eval) forms alike).
+    """
+
+    bn = nn.BatchNorm2d(4, momentum=None)
+    with torch.no_grad():
+        bn.weight.zero_()
+    bn.train()
+    assert _quiet_validate(bn, torch.randn(2, 4, 8, 8)) is True
+
+
+def test_check_norm_zero_weight_annihilates_never_exempts_weight_or_bias() -> None:
+    """Armed-proof: the zero-weight carve-out never exempts perturbing
+    weight or bias themselves, and never fires when weight is nonzero.
+    """
+
+    class _FakeBatchNormOp(FlatGroups):
+        out = torch.zeros(2)  # a finite saved output
+
+        def __init__(self, weight) -> None:
+            self.saved_args = [None, weight, None, None, None, False]
+            self.parent_arg_positions = {
+                "args": {
+                    0: "input_label",
+                    1: "weight_label",
+                    2: "bias_label",
+                    3: "running_mean_label",
+                    4: "running_var_label",
+                },
+                "kwargs": {},
+            }
+
+    zero_weight = torch.zeros(4)
+    nonzero_weight = torch.ones(4)
+
+    # Zero weight: input/running_mean/running_var are exempt.
+    layer = _FakeBatchNormOp(zero_weight)
+    assert _check_norm_zero_weight_annihilates(layer, ["input_label"]) is True
+    assert _check_norm_zero_weight_annihilates(layer, ["running_mean_label"]) is True
+    assert _check_norm_zero_weight_annihilates(layer, ["running_var_label"]) is True
+    # ... but never weight or bias themselves.
+    assert _check_norm_zero_weight_annihilates(layer, ["weight_label"]) is False
+    assert _check_norm_zero_weight_annihilates(layer, ["bias_label"]) is False
+
+    # Nonzero weight: nothing is exempt through this check.
+    nonzero_layer = _FakeBatchNormOp(nonzero_weight)
+    assert _check_norm_zero_weight_annihilates(nonzero_layer, ["input_label"]) is False
+    assert _check_norm_zero_weight_annihilates(nonzero_layer, ["running_mean_label"]) is False
+
+
+def test_check_norm_zero_weight_reads_the_real_captured_weight_slot() -> None:
+    """The zero-weight proof must read a REAL captured op's weight, not running_mean.
+
+    A fresh BatchNorm has ``running_mean == 0`` and ``weight == 1``. If the
+    captured ``batch_norm`` op's saved args followed ``F.batch_norm``'s Python
+    order ``(input, running_mean, running_var, weight, ...)``, args[1] would be
+    the all-zero running_mean and the proof would wrongly exempt input
+    perturbation for every fresh eval-mode BatchNorm. Pin the layout against an
+    actual capture: non-zero weight never exempts; an exactly-zero weight does.
+    """
+
+    for zero_weight in (False, True):
+        bn = nn.BatchNorm2d(4)
+        if zero_weight:
+            with torch.no_grad():
+                bn.weight.zero_()
+        bn.eval()
+        trace, _ = _capture(bn, torch.randn(2, 4, 8, 8))
+        op = next(op for op in trace._layer_list if op.func_name == "batch_norm")
+        assert torch.equal(op.call.saved_args[1], bn.weight.detach())
+        assert torch.equal(op.call.saved_args[3], bn.running_mean)
+        positions = op.call.parent_arg_positions["args"]
+        for position in (0, 3, 4):
+            if position in positions:
+                decision = _check_norm_zero_weight_annihilates(op, [positions[position]])
+                assert decision is zero_weight
+
+
+def test_sdpa_zero_query_key_insensitivity_validates() -> None:
+    """A zero-initialized class token must not fail sdpa's key-perturbation check.
+
+    Found on compact CaiT-style models (``cait_m36_384``/``cait_m48_448``) whose
+    ``ClassAttentionBlock`` initializes its class token to
+    ``nn.Parameter(torch.zeros(1, 1, dim))`` and feeds
+    ``self.norm(torch.cat([cls, patches]))[:, :1]`` as ``nn.MultiheadAttention``'s
+    query. ``nn.LayerNorm``'s default affine (weight=1, bias=0) maps an exactly-zero
+    row to an exactly-zero row, and ``nn.MultiheadAttention._reset_parameters``
+    zero-initializes ``in_proj_bias``/``out_proj.bias`` -- so the FIRST class-attention
+    block's query is EXACTLY zero at random init, for any image. With ``Q=0``,
+    ``softmax(Q @ K^T) = softmax(0) =`` uniform regardless of ``K``, so the key operand
+    provably cannot influence ``scaled_dot_product_attention``'s output: not a capture
+    bug (parent attribution was directly checked by comparing each saved arg's
+    ``data_ptr()``/value against its recorded parent op's output and found correct),
+    but the same zero-annihilator shape already proved for ``mul``/``addcmul``/
+    ``batch_norm``, on sdpa's query operand instead. Reproduced end-to-end on the real
+    model: the failing sdpa op's saved query had ``abs_max=0`` exactly, and 5
+    independent re-draws of the key operand across its observed value range
+    reproduced the saved sdpa output bit-for-bit every time.
+    """
+
+    class _ZeroQueryClassAttention(nn.Module):
+        def __init__(self, dim: int = 16, heads: int = 2) -> None:
+            super().__init__()
+            self.cls = nn.Parameter(torch.zeros(1, 1, dim))
+            self.norm = nn.LayerNorm(dim)
+            self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
+
+        def forward(self, context: torch.Tensor) -> torch.Tensor:
+            cls = self.cls.expand(context.shape[0], -1, -1)
+            source = self.norm(torch.cat([cls, context], dim=1))
+            out, _weights = self.attn(source[:, :1], source, source, need_weights=False)
+            return out
+
+    model = _ZeroQueryClassAttention()
+    assert _quiet_validate(model, torch.randn(2, 20, 16)) is True
+
+
+def test_sdpa_zero_query_decision_scoped_correctly() -> None:
+    """Armed-proof: only exempts the KEY parent when query is provably all-zero.
+
+    Never exempts perturbing query or value themselves (both genuinely influence
+    the output), and never exempts anything when query is nonzero.
+    """
+
+    from torchlens.validation._exemptions import _sdpa_zero_query_decision
+
+    class _FakeSdpaOp(FlatGroups):
+        out = torch.zeros(2)  # a finite saved output
+
+        def __init__(self, query) -> None:
+            self.saved_args = (query, None, None)
+            self.parent_arg_positions = {
+                "args": {0: "query_label", 1: "key_label", 2: "value_label"},
+                "kwargs": {},
+            }
+
+    zero_query = torch.zeros(1, 2, 1, 8)
+    nonzero_query = torch.randn(1, 2, 1, 8)
+
+    layer = _FakeSdpaOp(zero_query)
+    assert _sdpa_zero_query_decision(layer, ["key_label"], layer.call.saved_args).exempt is True
+    assert _sdpa_zero_query_decision(layer, ["query_label"], layer.call.saved_args).exempt is False
+    assert _sdpa_zero_query_decision(layer, ["value_label"], layer.call.saved_args).exempt is False
+
+    nonzero_layer = _FakeSdpaOp(nonzero_query)
+    assert (
+        _sdpa_zero_query_decision(
+            nonzero_layer, ["key_label"], nonzero_layer.call.saved_args
+        ).exempt
+        is False
+    )
+
+
+def test_linear_zero_input_annihilates_weight_perturbation() -> None:
+    """``_linear_zero_weight_input_decision`` must also cover the MIRROR shape.
+
+    Found while taking the sdpa zero-query fix to a real end-to-end pass:
+    ``nn.MultiheadAttention``'s combined in-projection splits ``in_proj_weight`` into
+    q/k/v chunks via ``split_with_sizes``, so the query projection's WEIGHT (not just
+    its input) is a traced graph parent. The existing exemption only covered
+    "perturbed input, zero weight"; when the zero-initialized class token makes
+    ``linear``'s INPUT all-zero instead, perturbing the (non-zero, split-derived)
+    WEIGHT parent fell through to a spurious ``perturbation_insensitive`` failure --
+    the exact mirror of the already-proved shape (``linear`` is bilinear in
+    input/weight, so either operand being zero annihilates sensitivity to the
+    other, the same symmetry ``_multiplicative_zero_annihilator_decision`` already
+    gives plain ``mul``).
+    """
+
+    from torchlens.validation._exemptions import _linear_zero_weight_input_decision
+
+    class _FakeLinearOp(FlatGroups):
+        out = torch.zeros(2)  # a finite saved output
+
+        def __init__(self, input_value, weight_value) -> None:
+            self.saved_args = (input_value, weight_value)
+            self.parent_arg_positions = {
+                "args": {0: "input_label", 1: "weight_label"},
+                "kwargs": {},
+            }
+
+    zero_input = torch.zeros(2, 4)
+    nonzero_weight = torch.randn(4, 4)
+
+    layer = _FakeLinearOp(zero_input, nonzero_weight)
+    assert (
+        _linear_zero_weight_input_decision(layer, ["weight_label"], layer.call.saved_args).exempt
+        is True
+    )
+    # Perturbing the (zero) input itself is never exempted by this proof.
+    assert (
+        _linear_zero_weight_input_decision(layer, ["input_label"], layer.call.saved_args).exempt
+        is False
+    )
+
+    nonzero_input = torch.randn(2, 4)
+    nonzero_layer = _FakeLinearOp(nonzero_input, nonzero_weight)
+    assert (
+        _linear_zero_weight_input_decision(
+            nonzero_layer, ["weight_label"], nonzero_layer.call.saved_args
+        ).exempt
+        is False
+    )
+
+
+def test_softmax_singleton_reduction_dim_validates() -> None:
+    """A softmax reduced over a size-1 dim must not fail its perturbation check.
+
+    Found on timm's ``csatv2``/``csatv2_21m``: every ``softmax`` op reduces over a
+    dimension of size 1 (a trivial single-key channel-attention shape), confirmed
+    end-to-end on ``timm.create_model('csatv2', pretrained=False)``: all 14 softmax
+    ops in the model reduce over a size-1 dimension. ``softmax`` of a single element is IDENTICALLY 1 by the
+    definition of the function (``exp(x) / exp(x) == 1`` for any finite ``x``),
+    regardless of that element's value -- a shape-based identity, not a magnitude
+    heuristic, and true regardless of training state (unlike the zero-annihilator
+    exemptions, it does not depend on a weight staying exactly zero).
+    """
+
+    class _SingletonSoftmax(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            logits = x.sum(dim=-1, keepdim=True)
+            return torch.softmax(logits, dim=-1)
+
+    assert _quiet_validate(_SingletonSoftmax(), torch.randn(2, 5, 4)) is True
+
+
+def test_softmax_singleton_dim_decision_scoped_correctly() -> None:
+    """Armed-proof: only exempts when the reduced dim's size is exactly 1."""
+
+    from torchlens.validation._exemptions import _softmax_singleton_dim_decision
+
+    class _FakeSoftmaxOp(FlatGroups):
+        def __init__(self, out_shape, dim) -> None:
+            self.saved_args = (None,)
+            self.saved_kwargs = {"dim": dim}
+            self.parent_arg_positions = {"args": {0: "logits_label"}, "kwargs": {}}
+            self.out = torch.ones(out_shape)  # softmax over a size-1 dim of finite logits
+
+    singleton = _FakeSoftmaxOp((2, 3, 1), dim=-1)
+    assert (
+        _softmax_singleton_dim_decision(singleton, ["logits_label"], singleton.saved_args).exempt
+        is True
+    )
+
+    wide = _FakeSoftmaxOp((2, 3, 5), dim=-1)
+    assert _softmax_singleton_dim_decision(wide, ["logits_label"], wide.saved_args).exempt is False
+
+    # Perturbing something other than the (sole) logits parent is never this proof's
+    # business.
+    assert (
+        _softmax_singleton_dim_decision(
+            singleton, ["some_other_label"], singleton.saved_args
+        ).exempt
+        is False
+    )
+
+    # No explicit integer dim: F.softmax's implicit-dim rule (dim 0 for 0/1/3-D
+    # input, else dim 1) is NOT the last dim, so a size-1 LAST dim proves nothing.
+    # A (4, 3, 1) input would reduce over dim 0 (size 4); never exempt.
+    implicit = _FakeSoftmaxOp((4, 3, 1), dim=None)
+    assert (
+        _softmax_singleton_dim_decision(implicit, ["logits_label"], implicit.saved_args).exempt
+        is False
+    )
+    implicit.saved_kwargs = {}
+    assert (
+        _softmax_singleton_dim_decision(implicit, ["logits_label"], implicit.saved_args).exempt
+        is False
+    )
+    # A positional integer dim is read the same as the keyword spelling.
+    positional = _FakeSoftmaxOp((4, 3, 1), dim=None)
+    positional.saved_kwargs = {}
+    positional.saved_args = (None, 0)
+    assert (
+        _softmax_singleton_dim_decision(positional, ["logits_label"], positional.saved_args).exempt
+        is False
+    )
+    positional.saved_args = (None, 2)
+    assert (
+        _softmax_singleton_dim_decision(positional, ["logits_label"], positional.saved_args).exempt
+        is True
+    )
+
+
+def test_layer_norm_singleton_normalized_shape_validates() -> None:
+    """A layer_norm over a size-1 normalized_shape must not fail its perturbation check.
+
+    Fixing csatv2's softmax-singleton-dim class unmasked a DIFFERENT op in the same
+    trivial single-channel attention branch --
+    ``layer_norm(input, normalized_shape=(1,), ...)``, confirmed on the real
+    ``timm.create_model('csatv2', pretrained=False)`` model, whose input there had
+    shape ``(1, 49, 1)``. ``layer_norm``
+    mean-centers and rescales over exactly the trailing ``normalized_shape`` dims;
+    when that span has exactly one element, the mean IS that element, so the
+    centered value is IDENTICALLY zero before the affine transform -- the same
+    shape-based identity already proved for softmax's singleton reduction dim,
+    applied to layer_norm's normalized_shape instead. The output (``bias``, or 0
+    with no affine) is a constant independent of the input's actual value,
+    regardless of what weight/bias happen to be.
+    """
+
+    class _SingletonLayerNorm(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.norm = nn.LayerNorm(1)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.norm(x.mean(dim=-1, keepdim=True))
+
+    assert _quiet_validate(_SingletonLayerNorm(), torch.randn(2, 5, 4)) is True
+
+
+def test_layer_norm_singleton_shape_decision_scoped_correctly() -> None:
+    """Armed-proof: only exempts when normalized_shape's element count is exactly 1."""
+
+    from torchlens.validation._exemptions import _layer_norm_singleton_shape_decision
+
+    class _FakeLayerNormOp(FlatGroups):
+        out = torch.zeros(2)  # a finite saved output
+
+        def __init__(self, normalized_shape) -> None:
+            self.saved_args = (None, normalized_shape, None, None)
+            self.parent_arg_positions = {"args": {0: "input_label"}, "kwargs": {}}
+
+    singleton = _FakeLayerNormOp((1,))
+    assert (
+        _layer_norm_singleton_shape_decision(
+            singleton, ["input_label"], singleton.saved_args
+        ).exempt
+        is True
+    )
+
+    wide = _FakeLayerNormOp((4,))
+    assert (
+        _layer_norm_singleton_shape_decision(wide, ["input_label"], wide.saved_args).exempt is False
+    )
+
+    # Every normalized dim must be size 1: (1, 3) spans 3 elements per group.
+    multi = _FakeLayerNormOp((1, 3))
+    assert (
+        _layer_norm_singleton_shape_decision(multi, ["input_label"], multi.saved_args).exempt
+        is False
+    )
+    # An empty normalized_shape is not a proof of a one-element group.
+    empty = _FakeLayerNormOp(())
+    assert (
+        _layer_norm_singleton_shape_decision(empty, ["input_label"], empty.saved_args).exempt
+        is False
+    )
+    # The saved input's trailing dims must agree with the saved normalized_shape:
+    # a (2, 5, 4) input normalized as (1,) is a contradiction, never a proof.
+    mismatched = _FakeLayerNormOp((1,))
+    mismatched.saved_args = (torch.randn(2, 5, 4), (1,), None, None)
+    assert (
+        _layer_norm_singleton_shape_decision(
+            mismatched, ["input_label"], mismatched.saved_args
+        ).exempt
+        is False
+    )
+    matched = _FakeLayerNormOp((1,))
+    matched.saved_args = (torch.randn(2, 5, 1), (1,), None, None)
+    assert (
+        _layer_norm_singleton_shape_decision(matched, ["input_label"], matched.saved_args).exempt
+        is True
+    )
+
+    # Perturbing something other than the (sole) input parent is never this proof's
+    # business.
+    assert (
+        _layer_norm_singleton_shape_decision(
+            singleton, ["some_other_label"], singleton.saved_args
+        ).exempt
+        is False
+    )
+
+
+def test_annihilator_and_singleton_proofs_refuse_a_non_finite_saved_output() -> None:
+    """Armed-proof: every constant-output proof requires a finite saved output.
+
+    ``0 * inf`` and ``inf - inf`` are NaN, so a non-finite saved operand makes the
+    ORIGINAL output non-finite; a correctly wired edge would then CHANGE under a
+    finite perturbation, and an unchanged output is a capture bug to surface,
+    never to exempt. Each proof below would fire on its zero/singleton premise
+    alone; a NaN or Inf in the saved output must keep it strict.
+    """
+
+    from types import SimpleNamespace
+
+    from torchlens.validation._exemptions import (
+        _conv_zero_weight_input_decision,
+        _layer_norm_singleton_shape_decision,
+        _linear_zero_weight_input_decision,
+        _sdpa_zero_query_decision,
+        _softmax_singleton_dim_decision,
+    )
+
+    def fake(out: torch.Tensor, positions: dict, **extra) -> SimpleNamespace:
+        return FlatNamespace(
+            out=out,
+            parent_arg_positions={"args": positions, "kwargs": {}},
+            saved_kwargs=extra.pop("saved_kwargs", {}),
+            **extra,
+        )
+
+    for bad in (float("nan"), float("inf")):
+        out = torch.tensor([0.0, bad])
+        assert (
+            _multiplicative_zero_annihilator_decision(
+                fake(out, {0: "p"}), ["p"], (torch.tensor([1.0, bad]), 0.0)
+            ).exempt
+            is False
+        )
+        assert (
+            _addcmul_zero_annihilator_decision(
+                fake(out, {0: "i", 1: "g", 2: "b"}),
+                ["b"],
+                (torch.zeros(2), torch.zeros(2), torch.tensor([1.0, bad])),
+            ).exempt
+            is False
+        )
+        assert (
+            _linear_zero_weight_input_decision(
+                fake(out, {0: "x", 1: "w"}), ["w"], (torch.zeros(1, 2), torch.ones(2, 2))
+            ).exempt
+            is False
+        )
+        assert (
+            _linear_zero_weight_input_decision(
+                fake(out, {0: "x", 1: "w"}), ["x"], (torch.ones(1, 2), torch.zeros(2, 2))
+            ).exempt
+            is False
+        )
+        assert (
+            _conv_zero_weight_input_decision(
+                fake(out, {0: "x", 1: "w"}),
+                ["x"],
+                (torch.ones(1, 1, 3), torch.zeros(1, 1, 1)),
+            ).exempt
+            is False
+        )
+        assert (
+            _sdpa_zero_query_decision(
+                fake(out, {0: "q", 1: "k", 2: "v"}), ["k"], (torch.zeros(1, 1, 2), None, None)
+            ).exempt
+            is False
+        )
+        assert (
+            _softmax_singleton_dim_decision(
+                fake(torch.tensor([[1.0], [bad]]), {0: "x"}, saved_kwargs={"dim": -1}),
+                ["x"],
+                (None,),
+            ).exempt
+            is False
+        )
+        assert (
+            _layer_norm_singleton_shape_decision(
+                fake(out, {0: "x"}), ["x"], (torch.ones(2, 1), (1,), None, None)
+            ).exempt
+            is False
+        )
+        bn = fake(
+            out,
+            {0: "x", 3: "rm", 4: "rv"},
+            saved_args=[None, torch.zeros(2), None, None, None, False],
+        )
+        assert _check_norm_zero_weight_annihilates(bn, ["x"]) is False
+
+    # The same premises with a finite saved output still prove the identity.
+    finite = torch.zeros(2)
+    assert (
+        _multiplicative_zero_annihilator_decision(
+            fake(finite, {0: "p"}), ["p"], (torch.ones(2), 0.0)
+        ).exempt
+        is True
+    )
+    bn_ok = fake(
+        finite, {0: "x", 3: "rm", 4: "rv"}, saved_args=[None, torch.zeros(2), None, None, None]
+    )
+    assert _check_norm_zero_weight_annihilates(bn_ok, ["x"]) is True
+
+
 def test_w35_nonzero_literal_never_exempted() -> None:
     """Armed-proof: the annihilator proof requires an exactly-zero co-arg.
 
@@ -669,8 +1305,9 @@ def test_w35_nonzero_literal_never_exempted() -> None:
     any multiplication spelling.
     """
 
-    class _FakeOp:
+    class _FakeOp(FlatGroups):
         saved_args = None
+        out = torch.zeros(3)  # a finite saved output
 
         def __init__(self, func_name: str, args_map: dict) -> None:
             self.func_name = func_name
@@ -701,9 +1338,9 @@ def test_f3_tuple_out_destination_keys_accepted() -> None:
     stays strict.
     """
 
-    from torchlens.validation.core import _perturbed_parents_only_occupy_out_kwarg
+    from torchlens.validation._core import _perturbed_parents_only_occupy_out_kwarg
 
-    class _FakeOp:
+    class _FakeOp(FlatGroups):
         def __init__(self, args_map: dict, kwargs_map: dict) -> None:
             self.parent_arg_positions = {"args": args_map, "kwargs": kwargs_map}
 
@@ -738,6 +1375,94 @@ def test_f3_tuple_out_model_validates() -> None:
     assert _quiet_validate(_TupleOut(), torch.randn(3, 4)) is True
 
 
+def test_buffer_rewrite_verdict_is_true_under_plain_filters() -> None:
+    """Plain python filters: a buffer-rewriting forward validates with no re-trace warning.
+
+    The re-trace starts from the buffers the first forward wrote and reaches NaN
+    where the first trace does not; buffer provenance is recorded, never
+    inferred from values, so both traces have the same structure.
+    """
+
+    model = BufferRewriteModel()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("default")
+        assert validate_forward_pass(model, torch.rand(12, 12)) is True
+    assert not any(issubclass(w.category, TraceNotReproducibleWarning) for w in caught)
+
+
+def test_buffer_rewrite_verdict_is_true_under_the_suite_error_filter() -> None:
+    """The suite's ``error::UserWarning:torchlens`` filter leaves the True verdict alone."""
+
+    model = BufferRewriteModel()
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", category=UserWarning, module=r"torchlens(\.|$)")
+        assert validate_forward_pass(model, torch.rand(12, 12)) is True
+
+
+class _ToggleBranch(nn.Module):
+    """Takes a different branch after its first forward: genuinely stateful."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.use_mul = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = x * 2 if self.use_mul else x + 1
+        self.use_mul = True
+        return out
+
+
+def test_retrace_mismatch_promoted_warning_propagates_never_reads_unavailable() -> None:
+    """The suite's error filter must not flip a stateful model's verdict to True.
+
+    Under ``error::UserWarning:torchlens`` the re-trace warning arrived as an
+    exception inside the check's own ``try`` and was recorded as an
+    "unavailable" re-trace, so the mismatch downgrade never ran and validation
+    returned True. A promoted warning now propagates.
+    """
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", category=UserWarning, module=r"torchlens(\.|$)")
+        with pytest.raises(TraceNotReproducibleWarning, match="stateful/non-reproducible"):
+            validate_forward_pass(_ToggleBranch(), torch.rand(3, 4))
+
+
+class _ReluScale(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(x * 2.0)
+
+
+def _replay_status_with_noisy_relu(action: str) -> str:
+    """Replay a capture whose relu re-execution warns, under one warning action."""
+
+    trace, ground_truth = _capture(_ReluScale(), torch.randn(3, 4))
+    relu_op = [op for op in trace._layer_list if op.func_name == "relu"][0]
+    original = relu_op.func
+
+    def noisy(*args, **kwargs):
+        warnings.warn("replay-only warning", UserWarning, stacklevel=2)
+        return original(*args, **kwargs)
+
+    noisy.__name__ = original.__name__
+    object.__setattr__(relu_op, "func", noisy)
+    with warnings.catch_warnings():
+        warnings.simplefilter(action)
+        return validate_saved_outs(trace, [ground_truth], validate_metadata=False).state
+
+
+def test_replay_verdict_does_not_depend_on_warning_filters() -> None:
+    """A warning raised by a replayed op must not change the replay verdict.
+
+    Under an ``error`` filter the replay's warning arrived as an exception,
+    which the replay path reads as "this op raised for these inputs" and fails
+    (or, perturbed, leaves unverified). Replay now runs with warnings ignored,
+    so the same correct capture passes under every filter.
+    """
+
+    assert _replay_status_with_noisy_relu("default") == "passed"
+    assert _replay_status_with_noisy_relu("error") == "passed"
+
+
 def test_w35_perturbation_net_still_fails_true_insensitivity() -> None:
     """Armed-proof: a genuinely wrong sensitivity claim still fails.
 
@@ -747,7 +1472,7 @@ def test_w35_perturbation_net_still_fails_true_insensitivity() -> None:
     still fail it with ``perturbation_insensitive``.
     """
 
-    from torchlens.validation.core import (
+    from torchlens.validation._core import (
         _check_whether_func_on_saved_parents_yields_saved_tensor,
     )
 
@@ -756,7 +1481,7 @@ def test_w35_perturbation_net_still_fails_true_insensitivity() -> None:
             return torch.relu(x * 2.0)
 
     trace, _ground_truth = _capture(_Mul(), torch.randn(3, 4))
-    relu_op = [op for op in trace.layer_list if op.func_name == "relu"][0]
+    relu_op = [op for op in trace._layer_list if op.func_name == "relu"][0]
     saved = relu_op.out.detach().clone()
     object.__setattr__(relu_op, "func", lambda *args, **kwargs: saved.clone())
     parent_label = relu_op.parents[0]
@@ -817,12 +1542,12 @@ def test_unit_step_retry_still_fails_true_insensitivity() -> None:
     without weakening real-bug detection.
     """
 
-    from torchlens.validation.core import (
+    from torchlens.validation._core import (
         _check_whether_func_on_saved_parents_yields_saved_tensor,
     )
 
     trace, _ground_truth = _capture(_ZeroConstIntCast(), torch.randn(4, 5))
-    long_op = [op for op in trace.layer_list if op.func_name == "long"][0]
+    long_op = [op for op in trace._layer_list if op.func_name == "long"][0]
     saved = long_op.out.detach().clone()
     object.__setattr__(long_op, "func", lambda *args, **kwargs: saved.clone())
     parent_label = long_op.parents[0]
@@ -883,12 +1608,12 @@ def test_geometric_ladder_still_fails_spurious_discretizing_edge() -> None:
     ADDED influence-detection attempts and introduced no false-VERIFIED path.
     """
 
-    from torchlens.validation.core import (
+    from torchlens.validation._core import (
         _check_whether_func_on_saved_parents_yields_saved_tensor,
     )
 
     trace, _ground_truth = _capture(_WideBucketize(), torch.randn(4, 5))
-    bucketize_op = [op for op in trace.layer_list if op.func_name == "bucketize"][0]
+    bucketize_op = [op for op in trace._layer_list if op.func_name == "bucketize"][0]
     saved = bucketize_op.out.detach().clone()
     object.__setattr__(bucketize_op, "func", lambda *args, **kwargs: saved.clone())
     parent_label = bucketize_op.parents[0]
@@ -912,10 +1637,10 @@ def test_geometric_ladder_scoped_to_value_discretizing_children() -> None:
     exemption.
     """
 
-    from torchlens.validation.core import _perturbation_retry_strategies
+    from torchlens.validation._core import _perturbation_retry_strategies
 
     bucketize_trace, _ = _capture(_WideBucketize(), torch.randn(4, 5))
-    bucketize_op = [op for op in bucketize_trace.layer_list if op.func_name == "bucketize"][0]
+    bucketize_op = [op for op in bucketize_trace._layer_list if op.func_name == "bucketize"][0]
     ladder = _perturbation_retry_strategies(bucketize_op)
     assert any(strategy.startswith("unit_step_up:") for strategy in ladder)
 
@@ -926,13 +1651,179 @@ def test_geometric_ladder_scoped_to_value_discretizing_children() -> None:
     swamped_trace, _ = _capture(
         _SwampedAdd(), torch.tensor([10000.0, 10001.0], dtype=torch.float32)
     )
-    add_op = [op for op in swamped_trace.layer_list if op.func_name == "__add__"][0]
+    add_op = [op for op in swamped_trace._layer_list if op.func_name == "__add__"][0]
     assert _perturbation_retry_strategies(add_op) == [
         "step_up",
         "step_down",
         "unit_step_up",
         "unit_step_down",
+        "lift_min_entry",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Saturated softmax: every uniform step is a null probe for a shift-invariant
+# child, so only the random draw could move a one-hot argmax.
+# ---------------------------------------------------------------------------
+
+
+class _SaturatedSoftmax(nn.Module):
+    """``softmax(fc(x) * 1000)`` -- the toy model's one-hot softmax."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.softmax(self.fc(x) * 1000, dim=-1)
+
+
+def _saturated_softmax_case(batch: int = 4) -> tuple[nn.Module, torch.Tensor]:
+    torch.manual_seed(0)
+    model = _SaturatedSoftmax()
+    return model, torch.rand(batch, 4)
+
+
+def test_saturated_softmax_validates_for_the_unlucky_ci_seed() -> None:
+    """PIN: validation seed 2165740343 drew a perturbation that kept every argmax.
+
+    The step retries all shift every entry equally, which leaves softmax
+    unchanged, so the real ``mul -> softmax`` edge false-FAILed
+    ``perturbation_insensitive`` (CI randomly seed 3122933370). The
+    ``lift_min_entry`` retry moves an argmax and proves the edge.
+    """
+
+    model, x = _saturated_softmax_case()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert validate_forward_pass(model, x, seed=2165740343) is True
+
+
+def test_uniform_steps_are_null_for_softmax_and_the_lift_is_not() -> None:
+    """The uniform retries cannot move a saturated softmax; the lift always can."""
+
+    from torchlens.validation._core import (
+        _execute_func_with_restored_state,
+        _perturbation_retry_strategies,
+        _prepare_input_args_for_validating_layer,
+    )
+
+    model, x = _saturated_softmax_case()
+    trace, _ = _capture(model, x)
+    softmax_op = [op for op in trace._layer_list if op.func_name == "softmax"][0]
+    parent_label = softmax_op.parents[0]
+    assert "lift_min_entry" in _perturbation_retry_strategies(softmax_op, [parent_label])
+    changed = {}
+    for strategy in ("step_up", "step_down", "unit_step_up", "unit_step_down", "lift_min_entry"):
+        args, _ = _prepare_input_args_for_validating_layer(
+            trace, softmax_op, [parent_label], perturb_strategy=strategy
+        )
+        assert args is not None
+        out = _execute_func_with_restored_state(
+            softmax_op, args, [parent_label], softmax_op.label, False
+        )
+        changed[strategy] = not torch.equal(out, softmax_op.out)
+    assert changed == {
+        "step_up": False,
+        "step_down": False,
+        "unit_step_up": False,
+        "unit_step_down": False,
+        "lift_min_entry": True,
+    }
+
+
+def test_lift_min_entry_lifts_floats_and_swaps_integer_extremes() -> None:
+    """Floats lift one entry to a strict maximum; integers swap min and max in the saved set."""
+
+    from torchlens.validation._core import _directional_step_perturb
+
+    tensor = torch.tensor([[3.0, -2.0], [5.0, 1.0]], dtype=torch.float16)
+    lifted = _directional_step_perturb(tensor, "lift_min_entry")
+    assert lifted.dtype == torch.float16
+    assert (lifted != tensor).sum().item() == 1
+    assert lifted[0, 1].item() == 5.0 + 7.0
+    constant = torch.zeros(3)
+    assert _directional_step_perturb(constant, "lift_min_entry").tolist() == [1.0, 0.0, 0.0]
+    # Integer parents swap their first minimum and first maximum, so every
+    # value stays one the saved call already accepted (an id never exceeds the
+    # saved maximum) while the argmax moves; bool parents flip one entry; a
+    # constant integer tensor has nothing to swap and takes the minimal step.
+    integers = torch.tensor([1, 2])
+    assert _directional_step_perturb(integers, "lift_min_entry").tolist() == [2, 1]
+    ids = torch.tensor([[7, 3, 9, 3, 9]])
+    swapped = _directional_step_perturb(ids, "lift_min_entry")
+    assert swapped.tolist() == [[7, 9, 3, 3, 9]]
+    assert swapped.dtype == ids.dtype
+    assert int(swapped.argmax()) != int(ids.argmax())
+    assert sorted(swapped.flatten().tolist()) == sorted(ids.flatten().tolist())
+    small = torch.tensor([0, 200], dtype=torch.uint8)
+    assert _directional_step_perturb(small, "lift_min_entry").tolist() == [200, 0]
+    constant_ids = torch.tensor([4, 4])
+    assert torch.equal(
+        _directional_step_perturb(constant_ids, "lift_min_entry"),
+        _directional_step_perturb(constant_ids, "step_up"),
+    )
+    wide_unsigned = getattr(torch, "uint32", None)
+    if wide_unsigned is not None:
+        # uint16/32/64 arrive as signed views and swap like any integer.
+        wide = torch.tensor([1, 3], dtype=torch.int32).view(wide_unsigned)
+        wide_swapped = _directional_step_perturb(wide, "lift_min_entry")
+        assert wide_swapped.dtype == wide_unsigned
+        assert wide_swapped.view(torch.int32).tolist() == [3, 1]
+    flags = torch.tensor([True, False])
+    assert _directional_step_perturb(flags, "lift_min_entry").tolist() == [True, True]
+    all_true = torch.tensor([True, True])
+    assert _directional_step_perturb(all_true, "lift_min_entry").tolist() == [False, True]
+    complex_values = torch.tensor([1 + 1j, 2 - 1j])
+    assert torch.equal(
+        _directional_step_perturb(complex_values, "lift_min_entry"),
+        _directional_step_perturb(complex_values, "step_up"),
+    )
+    huge = torch.tensor([-3.0e38, 3.0e38])
+    assert torch.equal(
+        _directional_step_perturb(huge, "lift_min_entry"),
+        _directional_step_perturb(huge, "step_up"),
+    )
+
+
+def test_lift_retry_still_fails_a_disconnected_softmax_parent() -> None:
+    """Armed-proof: the lift cannot bless a softmax whose parent is dead.
+
+    Freeze the softmax replay to return its saved out whatever its input:
+    no draw, step or lift can change it, so the tripwire must still fire
+    ``perturbation_insensitive`` for the same unlucky seed's model.
+    """
+
+    from torchlens.validation._core import (
+        _check_whether_func_on_saved_parents_yields_saved_tensor,
+    )
+
+    model, x = _saturated_softmax_case()
+    trace, _ = _capture(model, x)
+    softmax_op = [op for op in trace._layer_list if op.func_name == "softmax"][0]
+    saved = softmax_op.out.detach().clone()
+    object.__setattr__(softmax_op, "func", lambda *args, **kwargs: saved.clone())
+
+    result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+        trace, softmax_op.label, perturb=True, layers_to_perturb=[softmax_op.parents[0]]
+    )
+    assert result.decision == "failed"
+    assert result.reason == "perturbation_insensitive"
+
+
+def test_disconnected_softmax_parent_fails_public_validation() -> None:
+    """Armed-proof, full pipeline: a softmax whose replay ignores its parent fails."""
+
+    model, x = _saturated_softmax_case()
+    trace, ground_truth = _capture(model, x)
+    softmax_op = [op for op in trace._layer_list if op.func_name == "softmax"][0]
+    saved = softmax_op.out.detach().clone()
+    object.__setattr__(softmax_op, "func", lambda *args, **kwargs: saved.clone())
+    status = validate_saved_outs(trace, [ground_truth], validate_metadata=False)
+    assert status.state == "failed"
+    assert any(
+        decision.get("reason") == "perturbation_insensitive" for decision in status.decisions
+    )
 
 
 def test_genuine_raw_hook_replacement_mints_journal_edit_and_validates() -> None:
@@ -946,8 +1837,8 @@ def test_genuine_raw_hook_replacement_mints_journal_edit_and_validates() -> None
     forged plain-capture case (previous test) still fails.
     """
 
-    from torchlens.ir.events import InterventionAppliedEvent
-    from torchlens.validation.invariants import check_metadata_invariants
+    from torchlens._ir.events import InterventionAppliedEvent
+    from torchlens.validation._invariants import check_metadata_invariants
 
     model = _Tiny()
     injected = torch.ones(3, 4) * 7.0
@@ -967,7 +1858,7 @@ def test_genuine_raw_hook_replacement_mints_journal_edit_and_validates() -> None
         handle.remove()
 
     boundary_layers = [
-        layer for layer in trace.layer_list if layer.func_name == "intervention_replacement"
+        layer for layer in trace._layer_list if layer.func_name == "intervention_replacement"
     ]
     assert boundary_layers, "the untraceable replacement must synthesize a boundary op"
     edits = [
@@ -991,7 +1882,7 @@ def test_genuine_raw_hook_replacement_mints_journal_edit_and_validates() -> None
 def test_forged_journal_edit_does_not_bless_plain_placeholder() -> None:
     """FAIL-AFTER-WHERE-PASSED-BEFORE: a forged edit record stays inert.
 
-    Sol probe regression (extends the round-26 pin to the edit-record
+    Review probe regression (extends the round-26 pin to the edit-record
     surface): appending a bare ``InterventionAppliedEvent`` through the
     ordinary journal writer used to bless the exact plain-capture placeholder
     the 2026-06-02 lesson exists to fail, because corroboration matched on
@@ -1001,14 +1892,14 @@ def test_forged_journal_edit_does_not_bless_plain_placeholder() -> None:
 
     import dataclasses
 
-    from torchlens.ir.capture_events import SealedJournalAppendError
-    from torchlens.ir.events import InterventionAppliedEvent
+    from torchlens._ir.capture_events import SealedJournalAppendError
+    from torchlens._ir.events import InterventionAppliedEvent
 
     trace, ground_truth = _capture(_Tiny(), torch.randn(3, 4))
-    relu_op = [op for op in trace.layer_list if op.func_name == "relu"][0]
+    relu_op = [op for op in trace._layer_list if op.func_name == "relu"][0]
     object.__setattr__(relu_op, "func", None)
     object.__setattr__(relu_op, "func_name", "intervention_replacement")
-    object.__setattr__(relu_op, "intervention_replaced", True)
+    object.__setattr__(relu_op, "is_edited", True)
     bare_edit = InterventionAppliedEvent(
         label_raw=relu_op._label_raw,
         kind="replaced",
@@ -1030,10 +1921,10 @@ def test_forged_journal_edit_does_not_bless_plain_placeholder() -> None:
     # A forged binding built from stale facts (a plausible-looking target seq
     # that names no real op event in this journal) is refused the same way.
     trace2, ground_truth2 = _capture(_Tiny(), torch.randn(3, 4))
-    relu_op2 = [op for op in trace2.layer_list if op.func_name == "relu"][0]
+    relu_op2 = [op for op in trace2._layer_list if op.func_name == "relu"][0]
     object.__setattr__(relu_op2, "func", None)
     object.__setattr__(relu_op2, "func_name", "intervention_replacement")
-    object.__setattr__(relu_op2, "intervention_replaced", True)
+    object.__setattr__(relu_op2, "is_edited", True)
     _plant_forged_intervention_edit(
         trace2,
         dataclasses.replace(
@@ -1063,7 +1954,7 @@ def test_cross_run_replayed_edit_does_not_bless_placeholder() -> None:
 
     import dataclasses
 
-    from torchlens.ir.events import InterventionAppliedEvent
+    from torchlens._ir.events import InterventionAppliedEvent
 
     # Run A: a genuine raw-hook replacement mints a BOUND edit record.
     model_a = _Tiny()
@@ -1086,10 +1977,10 @@ def test_cross_run_replayed_edit_does_not_bless_placeholder() -> None:
 
     # Run B: plain capture; forge the placeholder and replay run A's edit.
     trace_b, ground_truth_b = _capture(_Tiny(), torch.randn(3, 4))
-    relu_op = [op for op in trace_b.layer_list if op.func_name == "relu"][0]
+    relu_op = [op for op in trace_b._layer_list if op.func_name == "relu"][0]
     object.__setattr__(relu_op, "func", None)
     object.__setattr__(relu_op, "func_name", "intervention_replacement")
-    object.__setattr__(relu_op, "intervention_replaced", True)
+    object.__setattr__(relu_op, "is_edited", True)
     _plant_forged_intervention_edit(
         trace_b, dataclasses.replace(genuine_edits[0], label_raw=relu_op._label_raw)
     )
@@ -1098,276 +1989,3 @@ def test_cross_run_replayed_edit_does_not_bless_placeholder() -> None:
     assert status.state == "failed"
     with pytest.raises(MetadataInvariantError):
         check_metadata_invariants(trace_b)
-
-
-# ---------------------------------------------------------------------------
-# R08 (b1-opus round-5): the discrete-bool blanket posthoc exemption
-# ---------------------------------------------------------------------------
-
-
-class _FarThresholdGate(nn.Module):
-    """``(x > 1e30).float()`` -- no feasible perturbation crosses the threshold."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return (x > 1.0e30).float()
-
-
-def test_bool_comparison_spurious_edge_now_fails() -> None:
-    """Armed-proof (R08): a dead edge on a COMPARISON op is no longer blessed.
-
-    Freeze the ``gt`` op's replay callable to return its saved bool output
-    regardless of inputs -- the recorded parent provably does not influence
-    the output. Pre-fix, ``dtype == torch.bool`` was a blanket posthoc pass,
-    so this exact spurious-edge class was unfalsifiable by perturbation
-    (red-capable: pre-fix this returns ``exempted``/``discrete_bool_output``).
-    The threshold-straddle probe now proves no value influence and the
-    tripwire fires.
-    """
-
-    from torchlens.validation.core import (
-        _check_whether_func_on_saved_parents_yields_saved_tensor,
-    )
-
-    trace, _ground_truth = _capture(_FarThresholdGate(), torch.randn(3, 4))
-    gt_op = [op for op in trace.layer_list if op.func_name == "__gt__"][0]
-    saved = gt_op.out.detach().clone()
-    object.__setattr__(gt_op, "func", lambda *args, **kwargs: saved.clone())
-    parent_label = gt_op.parents[0]
-
-    result = _check_whether_func_on_saved_parents_yields_saved_tensor(
-        trace, gt_op.label, perturb=True, layers_to_perturb=[parent_label]
-    )
-    assert result.decision == "failed"
-    assert result.reason == "perturbation_insensitive"
-
-
-def test_far_threshold_comparison_keeps_evidence_backed_exemption() -> None:
-    """A REAL comparison edge no feasible perturbation can flip stays exempt,
-    and the exemption now carries straddle-probe evidence instead of being a
-    blanket dtype pass (red-capable: pre-fix the justification was None)."""
-
-    from torchlens.validation.core import (
-        _check_whether_func_on_saved_parents_yields_saved_tensor,
-    )
-
-    trace, _ground_truth = _capture(_FarThresholdGate(), torch.randn(3, 4))
-    gt_op = [op for op in trace.layer_list if op.func_name == "__gt__"][0]
-    parent_label = gt_op.parents[0]
-
-    result = _check_whether_func_on_saved_parents_yields_saved_tensor(
-        trace, gt_op.label, perturb=True, layers_to_perturb=[parent_label]
-    )
-    assert result.decision == "exempted"
-    assert result.reason == "discrete_bool_output"
-    assert result.justification and "straddle" in result.justification
-
-
-def test_isnan_edge_validates_via_nan_probe() -> None:
-    """The NaN retry rung upgrades a real ``isnan`` edge from exempt to
-    VALIDATED (red-capable: pre-fix the finite draws never flipped the output
-    and the blanket bool exemption absorbed it)."""
-
-    from torchlens.validation.core import (
-        _check_whether_func_on_saved_parents_yields_saved_tensor,
-    )
-
-    class _NanGate(nn.Module):
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return torch.isnan(x).float()
-
-    trace, _ground_truth = _capture(_NanGate(), torch.randn(3, 4))
-    isnan_op = [op for op in trace.layer_list if op.func_name == "isnan"][0]
-    parent_label = isnan_op.parents[0]
-
-    result = _check_whether_func_on_saved_parents_yields_saved_tensor(
-        trace, isnan_op.label, perturb=True, layers_to_perturb=[parent_label]
-    )
-    assert result.decision == "validated"
-    assert result.reason == "perturbation_changed"
-
-
-def test_bool_output_models_still_validate_true_end_to_end() -> None:
-    """No false-fail regression: correct captures with bool ops validate True."""
-
-    class _BoolMix(nn.Module):
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            gate = (x > 0.5).float()
-            nan_gate = torch.isnan(x).float()
-            eq_gate = torch.eq(x, x.detach().clone() + 3.0).float()
-            return gate + nan_gate + eq_gate
-
-    torch.manual_seed(0)
-    assert _quiet_validate(_BoolMix(), torch.randn(3, 4)) is True
-    torch.manual_seed(0)
-    assert _quiet_validate(_FarThresholdGate(), torch.randn(3, 4)) is True
-
-
-class _PredicateZoo(nn.Module):
-    """Bool-output NON-comparison ops: the R08-2 residual family.
-
-    ``isnan``/``isfinite``/``logical_and``/``any``/``bitwise_not`` each get a
-    perturbable float (or derived-bool) parent so the spurious-edge freeze
-    harness and the honest controls run on real captured edges.
-    """
-
-    def __init__(self, func_name: str) -> None:
-        super().__init__()
-        self.func_name = func_name
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = x * 2.0
-        if self.func_name == "isnan":
-            return torch.isnan(h).float()
-        if self.func_name == "isfinite":
-            return torch.isfinite(h).float()
-        if self.func_name == "logical_and":
-            return torch.logical_and(h > 0, h < 1.0e30).float()
-        if self.func_name == "any":
-            return torch.any(h > 0).float()
-        if self.func_name == "bitwise_not":
-            return torch.bitwise_not(h > 0).float()
-        raise AssertionError(self.func_name)
-
-
-@pytest.mark.parametrize("func_name", ["isnan", "isfinite", "logical_and", "any", "bitwise_not"])
-def test_bool_predicate_spurious_edge_now_fails(func_name: str) -> None:
-    """Armed-proof (r7 R08-2): a dead edge on a NON-comparison bool op fails.
-
-    Round-6 residual of the R08 comparison fix: freezing the replay callable
-    of ``logical_and``/``isnan``/``isfinite``/``any``/``bitwise_not`` settled
-    ``exempted``/``discrete_bool_output`` with an empty justification -- the
-    ``probe is None`` fallback was still a blanket pass, so a capture bug
-    that drops or invents a parent edge on the predicate family was
-    unfalsifiable by perturbation. The substitution-battery probe now proves
-    no value influence and the tripwire fires (red-capable: pre-fix every
-    parametrization settles ``exempted``).
-    """
-
-    from torchlens.validation.core import (
-        _check_whether_func_on_saved_parents_yields_saved_tensor,
-    )
-
-    trace, _ground_truth = _capture(_PredicateZoo(func_name), torch.randn(3, 4))
-    target = [op for op in trace.layer_list if op.func_name == func_name][0]
-    saved = target.out.detach().clone()
-    object.__setattr__(target, "func", lambda *args, **kwargs: saved.clone())
-    parent_label = target.parents[0]
-
-    result = _check_whether_func_on_saved_parents_yields_saved_tensor(
-        trace, target.label, perturb=True, layers_to_perturb=[parent_label]
-    )
-    assert result.decision == "failed", (func_name, result.decision, result.reason)
-    assert result.reason == "perturbation_insensitive"
-
-
-@pytest.mark.parametrize("func_name", ["isnan", "isfinite", "logical_and", "any", "bitwise_not"])
-def test_bool_predicate_honest_edge_stays_green(func_name: str) -> None:
-    """Honest control: the real edge validates (rungs) or exempts WITH
-    battery evidence -- never the evidence-free blanket, never a failure."""
-
-    from torchlens.validation.core import (
-        _check_whether_func_on_saved_parents_yields_saved_tensor,
-    )
-
-    trace, _ground_truth = _capture(_PredicateZoo(func_name), torch.randn(3, 4))
-    target = [op for op in trace.layer_list if op.func_name == func_name][0]
-    parent_label = target.parents[0]
-
-    result = _check_whether_func_on_saved_parents_yields_saved_tensor(
-        trace, target.label, perturb=True, layers_to_perturb=[parent_label]
-    )
-    assert result.decision in ("validated", "exempted"), (
-        func_name,
-        result.decision,
-        result.reason,
-    )
-    if result.decision == "exempted" and result.reason == "discrete_bool_output":
-        assert result.justification, (
-            f"{func_name}: honest edge exempted through the evidence-free blanket"
-        )
-
-
-def test_validate_forward_pass_accepts_a_bare_ground_truth_tensor() -> None:
-    """r7 b1-opus R08-3: ``validate_forward_pass(model(x))`` must not FAIL.
-
-    A bare tensor was iterated as rows, so the arity check counted the BATCH
-    as expected outputs and a byte-correct capture reported
-    ``ground_truth_missing_out`` ("1 logged vs N expected") -- a validation
-    FAILURE for a caller-arity slip. The bare tensor now normalizes to
-    ``[tensor]`` (red-capable: pre-fix this asserts False).
-    """
-
-    model = _FarThresholdGate()
-    x = torch.randn(4, 3)
-    trace, ground_truth = _capture(model, x)
-    assert trace.validate_forward_pass(ground_truth) is True
-    assert trace.validate_forward_pass([ground_truth]) is True
-
-
-class _InplaceMaskGate(nn.Module):
-    """In-place bool op whose probe used to corrupt the retained operand."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        mask = x > 0
-        gate = x < 1.0e30
-        mask.logical_and_(gate)
-        return mask.float()
-
-
-def test_bool_predicate_probe_never_mutates_retained_saved_args() -> None:
-    """r8 R08 (fable MH): the battery must execute against CLONES.
-
-    The bool universe includes in-place ops (``logical_and_``); the probe
-    executed the captured func against the record's retained ``saved_args``
-    with only the probed slot substituted, so one probe run MUTATED the
-    capture evidence in place and returned a verdict computed on the
-    corrupted operand (red-capable: pre-fix the byte comparison fails).
-    """
-
-    from torchlens.validation.exemptions import _bool_predicate_influence_probe
-
-    trace, _ground_truth = _capture(_InplaceMaskGate(), torch.randn(3, 4))
-    target = [op for op in trace.layer_list if op.func_name == "logical_and_"][0]
-    saved_args = list(target.saved_args or ())
-    assert saved_args and isinstance(saved_args[0], torch.Tensor)
-    snapshots = [
-        arg.detach().clone() if isinstance(arg, torch.Tensor) else arg for arg in saved_args
-    ]
-    arg_positions = (getattr(target, "parent_arg_positions", None) or {}).get("args", {})
-    assert arg_positions, "expected positional parent metadata on the in-place op"
-    # Probe through each single-parent slot the metadata knows about.
-    for position, parent_label in arg_positions.items():
-        _bool_predicate_influence_probe(target, [parent_label])
-        _ = position
-    for index, snapshot in enumerate(snapshots):
-        if isinstance(snapshot, torch.Tensor):
-            assert torch.equal(saved_args[index], snapshot), (
-                f"probe mutated retained saved_args[{index}] in place"
-            )
-
-
-def test_bool_predicate_probe_catch_is_typed() -> None:
-    """r8 R08 (sol fault-injection): unexpected probe crashes PROPAGATE.
-
-    The old blanket ``except Exception`` swallowed genuine capture-bug
-    crashes into the evidence-free heuristic pass; benign substitute
-    refusals (TypeError/ValueError/RuntimeError) still settle "cannot run".
-    """
-
-    from torchlens.validation.exemptions import _bool_predicate_influence_probe
-
-    trace, _ground_truth = _capture(_PredicateZoo("isnan"), torch.randn(3, 4))
-    target = [op for op in trace.layer_list if op.func_name == "isnan"][0]
-    parent_label = target.parents[0]
-
-    object.__setattr__(
-        target, "func", lambda *args, **kwargs: (_ for _ in ()).throw(KeyError("capture bug"))
-    )
-    with pytest.raises(KeyError, match="capture bug"):
-        _bool_predicate_influence_probe(target, [parent_label])
-
-    def _benign_refusal(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202 - test shim
-        raise RuntimeError("substitute rejected")
-
-    object.__setattr__(target, "func", _benign_refusal)
-    assert _bool_predicate_influence_probe(target, [parent_label]) is None

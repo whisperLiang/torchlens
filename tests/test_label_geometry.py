@@ -12,41 +12,46 @@ from __future__ import annotations
 
 import io
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 import torch
 from PIL import Image
+from support.cairosvg_skip import require_cairosvg
 from torch import nn
 
-cairosvg = pytest.importorskip("cairosvg")
+cairosvg = require_cairosvg()
 
 import test_loop_module_rolling as demos  # noqa: E402
 from support.label_geometry import audit_gv_source  # noqa: E402
 
 import torchlens as tl  # noqa: E402
+from torchlens._visualization._fonts import graphviz_font_env  # noqa: E402
+from torchlens._visualization._pass_label_placement import place_pass_labels  # noqa: E402
 
 _CONTAINER_FRAME_GUTTER_PX = 5
 
 # The 16 rolled demo configs the placement sweep was calibrated against:
 # the 12 committed fixtures plus 4 extra inspection models.
 DEMO_CONFIGS: list[tuple[str, type[nn.Module], dict[str, object]]] = [
-    ("inside_outside_relu", demos.InsideOutsideRelu, {"vis_call_depth": 1}),
-    ("inside_outside_relu_separable", demos.InsideOutsideReluSeparable, {"vis_call_depth": 1}),
-    ("inside_outside_block_collapsed", demos.InsideOutsideBlock, {"vis_call_depth": 1}),
-    ("inside_outside_block_expanded", demos.InsideOutsideBlock, {"vis_call_depth": 1000}),
-    ("deep_loop_body", demos.DeepLoopBody, {"vis_call_depth": 1000}),
-    ("rnn_cell", demos.TanhRNNCellLoop, {"vis_call_depth": 1000}),
-    ("repeated_block_stack_collapsed", demos.RepeatedBlockStack, {"vis_call_depth": 1}),
-    ("repeated_block_stack_expanded", demos.RepeatedBlockStack, {"vis_call_depth": 1000}),
-    ("two_distinct_loops", demos.TwoDistinctLoops, {"vis_call_depth": 1}),
-    ("buffer_loop", demos.BufferRewriteLoops, {"show_buffer_layers": "always"}),
-    ("nested_loop", demos.NestedLoopBlock, {"vis_call_depth": 1}),
-    ("parallel_fanout", demos.ParallelFanout, {"vis_call_depth": 1}),
-    ("collapsed_block_recurrence", demos.CollapsedBlockRecurrence, {"vis_call_depth": 1000}),
-    ("inside_outside_loop", demos.InsideOutsideLoop, {"vis_call_depth": 1}),
-    ("parallel_siblings_loop", demos.ParallelSiblingsLoop, {"vis_call_depth": 1000}),
-    ("shared_two_site_recurrences", demos.SharedTwoSiteRecurrences, {"vis_call_depth": 1}),
+    ("inside_outside_relu", demos.InsideOutsideRelu, {"depth": 1}),
+    ("inside_outside_relu_separable", demos.InsideOutsideReluSeparable, {"depth": 1}),
+    ("inside_outside_block_collapsed", demos.InsideOutsideBlock, {"depth": 1}),
+    ("inside_outside_block_expanded", demos.InsideOutsideBlock, {"depth": 1000}),
+    ("deep_loop_body", demos.DeepLoopBody, {"depth": 1000}),
+    ("rnn_cell", demos.TanhRNNCellLoop, {"depth": 1000}),
+    ("repeated_block_stack_collapsed", demos.RepeatedBlockStack, {"depth": 1}),
+    ("repeated_block_stack_expanded", demos.RepeatedBlockStack, {"depth": 1000}),
+    ("two_distinct_loops", demos.TwoDistinctLoops, {"depth": 1}),
+    ("buffer_loop", demos.BufferRewriteLoops, {"show_buffers": "always"}),
+    ("nested_loop", demos.NestedLoopBlock, {"depth": 1}),
+    ("parallel_fanout", demos.ParallelFanout, {"depth": 1}),
+    ("collapsed_block_recurrence", demos.CollapsedBlockRecurrence, {"depth": 1000}),
+    ("inside_outside_loop", demos.InsideOutsideLoop, {"depth": 1}),
+    ("parallel_siblings_loop", demos.ParallelSiblingsLoop, {"depth": 1000}),
+    ("shared_two_site_recurrences", demos.SharedTwoSiteRecurrences, {"depth": 1}),
 ]
 
 
@@ -62,13 +67,16 @@ def test_rolled_edge_labels_have_zero_hard_violations(
 
     trace = demos._trace(model_cls())
     gv_source = trace.draw(
-        vis_mode="rolled",
-        vis_save_only=True,
-        vis_fileformat="dot",
-        vis_outpath=str(tmp_path / name),
+        rolled=True,
+        file_format="dot",
+        path=str(tmp_path / name),
         **kwargs,
-    )
-    result = audit_gv_source(gv_source)
+    ).dot
+    # The returned DOT carries no pass-label placement (it is the same under every
+    # Graphviz build); the renderer places the labels only in the text the image is
+    # drawn from, so audit that text.
+    placed_source = place_pass_labels(gv_source, engine="dot", timeout=60)
+    result = audit_gv_source(placed_source)
     assert result.hard_violation_count == 0, result.describe_violations(name)
 
 
@@ -171,6 +179,37 @@ class _CacheLayer(nn.Module):
         return x + 1, past_key_values
 
 
+_RASTERIZE_SCRIPT = (
+    "import sys, cairosvg; "
+    "sys.stdout.buffer.write(cairosvg.svg2png(bytestring=sys.stdin.buffer.read(), "
+    "output_width=int(sys.argv[1]), output_height=int(sys.argv[2])))"
+)
+
+
+def _rasterize_with_layout_font(svg_text: str, width: int, height: int) -> bytes:
+    """Rasterize ``svg_text`` to PNG with the font Graphviz measured the layout with.
+
+    The SVG names ``Helvetica``; Graphviz sized every box with the bundled face
+    (``graphviz_font_env``), but cairo in this process would resolve the name
+    through the host's fontconfig, where a wider fallback such as DejaVu Sans
+    overflows boxes that fit. A child process with the same font environment
+    draws the text the layout measured. Fontconfig reads its configuration once
+    per process, so the environment cannot be switched in place.
+    """
+
+    proc = subprocess.run(
+        [sys.executable, "-c", _RASTERIZE_SCRIPT, str(width), str(height)],
+        input=svg_text.encode(),
+        capture_output=True,
+        env=graphviz_font_env(),
+        timeout=120,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(f"cairosvg rasterization failed: {proc.stderr.decode()[-2000:]}")
+    return proc.stdout
+
+
 def _native_svg_outer_frame_min_brightness(svg_path: Path) -> dict[str, int]:
     """Return minimum RGB brightness in the outermost SVG frame."""
 
@@ -181,11 +220,7 @@ def _native_svg_outer_frame_min_brightness(svg_path: Path) -> dict[str, int]:
     _x0, _y0, view_width, view_height = [float(value) for value in match.group(1).split()]
     width = round(view_width)
     height = round(view_height)
-    png_bytes = cairosvg.svg2png(
-        bytestring=svg_text.encode(),
-        output_width=width,
-        output_height=height,
-    )
+    png_bytes = _rasterize_with_layout_font(svg_text, width, height)
     rgba_image = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
     image = Image.new("RGB", rgba_image.size, (255, 255, 255))
     image.paste(rgba_image, mask=rgba_image.getchannel("A"))
@@ -206,16 +241,19 @@ def _native_svg_outer_frame_min_brightness(svg_path: Path) -> dict[str, int]:
 def test_container_edge_labels_are_midpoint_and_geometry_clean(tmp_path: Path) -> None:
     """Container key labels use midpoint labels without endpoint placement attrs."""
 
-    trace = tl.trace(_ContainerLabelModel(), torch.ones(2), intervention_ready=True)
+    trace = tl.trace(
+        _ContainerLabelModel(),
+        torch.ones(2),
+        capture=tl.options.CaptureOptions(replayable=True),
+    )
     gv_source = trace.draw(
         show_containers="labels",
-        vis_save_only=True,
-        vis_fileformat="dot",
-        vis_outpath=str(tmp_path / "container_labels"),
-    )
+        file_format="dot",
+        path=str(tmp_path / "container_labels"),
+    ).dot
 
-    assert '<FONT POINT-SIZE="8">left</FONT>' in gv_source
-    assert '<FONT POINT-SIZE="8">right</FONT>' in gv_source
+    assert '<FONT POINT-SIZE="13">left</FONT>' in gv_source
+    assert '<FONT POINT-SIZE="13">right</FONT>' in gv_source
     assert "headlabel=" not in gv_source
     assert "taillabel=" not in gv_source
     assert "labeldistance=" not in gv_source
@@ -247,15 +285,12 @@ def test_container_nodes_have_native_svg_frame_margin(
     """Container-node labels do not put ink on the native SVG frame."""
 
     trace = tl.trace(
-        model,
-        args,
-        capture_container_structure=True,
+        model, args, capture=tl.options.CaptureOptions(capture_container_structure=True)
     )
     trace.draw(
         show_containers="nodes",
-        vis_save_only=True,
-        vis_fileformat="svg",
-        vis_outpath=str(tmp_path / name),
+        file_format="svg",
+        path=str(tmp_path / name),
     )
 
     edge_brightness = _native_svg_outer_frame_min_brightness(tmp_path / f"{name}.svg")

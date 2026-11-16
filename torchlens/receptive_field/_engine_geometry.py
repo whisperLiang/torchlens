@@ -8,21 +8,12 @@ from fractions import Fraction
 from math import ceil, floor
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from .._utils._display_bounded import short_dataclass_repr
 from ._errors import ReceptiveFieldConfigurationError
-from ._types import ReceptiveFieldStatus
 
 if TYPE_CHECKING:
-    from ..data_classes.op import Op
-    from ._rules import _RuleResult
-
-
-@dataclass(frozen=True)
-class _RuleApplication:
-    """One local rule and the provenance accumulated for its application."""
-
-    result: _RuleResult
-    name: str
-    notes: tuple[str, ...]
+    from .._data_classes.op import Op
+    from ._types import ReceptiveFieldStatus
 
 
 @dataclass(frozen=True)
@@ -47,15 +38,6 @@ class _Mapped:
     exact: bool = True
     aligned: bool = True
     sparse: bool = False
-
-
-@dataclass(frozen=True)
-class _WindowMapping:
-    """Affine spatial maps with their non-spatial dependency semantics."""
-
-    maps: tuple[_Mapped, ...]
-    preserve_non_window_axes: bool = False
-    channel_dependency: str = "full_exact"
 
 
 @dataclass(frozen=True)
@@ -87,6 +69,8 @@ class _AxisState:
 class _InputState:
     """Internal per-model-input state at one captured operation."""
 
+    __repr__ = short_dataclass_repr
+
     input_op_label: str
     io_role: str
     input_shape: tuple[int, ...]
@@ -96,6 +80,17 @@ class _InputState:
     rule: str
     batch_axis: int | None = None
     merge_seen: bool = False
+
+
+def _has_no_units(op: Op) -> bool:
+    """Return whether ``op``'s captured tensor has a zero-length axis.
+
+    Such a tensor holds no units and carries no value onward, so no unit of a
+    parent reaches a projective target through it. A shapeless op
+    (``shape is None``) is not unit-less.
+    """
+
+    return op.shape is not None and 0 in tuple(op.shape)
 
 
 def _compose(parent: _Mapped, local: _Mapped) -> _Mapped:

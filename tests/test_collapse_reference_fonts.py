@@ -7,8 +7,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.smoke
-
 
 @pytest.mark.parametrize("previous", (None, "/tmp/custom-fontconfig.conf"))
 @pytest.mark.parametrize("raises", (False, True))

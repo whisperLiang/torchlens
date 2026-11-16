@@ -194,4 +194,4 @@ def live_tinygrad_buffer_tensors_by_uop(
     return bindings
 
 
-__all__ = ["live_tinygrad_buffer_tensors_by_uop", "live_tinygrad_tensors_by_uop"]
+__all__ = ("live_tinygrad_buffer_tensors_by_uop", "live_tinygrad_tensors_by_uop")

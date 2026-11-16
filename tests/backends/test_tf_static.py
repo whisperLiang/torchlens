@@ -21,6 +21,7 @@ pytestmark = [
         _TF_BACKEND_SKIP_REASON is not None,
         reason=_TF_BACKEND_SKIP_REASON or "TensorFlow backend stack is supported",
     ),
+    pytest.mark.rare,
 ]
 
 
@@ -93,29 +94,35 @@ def test_tf_static_captures_loaded_saved_model_structure_values_and_modules(
     loaded = tf.saved_model.load(str(save_dir))
 
     trace = tl.trace(loaded, x, backend="tf", save=tl.func("relu"))
-    op_types = {op.func_name for op in trace.layer_list}
-    assert trace.backend == "tf"
-    assert trace.module_identity_mode == "function_root"
-    relu_ops = [op for op in trace.layer_list if op.func_name == "Relu"]
+    op_types = {op.func_name for op in trace._layer_list}
+    assert trace.provenance.backend == "tf"
+    assert trace.options.module_identity_mode == "function_root"
+    relu_ops = [op for op in trace._layer_list if op.func_name == "Relu"]
     if relu_ops:
         relu = relu_ops[0]
-        matmul = next(op for op in trace.layer_list if op.func_name == "MatMul")
+        matmul = next(op for op in trace._layer_list if op.func_name == "MatMul")
         assert {"MatMul", "BiasAdd", "Relu"} <= op_types
         assert matmul.parents
         assert relu.parents
         assert relu.out is not None
         assert np.allclose(relu.out, np.array([[5.25, 0.0]], dtype=np.float32))
-        output_labels = set(trace.output_layers)
+        # Previews never wrap the real output-producing op in a separate
+        # single-pass ``is_output`` pseudo-op (unlike torch): they mark the
+        # real producer with ``is_output_parent`` instead
+        # (backends/_finalize.py::mark_output_label). The trailing boundary
+        # Identity this loaded SavedModel wraps its output in is exactly
+        # such a producer, so it must be excluded by that flag, not
+        # ``is_output`` (which previews never set).
         assert all(
             op.out is None
-            for op in trace.layer_list
+            for op in trace._layer_list
             if not op.is_input
             and not op.is_output
-            and getattr(op, "label_raw", op.label.split(":")[0]) not in output_labels
+            and not op.graph.is_output_parent
             and op.func_name not in {"Relu"}
         )
     else:
-        regions = [op for op in trace.layer_list if str(op.func_name).startswith("region:")]
+        regions = [op for op in trace._layer_list if str(op.func_name).startswith("region:")]
         assert regions
         assert all(not region.has_saved_activation for region in regions)
 
@@ -128,10 +135,10 @@ def test_tf_static_captures_tf_function_compiled_model() -> None:
     model(x)
 
     trace = tl.trace(model, x, backend="tf")
-    op_types = {op.func_name for op in trace.layer_list}
-    relu = next(op for op in trace.layer_list if op.func_name == "Relu")
+    op_types = {op.func_name for op in trace._layer_list}
+    relu = next(op for op in trace._layer_list if op.func_name == "Relu")
 
-    assert trace.backend == "tf"
+    assert trace.provenance.backend == "tf"
     assert {"MatMul", "AddV2", "Relu"} <= op_types
     assert relu.parents
     assert np.allclose(relu.out, np.array([[5.0, 4.0]], dtype=np.float32))
@@ -141,10 +148,10 @@ def test_tf_static_control_flow_regions_are_unverified() -> None:
     """Represent static TensorFlow control flow as unverified regions."""
 
     trace = tl.trace(ControlFlowModel(), tf.constant([1.0, 2.0]), backend="tf")
-    regions = [op for op in trace.layer_list if str(op.func_name).startswith("region:")]
+    regions = [op for op in trace._layer_list if str(op.func_name).startswith("region:")]
     status = TFBackend().validate_trace(trace)
 
-    assert trace.backend == "tf"
+    assert trace.provenance.backend == "tf"
     assert regions
     assert all(not region.has_saved_activation for region in regions)
     assert getattr(trace.validation_replay_status, "state") == "unverified", getattr(
@@ -152,5 +159,5 @@ def test_tf_static_control_flow_regions_are_unverified() -> None:
         "_tf_validation_result",
         None,
     )
-    assert getattr(trace.validation_replay_status, "effect_region_node_count") >= len(regions)
+    assert getattr(trace.validation_replay_status, "num_effect_region_ops") >= len(regions)
     assert status is trace.validation_replay_status

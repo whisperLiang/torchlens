@@ -14,8 +14,6 @@ import pytest
 
 import torchlens
 
-pytestmark = pytest.mark.smoke
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -35,4 +33,16 @@ def test_pyproject_version_matches_package_version() -> None:
         f"pyproject.toml declares {declared} but torchlens.__version__ is "
         f"{torchlens.__version__}; python-semantic-release updates both -- a manual "
         "edit must keep them in lockstep"
+    )
+
+
+def test_package_version_matches_the_io_copy() -> None:
+    """The facade literal and the copy the io modules read (``_vocab``) never drift."""
+
+    from torchlens._vocab._package_version import __version__ as io_copy
+
+    assert io_copy == torchlens.__version__, (
+        f"torchlens/_vocab/_package_version.py declares {io_copy} but torchlens.__version__ "
+        f"is {torchlens.__version__}; both are version_variables in pyproject.toml and a "
+        "manual edit must keep them in lockstep"
     )

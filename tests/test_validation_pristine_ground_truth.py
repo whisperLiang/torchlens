@@ -35,11 +35,13 @@ _PROBE_SCRIPT = textwrap.dedent(
 
     # Plant the b9-fable distortion BEFORE the first wrap: the wrapper built
     # for tanh silently multiplies its result by 1.001 using pristine
-    # pre-wrap references. This models a wrapper-layer capture bug.
-    pristine_mul = torch.mul
+    # pre-wrap references. This models a wrapper-layer capture bug. The
+    # pristine ``torch.mul`` is bound as a default argument, not a module
+    # global, because the wrap-time module sweep rebinds module globals that
+    # hold a pristine torch callable.
     real_decorator = wrappers.torch_func_decorator
 
-    def planted_decorator(func, func_name, property_accessor=None):
+    def planted_decorator(func, func_name, property_accessor=None, pristine_mul=torch.mul):
         if func_name == "tanh":
             orig = func
 
@@ -116,6 +118,7 @@ def test_clean_wrapped_process_validation_still_passes() -> None:
     assert "VERDICT=True" in stdout, stdout
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
 def test_pristine_oracle_unwraps_and_restores_wrap_state() -> None:
     """Inside the context torch is pristine; after it, wrappers return."""
 
@@ -154,6 +157,7 @@ def test_pristine_oracle_is_noop_when_never_wrapped() -> None:
     assert "NOOP-OK" in _run_probe(script)
 
 
+# Kept by shrink-r4 (per-id subset rule): sole coverage of validation/_backward.py.
 def test_backward_validation_runs_pristine_stock_pass() -> None:
     """Backward validation's stock pass also settles under the pristine root.
 
@@ -162,7 +166,7 @@ def test_backward_validation_runs_pristine_stock_pass() -> None:
     the wrappers are back afterwards.
     """
 
-    from torchlens.validation.backward import validate_backward_pass
+    from torchlens.validation._backward import validate_backward_pass
 
     model = nn.Sequential(nn.Linear(4, 4), nn.Tanh()).eval()
     tl.trace(model, torch.randn(2, 4))
@@ -170,7 +174,7 @@ def test_backward_validation_runs_pristine_stock_pass() -> None:
     assert validate_backward_pass(
         model,
         torch.randn(2, 4),
-        random_seed=3,
+        seed=3,
         validate_metadata=False,
     )
     assert _state._is_decorated
@@ -200,7 +204,7 @@ class TestUnwrapLedgerIntegrity:
         return key
 
     def test_poisoned_ledger_refuses_the_pristine_oracle(self) -> None:
-        from torchlens._errors import CaptureContextError
+        from torchlens._errors import CaptureNotActiveError
 
         model = nn.Sequential(nn.Linear(4, 4), nn.Tanh()).eval()
         tl.trace(model, torch.randn(2, 4))
@@ -208,7 +212,7 @@ class TestUnwrapLedgerIntegrity:
         key = self._poison()
         try:
             with (
-                pytest.raises(CaptureContextError) as excinfo,
+                pytest.raises(CaptureNotActiveError) as excinfo,
                 pristine_torch_oracle(),
             ):
                 raise AssertionError("oracle must refuse before yielding")
@@ -218,6 +222,7 @@ class TestUnwrapLedgerIntegrity:
         # The refusal must not have unwrapped torch and left it that way.
         assert _state._is_decorated
 
+    # Kept by shrink-r4 (per-id subset rule): sole coverage of _user_public_impls.py, validation/_pristine.py, campaign mutant kills.
     def test_poisoned_ledger_fails_validation_closed(self) -> None:
         model = nn.Sequential(nn.Linear(4, 4), nn.Tanh()).eval()
         x = torch.randn(2, 4)
@@ -230,21 +235,30 @@ class TestUnwrapLedgerIntegrity:
         finally:
             _state._decorated_to_orig.pop(key, None)
 
-    def test_honest_ledger_carries_no_wrapper_marked_origs(self) -> None:
-        """Positive control: after real captures the append-only ledger holds
-        only unwrapped originals -- the integrity scan has no false positive
-        surface on an honest process."""
+    def test_marker_bearing_foreign_original_is_not_poison(self) -> None:
+        """A foreign wrapper built with ``functools.wraps`` over a torchlens
+        wrapper inherits ``__tl_wrapper_name__`` through ``__dict__``; adopted as
+        an original at re-wrap it is a legitimate original, so the scan keys on
+        ledger identity (is the orig itself a wrapper key?), not the marker."""
+
+        def adopted_foreign_original(*args, **kwargs):  # pragma: no cover
+            raise AssertionError("the oracle must not call ledger entries")
+
+        adopted_foreign_original.__tl_wrapper_name__ = "torch_func:cos"  # type: ignore[attr-defined]
+
+        def wrapper_over_it(*args, **kwargs):  # pragma: no cover
+            raise AssertionError("the oracle must not call ledger entries")
 
         model = nn.Sequential(nn.Linear(4, 4), nn.Tanh()).eval()
         tl.trace(model, torch.randn(2, 4))
-        offenders = [
-            getattr(orig, "__tl_wrapper_name__")
-            for orig in _state._decorated_to_orig.values()
-            if hasattr(orig, "__tl_wrapper_name__")
-        ]
-        assert not offenders, offenders
-        with pristine_torch_oracle() as pristine:
-            assert pristine
+        key = id(wrapper_over_it)
+        _state._decorated_to_orig[key] = adopted_foreign_original
+        try:
+            with pristine_torch_oracle() as pristine:
+                assert pristine
+        finally:
+            _state._decorated_to_orig.pop(key, None)
+        assert _state._is_decorated
 
 
 _MASKED_PROBE_SCRIPT = _PROBE_SCRIPT.replace(

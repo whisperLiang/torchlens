@@ -9,20 +9,20 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.backends.torch._tl import (
+from torchlens._data_classes.trace import Trace
+from torchlens._utils._tensor_label import (
     TensorMeta,
     get_buffer_address,
-    get_module_meta,
     get_tensor_label,
     set_module_meta,
     set_tensor_label,
 )
+from torchlens._utils.introspection import get_vars_of_type_from_obj
 from torchlens.backends.torch.model_prep import _tag_untagged_buffers
-from torchlens.data_classes.trace import Trace
-from torchlens.intervention.runtime import _copy_tl_replacement_attrs
-from torchlens.options import CaptureOptions, SaveOptions
-from torchlens.partial import PartialTrace
-from torchlens.utils.introspection import get_vars_of_type_from_obj
+from torchlens.errors import TraceCaptureError
+from torchlens.intervention._runtime_hook_copy import _copy_tl_replacement_attrs
+from torchlens.options import CaptureOptions
+from torchlens.types import PartialTrace
 
 
 class _LifecycleModel(nn.Module):
@@ -78,65 +78,35 @@ def _assert_tensor_tree_clean(value: Any) -> None:
         assert not hasattr(tensor, "_tl")
 
 
-@pytest.mark.smoke
-def test_successful_capture_cleans_session_tensor_and_param_metadata() -> None:
-    """Successful captures should clean session metadata while keeping module metadata."""
-    model = _LifecycleModel()
-    x = torch.randn(2, 3)
-    original_requires_grad = {name: p.requires_grad for name, p in model.named_parameters()}
-
-    log = tl.trace(
-        model,
-        x,
-        capture=CaptureOptions(save_arg_values=True),
-        save=SaveOptions(activation_transform=lambda t: t.float().mean()),
-    )
-
-    assert not hasattr(x, "_tl")
-    assert get_tensor_label(model.scale) is None
-    assert get_buffer_address(model.scale) is None
-    for name, param in model.named_parameters():
-        assert param.requires_grad == original_requires_grad[name]
-        assert not hasattr(param, "_tl")
-
-    module_meta = get_module_meta(model.linear)
-    assert module_meta is not None
-    assert module_meta.address == "linear"
-    assert module_meta.module_type == "Linear"
-
-    for layer in log.layer_list:
-        _assert_tensor_tree_clean(layer.out)
-        _assert_tensor_tree_clean(getattr(layer, "transformed_out", None))
-        _assert_tensor_tree_clean(getattr(layer, "saved_args", None))
-        _assert_tensor_tree_clean(getattr(layer, "saved_kwargs", None))
-
-
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/_ops_exhaustive.py.
 def test_successful_capture_cleans_deeply_nested_saved_args() -> None:
     """Step 12 must clear session metadata from every supported tensor-tree leaf."""
 
     trace = tl.trace(
         _NestedSavedArgsModel(),
         torch.ones(2),
-        capture=CaptureOptions(layers_to_save="all", save_arg_values=True),
+        capture=CaptureOptions(save_args=True),
+        save="all",
     )
 
     foreach_ops = [op for op in trace.ops if op.func_name == "_foreach_add"]
     assert foreach_ops
     for op in foreach_ops:
-        _assert_tensor_tree_clean(op.saved_args)
+        _assert_tensor_tree_clean(op.call.saved_args)
 
 
-@pytest.mark.smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _partial/__init__.py.
 def test_failed_capture_cleans_partial_outputs_buffers_and_params() -> None:
     """Failed captures should clean partial output metadata and restore model state."""
     model = _FailingLifecycleModel()
     x = torch.randn(2, 3)
     original_requires_grad = {name: p.requires_grad for name, p in model.named_parameters()}
 
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(TraceCaptureError) as exc_info:
         tl.trace(model, x)
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
 
-    partial = getattr(exc_info.value, "partial_log", None)
+    partial = getattr(exc_info.value, "partial_trace", None)
     assert isinstance(partial, PartialTrace)
     for layer in partial.raw_layers:
         _assert_tensor_tree_clean(getattr(layer, "out", None))
@@ -148,7 +118,7 @@ def test_failed_capture_cleans_partial_outputs_buffers_and_params() -> None:
         assert not hasattr(param, "_tl")
 
 
-@pytest.mark.smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/model_prep.py, campaign mutant kills.
 def test_tag_untagged_buffers_promotes_prior_label_mid_session() -> None:
     """Dynamic buffer tagging should preserve prior label as buffer_source.
 
@@ -181,7 +151,7 @@ def test_tag_untagged_buffers_promotes_prior_label_mid_session() -> None:
     assert sum(1 for entry in trace._session_buffer_inventory if entry is module.buf) == 1
 
 
-@pytest.mark.smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
 def test_intervention_replacement_copies_tensor_meta_subclass() -> None:
     """Intervention replacement metadata copying should preserve TensorMeta."""
     source = torch.ones(2)

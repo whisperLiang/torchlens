@@ -1,5 +1,12 @@
 # Native split runtime
 
+The integrated `3.0.3+split.1` release uses the upstream 3.x capture, records,
+validation and backend registry. Split preparation projects those records into
+the existing native execution graph. Public capture remains `tl.trace`; its
+settings use `tl.options.CaptureOptions`. See the
+[3.x Split migration guide](../migration/split_3_x.md) for the capture boundary
+and backend contracts.
+
 `GraphPartition(prefix_node_ids=frozenset(...))` is the sole split description.
 Use `graph.compute_dag()` to expose native calls, then `dag.to_partition(call_ids)`
 to expand externally selected calls into canonical compute-value IDs. Display
@@ -388,3 +395,38 @@ with `--memory-iterations 100`, to distinguish live runtime ownership from Pytho
 and CUDA allocator retention. Reports include RSS, tracemalloc, CUDA allocated,
 reserved and peak bytes, weak-reference liveness, cache counts and GC checkpoints.
 The stress test never calls `empty_cache()` in its loop.
+
+## Public Split import paths
+
+The fork retains these module paths for existing callers. Symbols exported by
+`torchlens.split` remain the usual entry point.
+
+| Module | Responsibility |
+| --- | --- |
+| `torchlens.split.adapters` | Backend adapter protocol and native implementations |
+| `torchlens.split.api` | Public preparation entry points |
+| `torchlens.split.batch_probe` | Independent concrete batch validation |
+| `torchlens.split.batching` | Batch-polymorphic runtime values |
+| `torchlens.split.boundary` | Boundary schema and payload |
+| `torchlens.split.boundary_layout` | Structured boundary layouts |
+| `torchlens.split.cache` | Preparation cache |
+| `torchlens.split.context` | Split feature and execution options |
+| `torchlens.split.errors` | Structured Split refusals |
+| `torchlens.split.flops` | Public operation cost rules |
+| `torchlens.split.frontier` | Boundary frontier construction |
+| `torchlens.split.graph` | Captured SplitTraceGraph |
+| `torchlens.split.graph_profile` | Scheduler-facing graph costs |
+| `torchlens.split.ir` | ComputeDAG and atomic replay calls |
+| `torchlens.split.ownership` | Trainable parameter ownership |
+| `torchlens.split.pipeline` | Capture and preparation lifecycle |
+| `torchlens.split.placement` | Prefix and suffix device placement |
+| `torchlens.split.planner` | Partition legality analysis |
+| `torchlens.split.profiles` | Model and input profiles |
+| `torchlens.split.profiling` | Native runtime profiling |
+| `torchlens.split.program` | Generated replay programs |
+| `torchlens.split.runtime` | Prepared execution and repartition |
+| `torchlens.split.shape` | Symbolic tensor shape bindings |
+| `torchlens.split.shape_program` | Validated dynamic shape operands |
+| `torchlens.split.state` | Segment state migration |
+| `torchlens.split.training` | Boundary gradient handoff and caller-owned optimizer execution |
+| `torchlens.split.validation` | Split validation reports |

@@ -6,7 +6,6 @@ import ast
 import importlib.util
 import linecache
 import re
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +13,8 @@ import pytest
 import torch
 
 MIGRATION_FILES = (
+    "from_hooks.md",
+    "from_torchinfo.md",
     "from_nnsight.md",
     "from_transformerlens.md",
     "from_captum.md",
@@ -21,9 +22,13 @@ MIGRATION_FILES = (
     "from_pyvene.md",
     "from_torchextractor.md",
     "from_fx.md",
+    "coming_from_torchsnooper.md",
+    "cross_engine.md",
 )
 
 OPTIONAL_IMPORTS = {
+    "hooks": "torch",
+    "torchinfo": "torchinfo",
     "captum": "captum",
     "fx": "torch.fx",
     "nnsight": "nnsight",
@@ -31,6 +36,7 @@ OPTIONAL_IMPORTS = {
     "thingsvision": "thingsvision",
     "torchextractor": "torchextractor",
     "torchlens": "torchlens",
+    "torchsnooper": "torchsnooper",
     "transformer_lens": "transformer_lens",
 }
 
@@ -83,18 +89,6 @@ def _skip_incompatible_optional_example(file_name: str, tool: str) -> None:
     tool:
         Tool key from the migration-test header.
     """
-    if file_name == "from_nnsight.md" and tool == "nnsight":
-        try:
-            installed = version("nnsight")
-        except PackageNotFoundError:
-            return
-        major, minor, *_ = installed.split(".")
-        if int(major) > 0 or int(minor) >= 7:
-            pytest.skip("nnsight>=0.7 changed LanguageModel trace input semantics")
-    if file_name == "from_transformerlens.md" and tool == "transformer_lens":
-        pytest.skip(
-            "transformer_lens pretrained tiny-stories-1M cache values vary by installed weights/version"
-        )
     if file_name == "from_pyvene.md" and tool == "pyvene":
         pytest.skip("pyvene example requires a version-specific configured model checkpoint")
 

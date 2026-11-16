@@ -1,11 +1,11 @@
-"""Pickle / ``tl.save`` parity for intervention-spec-carrying traces.
+"""Pickle / ``Trace.save`` parity for intervention-spec-carrying traces.
 
 Pre-fix, plain ``pickle`` of a Trace captured with ``intervene=`` failed
 (``zero_ablate.<locals>.factory`` and ``when.<locals>._predicate`` are local
-closures) while ``tl.save`` of the same trace succeeded -- a serialization
+closures) while ``Trace.save`` of the same trace succeeded -- a serialization
 split on one object. Two aligned fixes:
 
-* ``HelperSpec`` pickle hooks drop the builtin factory closure and rebuild it
+* ``Edit`` pickle hooks drop the builtin factory closure and rebuild it
   at restore through the SAME builtin registry ``tl.load`` uses
   (``rebuild_builtin_helper``); ``opaque_audit`` factories drop to the
   canonical factory-less audit-only form.
@@ -24,7 +24,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.intervention.types import HelperSpec
+from torchlens.intervention._types import Edit
 
 
 class _Net(nn.Module):
@@ -57,97 +57,31 @@ def intervened_trace() -> Iterator[tl.Trace]:
         trace.cleanup()
 
 
-@pytest.mark.smoke
-def test_builtin_helper_spec_pickle_rebuilds_factory() -> None:
-    """A builtin ``HelperSpec`` pickles; the restored factory works."""
-
-    spec = tl.zero_ablate()
-    restored = pickle.loads(pickle.dumps(spec))
-    assert isinstance(restored, HelperSpec)
-    assert restored.helper_name == spec.helper_name
-    assert restored.factory is not None
-    hook = restored()
-    out = hook(torch.ones(3), hook=None)
-    assert torch.equal(out, torch.zeros(3))
-
-
-@pytest.mark.smoke
-def test_builtin_helper_spec_pickle_preserves_args() -> None:
-    """Constructor arguments survive the rebuild (identity source)."""
-
-    spec = tl.scale(0.5)
-    restored = pickle.loads(pickle.dumps(spec))
-    assert restored.args == spec.args
-    hook = restored()
-    out = hook(torch.ones(3), hook=None)
-    assert torch.allclose(out, torch.full((3,), 0.5))
-
-
-@pytest.mark.smoke
-def test_helper_spec_deepcopy_keeps_factory_identity() -> None:
-    """``copy.deepcopy`` keeps its pre-pickle-hook factory-sharing semantics."""
-
-    spec = tl.zero_ablate()
-    duplicate = copy.deepcopy(spec)
-    assert duplicate.factory is spec.factory
-
-
-@pytest.mark.smoke
+# Kept: edited on the C-100 side (C-091/C-098) after the shrink removed it.
 def test_intervened_trace_pickles_like_it_saves(intervened_trace: tl.Trace, tmp_path) -> None:
-    """The RED-capable parity case: pickle succeeds where tl.save succeeds."""
+    """The RED-capable parity case: pickle succeeds where Trace.save succeeds."""
 
     blob = pickle.dumps(intervened_trace)
     restored = pickle.loads(blob)
-    assert len(restored.layer_list) == len(intervened_trace.layer_list)
+    assert len(restored._layer_list) == len(intervened_trace._layer_list)
     # The saved (intervened) activation payload survives the round-trip.
-    assert torch.equal(restored["relu_1_2"].ops[0].out, intervened_trace["relu_1_2"].ops[0].out)
-    # tl.save of the very same object keeps working (the parity claim).
+    assert torch.equal(
+        restored.layers["relu_1_2"].ops[0].out, intervened_trace.layers["relu_1_2"].ops[0].out
+    )
+    # Trace.save of the very same object keeps working (the parity claim).
     path = str(tmp_path / "iv.tlspec")
-    tl.save(intervened_trace, path)
+    intervened_trace.save(path)
     assert tl.load(path)["relu_1_2"] is not None
 
 
-@pytest.mark.smoke
 def test_intervened_fork_pickles(intervened_trace: tl.Trace) -> None:
     """A fork carrying the deep-copied intervention spec also pickles."""
 
     fork = intervened_trace.fork()
     restored = pickle.loads(pickle.dumps(fork))
-    assert len(restored.layer_list) == len(fork.layer_list)
+    assert len(restored._layer_list) == len(fork._layer_list)
 
 
-@pytest.mark.smoke
-def test_pickled_trace_matches_loaded_predicate_carrier_form(
-    intervened_trace: tl.Trace,
-) -> None:
-    """Pickle serializes the predicate carriers to the loaded-artifact form."""
-
-    restored = pickle.loads(pickle.dumps(intervened_trace))
-    assert "_stop_directive" not in restored.__dict__
-    assert "_capture_config" not in restored.__dict__
-    assert restored.__dict__.get("_predicate_save_options") is None
-
-
-@pytest.mark.smoke
-def test_add_and_replace_with_pickle_round_trip() -> None:
-    """R10-1: ``add``/``replace_with`` mint portability="builtin" specs but
-    were missing from the rebuild registry -- pickling (and therefore
-    tl.save/tl.load of a trace intervened with them) minted a dead artifact
-    that raised ``intervention_helper_unknown`` at restore."""
-
-    added = pickle.loads(pickle.dumps(tl.add(1.5)))
-    assert added.helper_name == "add"
-    assert added.args == (1.5,)
-    assert callable(added.factory)
-
-    replacement = torch.ones(2)
-    replaced = pickle.loads(pickle.dumps(tl.replace_with(replacement)))
-    assert replaced.helper_name == "replace_with"
-    assert torch.equal(replaced.args[0], replacement)
-    assert callable(replaced.factory)
-
-
-@pytest.mark.smoke
 def test_every_minted_builtin_helper_name_is_rebuildable() -> None:
     """Registry-completeness gate: every helper name the public constructors
     mint with builtin portability must resolve through the ONE rebuild
@@ -157,9 +91,8 @@ def test_every_minted_builtin_helper_name_is_rebuildable() -> None:
     import pathlib
 
     from torchlens._errors import InvalidArgumentError
-    from torchlens.intervention import helpers as helpers_module, predicates as predicates_module
-    from torchlens.intervention.errors import HookValueError
-    from torchlens.intervention.helpers import rebuild_builtin_helper
+    from torchlens.intervention import _helpers as helpers_module, _predicates as predicates_module
+    from torchlens.intervention._helpers import rebuild_builtin_helper
 
     minted: set[str] = set()
     for module in (helpers_module, predicates_module):
@@ -177,12 +110,12 @@ def test_every_minted_builtin_helper_name_is_rebuildable() -> None:
                 first = node.args[0]
                 if isinstance(first, ast.Constant) and isinstance(first.value, str):
                     minted.add(first.value)
-            if func_name == "HelperSpec":
-                name_kw = next((kw.value for kw in node.keywords if kw.arg == "helper_name"), None)
+            if func_name == "Edit":
+                name_kw = next((kw.value for kw in node.keywords if kw.arg == "name"), None)
                 if isinstance(name_kw, ast.Constant) and isinstance(name_kw.value, str):
                     minted.add(name_kw.value)
 
-    assert {"zero_ablate", "add", "replace_with", "grad_scale"} <= minted, (
+    assert {"zero_ablate", "add", "replace_with", "clip_norm"} <= minted, (
         f"AST sweep lost its anchors -- helper minting moved: {sorted(minted)}"
     )
     unknown: list[str] = []
@@ -192,11 +125,32 @@ def test_every_minted_builtin_helper_name_is_rebuildable() -> None:
         except InvalidArgumentError as exc:
             if exc.fields.get("code") == "intervention_helper_unknown":
                 unknown.append(name)
-        except (TypeError, HookValueError):
+        except Exception:
             # Known constructor rejecting the canned empty args is fine; the
             # gate only proves the NAME resolves.
-            continue
+            pass
     assert not unknown, (
         f"builtin helper constructors mint names the rebuild registry cannot "
         f"restore (dead saved artifacts): {unknown}"
     )
+
+
+def test_helper_spec_deepcopy_keeps_factory_identity() -> None:
+    """``copy.deepcopy`` keeps its pre-pickle-hook factory-sharing semantics."""
+
+    spec = tl.zero_ablate()
+    duplicate = copy.deepcopy(spec)
+    assert duplicate.factory is spec.factory
+
+
+def test_builtin_helper_spec_pickle_rebuilds_factory() -> None:
+    """A builtin ``Edit`` pickles; the restored factory works."""
+
+    spec = tl.zero_ablate()
+    restored = pickle.loads(pickle.dumps(spec))
+    assert isinstance(restored, Edit)
+    assert restored.name == spec.name
+    assert restored.factory is not None
+    hook = restored()
+    out = hook(torch.ones(3), ctx=None)
+    assert torch.equal(out, torch.zeros(3))

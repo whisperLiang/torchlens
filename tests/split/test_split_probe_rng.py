@@ -44,7 +44,7 @@ def test_probe_matches_native_random_draws_without_mutating_capture(
     """Only two captures run, and the retained B=1 RNG records remain untouched."""
 
     captures: list[tuple[int, int]] = []
-    retained_states: dict[str, tuple[Any, torch.Tensor]] = {}
+    retained_states: dict[int, tuple[Any, torch.Tensor]] = {}
     original = pipeline.capture_model
 
     def capture(model: Any, inputs: tuple[Any, ...], spec: Any, **kwargs: Any) -> Any:
@@ -52,12 +52,12 @@ def test_probe_matches_native_random_draws_without_mutating_capture(
 
         result = original(model, inputs, spec, **kwargs)
         batch = int(inputs[0].shape[0])
-        captures.append((batch, result.random_seed))
+        captures.append((batch, result.options.seed))
         if batch == 1:
             for op in result.ops:
-                state = op.func_rng_states
+                state = op.call.rng_states
                 if state:
-                    retained_states[op.label] = (state, state["torch"].clone())
+                    retained_states[op.raw_index] = (state, state["torch"].clone())
         return result
 
     monkeypatch.setattr(pipeline, "capture_model", capture)
@@ -72,8 +72,8 @@ def test_probe_matches_native_random_draws_without_mutating_capture(
     assert captures[0][1] == captures[1][1]
     assert retained_states
     for node in runtime.trace_graph.nodes:
-        if node.canonical_id in retained_states:
-            original_state, saved_values = retained_states[node.canonical_id]
+        if node.raw_index in retained_states:
+            original_state, saved_values = retained_states[node.raw_index]
             assert node.op.func_rng_states is original_state
             assert torch.equal(node.op.func_rng_states["torch"], saved_values)
     for batch in (1, 2, 8):

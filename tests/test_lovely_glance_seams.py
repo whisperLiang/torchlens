@@ -1,0 +1,102 @@
+"""F10 lovely items 10-11: glance + seam adapters + echo purity.
+
+One record, many densities: the cell formatter and the HTML fixture read
+the SAME frozen record the line renders (a number may never exist only in
+HTML); the echo observer never contaminates the capture it observes.
+"""
+
+from __future__ import annotations
+
+import pytest
+import torch
+from torch import nn
+
+import torchlens as tl
+from torchlens.stats import (
+    glance,
+    narrate,
+    tensor_stats,
+)
+from torchlens.stats._seams import summary_cell, treescope_card_fields
+from torchlens.stats._stats_render import render_core_line
+
+
+def test_glance_refuses_non_tensors_teaching() -> None:
+    """The refusal names the captured-record spelling (teaching refusal)."""
+
+    with pytest.raises(TypeError, match="record surfaces"):
+        glance([1.0, 2.0])  # type: ignore[arg-type]
+
+
+def test_glance_width_ladder_keeps_extrema_and_health() -> None:
+    """D14: degradation drops bytes/n/sparkline, never extrema or health."""
+
+    tensor = torch.arange(4096, dtype=torch.float32).reshape(64, 64)
+    tensor[0, 0] = float("nan")
+    narrow = glance(tensor, max_width=60)
+    assert "nan=" in narrow
+    assert "[" in narrow  # the extrema bracket survives
+
+
+def test_summary_cell_matches_line_renderer() -> None:
+    """Seam pin: the cell IS the line renderer at the cell width."""
+
+    stats = tensor_stats(torch.arange(100, dtype=torch.float32))
+    assert summary_cell(stats, max_width=40) == render_core_line(stats, max_width=40)
+
+
+class _EchoModel(nn.Module):
+    """Two-op model for the echo purity pin."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(8, 8)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(self.fc(x))
+
+
+def test_echo_mounts_and_stays_pure() -> None:
+    """The echo fires per site AND adds ZERO ops to the captured graph."""
+
+    x = torch.arange(16, dtype=torch.float32).reshape(2, 8)
+    control = tl.trace(_EchoModel().eval(), x.clone())
+    control_ops = control._num_ops
+    control.cleanup()
+
+    sink_lines: list[str] = []
+    observer = narrate(tl.func("relu"), sink=sink_lines.append)
+    echoed = tl.trace(
+        _EchoModel().eval(),
+        x.clone(),
+        capture=tl.options.CaptureOptions(replayable=True, hooks=observer),
+    )
+    assert observer.lines and sink_lines == observer.lines
+    assert " -> " in observer.lines[0] and "mean=" in observer.lines[0]
+    # Purity: the echo's own stats math never enters the captured graph.
+    assert echoed._num_ops == control_ops
+    line = repr(observer)
+    assert "EchoObserver(" in line and "lines echoed" in line
+    assert "\n" not in line
+    echoed.cleanup()
+
+
+def test_treescope_verdict_evidence_is_not_an_exact_census() -> None:
+    """The shared-record projection must preserve presence-only evidence."""
+
+    from dataclasses import replace
+
+    from torchlens.stats import FamilyEvidence
+
+    stats = replace(
+        tensor_stats(torch.arange(4.0)),
+        num_nan=None,
+        num_posinf=None,
+        num_neginf=None,
+        nonfinite_evidence=FamilyEvidence("verdict", 4, reason="track_nonfinite"),
+    )
+    fields = treescope_card_fields(stats)
+    assert fields["evidence"]["nonfinite"] == "verdict"
+    assert fields["nan_count"] is None and fields["posinf_count"] is None
+    assert fields["neginf_count"] is None
+    assert "nonfinite present" in fields["line_ascii"]

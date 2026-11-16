@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import sys
 from collections.abc import Iterator
 from types import ModuleType
 
@@ -11,7 +12,28 @@ import torch
 
 from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
 
-pytestmark = pytest.mark.smoke
+
+def test_incomplete_flex_gemm_surface_has_a_visible_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A changed optional frontend refuses the shim without breaking wrapping."""
+
+    from torchlens._utils import _torch_compat
+    from torchlens.backends.torch import identity_shims
+
+    module = ModuleType("torch._higher_order_ops.flex_gemm")
+
+    class FlexGemm:
+        def __call__(self, *args: object) -> None:
+            pass
+
+    module.FlexGemm = FlexGemm
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    records: list[tuple[object, str, object]] = []
+    with pytest.warns(UserWarning, match="HAS_FLEX_GEMM"):
+        identity_shims._install_flex_gemm_shim(records)
+    assert records == []
+    assert _torch_compat.get_torch_capability_snapshot()["HAS_FLEX_GEMM"] is False
 
 
 @pytest.fixture

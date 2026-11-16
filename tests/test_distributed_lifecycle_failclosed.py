@@ -18,8 +18,6 @@ Two fail-open holes are pinned shut here:
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
@@ -28,8 +26,21 @@ pytestmark = pytest.mark.skipif(
     reason="torch.distributed gloo unavailable",
 )
 
-from torchlens.distributed import _lifecycle as lifecycle  # noqa: E402
-from torchlens.distributed._lifecycle import AmbiguousGroupLifetimeError  # noqa: E402
+from torchlens._distributed import _lifecycle as lifecycle  # noqa: E402
+from torchlens._distributed._lifecycle import AmbiguousGroupLifetimeError  # noqa: E402
+from torchlens.distributed import is_vetted_build  # noqa: E402
+
+# F1 ruling (Lead, 2026-10-01): full collective arming only runs where a
+# census-vetted torch build exists (torchlens.distributed.is_vetted_build());
+# on an unvetted torch, arm() fails closed with UncapturedCollectiveOpError.
+# Only the two classes below call a real arm() expecting success;
+# TestAutoArmProbeDisclosure exercises the lazy auto-arm probe-failure path,
+# which is unrelated to vetting and must keep running everywhere.
+requires_vetted_snapshot = pytest.mark.skipif(
+    not is_vetted_build(),
+    reason="full collective arming requires a census-vetted torch build "
+    "(torchlens.distributed.is_vetted_build() is False here)",
+)
 
 
 @pytest.fixture()
@@ -61,7 +72,9 @@ def gloo_world(tmp_path, clean_lifecycle):
             dist.destroy_process_group()
 
 
+@requires_vetted_snapshot
 class TestArmEpochProbeFailClosed:
+    # Kept by shrink-r4 (per-id subset rule): sole coverage of distributed/_lifecycle.py.
     def test_probe_exception_stamps_seeded_not_complete_witness(self, clean_lifecycle, monkeypatch):
         def raising_is_initialized() -> bool:
             raise RuntimeError("torch probe blew up")
@@ -73,31 +86,10 @@ class TestArmEpochProbeFailClosed:
         # forge complete-witness authority out of a probe failure.
         assert record.install_epoch == "seeded"
 
-    def test_unreadable_registry_stamps_seeded(self, clean_lifecycle, monkeypatch):
-        class NoPgMap:
-            """Registry holder without a readable pg_map (private-API drift)."""
 
-        real_world = torch.distributed.distributed_c10d._world
-        with monkeypatch.context() as patch:
-            patch.setattr(torch.distributed.distributed_c10d, "_world", NoPgMap())
-            record = lifecycle.arm()
-            assert record.install_epoch == "seeded"
-        assert torch.distributed.distributed_c10d._world is real_world
-
-    def test_clean_empty_registry_still_proves_the_negative(
-        self, clean_lifecycle, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Disarming TorchLens does not clear groups left by another test.
-        # Control both PyTorch probes so this case exercises the empty branch.
-        monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
-        monkeypatch.setattr(
-            torch.distributed.distributed_c10d, "_world", SimpleNamespace(pg_map={})
-        )
-        record = lifecycle.arm()
-        assert record.install_epoch == "armed_before_any_group"
-
-
+@requires_vetted_snapshot
 class TestEnumerationGapsFailClosed:
+    # Kept by shrink-r4 (per-id subset rule): sole coverage of distributed/_lifecycle.py.
     def test_unenumerable_creation_poisons_identities_and_seeding(self, gloo_world, monkeypatch):
         dist = gloo_world
         lifecycle.arm()
@@ -105,24 +97,25 @@ class TestEnumerationGapsFailClosed:
         def raising_ranks(group):
             raise RuntimeError("membership unreadable")
 
-        with monkeypatch.context() as patch:
-            patch.setattr(torch.distributed, "get_process_group_ranks", raising_ranks)
-            with pytest.warns(UserWarning, match="could not be enumerated"):
-                extra = dist.new_group([0])
-            state = lifecycle.armed_state()
-            assert state is not None
-            assert state.ledger_gaps, "the dropped creation must be recorded as a gap"
-            assert id(extra) not in state.identities, "no identity may be minted on a gap"
-            # The gapped group itself refuses typed (previously the raw torch
-            # error leaked out of the seeding path mid-capture).
-            with pytest.raises(AmbiguousGroupLifetimeError):
-                lifecycle.resolve_group_identity(extra)
+        monkeypatch.setattr(torch.distributed, "get_process_group_ranks", raising_ranks)
+        with pytest.warns(UserWarning, match="could not be enumerated"):
+            extra = dist.new_group([0])
+        state = lifecycle.armed_state()
+        assert state is not None
+        assert state.ledger_gaps, "the dropped creation must be recorded as a gap"
+        assert id(extra) not in state.identities, "no identity may be minted on a gap"
+        # The gapped group itself refuses typed (previously the raw torch
+        # error leaked out of the seeding path mid-capture).
+        with pytest.raises(AmbiguousGroupLifetimeError):
+            lifecycle.resolve_group_identity(extra)
+        monkeypatch.undo()
         # Restricted seeding is disabled rank-wide while a gap is open: the
         # dropped event may have been a generation of ANY membership, so even
         # the world group's generation-0 claim is unprovable.
         with pytest.raises(AmbiguousGroupLifetimeError, match="could not be enumerated"):
             lifecycle.resolve_group_identity(None)
 
+    # Kept by shrink-r4 (per-id subset rule): sole coverage of distributed/_lifecycle.py.
     def test_unenumerable_destroy_records_a_gap(self, gloo_world, monkeypatch):
         dist = gloo_world
         # Created BEFORE arming: the group is never identified, so its destroy
@@ -133,14 +126,14 @@ class TestEnumerationGapsFailClosed:
         def raising_ranks(group):
             raise RuntimeError("membership unreadable")
 
-        with monkeypatch.context() as patch:
-            patch.setattr(torch.distributed, "get_process_group_ranks", raising_ranks)
-            with pytest.warns(UserWarning, match="could not be enumerated"):
-                dist.destroy_process_group(pre_arm_group)
-            state = lifecycle.armed_state()
-            assert state is not None
-            assert state.ledger_gaps, "the dropped destroy must be recorded as a gap"
+        monkeypatch.setattr(torch.distributed, "get_process_group_ranks", raising_ranks)
+        with pytest.warns(UserWarning, match="could not be enumerated"):
+            dist.destroy_process_group(pre_arm_group)
+        state = lifecycle.armed_state()
+        assert state is not None
+        assert state.ledger_gaps, "the dropped destroy must be recorded as a gap"
 
+    # Kept by shrink-r4 (per-id subset rule): sole coverage of distributed/_lifecycle.py.
     def test_unreadable_registry_refuses_seeding(self, gloo_world, monkeypatch):
         lifecycle.arm()
         real_world = torch.distributed.distributed_c10d._world
@@ -153,19 +146,15 @@ class TestEnumerationGapsFailClosed:
                     raise AttributeError(name)
                 return getattr(real_world, name)
 
-        # Restore the registry before gloo_world tears down, independently of
-        # when another fixture first requested the shared monkeypatch fixture.
-        with monkeypatch.context() as patch:
-            patch.setattr(torch.distributed.distributed_c10d, "_world", WorldWithoutPgMap())
-            # Seeding needs the same-membership ALIVE count; an unreadable
-            # registry is not a provable zero.
-            with pytest.raises(AmbiguousGroupLifetimeError, match="cannot be read"):
-                lifecycle.resolve_group_identity(None)
-        assert torch.distributed.distributed_c10d._world is real_world
-        assert gloo_world.is_initialized()
+        monkeypatch.setattr(torch.distributed.distributed_c10d, "_world", WorldWithoutPgMap())
+        # Seeding needs the same-membership ALIVE count; an unreadable
+        # registry is not a provable zero.
+        with pytest.raises(AmbiguousGroupLifetimeError, match="cannot be read"):
+            lifecycle.resolve_group_identity(None)
 
 
 class TestAutoArmProbeDisclosure:
+    # Kept by shrink-r4 (per-id subset rule): sole coverage of distributed/_lifecycle.py.
     def test_probe_exception_warns_instead_of_silent_skip(self, clean_lifecycle, monkeypatch):
         def raising_is_initialized() -> bool:
             raise RuntimeError("torch probe blew up")
@@ -174,39 +163,3 @@ class TestAutoArmProbeDisclosure:
         monkeypatch.setattr(lifecycle, "_AUTO_ARM_DEGRADATION", None)
         with pytest.warns(UserWarning, match="could not probe torch.distributed"):
             assert lifecycle.maybe_auto_arm() is None
-
-    def test_probe_exception_warns_on_every_capture_entry(self, clean_lifecycle, monkeypatch):
-        """p5 T-DISTRIBUTED: the disclosure must not latch away after capture 1.
-
-        Fail-before: ``_AUTO_ARM_WARNED`` latched once per process, so every
-        capture after the first silently skipped arming -- collectives
-        silently omitted with ZERO disclosure for the rest of the process.
-        """
-
-        def raising_is_initialized() -> bool:
-            raise RuntimeError("torch probe blew up")
-
-        monkeypatch.setattr(torch.distributed, "is_initialized", raising_is_initialized)
-        monkeypatch.setattr(lifecycle, "_AUTO_ARM_DEGRADATION", None)
-        with pytest.warns(UserWarning, match="could not probe torch.distributed"):
-            assert lifecycle.maybe_auto_arm() is None
-        # The SECOND degraded capture entry warns again.
-        with pytest.warns(UserWarning, match="could not probe torch.distributed"):
-            assert lifecycle.maybe_auto_arm() is None
-
-    def test_degradation_reason_is_introspectable_and_clears(self, clean_lifecycle, monkeypatch):
-        """The reason survives as in-band state, not just a stderr line."""
-
-        def raising_is_initialized() -> bool:
-            raise RuntimeError("torch probe blew up")
-
-        monkeypatch.setattr(torch.distributed, "is_initialized", raising_is_initialized)
-        monkeypatch.setattr(lifecycle, "_AUTO_ARM_DEGRADATION", None)
-        with pytest.warns(UserWarning):
-            lifecycle.maybe_auto_arm()
-        reason = lifecycle.auto_arm_degradation()
-        assert reason is not None and "probe_failed" in reason
-        # A later clean probe (distributed provably not in play) clears it.
-        monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
-        assert lifecycle.maybe_auto_arm() is None
-        assert lifecycle.auto_arm_degradation() is None

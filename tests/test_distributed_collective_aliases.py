@@ -11,10 +11,8 @@ import pytest
 import torch
 
 from torchlens.backends.torch import collectives
-from torchlens.distributed import _lifecycle as lifecycle
 
 pytestmark = [
-    pytest.mark.smoke,
     pytest.mark.skipif(
         not torch.distributed.is_available(), reason="torch.distributed unavailable"
     ),
@@ -59,7 +57,7 @@ def test_only_identity_proven_collective_aliases_are_wrapped(
     modules = [dist, c10d, public_alias, private_alias, unrelated]
     if reverse_order:
         modules.reverse()
-    monkeypatch.setattr(lifecycle, "_patch_modules", lambda: modules)
+    monkeypatch.setattr(collectives, "_patch_modules", lambda: modules)
     expected = {
         (dist, "reduce"): public_reduce,
         (c10d, "reduce"): implementation_reduce,

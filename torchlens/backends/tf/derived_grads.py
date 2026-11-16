@@ -19,14 +19,20 @@ from typing import Any
 
 import numpy as np
 
-from ...data_classes.derived_grad import (
+from ..._data_classes.derived_grad import (
     DerivedGradAccessor,
     DerivedGradRecord,
     IntermediateDerivedGradAccessor,
     IntermediateDerivedGradRecord,
 )
-from ...data_classes.trace import Trace
-from ...ir.refs import DtypeRef
+from ..._data_classes.trace import Trace
+from ..._ir.refs import DtypeRef
+from .._entry_refusals import (
+    refuse_if_bad_max_intermediate_grads,
+    refuse_tf_loss_not_scalar,
+    refuse_tf_no_grad_leaves,
+    refuse_tf_replay_diverged,
+)
 from .._finalize import mirror_param_derived_grads, stable_callable_name as _callable_identity
 from .._validation_shared import float_replay_tolerances
 from ..registry import BackendUnsupportedError
@@ -66,8 +72,7 @@ class GradOptions:
     ) -> None:
         """Initialize TensorFlow derived-gradient options."""
 
-        if not isinstance(max_intermediate_grads, int) or max_intermediate_grads < 1:
-            raise ValueError("max_intermediate_grads must be an integer >= 1")
+        refuse_if_bad_max_intermediate_grads(max_intermediate_grads)
         object.__setattr__(self, "loss_fn", loss_fn)
         normalized = None if input_grad_argnums is None else tuple(input_grad_argnums)
         object.__setattr__(self, "input_grad_argnums", normalized)
@@ -179,8 +184,8 @@ def attach_tf_derived_grads(
     Returns
     -------
     None
-        ``trace.derived_grads`` and optionally
-        ``trace.intermediate_derived_grads`` are populated.
+        ``trace.autograd.derived_grads`` and optionally
+        ``trace.autograd.intermediate_derived_grads`` are populated.
     """
 
     input_argnums = _normalize_tf_input_grad_argnums(
@@ -192,10 +197,7 @@ def attach_tf_derived_grads(
     param_leaves = _tf_param_grad_leaves(trace)
     all_leaves = (*leaves, *param_leaves)
     if not all_leaves and not grad_options.intermediate_grads:
-        raise ValueError(
-            "TensorFlow derived gradients require at least one floating tensor "
-            "input or module parameter."
-        )
+        refuse_tf_no_grad_leaves()
     previous_call_counts = dict(module_tree.call_counts) if module_tree is not None else None
     previous_forward_args = (
         dict(module_tree.forward_args_by_call) if module_tree is not None else None
@@ -225,15 +227,9 @@ def attach_tf_derived_grads(
                 else replay_result.output
             )
         if not _is_scalar_float_tf_tensor(loss, tf):
-            raise ValueError(
-                "TensorFlow derived gradients require loss_fn(raw_output) to be a "
-                "scalar float tensor unless the traced output is already scalar."
-            )
+            refuse_tf_loss_not_scalar()
         if not _tf_trees_close(tf, replay_result.output, captured_output):
-            raise ValueError(
-                "TensorFlow derived gradient run raw output diverged from captured "
-                "raw output; refusing to expose trace.derived_grads."
-            )
+            refuse_tf_replay_diverged()
         intermediate_accessor = IntermediateDerivedGradAccessor()
         if grad_options.intermediate_grads:
             intermediate_accessor = _records_for_intermediate_tf_grads(
@@ -272,9 +268,11 @@ def attach_tf_derived_grads(
         if module_tree is not None and previous_forward_args is not None:
             module_tree.forward_args_by_call.clear()
             module_tree.forward_args_by_call.update(previous_forward_args)
-    trace.derived_grads = DerivedGradAccessor(records)
+    trace._autograd_derived_grads = DerivedGradAccessor(records)
     if grad_options.intermediate_grads:
-        trace.intermediate_derived_grads = intermediate_accessor
+        from ..._data_classes.derived_grad import set_intermediate_derived_grads
+
+        set_intermediate_derived_grads(trace, intermediate_accessor)
     mirror_param_derived_grads(trace, records)
 
 
@@ -434,17 +432,27 @@ def _tf_trace_intermediate_signatures(
 
     groups: dict[TFIntermediateSignature, list[Any]] = defaultdict(list)
     # Replay-side signatures speak RAW label space (capture input records).
-    # Recurrence grouping rewrites ``op.parents`` to final pass-qualified
-    # labels, so parents are resolved back to raw space before signature
-    # construction; without this every grouped intermediate would silently
-    # fail to match its replay candidate.
-    final_to_raw = {
-        str(getattr(op, "label", "")): str(getattr(op, "_label_raw", ""))
-        for op in getattr(trace, "layer_list", ())
-        if isinstance(getattr(op, "label", None), str)
-        and isinstance(getattr(op, "_label_raw", None), str)
-    }
-    for op in getattr(trace, "layer_list", ()):
+    # Recurrence grouping rewrites ``op.parents`` to final labels -- the
+    # pass-qualified ``op.label`` for a multi-pass referenced layer, but the
+    # BARE ``op.layer_label`` (torch parity) for a single-pass one -- so
+    # parents are resolved back to raw space before signature construction.
+    # Both final spellings must resolve: the pass-qualified key always, and
+    # the bare key too for single-pass ops (unambiguous there; omitted for
+    # multi-pass ops, where the bare label would collide across passes and
+    # ``op.parents`` never uses it anyway). Without this every grouped
+    # intermediate would silently fail to match its replay candidate.
+    final_to_raw: dict[str, str] = {}
+    for op in trace._layer_list:
+        raw_label = getattr(op, "_label_raw", None)
+        if not isinstance(raw_label, str):
+            continue
+        label = getattr(op, "label", None)
+        if isinstance(label, str):
+            final_to_raw[label] = raw_label
+        layer_label = getattr(op, "layer_label", None)
+        if isinstance(layer_label, str) and int(getattr(op, "num_passes", 1)) == 1:
+            final_to_raw[layer_label] = raw_label
+    for op in trace._layer_list:
         if bool(getattr(op, "is_input", False)) or not bool(
             getattr(op, "has_saved_activation", False)
         ):
@@ -452,7 +460,7 @@ def _tf_trace_intermediate_signatures(
         if not _is_float_dtype_text(str(getattr(op, "dtype", ""))):
             continue
         signature = TFIntermediateSignature(
-            func_call_id=int(getattr(op, "func_call_id", 0)),
+            func_call_id=int(getattr(op.call, "call_id", 0)),
             op_name=str(getattr(op, "func_name", "")),
             parent_labels=tuple(
                 dict.fromkeys(

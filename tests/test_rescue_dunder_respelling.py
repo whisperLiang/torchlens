@@ -1,0 +1,192 @@
+"""Rescue recovery oracle vs ``TorchFunctionMode`` dunder respelling.
+
+The rescue re-run arms a ``TorchFunctionMode``; with a mode active torch
+dispatches C-level operator dunders as their named method, so the mode-free
+primary logs ``__radd__`` / ``__truediv__`` / ``__iadd__`` while the rescued
+trace logs ``add`` / ``div`` / ``add_``. The two-sided op-count oracle read
+those as LOST ops and refused a rescue that had recovered the escaped op,
+returning the broken primary as ``escape_rescue_unrecovered``. These tests pin
+the canonicalization (``rescue._canonical_op_name``) against torch itself, end
+to end through ``tl.trace``, and keep the oracle red for a genuine loss.
+"""
+
+from __future__ import annotations
+
+import itertools
+import types
+from collections.abc import Iterator
+from typing import Any
+
+import pytest
+import torch
+from _stale_holders import OpaqueCallable
+from torch.overrides import TorchFunctionMode
+
+from torchlens._utils._callable_safety import _ALLOWED_FORWARD_DUNDERS
+from torchlens._utils._tensor_label import is_decorated_function
+from torchlens.backends.torch.rescue import (
+    _canonical_op_name,
+    capture_with_rescue,
+)
+from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+
+_MODE_BOOKKEEPING = frozenset({"untyped_storage", "__get__"})
+
+
+def _receivers() -> list[torch.Tensor]:
+    """Fresh receivers, built outside any mode: matrices, then 0-d scalars."""
+
+    return [
+        torch.tensor([[1.5, 2.5], [0.5, 3.0]]),
+        torch.tensor([[True, False], [False, True]]),
+        torch.tensor([[1, 2], [3, 4]]),
+        torch.tensor(2.5),
+        torch.tensor(3),
+        torch.tensor(True),
+    ]
+
+
+#: Operand sets tried in order; ``None`` stands for a fresh copy of the receiver.
+#: The trailing single-tuple set is a tuple index (``t[0, 1]``): on torch 2.1 a
+#: basic int or slice index never reaches a mode, so ``__getitem__`` needs it there.
+_ARGSETS: tuple[tuple[Any, ...], ...] = (
+    (),
+    (2.0,),
+    (True,),
+    (1,),
+    (0,),
+    (0, 1),
+    (None,),
+    ((0, 1),),
+)
+
+
+class _RecordingMode(TorchFunctionMode):
+    """Record the name of every function torch hands the mode."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.names: list[str] = []
+
+    def __torch_function__(
+        self,
+        func: Any,
+        types: Any,
+        args: tuple[Any, ...] = (),
+        kwargs: dict[str, Any] | None = None,
+    ) -> Any:
+        self.names.append(str(getattr(func, "__name__", "")))
+        return func(*args, **(kwargs or {}))
+
+
+def _recorded_names(bound: Any, call_args: tuple[Any, ...]) -> list[str]:
+    """Return the names a mode records for one call, or [] if the operands misfit."""
+
+    mode = _RecordingMode()
+    try:
+        with mode:
+            bound(*call_args)
+    except Exception:  # noqa: BLE001 - an operand misfit; the caller tries the next set
+        return []
+    return [name for name in mode.names if name not in _MODE_BOOKKEEPING]
+
+
+def _mode_spellings(dunder: str) -> list[str] | None:
+    """Return what torch hands a mode for ``Tensor.<dunder>``, or None if no operand fits.
+
+    Tries receiver and operand combinations in a fixed order; operands are
+    built outside the recording mode so only the dunder itself is recorded.
+    """
+
+    for index, args in itertools.product(range(len(_receivers())), _ARGSETS):
+        receiver, operand = _receivers()[index], _receivers()[index]
+        call_args = tuple(operand if arg is None else arg for arg in args)
+        seen = _recorded_names(getattr(receiver, dunder), call_args)
+        if seen:
+            return seen
+    return None
+
+
+def _respelling_mismatch(dunder: str) -> str | None:
+    """Describe how ``dunder``'s mode spelling misses its canonical name, else None."""
+
+    seen = _mode_spellings(dunder)
+    if seen is None:
+        return f"{dunder}: no operand set reached the mode"
+    if {_canonical_op_name(name) for name in seen} != {_canonical_op_name(dunder)}:
+        return f"{dunder}: mode saw {seen}"
+    return None
+
+
+#: Admitted dunders no tensor call completes, so none ever reaches a trace:
+#: tensors reject item deletion for every operand.
+_NEVER_COMPLETES = frozenset({"__delitem__"})
+
+#: Every admitted operator dunder the running torch defines on ``Tensor``.
+_TENSOR_DUNDERS = sorted(
+    d for d in _ALLOWED_FORWARD_DUNDERS - _NEVER_COMPLETES if hasattr(torch.Tensor, d)
+)
+
+
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
+# Rows sampled by shrink-r4 (per-id subset rule; the rows kept hold every per-id campaign kill).
+@pytest.mark.parametrize("dunder", [d for d in _TENSOR_DUNDERS if d in {"__div__", "__gt__"}])
+def test_canonical_name_matches_what_torch_hands_a_mode(dunder: str) -> None:
+    """Every admitted operator dunder canonicalizes to what the rescue's mode logs.
+
+    Derived from torch, not asserted from the table: whatever the running
+    torch passes to a ``TorchFunctionMode`` for the dunder must land on the
+    dunder's own canonical name.
+    """
+
+    assert _respelling_mismatch(dunder) is None
+
+
+def _stub_trace(op_names: list[str], *, signal: bool = False) -> Any:
+    """Build a minimal trace stub for direct driver tests (rows in ``layer_list`` too)."""
+
+    rows = [types.SimpleNamespace(func_name=name) for name in op_names]
+    return types.SimpleNamespace(
+        escape_diagnostics=[],
+        _had_unattributed_tensor_args=signal,
+        ops=rows,
+        _layer_list=rows,
+        modules=[],
+        _provenance_verified=None,
+        _provenance_verification_reason=None,
+    )
+
+
+# Kept by shrink-r4 (per-id subset rule): sole coverage of planted fault catches.
+@pytest.mark.parametrize(
+    ("primary_ops", "rescued_ops", "lost"),
+    [(["__iadd__", "relu"], ["add", "relu", "relu"], ("add_",))],
+    ids=["iadd_as_out_of_place_add"],
+)
+def test_genuine_loss_still_refuses_the_rescue(
+    primary_ops: list[str], rescued_ops: list[str], lost: tuple[str, ...]
+) -> None:
+    """A rescued trace that really misses an op keeps the primary."""
+
+    primary = _stub_trace(primary_ops, signal=True)
+    traces = iter([primary, _stub_trace(rescued_ops)])
+
+    result = capture_with_rescue(lambda: next(traces))
+
+    assert result is primary
+    assert result._provenance_verification_reason == "escape_rescue_unrecovered"
+    assert result._rescue_rerun["recovered"] is False
+    assert result._rescue_rerun["lost_ops"] == lost
+
+
+@pytest.fixture()
+def raw_cos() -> Iterator[Any]:
+    """A pristine pre-wrap ``torch.cos`` in an unrebindable holder, rewrapping afterwards."""
+
+    unwrap_torch()
+    raw = torch.cos
+    assert not is_decorated_function(raw)
+    try:
+        yield OpaqueCallable(raw)
+    finally:
+        wrap_torch()

@@ -3,66 +3,47 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, Iterator, Mapping
+import weakref
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Literal
 
-import torch
 import torch.nn.modules.module as torch_module
 from torch import nn
 
+from torchlens._ir.events import PreHookProvenanceEvent
+
 from ... import _state
-from ...data_classes.func_call_location import FuncCallLocation
-from ...data_classes.module import HookInfo
-from ...data_classes.prehook import (
+from ..._data_classes.func_call_location import FuncCallLocation
+from ..._data_classes.module import HookInfo
+from ..._data_classes.prehook import (
     ModuleInputSnapshot,
     PreHookEffect,
-    TensorInputObservation,
-    TypedInputPath,
 )
-from ...ir import PreHookProvenanceEvent
-from ._tl import get_tensor_label
+from ..._errors import RecordBindingError
+from ..._utils._display_bounded import short_dataclass_repr
+from ..._utils._record_group_table import record_member
+from ._prehook_state import (
+    _compare_observations,
+    _fingerprint,
+    _observe_state,
+    _snapshot_state,
+    _StateObservation,
+)
 
 if TYPE_CHECKING:
-    from ...data_classes.trace import Trace
+    from ..._data_classes.trace import Trace
 
-_INCOMPLETE_VERSION = "tensor_version_unavailable"
 _INCOMPLETE_BYPASS = "registration_interposition_bypassed"
-_INCOMPLETE_OPAQUE_OBJECT = "opaque_object_untraversed"
-_IMMUTABLE_LEAF_TYPES = (str, bytes, int, float, bool, complex, type(None))
-
-
-@dataclass(frozen=True)
-class _TensorState:
-    """Cheap live tensor observation used for transition comparison."""
-
-    path: TypedInputPath
-    value: torch.Tensor
-    object_id: int
-    version: int | None
-    shape: tuple[int, ...]
-    dtype: str
-    device: str
-    layout: str
-    requires_grad: bool
-    source_op: str | None
-
-
-@dataclass(frozen=True)
-class _StateObservation:
-    """Metadata-only observation of one logical args/kwargs state."""
-
-    structure: tuple[Any, ...]
-    tensors: tuple[_TensorState, ...]
-    leaves: tuple[tuple[TypedInputPath, str, Any], ...]
-    incomplete_reasons: tuple[str, ...]
 
 
 @dataclass
 class _InvocationToken:
     """Mutable correlation token for one re-entrant module invocation."""
+
+    __repr__ = short_dataclass_repr
 
     module: nn.Module
     args: tuple[Any, ...]
@@ -98,9 +79,15 @@ class _InstanceAttributeReplacement:
 
 @dataclass
 class PreHookProvenanceLedger:
-    """Strong session-only ledger for all reversible interposition."""
+    """Strong session-only ledger for all reversible interposition.
 
-    trace: Trace
+    The ledger holds its capture trace WEAKLY: the trace owns the ledger for
+    the session, and the wrappers the ledger installs close over the ledger,
+    so a strong back-reference made every dead Trace wait for the cyclic
+    collector.
+    """
+
+    trace_ref: weakref.ReferenceType[Trace]
     model: nn.Module
     modules: tuple[nn.Module, ...]
     prepared_ids: frozenset[int]
@@ -115,6 +102,27 @@ class PreHookProvenanceLedger:
     bypassed_modules: set[int] = field(default_factory=set)
     global_bypass_seen: bool = False
     active: bool = True
+
+    @property
+    def trace(self) -> Trace:
+        """Return the capture trace this ledger serves.
+
+        Raises
+        ------
+        RecordBindingError
+            Code ``trace_reference_collected`` when the trace is already dead:
+            the ledger is session-only and every wrapper checks ``active``
+            before reaching the trace.
+        """
+
+        trace = self.trace_ref()
+        if trace is None:
+            raise RecordBindingError(
+                "pre-hook provenance ledger outlived its capture trace",
+                code="trace_reference_collected",
+                remedy="keep the Trace in a variable (t = tl.trace(...)) while reading its records",
+            )
+        return trace
 
     def current_token(self, module: nn.Module) -> _InvocationToken | None:
         """Return the active LIFO token for ``module`` when present."""
@@ -131,7 +139,6 @@ def install_prehook_provenance(
     | None = None,
 ) -> PreHookProvenanceLedger:
     """Install the complete reversible pre-hook provenance transaction.
-
     Parameters
     ----------
     trace:
@@ -141,12 +148,10 @@ def install_prehook_provenance(
     forward_hook_wrapper_factory:
         Existing TorchLens output-replacement wrapper factory. Supplying it
         migrates forward-hook wrapping into the same restoration transaction.
-
     Returns
     -------
     PreHookProvenanceLedger
         Installed transaction ledger.
-
     Raises
     ------
     Exception
@@ -155,7 +160,7 @@ def install_prehook_provenance(
 
     modules = tuple(model.modules())
     ledger = PreHookProvenanceLedger(
-        trace=trace,
+        trace_ref=weakref.ref(trace),
         model=model,
         modules=modules,
         prepared_ids=frozenset(id(module) for module in modules),
@@ -221,6 +226,12 @@ def rollback_prehook_provenance(trace: Trace) -> None:
             registry_replacement.registry[registry_replacement.hook_id] = (
                 registry_replacement.original
             )
+    # The wrappers close over the ledger and the ledger lists the wrappers:
+    # release those cycles here so the restored session dies by refcount.
+    ledger.attribute_replacements.clear()
+    ledger.registry_replacements.clear()
+    ledger.invocation_stacks.clear()
+    ledger.known_wrappers.clear()
     trace.__dict__.pop("_prehook_provenance_ledger", None)
 
 
@@ -525,7 +536,8 @@ def _ensure_root_forward_binder(ledger: PreHookProvenanceLedger) -> None:
     def root_forward(*args: Any, **kwargs: Any) -> Any:
         """Bind the current root token before the real forward body starts."""
 
-        bind_invocation(ledger.trace, model, "self", 1, args, kwargs)
+        if ledger.active:
+            bind_invocation(ledger.trace, model, "self", 1, (args, kwargs))
         return prior_forward(*args, **kwargs)
 
     model.forward = root_forward
@@ -539,10 +551,13 @@ def bind_invocation(
     module: nn.Module,
     address: str,
     call_index: int,
-    args: tuple[Any, ...] | None = None,
-    kwargs: dict[str, Any] | None = None,
+    inputs: tuple[tuple[Any, ...], dict[str, Any]] | None = None,
 ) -> None:
-    """Bind the current invocation token to its actual ModuleCall identity."""
+    """Bind the current invocation token to its actual ModuleCall identity.
+
+    ``inputs`` is the ``(args, kwargs)`` pair of the invocation when the
+    caller holds it (needed only for the bypassed-module disclosure path).
+    """
 
     ledger = getattr(trace, "_prehook_provenance_ledger", None)
     if not isinstance(ledger, PreHookProvenanceLedger) or not ledger.active:
@@ -558,7 +573,8 @@ def bind_invocation(
             return
         refresh_registration_bypasses(trace, module)
         bypassed = ledger.global_bypass_seen or id(module) in ledger.bypassed_modules
-        if bypassed and args is not None and kwargs is not None:
+        if bypassed and inputs is not None:
+            args, kwargs = inputs
             with _paused_logging():
                 observation = _observe_state(args, kwargs)
                 snapshot = _snapshot_state(args, kwargs, observation)
@@ -625,9 +641,9 @@ def _snapshot_with_reasons(
     return ModuleInputSnapshot(
         _args=snapshot._args,
         _kwargs=snapshot._kwargs,
-        structure=snapshot.structure,
+        input_structure=snapshot.input_structure,
         tensor_observations=snapshot.tensor_observations,
-        capture_complete=not merged,
+        is_capture_complete=not merged,
         incomplete_reasons=merged,
         summary=snapshot.summary,
     )
@@ -708,7 +724,7 @@ def _make_pre_hook_wrapper(
                     hook=hook_info,
                     with_kwargs=with_kwargs,
                     outcome=outcome,
-                    changed=changed,
+                    has_changes=changed,
                     change_kinds=kinds,
                     changed_paths=paths,
                     before_fingerprint=_fingerprint(before),
@@ -762,231 +778,9 @@ def _paused_logging() -> Iterator[None]:
         yield
 
 
-def _observe_state(args: tuple[Any, ...], kwargs: dict[str, Any]) -> _StateObservation:
-    """Capture structure, identity, version, and metadata without tensor copies."""
-
-    structure: list[Any] = []
-    tensors: list[_TensorState] = []
-    leaves: list[tuple[TypedInputPath, str, Any]] = []
-    reasons: set[str] = set()
-    _walk_value(args, ("args",), structure, tensors, leaves, reasons)
-    _walk_value(kwargs, ("kwargs",), structure, tensors, leaves, reasons)
-    return _StateObservation(
-        structure=tuple(structure),
-        tensors=tuple(tensors),
-        leaves=tuple(leaves),
-        incomplete_reasons=tuple(sorted(reasons)),
-    )
-
-
-def _walk_value(
-    value: Any,
-    path: TypedInputPath,
-    structure: list[Any],
-    tensors: list[_TensorState],
-    leaves: list[tuple[TypedInputPath, str, Any]],
-    reasons: set[str],
-) -> None:
-    """Walk supported input containers in deterministic typed-path order."""
-
-    if isinstance(value, torch.Tensor):
-        try:
-            version = int(value._version)
-        except (AttributeError, RuntimeError):
-            version = None
-            reasons.add(_INCOMPLETE_VERSION)
-        structure.append((path, "tensor"))
-        tensors.append(
-            _TensorState(
-                path=path,
-                value=value,
-                object_id=id(value),
-                version=version,
-                shape=tuple(value.shape),
-                dtype=str(value.dtype),
-                device=str(value.device),
-                layout=str(value.layout),
-                requires_grad=bool(value.requires_grad),
-                source_op=get_tensor_label(value),
-            )
-        )
-        return
-    if isinstance(value, tuple):
-        structure.append((path, "tuple", len(value)))
-        for index, item in enumerate(value):
-            _walk_value(item, (*path, index), structure, tensors, leaves, reasons)
-        return
-    if isinstance(value, list):
-        structure.append((path, "list", len(value)))
-        for index, item in enumerate(value):
-            _walk_value(item, (*path, index), structure, tensors, leaves, reasons)
-        return
-    if isinstance(value, Mapping):
-        keys = tuple(value.keys())
-        structure.append((path, "mapping", tuple((type(key).__name__, repr(key)) for key in keys)))
-        for key in keys:
-            _walk_value(value[key], (*path, ("key", key)), structure, tensors, leaves, reasons)
-        return
-    if isinstance(value, _IMMUTABLE_LEAF_TYPES):
-        structure.append((path, "immutable", type(value).__name__))
-        leaves.append((path, "immutable", (type(value).__name__, value)))
-        return
-    reasons.add(_INCOMPLETE_OPAQUE_OBJECT)
-    structure.append((path, "object", type(value).__qualname__))
-    leaves.append((path, "object", (type(value).__qualname__, id(value))))
-
-
-def _compare_observations(
-    before: _StateObservation,
-    after: _StateObservation,
-) -> tuple[bool | None, tuple[str, ...], tuple[TypedInputPath, ...], tuple[str, ...]]:
-    """Compare two observations using the decided tri-state detection semantics."""
-
-    kinds: set[str] = set()
-    paths: set[TypedInputPath] = set()
-    if before.structure != after.structure:
-        kinds.add("structure")
-        before_paths = {entry[0] for entry in before.structure}
-        after_paths = {entry[0] for entry in after.structure}
-        paths.update(before_paths ^ after_paths)
-    before_tensors = {state.path: state for state in before.tensors}
-    after_tensors = {state.path: state for state in after.tensors}
-    for path in before_tensors.keys() | after_tensors.keys():
-        left = before_tensors.get(path)
-        right = after_tensors.get(path)
-        if left is None or right is None:
-            kinds.add("structure")
-            paths.add(path)
-            continue
-        if left.object_id != right.object_id:
-            kinds.add("identity")
-            paths.add(path)
-            continue
-        if left.version is not None and right.version is not None and left.version != right.version:
-            kinds.add("in_place_tensor")
-            paths.add(path)
-        left_metadata = (left.shape, left.dtype, left.device, left.layout, left.requires_grad)
-        right_metadata = (right.shape, right.dtype, right.device, right.layout, right.requires_grad)
-        if left_metadata != right_metadata:
-            kinds.add("tensor_metadata")
-            paths.add(path)
-    before_leaves = {path: value for path, _kind, value in before.leaves}
-    after_leaves = {path: value for path, _kind, value in after.leaves}
-    for path in before_leaves.keys() | after_leaves.keys():
-        if before_leaves.get(path) != after_leaves.get(path):
-            kinds.add("value_or_identity")
-            paths.add(path)
-    reasons = tuple(sorted(set(before.incomplete_reasons) | set(after.incomplete_reasons)))
-    changed: bool | None = True if kinds else (None if reasons else False)
-    return changed, tuple(sorted(kinds)), tuple(sorted(paths, key=repr)), reasons
-
-
-def _fingerprint(observation: _StateObservation) -> tuple[Any, ...]:
-    """Return a compact metadata-only fingerprint for one observation."""
-
-    tensor_bits = tuple(
-        (
-            state.path,
-            state.object_id,
-            state.version,
-            state.shape,
-            state.dtype,
-            state.device,
-            state.layout,
-            state.requires_grad,
-        )
-        for state in observation.tensors
-    )
-    return observation.structure, tensor_bits, observation.leaves
-
-
-def _snapshot_state(
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    observation: _StateObservation,
-    *,
-    trace: Trace | None = None,
-    reuse_source_payload: bool = False,
-) -> ModuleInputSnapshot:
-    """Create one truthful detached snapshot, deduplicating tensor aliases."""
-
-    tensor_copies: dict[int, Any] = {}
-    payload_origins: dict[int, str] = {}
-    copy_failures: set[int] = set()
-    states_by_id = {state.object_id: state for state in observation.tensors}
-
-    def clone(value: Any) -> Any:
-        """Clone tensors and recursively preserve supported input containers."""
-
-        if isinstance(value, torch.Tensor):
-            tensor_id = id(value)
-            if tensor_id in tensor_copies:
-                return tensor_copies[tensor_id]
-            state = states_by_id[tensor_id]
-            if reuse_source_payload and trace is not None and state.source_op is not None:
-                event = trace.capture_events.op_event_by_label_raw.get(state.source_op)
-                payload = event.output.tensor.payload if event is not None else None
-                if isinstance(payload, torch.Tensor) and payload is not value:
-                    tensor_copies[tensor_id] = payload
-                    payload_origins[tensor_id] = "immutable_producer_snapshot"
-                    return payload
-            try:
-                copied = value.detach().clone()  # detach-ok: provenance snapshot copy
-            except Exception:
-                copied = None
-                copy_failures.add(tensor_id)
-            tensor_copies[tensor_id] = copied
-            payload_origins[tensor_id] = "dedicated_pre_hook_snapshot"
-            return copied
-        if isinstance(value, tuple):
-            return tuple(clone(item) for item in value)
-        if isinstance(value, list):
-            return [clone(item) for item in value]
-        if isinstance(value, dict):
-            return {key: clone(item) for key, item in value.items()}
-        return value
-
-    cloned_args = clone(args)
-    cloned_kwargs = clone(kwargs)
-    alias_groups: dict[int, int] = {}
-    tensor_observations: list[TensorInputObservation] = []
-    reasons = set(observation.incomplete_reasons)
-    for state in observation.tensors:
-        alias_group = alias_groups.setdefault(state.object_id, len(alias_groups) + 1)
-        payload = tensor_copies.get(state.object_id)
-        if state.object_id in copy_failures:
-            reasons.add("tensor_payload_copy_failed")
-        tensor_observations.append(
-            TensorInputObservation(
-                path=state.path,
-                source_op=state.source_op,
-                object_id=state.object_id,
-                version=state.version,
-                shape=state.shape,
-                dtype=state.dtype,
-                device=state.device,
-                layout=state.layout,
-                requires_grad=state.requires_grad,
-                payload=payload,
-                payload_status="saved" if payload is not None else "unsaved",
-                alias_group=alias_group,
-                payload_origin=payload_origins.get(state.object_id, "dedicated_pre_hook_snapshot"),
-            )
-        )
-    return ModuleInputSnapshot(
-        _args=cloned_args,
-        _kwargs=cloned_kwargs,
-        structure=observation.structure,
-        tensor_observations=tuple(tensor_observations),
-        capture_complete=not reasons,
-        incomplete_reasons=tuple(sorted(reasons)),
-        summary=f"args={len(args)}, kwargs={len(kwargs)}, tensors={len(observation.tensors)}",
-    )
-
-
 def _module_address(module: nn.Module) -> str:
     """Return the prepared module address for interrupted event diagnostics."""
 
     meta = getattr(module, "_tl", None)
-    address = getattr(meta, "address", None)
+    address = record_member(meta, "address", None)
     return "self" if not address else str(address)

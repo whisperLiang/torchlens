@@ -68,8 +68,8 @@ def make_boundary_schema(
     )
 
 
-__all__ = [
+__all__ = (
     "boundary_key_for_node",
     "classify_boundary_role",
     "make_boundary_schema",
-]
+)

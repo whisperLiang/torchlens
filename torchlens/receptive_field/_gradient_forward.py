@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from ..backends import BackendUnsupportedError, get_backend_spec
+from torchlens.backends.registry import BackendUnsupportedError
+
+from .._record_type import record_type
+from ..backends.registry import get_backend_spec
 from ._engine_forward import solve_projective
 from ._errors import ReceptiveFieldUnavailableError
 from ._gradient import (
@@ -22,28 +25,27 @@ from ._gradient import (
     _support_ranges,
 )
 from ._path import descendant_labels, require_path, resolve_graph_point
-from ._types import GradientReceptiveField, ReceptiveFieldDirection
+from ._types import GradReceptiveField, ReceptiveFieldDirection
 
 if TYPE_CHECKING:
-    from ..data_classes.op import Op
-    from ..data_classes.trace import Trace
+    from .._data_classes.op import Op
+    from .._data_classes.trace import Trace
     from ._engine_forward import _ProjectiveFieldSolution
 
 
 _RECAPTURE_RECIPE = (
-    "tl.trace(model, x.requires_grad_(True), "
-    'capture=tl.options.CaptureOptions(backward_ready=True), save_mode="reference")'
+    "tl.trace(model, x, "
+    'capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"))'
 )
 
 
 def _no_projective_vjp_reason(source: Op, targets: Sequence[Op], trace: Trace) -> str:
     """Return the honest reason a projective VJP came back empty.
 
-    Finding B1-19b (SF-04 class): this message used to prescribe
-    ``save_mode="reference"`` unconditionally -- including on traces already
-    captured in that exact mode, which is the shape of remedy that sends a user
-    in a circle. It also blamed a "stale saved tensor identity" for a case that
-    is neither stale nor a mode problem: when the only target is a structural
+    The message is cause-specific: it never prescribes ``save_mode="reference"``
+    on a trace already captured in that mode (a remedy that would send a user in
+    a circle), and it does not blame a "stale saved tensor identity" where
+    nothing is stale. When the only target is a structural
     OUTPUT MARKER whose sole parent is the source, both payloads are independent
     clones of the SAME captured value, so there is no autograd edge between them
     for any VJP to traverse.
@@ -67,7 +69,7 @@ def _no_projective_vjp_reason(source: Op, targets: Sequence[Op], trace: Trace) -
     marker_targets = [
         target
         for target in targets
-        if getattr(target, "layer_type", None) == "output"
+        if record_type(target, None) == "output"
         and set(getattr(target, "parents", ()) or ()) == {source.layer_label}
     ]
     if marker_targets and len(marker_targets) == len(targets):
@@ -85,7 +87,7 @@ def _no_projective_vjp_reason(source: Op, targets: Sequence[Op], trace: Trace) -
         "but autograd returned no VJP, so the saved tensor identity is not the one in the "
         "captured graph."
     )
-    if str(getattr(trace, "save_mode", "")) != "reference":
+    if str(trace._options_save_mode) != "reference":
         return reason + ' Recapture with save_mode="reference".'
     return (
         reason + ' This trace already used save_mode="reference", so the cause is not the '
@@ -108,7 +110,7 @@ def _target_key(target: Op) -> str:
         Exact IO role for a model output, otherwise the pass-qualified label.
     """
 
-    return str(target.io_role or target.label)
+    return str(target.graph.io_role or target.label)
 
 
 def _select_targets(source: Op, target: object | None) -> tuple[tuple[Op, ...], bool]:
@@ -169,12 +171,12 @@ def _projective_recapture_recipe(source: Op, targets: Sequence[Op]) -> str:
         Selector-based recapture guidance.
     """
 
-    labels = (source.layer_label_short, *(target.layer_label_short for target in targets))
+    labels = (source.short_layer_label, *(target.short_layer_label for target in targets))
     selectors = " | ".join(f"tl.label({label!r})" for label in labels)
     return (
-        "tl.trace(model, x.requires_grad_(True), "
-        "capture=tl.options.CaptureOptions(backward_ready=True), "
-        f'save_mode="reference", save={selectors})'
+        "tl.trace(model, x, "
+        'capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"), '
+        f"save={selectors})"
     )
 
 
@@ -266,7 +268,7 @@ def _build_projective_result(
     solution: _ProjectiveFieldSolution,
     atol: float,
     rtol: float,
-) -> GradientReceptiveField:
+) -> GradReceptiveField:
     """Build one target-space empirical projective-field result.
 
     Parameters
@@ -286,21 +288,21 @@ def _build_projective_result(
 
     Returns
     -------
-    GradientReceptiveField
+    GradReceptiveField
         Immutable target-space influence set.
     """
 
     magnitude = column.detach().abs()
     finite = torch.isfinite(magnitude)
-    nonfinite_count = int((~finite).sum().item())
+    num_nonfinite = int((~finite).sum().item())
     finite_values = magnitude[finite]
     maximum = finite_values.max() if finite_values.numel() else magnitude.new_tensor(0.0)
     support = finite & (magnitude > atol + rtol * maximum)
     result_warnings: tuple[str, ...] = ()
-    if nonfinite_count:
+    if num_nonfinite:
         message = (
             f"Projective gradient from {source.label!r} to {target.label!r} contains "
-            f"{nonfinite_count} NaN or Inf entries; validation is indeterminate."
+            f"{num_nonfinite} NaN or Inf entries; validation is indeterminate."
         )
         warnings.warn(message, RuntimeWarning, stacklevel=3)
         result_warnings = (message,)
@@ -318,85 +320,87 @@ def _build_projective_result(
         support_mask=support,
         support_ranges=_support_ranges(support),
         spatial_support_mask=_spatial_support(
-            support, None if descriptor is None else descriptor.layout
+            support, None if descriptor is None else descriptor.axis_roles
         ),
         batch_support=batch_support,
         cross_batch_influence=cross_batch,
         atol=atol,
         rtol=rtol,
-        nonfinite_count=nonfinite_count,
+        num_nonfinite=num_nonfinite,
         warnings=result_warnings,
         direction=ReceptiveFieldDirection.PROJECTIVE,
         unit_shape=tuple(source.shape),
     )
 
 
-def projective_gradient_for_unit(
-    source: Op,
-    unit: Sequence[int],
-    *,
-    target: object | None = None,
-    atol: float = 0.0,
-    rtol: float = 0.0,
-    retain_graph: bool = False,
-) -> GradientReceptiveField | Mapping[str, GradientReceptiveField]:
-    """Probe the target-space influence of exactly one source element.
+def projective_supports_by_row_sweep(
+    source: Op, units: Sequence[Sequence[int]], target: Op
+) -> tuple[GradReceptiveField, ...]:
+    """Probe several source units' projective fields one target element at a time.
 
-    The probe extracts a Jacobian column from the captured autograd graph using
-    two VJP calls. Compute and temporary memory therefore scale with the number
-    and sizes of selected targets even though the call count remains exactly two.
+    The fallback for a captured graph that cannot be differentiated twice (a
+    fused kernel with no second derivative, such as fused scaled-dot-product
+    attention): row ``t`` of the Jacobian is one ordinary VJP seeded at target
+    element ``t``, and each unit's column is read off the rows. The cost is one
+    backward pass per target element, however many source units are probed.
 
     Parameters
     ----------
     source:
-        Source operation with a live saved output tensor.
-    unit:
-        Complete source-element index, including every source axis.
+        Operation whose output elements seed the projective fields.
+    units:
+        Complete source indices, one per probe.
     target:
-        Optional descendant graph point. ``None`` probes every reachable model
-        output in one double-VJP operation.
-    atol, rtol:
-        Non-negative support thresholds.
-    retain_graph:
-        Whether PyTorch should retain saved autograd buffers after the probe.
+        The one operation whose output space the fields live in.
 
     Returns
     -------
-    GradientReceptiveField or Mapping[str, GradientReceptiveField]
-        One result for an explicit target, otherwise an insertion-ordered mapping.
-
-    Raises
-    ------
-    BackendUnsupportedError
-        If the trace backend does not support true backward capture.
-    ReceptiveFieldUnavailableError
-        If saved-graph probing or cotangent linearization is unavailable.
-    ReceptiveFieldError
-        If the source index is invalid or suppression leaks trace state.
+    tuple[GradReceptiveField, ...]
+        One exact (zero-threshold) projective field per unit, in ``units`` order.
     """
 
-    if atol < 0 or rtol < 0:
-        raise ValueError("atol and rtol must be non-negative.")
     trace: Trace = source.source_trace
-    spec = get_backend_spec(str(getattr(trace, "backend", "torch")))
-    if not spec.capabilities.backward_capture:
-        raise BackendUnsupportedError(
-            f"Backend {spec.name!r} does not support projective gradient probes."
-        )
-    if not getattr(trace, "backward_ready", False):
-        raise ReceptiveFieldUnavailableError(
-            "Projective gradient fields require backward_ready=True and saved payloads. "
-            f"Recapture with {_RECAPTURE_RECIPE}."
-        )
-
-    targets, explicit_target = _select_targets(source, target)
+    targets, _ = _select_targets(source, target)
     source_tensor = _source_tensor(source, targets)
-    normalized_unit = _normalize_unit(unit, tuple(source_tensor.shape), source.label)
-    target_tensors = _target_tensors(targets)
+    (target_tensor,) = _target_tensors(targets)
     solution = solve_projective(trace, targets)
+    normalized = [_normalize_unit(unit, tuple(source_tensor.shape), source.label) for unit in units]
+    unit_index = tuple(torch.tensor(axis) for axis in zip(*normalized, strict=True))
+    flat_target = target_tensor.reshape(-1)
+    columns = torch.zeros((len(normalized), flat_target.numel()), dtype=source_tensor.dtype)
+    with _probe_suppressed(trace):
+        for element in range(flat_target.numel()):
+            (row,) = torch.autograd.grad(
+                flat_target[element], source_tensor, retain_graph=True, allow_unused=True
+            )
+            if row is not None:
+                columns[:, element] = row.detach()[unit_index]
+    return tuple(
+        _build_projective_result(
+            source=source,
+            target=targets[0],
+            unit=unit,
+            column=columns[position].reshape(target_tensor.shape),
+            solution=solution,
+            atol=0.0,
+            rtol=0.0,
+        )
+        for position, unit in enumerate(normalized)
+    )
 
-    seed = torch.zeros_like(source_tensor)
-    seed[normalized_unit] = 1
+
+def _projective_columns(
+    source: Op,
+    targets: Sequence[Op],
+    source_tensor: torch.Tensor,
+    target_tensors: Sequence[torch.Tensor],
+    seed: torch.Tensor,
+    *,
+    retain_graph: bool,
+) -> tuple[torch.Tensor | None, ...]:
+    """Linearize the target cotangents and pull one projective column per target."""
+
+    trace: Trace = source.source_trace
     try:
         with _probe_suppressed(trace):
             cotangents = tuple(
@@ -427,10 +431,84 @@ def projective_gradient_for_unit(
         raise ReceptiveFieldUnavailableError(
             "Projective gradient cotangent linearization unavailable at the captured "
             f"autograd node: {exc}. Use a receptive-probe sweep over candidate target "
-            "units as the O(units) alternative."
+            "units as the O(units) alternative (a field view's .of(method='gradient') "
+            "runs that sweep itself when the target site has at most probe_budget "
+            "elements)."
         ) from exc
+    return columns
 
-    results: dict[str, GradientReceptiveField] = {}
+
+def projective_gradient_for_unit(
+    source: Op,
+    unit: Sequence[int],
+    *,
+    target: object | None = None,
+    atol: float = 0.0,
+    rtol: float = 0.0,
+    retain_graph: bool = False,
+) -> GradReceptiveField | Mapping[str, GradReceptiveField]:
+    """Probe the target-space influence of exactly one source element.
+
+    The probe extracts a Jacobian column from the captured autograd graph using
+    two VJP calls. Compute and temporary memory therefore scale with the number
+    and sizes of selected targets even though the call count remains exactly two.
+
+    Parameters
+    ----------
+    source:
+        Source operation with a live saved output tensor.
+    unit:
+        Complete source-element index, including every source axis.
+    target:
+        Optional descendant graph point. ``None`` probes every reachable model
+        output in one double-VJP operation.
+    atol, rtol:
+        Non-negative support thresholds.
+    retain_graph:
+        Whether PyTorch should retain saved autograd buffers after the probe.
+
+    Returns
+    -------
+    GradReceptiveField or Mapping[str, GradReceptiveField]
+        One result for an explicit target, otherwise an insertion-ordered mapping.
+
+    Raises
+    ------
+    BackendUnsupportedError
+        If the trace backend does not support true backward capture.
+    ReceptiveFieldUnavailableError
+        If saved-graph probing or cotangent linearization is unavailable.
+    ReceptiveFieldError
+        If the source index is invalid or suppression leaks trace state.
+    """
+
+    if atol < 0 or rtol < 0:
+        raise ValueError("atol and rtol must be non-negative.")
+    trace: Trace = source.source_trace
+    spec = get_backend_spec(str(trace._provenance_backend))
+    if not spec.capabilities.backward_capture:
+        raise BackendUnsupportedError(
+            f"Backend {spec.name!r} does not support projective gradient probes."
+        )
+    if not trace._options_backward_ready:
+        raise ReceptiveFieldUnavailableError(
+            "Projective gradient fields require backward_ready=True and saved payloads. "
+            f"Recapture with {_RECAPTURE_RECIPE}."
+        )
+
+    targets, explicit_target = _select_targets(source, target)
+    source_tensor = _source_tensor(source, targets)
+    normalized_unit = _normalize_unit(unit, tuple(source_tensor.shape), source.label)
+    target_tensors = _target_tensors(targets)
+    solution = solve_projective(trace, targets)
+
+    seed = torch.zeros_like(source_tensor)
+    seed[normalized_unit] = 1
+    columns = _projective_columns(
+        source, targets, source_tensor, target_tensors, seed, retain_graph=retain_graph
+    )
+
+    results: dict[str, GradReceptiveField] = {}
     for target_op, column in zip(targets, columns, strict=True):
         if column is None:
             raise ReceptiveFieldUnavailableError(

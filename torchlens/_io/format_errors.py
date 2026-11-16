@@ -1,0 +1,184 @@
+"""Portable-I/O error vocabulary (logical L0; physically homed with _io).
+
+The persistence four-way ruling sends IO error
+CLASSES to L0: they are frozen vocabulary consumed by every stratum that
+touches an artifact. They stay physically inside ``torchlens._io`` under
+Rule V's single-lower-consumer clause (declared logical layer, printed in
+the vocabulary census); the ``torchlens._io`` facade re-exports every
+historical spelling unchanged.
+"""
+
+from __future__ import annotations
+
+from typing import NoReturn
+
+from ..errors._base import CompatibilityError, ConfigurationError
+
+__tl_layer__ = "L0"
+__tl_vocabulary__ = True
+
+#: Remedy for a tensor with no saved-format payload codec (a sparse or other
+#: non-strided layout): the ``metadata_value_unportable`` save refusal carries it.
+DENSE_REMEDY = 'make the tensor dense and strided before the save, or save at level="audit"'
+
+
+class ArtifactError(CompatibilityError, RuntimeError):
+    """Raised when TorchLens portable bundle state is invalid or unsupported.
+
+    Examples
+    --------
+    >>> issubclass(ArtifactError, tl.errors.CompatibilityError)
+    True
+    >>> issubclass(ArtifactError, RuntimeError)
+    True
+    """
+
+
+class ArtifactTooOldError(ArtifactError):
+    """Raised when an artifact was saved by torchlens 2.37 and earlier, which this release does not read.
+
+    Any stamp older than the current ``tlspec_version``, any pickled pre-2.38 module path and the
+    2.16 ModelLog format refuse with this error rather than being partially reconstructed;
+    the remedy is to load the file with torchlens 2.36.x or capture the model again.
+
+    Examples
+    --------
+    >>> issubclass(ArtifactTooOldError, tl.errors.ArtifactError)
+    True
+    >>> issubclass(ArtifactTooOldError, RuntimeError)
+    True
+    """
+
+
+class ArtifactTooNewError(ArtifactError):
+    """Raised when an artifact declares a schema newer than this runtime's ceiling.
+
+    The artifact is valid; the READER is too old. Distinct from
+    :class:`ArtifactTooOldError` (artifact too old) and from
+    integrity refusals: the remedy is upgrading torchlens to the release that
+    wrote the artifact (or newer), never editing the artifact. Every
+    above-ceiling site routes through ``above_ceiling_error`` so the
+    refusal carries the same stable ``fields["code"]`` everywhere (G3
+    consolidation; the bare ``ValueError`` at the validation entry used to
+    defeat the load path's typed-refusal pass-through).
+
+    Examples
+    --------
+    >>> issubclass(ArtifactTooNewError, tl.errors.ArtifactError)
+    True
+    >>> issubclass(ArtifactTooNewError, RuntimeError)
+    True
+    """
+
+
+class ArtifactRuntimeIncompatibleError(ArtifactError):
+    """Raised when the RUNTIME cannot serve an otherwise-valid artifact.
+
+    A runtime-axis refusal (torch major-version mismatch, unparseable torch
+    version), never a schema-calendar one: the artifact stays valid and loads
+    under a runtime with the recorded major version. Distinct class so
+    callers can tell runtime policy apart from the version window.
+
+    Examples
+    --------
+    >>> issubclass(ArtifactRuntimeIncompatibleError, tl.errors.ArtifactError)
+    True
+    >>> issubclass(ArtifactRuntimeIncompatibleError, RuntimeError)
+    True
+    """
+
+
+class UnknownPersistedFieldError(ArtifactError):
+    """Raised when incoming persisted state carries fields this reader does not know.
+
+    The persisted-state contract (ecosystem MEMO 3.3): unknown fields refuse
+    TYPED, in BOTH writer directions, by default -- a newer writer's additive
+    field is captured truth this reader would silently drop (the
+    ``dropped_edge_tensor_args`` lesson: the one real unknown field in
+    torchlens history was evidence whose loss also disabled a metadata
+    invariant), and an older writer's field this reader deleted without an
+    alias is a reader regression. ``fields`` carries ``code``
+    (``unknown_persisted_field``), ``record_type``, ``unknown_fields``,
+    ``declared_tlspec_version``, ``runtime_tlspec_version``, and ``remedy``.
+
+    Examples
+    --------
+    >>> issubclass(UnknownPersistedFieldError, tl.errors.ArtifactError)
+    True
+    >>> issubclass(UnknownPersistedFieldError, RuntimeError)
+    True
+    """
+
+
+class PreReleaseArtifactError(ArtifactError):
+    """Raised when a pre-release-marked artifact loads without the switch.
+
+    Sprint-gated fields persist only under the test-only activation switch
+    (:mod:`torchlens._io.prerelease`), and every state written under the
+    switch carries the pre-release marker. Loading such an artifact as a real
+    current-version artifact refuses with this error so switched and real
+    writes are never indistinguishable.
+    """
+
+
+# Pickle-visible identity stays the historical facade path: persisted bundle
+# metadata references these classes by (module, qualname), and the guarded
+# unpickler allowlists exactly those paths -- the physical split must not
+# change a single persisted byte (move-compat law, memo org rule 9).
+for _cls in (
+    ArtifactError,
+    ArtifactTooOldError,
+    ArtifactTooNewError,
+    ArtifactRuntimeIncompatibleError,
+    UnknownPersistedFieldError,
+    PreReleaseArtifactError,
+):
+    _cls.__module__ = "torchlens._io"
+del _cls
+
+
+def refuse_bundle_exists(path: object, *, overwritable: bool = False) -> NoReturn:
+    """Raise the ``bundle_path_exists`` refusal for a save or streaming target that exists.
+
+    Shared by the streaming writer (``to_disk``), ``Trace.save`` and ``Bundle.save``
+    (``overwritable=True``: those doors take ``overwrite=``), at the entry check and at
+    the publish-time TOCTOU recheck, so every existing-target refusal carries the same
+    code and message shape (behaviour-net IO-3 follow-up).
+    """
+
+    raise ArtifactError(
+        f"Bundle path already exists: {path}",
+        code="bundle_path_exists",
+        remedy=(
+            "pass overwrite=True to replace the existing bundle, or save to a path that "
+            "does not exist yet"
+            if overwritable
+            else "stream to a path that does not exist yet, or remove the old bundle first"
+        ),
+    )
+
+
+def refuse_missing_blobs(blob_ids: list[str], *, file_path: str | None = None) -> NoReturn:
+    """Raise the ``bundle_blob_missing`` refusal for a manifest whose blob files are gone."""
+
+    raise ArtifactError(
+        f"Bundle manifest references missing blob files for blob_id(s): {', '.join(blob_ids)}.",
+        code="bundle_blob_missing",
+        remedy="restore the missing blob files, or re-save the bundle from its source capture",
+        file_path=file_path,
+    )
+
+
+class OpaqueCallableError(ConfigurationError, ValueError):
+    """Raised when an executable intervention save would require opaque code.
+
+    Examples
+    --------
+    >>> issubclass(tl.errors.OpaqueCallableError, tl.errors.ConfigurationError)
+    True
+    >>> issubclass(tl.errors.OpaqueCallableError, ValueError)
+    True
+    """
+
+
+OpaqueCallableError.__module__ = "torchlens.intervention.errors"

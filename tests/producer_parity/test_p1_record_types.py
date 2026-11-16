@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 import torchlens as tl
-from torchlens.ir.op_record import (
+from torchlens._ir.op_record import (
     AMENDMENT_FAMILIES,
     PATH_TO_FLAT,
     TYPED_CONSTRUCTORS,
@@ -39,7 +39,7 @@ from torchlens.ir.op_record import (
     op_record_from_event,
     validate_amendment,
 )
-from torchlens.ir.op_record_scatter import (
+from torchlens._ir.op_record_scatter import (
     CELL_SOURCES,
     EXTRA_KEY_CHANNELS,
 )
@@ -48,9 +48,8 @@ from torchlens.ir.op_record_scatter import (
 # in the `-m smoke` tier, so the smoke mark is applied per test instead.
 
 
-@pytest.mark.smoke
 def test_three_way_manifest_closure() -> None:
-    from torchlens.data_classes.op import _OP_SLOT_NAMES
+    from torchlens._data_classes.op import _OP_SLOT_NAMES
 
     manifest_keys = set(CELL_SOURCES)
     slot_keys = set(_OP_SLOT_NAMES)
@@ -61,15 +60,14 @@ def test_three_way_manifest_closure() -> None:
     assert not stale, f"manifest rows without a store cell: {sorted(stale)}"
 
 
-@pytest.mark.smoke
 def test_manifest_regenerate_and_diff() -> None:
     from tools.generate_op_record_manifest import generate
 
-    generated = Path("torchlens/ir/op_record_manifest.py").read_text()
+    generated = Path("torchlens/_ir/op_record_manifest.py").read_text()
     assert generated == generate(), (
         "generated manifest is stale — run python -m tools.generate_op_record_manifest"
     )
-    from torchlens.ir.op_record_manifest import CELL_SOURCE_MANIFEST
+    from torchlens._ir.op_record_manifest import CELL_SOURCE_MANIFEST
 
     assert CELL_SOURCE_MANIFEST == CELL_SOURCES
 
@@ -109,7 +107,6 @@ def test_manifest_check_cli_works_as_a_subprocess(invocation: str) -> None:
     assert result.stdout.strip().startswith("ok:"), result.stdout
 
 
-@pytest.mark.smoke
 def test_amendment_registry_exact_sets() -> None:
     union = {path for schema in AMENDMENT_FAMILIES.values() for path, _ in schema}
     assert union == set(PATH_TO_FLAT), "PATH_TO_FLAT must cover exactly the path union"
@@ -178,7 +175,6 @@ def test_amendment_registry_exact_sets() -> None:
         )
 
 
-@pytest.mark.smoke
 def test_strict_protocol_refusal_type() -> None:
     from ._models import SmallCNN, _cnn_input
 
@@ -202,17 +198,17 @@ def _journal_events(model, inputs) -> list:
     inverse adapter.
     """
 
-    import torchlens.postprocess as postprocess_module
-    import torchlens.postprocess._materialize as materialize_module
+    import torchlens._postprocess as postprocess_module
+    import torchlens._postprocess._materialize as materialize_module
 
     from ._oracle_adapter import op_event_from_record
 
     captured: list = []
     original = materialize_module.materialize_from_events
 
-    def spy(trace, events):
+    def spy(trace, events, *rest):
         captured.extend(events.op_events)
-        original(trace, events)
+        original(trace, events, *rest)
 
     postprocess_module.materialize_from_events = spy
     materialize_module.materialize_from_events = spy
@@ -226,17 +222,22 @@ def _journal_events(model, inputs) -> list:
 
 @pytest.mark.heavy
 def test_scatter_is_the_single_ingest_truth(tmp_path: Path) -> None:
-    """Every journal record ingests through the generated scatter (P3).
+    """Every journal record ingests exactly once, through the scatter or its capture row (P3, C2c).
 
     ``_fields_from_event`` is deleted; the record-sourced cells of every
-    materialized op flow through ``scatter_record_to_cells`` exactly once per
-    record, and the scatter output lands verbatim in the Op fields ingest
-    hands to construction (spot-checked on identity cells). Byte-identity of
-    the full store/journal/artifact layers vs pre-migration main is carried
-    by the temporal-baseline comparator (P0 archive, 6.2b).
+    materialized op come either from ``scatter_record_to_cells`` (records
+    without a capture row) or from the exhaustive commit's capture row, which
+    ingest adopts (``adopt_capture_row``) instead of scattering the record.
+    Each journal record takes exactly one of the two routes, and the cells
+    land verbatim in the op (spot-checked on identity cells). Cell-for-cell
+    equality of an adopted row with the scatter route is pinned by
+    ``tests/test_capture_row_ingest.py``. Byte-identity of the full
+    store/journal/artifact layers vs pre-migration main is carried by the
+    temporal-baseline comparator (P0 archive, 6.2b).
     """
 
-    import torchlens.ir.op_record_scatter as scatter_module
+    import torchlens._ir.op_record_scatter as scatter_module
+    import torchlens._postprocess._materialize as materialize_module
 
     from ._models import SCENARIOS
     from ._snapshot import run_scenario
@@ -259,7 +260,21 @@ def test_scatter_is_the_single_ingest_truth(tmp_path: Path) -> None:
             _sink.append((record.core.label_raw, cells))
             return cells
 
+        original_adopt = materialize_module.adopt_capture_row
+
+        def observing_adopt(
+            row, join_cells, store, op_class, plan, _orig=original_adopt, _sink=scattered
+        ):
+            """Record the identity cells of each adopted capture row, then return its op."""
+
+            op = _orig(row, join_cells, store, op_class, plan)
+            fid = plan.fid_by_name
+            cells = {name: row[fid[name]] for name in ("_label_raw", "type_index")}
+            _sink.append((cells["_label_raw"], cells))
+            return op
+
         scatter_module.scatter_record_to_cells = observing_scatter
+        materialize_module.adopt_capture_row = observing_adopt
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 run = run_scenario(
@@ -270,6 +285,7 @@ def test_scatter_is_the_single_ingest_truth(tmp_path: Path) -> None:
                 )
         finally:
             scatter_module.scatter_record_to_cells = original_scatter
+            materialize_module.adopt_capture_row = original_adopt
         assert journal_labels, f"{scenario.name}: no journal rows (vacuous)"
         scattered_labels = [label for label, _ in scattered]
         assert sorted(scattered_labels) == sorted(journal_labels), (
@@ -287,11 +303,10 @@ def test_scatter_is_the_single_ingest_truth(tmp_path: Path) -> None:
                 assert cells["type_index"] is not None
 
 
-@pytest.mark.smoke
 def test_ingest_inputs_v1_reserves_aten_lane_and_covers_step0_reads() -> None:
     import json
 
-    from torchlens.postprocess._ingest_contract import (
+    from torchlens._postprocess._ingest_contract import (
         INGEST_CONTRACT_ROWS,
         IngestInputs,
         JournalView,

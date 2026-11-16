@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pickle
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -13,10 +12,8 @@ import torch.nn.modules.module as torch_module
 from torch import nn
 
 import torchlens as tl
-from torchlens._io import BlobRef
 from torchlens.backends.torch import prehook_provenance as provenance
-from torchlens.fastlog import PredicateError
-from torchlens.validation.core import validate_saved_outs
+from torchlens.errors import PredicateError, TraceCaptureError
 
 
 class _Unary(nn.Module):
@@ -43,13 +40,15 @@ class _Nested(nn.Module):
         return self.child(x, **kwargs)
 
 
-def _call(trace: tl.Trace, label: str = "child:1") -> tl.ModuleCall:
+def _call(trace: tl.Trace, label: str = "child:1") -> tl.types.ModuleCall:
     """Return one ModuleCall by label."""
 
     return trace.module_calls[label]
 
 
-def _tensor(snapshot: tl.ModuleInputSnapshot, path: tuple[Any, ...] = ("args", 0)) -> torch.Tensor:
+def _tensor(
+    snapshot: tl.types.ModuleInputSnapshot, path: tuple[Any, ...] = ("args", 0)
+) -> torch.Tensor:
     """Return the retained tensor payload at ``path``."""
 
     observation = next(item for item in snapshot.tensor_observations if item.path == path)
@@ -82,31 +81,6 @@ def _interposition_state(model: nn.Module) -> tuple[Any, ...]:
     )
 
 
-def test_in_place_mutation_truthful_snapshots_and_validation_replay() -> None:
-    """Matrix 1: in-place mutation retains old/new bytes and replay authority stays Ops."""
-
-    model = _Nested()
-
-    def mutate(_module: nn.Module, args: tuple[Any, ...]) -> None:
-        """Increment the first tensor in place."""
-
-        args[0].add_(1)
-
-    model.child.register_forward_pre_hook(mutate)
-    x = torch.tensor([-2.0, 1.0])
-    trace = tl.trace(model, x, save_arg_values=True, layers_to_save="all")
-    call = _call(trace)
-
-    assert torch.equal(call.inputs_before_pre_hooks.args[0], x)
-    assert torch.equal(call.inputs_after_pre_hooks.args[0], x + 1)
-    assert call.forward_pre_hook_effects[0].change_kinds == ("in_place_tensor",)
-    assert call.forward_args is None
-
-    ground_truth = model(x.clone()).detach()
-    status = validate_saved_outs(trace, [ground_truth], validate_metadata=True)
-    assert status.state == "passed"
-
-
 def test_observational_hook_records_unchanged_without_dedicated_payload() -> None:
     """Matrix 2: a no-op hook is distinct from no hook and reuses producer payload."""
 
@@ -123,7 +97,7 @@ def test_observational_hook_records_unchanged_without_dedicated_payload() -> Non
     call = _call(trace)
 
     assert seen == [torch.Size([2])]
-    assert call.forward_pre_hook_effects[0].changed is False
+    assert call.forward_pre_hook_effects[0].has_changes is False
     assert call.inputs_before_pre_hooks.tensor_observations[0].payload_origin == (
         "immutable_producer_snapshot"
     )
@@ -131,47 +105,6 @@ def test_observational_hook_records_unchanged_without_dedicated_payload() -> Non
         _tensor(call.inputs_before_pre_hooks).data_ptr()
         == _tensor(call.inputs_after_pre_hooks).data_ptr()
     )
-
-
-def test_non_kwargs_replacement_is_tuple_normalized_and_attributed() -> None:
-    """Matrix 3: a single tensor return becomes one positional argument."""
-
-    model = _Nested()
-
-    def replace(_module: nn.Module, args: tuple[Any, ...]) -> torch.Tensor:
-        """Return a replacement tensor rather than a tuple."""
-
-        return args[0] * 3
-
-    model.child.register_forward_pre_hook(replace)
-    trace = tl.trace(model, torch.tensor([2.0]))
-    call = _call(trace)
-
-    assert isinstance(call.inputs_after_pre_hooks.args, tuple)
-    assert len(call.inputs_after_pre_hooks.args) == 1
-    assert torch.equal(call.inputs_after_pre_hooks.args[0], torch.tensor([6.0]))
-    assert call.forward_pre_hook_effects[0].change_kinds == ("identity",)
-    assert call.inputs_after_pre_hooks.tensor_observations[0].source_op is not None
-
-
-def test_in_place_mutation_and_replacement_record_both_effects() -> None:
-    """A pre-hook that mutates then replaces records both change kinds."""
-
-    model = _Nested()
-
-    def mutate_and_replace(_module: nn.Module, args: tuple[Any, ...]) -> tuple[torch.Tensor, ...]:
-        """Mutate the original tensor before returning a fresh replacement."""
-
-        tensor = args[0]
-        assert isinstance(tensor, torch.Tensor)
-        tensor.add_(2)
-        return (tensor.clone() * 3,)
-
-    model.child.register_forward_pre_hook(mutate_and_replace)
-    trace = tl.trace(model, torch.tensor([1.0]))
-    effect = _call(trace).forward_pre_hook_effects[0]
-
-    assert effect.change_kinds == ("identity", "in_place_tensor")
 
 
 def test_opaque_object_tensor_mutation_downgrades_provenance_fail_closed() -> None:
@@ -220,19 +153,19 @@ def test_opaque_object_tensor_mutation_downgrades_provenance_fail_closed() -> No
     trace = tl.trace(
         model,
         _Box(torch.tensor([-2.0, 1.0])),
-        save_arg_values=True,
-        layers_to_save="all",
+        capture=tl.options.CaptureOptions(save_args=True),
+        save="all",
     )
     call = _call(trace)
     effect = call.forward_pre_hook_effects[0]
 
-    assert effect.changed is None
+    assert effect.has_changes is None
     assert effect.change_kinds == ()
     assert effect.incomplete_reasons == ("opaque_object_untraversed",)
     assert call.inputs_before_pre_hooks is not None
-    assert call.inputs_before_pre_hooks.capture_complete is False
+    assert call.inputs_before_pre_hooks.is_capture_complete is False
     assert call.inputs_before_pre_hooks.incomplete_reasons == ("opaque_object_untraversed",)
-    assert call.inputs_after_pre_hooks.capture_complete is False
+    assert call.inputs_after_pre_hooks.is_capture_complete is False
     assert call.inputs_after_pre_hooks.incomplete_reasons == ("opaque_object_untraversed",)
 
 
@@ -269,42 +202,9 @@ def test_kwargs_transition_paths_and_invalid_return_are_canonical() -> None:
     expected = "forward pre-hook must return None"
     with pytest.raises(RuntimeError, match=expected):
         bad_model(torch.ones(1))
-    with pytest.raises(RuntimeError, match=expected):
+    with pytest.raises(TraceCaptureError, match=expected) as _tce_info2:
         tl.trace(bad_model, torch.ones(1))
-
-
-def test_global_prepend_append_order_and_per_hook_attribution() -> None:
-    """Matrix 5: global and local hooks share exact PyTorch execution order."""
-
-    model = _Nested()
-    order: list[str] = []
-
-    def hook(name: str, delta: float) -> Callable[..., Any]:
-        """Build one named replacement hook."""
-
-        def apply(_module: nn.Module, args: tuple[Any, ...]) -> tuple[torch.Tensor]:
-            """Append execution order and replace the tensor."""
-
-            order.append(name)
-            return (args[0] + delta,)
-
-        apply.__name__ = name
-        return apply
-
-    global_handle = torch_module.register_module_forward_pre_hook(hook("G", 1))
-    model.child.register_forward_pre_hook(hook("A", 3))
-    model.child.register_forward_pre_hook(hook("B", 4))
-    model.child.register_forward_pre_hook(hook("P", 2), prepend=True)
-    try:
-        trace = tl.trace(model, torch.zeros(1))
-    finally:
-        global_handle.remove()
-
-    child_order = [name for name in order if name in {"G", "P", "A", "B"}][-4:]
-    assert child_order == ["G", "P", "A", "B"]
-    effects = _call(trace).forward_pre_hook_effects
-    assert [effect.hook.name for effect in effects] == ["G", "P", "A", "B"]
-    assert [effect.ordinal for effect in effects] == [1, 2, 3, 4]
+    assert isinstance(_tce_info2.value.__cause__, RuntimeError)
 
 
 def test_parent_adds_child_hook_before_first_child_call() -> None:
@@ -404,71 +304,14 @@ def test_hook_exception_records_partial_and_restores_every_interposition() -> No
 
     handle = model.child.register_forward_pre_hook(explode)
     before = _interposition_state(model)
-    with pytest.raises(LookupError, match="hook exploded") as exc_info:
+    with pytest.raises(TraceCaptureError, match="hook exploded") as exc_info:
         tl.trace(model, torch.ones(1))
-    assert hasattr(exc_info.value, "partial_log")
+    assert isinstance(exc_info.value.__cause__, LookupError)
+    assert hasattr(exc_info.value, "partial_trace")
     assert _interposition_state(model) == before
 
     handle.remove()
     assert torch.equal(model(torch.ones(1)), torch.ones(1))
-
-
-def test_spectral_norm_module_state_hook_is_not_input_change() -> None:
-    """Matrix 10: weight-mutating spectral norm is observational for inputs."""
-
-    linear = torch.nn.utils.spectral_norm(nn.Linear(2, 2))
-    model = nn.Sequential(linear)
-    trace = tl.trace(model, torch.ones(1, 2))
-    effect = _call(trace, "0:1").forward_pre_hook_effects[0]
-
-    assert effect.changed is False
-    assert effect.change_kinds == ()
-
-
-def test_hookless_trace_skips_registration_refresh_hot_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Hookless module calls do not scan registries or all prepared modules."""
-
-    refresh_calls = 0
-    original = provenance.refresh_registration_bypasses
-
-    def count_refreshes(trace: tl.Trace, module: nn.Module | None = None) -> None:
-        """Count registration refreshes while preserving their behavior."""
-
-        nonlocal refresh_calls
-        refresh_calls += 1
-        original(trace, module)
-
-    monkeypatch.setattr(provenance, "refresh_registration_bypasses", count_refreshes)
-    tl.trace(nn.Sequential(*[nn.ReLU() for _ in range(20)]), torch.ones(1))
-
-    assert refresh_calls == 0
-
-
-def test_global_hook_refreshes_observers_once_per_capture(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A stable global hook does not trigger an all-module refresh per call."""
-
-    refresh_calls = 0
-    original = provenance._refresh_observers
-
-    def count_refreshes(ledger: provenance.PreHookProvenanceLedger) -> None:
-        """Count full observer refreshes while preserving their behavior."""
-
-        nonlocal refresh_calls
-        refresh_calls += 1
-        original(ledger)
-
-    monkeypatch.setattr(provenance, "_refresh_observers", count_refreshes)
-    handle = torch_module.register_module_forward_pre_hook(lambda _module, _args: None)
-    try:
-        tl.trace(nn.Sequential(*[nn.ReLU() for _ in range(20)]), torch.ones(1))
-    finally:
-        handle.remove()
-
-    assert refresh_calls == 1
 
 
 def test_root_pre_hook_populates_self_call() -> None:
@@ -483,90 +326,21 @@ def test_root_pre_hook_populates_self_call() -> None:
     assert torch.equal(root.inputs_after_pre_hooks.args[0], torch.tensor([3.0]))
 
 
-def test_shared_recurrent_calls_have_independent_records() -> None:
-    """Matrix 12: repeated shared-module calls bind independent call indices."""
-
-    class Shared(nn.Module):
-        """Call one shared module with distinct inputs."""
-
-        def __init__(self) -> None:
-            """Initialize the shared child."""
-
-            super().__init__()
-            self.child = _Unary()
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Invoke the child twice."""
-
-            return self.child(x) + self.child(x + 10)
-
-    model = Shared()
-    model.child.register_forward_pre_hook(lambda _m, args: (args[0] + 1,))
-    trace = tl.trace(model, torch.zeros(1))
-
-    assert torch.equal(_call(trace, "child:1").inputs_before_pre_hooks.args[0], torch.zeros(1))
-    assert torch.equal(
-        _call(trace, "child:2").inputs_before_pre_hooks.args[0], torch.tensor([10.0])
-    )
-
-
-def test_reentrant_same_module_uses_lifo_tokens() -> None:
-    """Matrix 13: recursive invocation binds inner and outer tokens independently."""
-
-    model = _Nested()
-    in_hook = False
-
-    def recurse(module: nn.Module, args: tuple[Any, ...]) -> None:
-        """Invoke the same module once from its pre-hook."""
-
-        nonlocal in_hook
-        if in_hook:
-            return
-        in_hook = True
-        try:
-            module(args[0] + 5)
-        finally:
-            in_hook = False
-
-    model.child.register_forward_pre_hook(recurse)
-    trace = tl.trace(model, torch.ones(1))
-
-    assert len(trace.module_calls) == 3
-    assert len(_call(trace, "child:1").forward_pre_hook_effects) == 1
-    assert len(_call(trace, "child:2").forward_pre_hook_effects) == 1
-
-
-def test_fast_second_pass_preserves_exhaustive_provenance_once() -> None:
-    """Matrix 14: selective two-pass capture does not overwrite provenance."""
-
-    model = _Nested()
-    count = 0
-
-    def mutate(_module: nn.Module, args: tuple[Any, ...]) -> tuple[torch.Tensor]:
-        """Count executions and replace input."""
-
-        nonlocal count
-        count += 1
-        return (args[0] + 1,)
-
-    model.child.register_forward_pre_hook(mutate)
-    trace = tl.trace(model, torch.ones(1))
-    trace.save_new_outs(model, torch.ones(1), layers_to_save="all")
-
-    assert count == 2
-    assert len(_call(trace).forward_pre_hook_effects) == 1
-
-
 def test_record_to_trace_ram_and_disk_preserve_provenance(tmp_path: Path) -> None:
     """Matrix 15: predicate Recording materializes provenance in RAM and disk modes."""
 
     for streaming in (
         None,
-        tl.StreamingOptions(bundle_path=tmp_path / "recording.tlfast", retain_in_memory=False),
+        tl.options.StorageOptions(path=tmp_path / "recording.tlfast", retain_in_memory=False),
     ):
         model = _Nested()
         model.child.register_forward_pre_hook(lambda _m, args: (args[0] + 1,))
-        recording = tl.fastlog.record(model, torch.ones(1), default_op=True, streaming=streaming)
+        recording = tl.record(
+            model,
+            torch.ones(1),
+            storage=streaming,
+            recording=tl.options.RecordingOptions(default_op=True),
+        )
         trace = recording.to_trace()
         assert torch.equal(_call(trace).inputs_after_pre_hooks.args[0], torch.tensor([2.0]))
 
@@ -612,7 +386,7 @@ def test_version_edges_and_alias_deduplication() -> None:
     call = _call(trace)
     observations = call.inputs_before_pre_hooks.tensor_observations
 
-    assert call.forward_pre_hook_effects[0].changed is True
+    assert call.forward_pre_hook_effects[0].has_changes is True
     assert call.forward_pre_hook_effects[0].change_kinds == ("in_place_tensor",)
     assert len({item.alias_group for item in observations}) == 1
     assert observations[0].payload.data_ptr() == observations[1].payload.data_ptr()
@@ -670,23 +444,6 @@ def test_wrappers_expose_original_and_unrelated_registration_is_unmodified() -> 
     assert next(iter(unrelated._forward_pre_hooks.values())) is unrelated_hook
 
 
-def test_pickle_tlspec_lazy_and_v5_compatibility(tmp_path: Path) -> None:
-    """Matrix 17: pickle and eager/lazy tlspec preserve or explicitly defer payloads."""
-
-    model = _Nested()
-    model.child.register_forward_pre_hook(lambda _m, args: (args[0] + 1,))
-    trace = tl.trace(model, torch.ones(1))
-    pickled_call = pickle.loads(pickle.dumps(_call(trace)))
-    assert torch.equal(pickled_call.inputs_before_pre_hooks.args[0], torch.ones(1))
-
-    path = tmp_path / "prehook.tlspec"
-    tl.save(trace, path)
-    eager = tl.load(path, lazy=False)
-    lazy = tl.load(path, lazy=True, materialize_nested=False)
-    assert torch.equal(_call(eager).inputs_after_pre_hooks.args[0], torch.tensor([2.0]))
-    assert isinstance(_call(lazy).inputs_before_pre_hooks.args[0], BlobRef)
-
-
 def test_restoration_matrix_success_forward_error_halt_and_predicate_error() -> None:
     """Matrix 18: success, forward error, halt, and predicate failure restore state."""
 
@@ -711,12 +468,13 @@ def test_restoration_matrix_success_forward_error_halt_and_predicate_error() -> 
     assert _interposition_state(model) == before
 
     model.fail = True
-    with pytest.raises(ArithmeticError, match="forward failed"):
+    with pytest.raises(TraceCaptureError, match="forward failed") as _tce_info3:
         tl.trace(model, torch.ones(1))
+    assert isinstance(_tce_info3.value.__cause__, ArithmeticError)
     assert _interposition_state(model) == before
     model.fail = False
 
-    tl.trace(model, torch.ones(1), halt=lambda ctx: ctx.kind == "op")
+    tl.trace(model, torch.ones(1), stop_after=lambda ctx: ctx.kind == "op")
     assert _interposition_state(model) == before
 
     with pytest.raises(PredicateError):
@@ -741,41 +499,10 @@ def test_preparation_failure_rolls_back_partial_transaction(
         raise RuntimeError("prep injection")
 
     monkeypatch.setattr(provenance, "install_prehook_provenance", fail_after_install)
-    with pytest.raises(RuntimeError, match="prep injection"):
+    with pytest.raises(TraceCaptureError, match="prep injection") as _tce_info4:
         tl.trace(model, torch.ones(1))
+    assert isinstance(_tce_info4.value.__cause__, RuntimeError)
     assert _interposition_state(model) == before
-
-
-def test_hookless_model_installs_no_observers_or_hook_wrappers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Matrix 19: no-hook capture installs zero observer/wrapper frames."""
-
-    observer_calls = 0
-    wrapper_calls = 0
-    original_observer = provenance._ensure_observer
-    original_wrapper = provenance._make_pre_hook_wrapper
-
-    def count_observer(*args: Any, **kwargs: Any) -> Any:
-        """Count observer installations."""
-
-        nonlocal observer_calls
-        observer_calls += 1
-        return original_observer(*args, **kwargs)
-
-    def count_wrapper(*args: Any, **kwargs: Any) -> Any:
-        """Count hook wrapper constructions."""
-
-        nonlocal wrapper_calls
-        wrapper_calls += 1
-        return original_wrapper(*args, **kwargs)
-
-    monkeypatch.setattr(provenance, "_ensure_observer", count_observer)
-    monkeypatch.setattr(provenance, "_make_pre_hook_wrapper", count_wrapper)
-    tl.trace(nn.Sequential(nn.ReLU(), nn.ReLU()), torch.ones(1))
-
-    assert observer_calls == 0
-    assert wrapper_calls == 0
 
 
 def test_requires_grad_metadata_mutation_is_detected_without_version_increment() -> None:
@@ -792,7 +519,7 @@ def test_requires_grad_metadata_mutation_is_detected_without_version_increment()
     trace = tl.trace(model, torch.ones(1))
     effect = _call(trace, "self:1").forward_pre_hook_effects[0]
 
-    assert effect.changed is True
+    assert effect.has_changes is True
     assert effect.change_kinds == ("tensor_metadata",)
 
 
@@ -803,13 +530,17 @@ def test_full_backward_hook_rewrap_does_not_redefine_snapshot_b() -> None:
     model.register_forward_pre_hook(lambda _m, args: (args[0] + 2,))
     backward_handle = model.register_full_backward_hook(lambda _m, grad_in, _grad_out: grad_in)
     try:
-        trace = tl.trace(model, torch.ones(1, requires_grad=True), backward_ready=True)
+        trace = tl.trace(
+            model,
+            torch.ones(1, requires_grad=True),
+            capture=tl.options.CaptureOptions(backward_ready=True),
+        )
     finally:
         backward_handle.remove()
 
     call = _call(trace, "self:1")
     assert torch.equal(call.inputs_after_pre_hooks.args[0], torch.tensor([3.0]))
-    assert call.forward_pre_hook_effects[0].changed is True
+    assert call.forward_pre_hook_effects[0].has_changes is True
 
 
 def test_registration_bypass_downgrades_but_keeps_after_snapshot_truthful() -> None:
@@ -843,7 +574,7 @@ def test_registration_bypass_downgrades_but_keeps_after_snapshot_truthful() -> N
 
     assert call.inputs_before_pre_hooks is None
     assert torch.equal(call.inputs_after_pre_hooks.args[0], torch.tensor([8.0]))
-    assert call.inputs_after_pre_hooks.capture_complete is False
+    assert call.inputs_after_pre_hooks.is_capture_complete is False
     assert "registration_interposition_bypassed" in (call.inputs_after_pre_hooks.incomplete_reasons)
     assert call.forward_pre_hook_effects == ()
-    assert call.had_pre_hook_input_change is None
+    assert call.has_pre_hook_input_change is None

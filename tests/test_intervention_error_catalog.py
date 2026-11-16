@@ -14,9 +14,10 @@ import torch
 from example_models import TinyReluAdd as _ReluAdd
 
 import torchlens as tl
-from torchlens.intervention import errors as terrors
-from torchlens.io import TraceState, list_logs, load_intervention_spec
-from torchlens.validation import check_spec_compat
+from torchlens.intervention import check_spec_compat, errors as terrors
+from torchlens.io import TraceState, list_traces, load_intervention_spec
+
+pytestmark = pytest.mark.usefixtures("root_edits_in_place")  # D.12: no per-call mutation keyword
 
 SeverityClass = type[BaseException]
 WarningClass = type[Warning]
@@ -25,16 +26,16 @@ ERROR_NAMES: tuple[str, ...] = (
     "EngineDispatchError",
     "ModelMismatchError",
     "BundleMemberError",
-    "BundleRelationshipError",
+    "BundleComparisonError",
     "BaselineUndeterminedError",
     "ReplayPreconditionError",
     "SelectionError",
     "SiteResolutionError",
-    "SiteAmbiguityError",
+    "AmbiguousSiteError",
     "HookSignatureError",
     "HookValueError",
     "HookSiteCoverageError",
-    "AxisAmbiguityError",
+    "AmbiguousAxisError",
     "AppendMismatchError",
     "AppendBatchDependenceError",
     "ControlFlowDivergenceError",
@@ -44,14 +45,14 @@ ERROR_NAMES: tuple[str, ...] = (
     "LiveModeLabelError",
     "SpliceModuleDeviceError",
     "SpliceModuleDtypeError",
-    "DirectWriteInExecutableSaveError",
+    "DirectWriteSaveError",
     "SpecMutationError",
-    "OpaqueCallableInExecutableSaveError",
+    "OpaqueCallableError",
 )
 """v5.2 intervention errors owned by Phase 14."""
 
 WARNING_NAMES: tuple[str, ...] = (
-    "MutateInPlaceWarning",
+    "TraceMutationWarning",
     "DirectActivationWriteWarning",
     "MultiMatchWarning",
     "ControlFlowDivergenceWarning",
@@ -66,16 +67,16 @@ CATALOG_EXERCISE_MANIFEST: dict[str, str] = {
     "EngineDispatchError": "tests/test_intervention_phase8b.py::test_do_ambiguous_dispatch_and_model_mismatch_errors",
     "ModelMismatchError": "tests/test_intervention_phase8b.py::test_do_ambiguous_dispatch_and_model_mismatch_errors",
     "BundleMemberError": "tests/test_intervention_error_catalog.py::test_bundle_member_error_raised_for_missing_bundle_site",
-    "BundleRelationshipError": "tests/test_intervention_phase9.py",
+    "BundleComparisonError": "tests/test_intervention_phase9.py",
     "SelectionError": "tests/test_intervention_error_catalog.py::test_selection_error_kind_matrix_refusal",
     "BaselineUndeterminedError": "tests/test_intervention_phase9.py",
     "ReplayPreconditionError": "tests/test_intervention_phase6.py::test_replay_rejects_non_intervention_ready_logs",
     "SiteResolutionError": "tests/test_intervention_phase2.py::test_resolution_errors_strict_mode_and_warnings",
-    "SiteAmbiguityError": "tests/test_intervention_phase2.py::test_resolution_errors_strict_mode_and_warnings",
+    "AmbiguousSiteError": "tests/test_intervention_phase2.py::test_resolution_errors_strict_mode_and_warnings",
     "HookSignatureError": "tests/test_intervention_phase3.py::test_normalizer_rejects_missing_site_and_bad_signature",
     "HookValueError": "tests/test_intervention_phase3.py::test_execute_hook_rejects_none_type_shape_dtype_and_device",
     "HookSiteCoverageError": "tests/test_intervention_phase3.py::test_normalizer_rejects_missing_site_and_bad_signature",
-    "AxisAmbiguityError": "tests/test_intervention_error_catalog.py::test_helper_axis_ambiguity_uses_catalog_error",
+    "AmbiguousAxisError": "tests/test_intervention_error_catalog.py::test_helper_axis_ambiguity_uses_catalog_error",
     "AppendMismatchError": "tests/test_intervention_phase12.py::test_append_shape_mismatch_raises",
     "AppendBatchDependenceError": "tests/test_intervention_phase12.py::test_append_batch_dependent_helper_rejected_after_clean_rerun",
     "ControlFlowDivergenceError": "tests/test_intervention_phase7.py::test_rerun_strict_divergence_raises_before_swap",
@@ -85,12 +86,12 @@ CATALOG_EXERCISE_MANIFEST: dict[str, str] = {
     "LiveModeLabelError": "tests/test_intervention_phase4c.py",
     "SpliceModuleDeviceError": "tests/test_intervention_error_catalog.py::test_splice_module_device_error_raised_for_device_mismatch",
     "SpliceModuleDtypeError": "tests/test_intervention_phase3.py::test_splice_module_dtype_error_is_specific",
-    "DirectWriteInExecutableSaveError": "tests/test_intervention_error_catalog.py::test_direct_write_executable_save_error_raised",
+    "DirectWriteSaveError": "tests/test_intervention_error_catalog.py::test_direct_write_executable_save_error_raised",
     "SpecMutationError": "tests/test_intervention_phase8a.py",
-    "OpaqueCallableInExecutableSaveError": "tests/test_intervention_phase10.py::test_portable_save_rejects_opaque_callable",
-    "MutateInPlaceWarning": "tests/test_intervention_phase8b.py::test_mutate_warning_fires_once_and_can_be_suppressed",
+    "OpaqueCallableError": "tests/test_intervention_phase10.py::test_portable_save_rejects_opaque_callable",
+    "TraceMutationWarning": "tests/test_intervention_phase8b.py::test_mutate_warning_fires_once_and_can_be_suppressed",
     "DirectActivationWriteWarning": "tests/test_intervention_phase8b.py::test_direct_out_write_warns_once_and_marks_dirty",
-    "MultiMatchWarning": "tests/test_intervention_phase2.py::test_resolution_errors_strict_mode_and_warnings",
+    "MultiMatchWarning": "tests/test_intervention_phase10.py::test_save_intervention_allows_more_than_eight_matching_sites",
     "ControlFlowDivergenceWarning": "tests/test_intervention_phase7.py::test_rerun_non_strict_divergence_warns_and_swaps",
     "BatchNormTrainModeWarning": "tests/test_intervention_phase12.py::test_append_batchnorm_train_mode_warns",
 }
@@ -166,7 +167,7 @@ class _MetaReturn(torch.nn.Module):
         return torch.empty_like(x, device="meta")
 
 
-def _zero_hook(out: torch.Tensor, *, hook: Any) -> torch.Tensor:
+def _zero_hook(out: torch.Tensor, *, ctx: Any) -> torch.Tensor:
     """Return zeros matching the input out.
 
     Parameters
@@ -182,7 +183,7 @@ def _zero_hook(out: torch.Tensor, *, hook: Any) -> torch.Tensor:
         Zero out.
     """
 
-    del hook
+    del ctx
     return torch.zeros_like(out)
 
 
@@ -206,7 +207,7 @@ def _capture(model: torch.nn.Module | None = None, x: torch.Tensor | None = None
     return tl.trace(
         _ReluAdd() if model is None else model,
         torch.tensor([[-1.0, 2.0, 3.0]]) if x is None else x,
-        capture=tl.options.CaptureOptions(intervention_ready=True),
+        capture=tl.options.CaptureOptions(replayable=True),
     )
 
 
@@ -244,17 +245,6 @@ def _is_warning_name(name: str) -> bool:
     return name in WARNING_NAMES
 
 
-@pytest.mark.parametrize("name", CATALOG_NAMES)
-def test_each_named_error_is_importable_and_has_severity(name: str) -> None:
-    """Every v5.2 catalog entry is importable and has a valid severity."""
-
-    cls = _catalog_class(name)
-
-    assert getattr(tl.intervention, name) is cls
-    assert hasattr(cls, "severity"), f"{name} missing severity tag"
-    assert cls.severity in ("recoverable", "informational", "fatal")
-
-
 def test_error_warning_partition_is_consistent() -> None:
     """Catalog entries use exception and warning bases consistently."""
 
@@ -269,7 +259,7 @@ def test_error_warning_partition_is_consistent() -> None:
 def test_spec_portability_alias_reconciles_executable_save_name() -> None:
     """v5.2 ``SpecPortabilityError`` remains compatible with Phase 10 naming."""
 
-    assert terrors.SpecPortabilityError is terrors.OpaqueCallableInExecutableSaveError
+    assert terrors.SpecPortabilityError is terrors.OpaqueCallableError
 
 
 def test_catalog_manifest_covers_named_entries() -> None:
@@ -278,67 +268,75 @@ def test_catalog_manifest_covers_named_entries() -> None:
     assert set(CATALOG_EXERCISE_MANIFEST) == set(CATALOG_NAMES)
 
 
+# Severity policy examples (Phase 14): representative entries and the severity they must carry.
+_SEVERITY_POLICY_EXAMPLES: dict[str, str] = {
+    "HookSignatureError": "fatal",
+    "GraphShapeMismatchError": "fatal",
+    "ControlFlowDivergenceError": "fatal",
+    "ModelMismatchError": "fatal",
+    "BundleComparisonError": "fatal",
+    "ReplayPreconditionError": "recoverable",
+    "SiteResolutionError": "recoverable",
+    "AppendMismatchError": "recoverable",
+    "SpecMutationError": "recoverable",
+    "TraceMutationWarning": "informational",
+}
+
+
 @pytest.mark.parametrize("name", CATALOG_NAMES)
-def test_catalog_messages_include_required_payload_fields(name: str) -> None:
-    """Named-field constructors include cited variables in user-facing text."""
+def test_catalog_entry_contract(name: str) -> None:
+    """One check per catalog code: importable, severity tagged, policy example, payload text."""
 
     cls = _catalog_class(name)
-    instance = cls(site="relu_1_2", helper="zero_ablate", shape=(2, 3))
 
+    assert getattr(tl.errors, name) is cls
+    assert hasattr(cls, "severity"), f"{name} missing severity tag"
+    assert cls.severity in ("recoverable", "informational", "fatal")
+    if name in _SEVERITY_POLICY_EXAMPLES:
+        assert cls.severity == _SEVERITY_POLICY_EXAMPLES[name]
+
+    instance = cls(site="relu_1_2", helper="zero_ablate", shape=(2, 3))
     message = str(instance)
     assert "relu_1_2" in message
     assert "zero_ablate" in message
     assert "(2, 3)" in message
 
 
-@pytest.mark.parametrize(
-    ("name", "expected"),
-    (
-        ("HookSignatureError", "fatal"),
-        ("GraphShapeMismatchError", "fatal"),
-        ("ControlFlowDivergenceError", "fatal"),
-        ("ModelMismatchError", "fatal"),
-        ("BundleRelationshipError", "fatal"),
-        ("ReplayPreconditionError", "recoverable"),
-        ("SiteResolutionError", "recoverable"),
-        ("AppendMismatchError", "recoverable"),
-        ("SpecMutationError", "recoverable"),
-        ("MutateInPlaceWarning", "informational"),
-    ),
-)
-def test_catalog_severity_policy_examples(name: str, expected: str) -> None:
-    """Representative entries follow the Phase 14 severity policy."""
-
-    assert _catalog_class(name).severity == expected
-
-
-@pytest.mark.smoke
+@pytest.mark.usefixtures("root_edits_in_place")  # D.12: edits a root log in place on purpose
 def test_axis_a_public_verbs_success_paths() -> None:
-    """Public set, attach_hooks, do, replay, rerun, fork, and append smoke paths work."""
+    """Public set, do (replay and set-only), rerun, fork, and append smoke paths work."""
 
     log = _capture()
-    log.set(tl.func("relu"), torch.zeros(1, 3), confirm_mutation=True)
-    log.attach_hooks(tl.func("relu"), _zero_hook, confirm_mutation=True)
-    with pytest.warns(DeprecationWarning, match="Trace.replay"):
-        replay_result = log.replay()
+    log.do(
+        tl.func("relu"),
+        torch.zeros(1, 3),
+        intervention=tl.options.InterventionOptions(engine="set_only"),
+    )
+    replay_result = log.do(
+        tl.func("relu"),
+        _zero_hook,
+        intervention=tl.options.InterventionOptions(),
+    )
     assert replay_result is log
     assert log.state is TraceState.REPLAY_PROPAGATED
 
     do_log = _capture()
-    with pytest.warns(DeprecationWarning):
-        do_log.do(tl.func("relu"), torch.ones(1, 3), engine="set_only", confirm_mutation=True)
+    do_log.do(
+        tl.func("relu"),
+        torch.ones(1, 3),
+        intervention=tl.options.InterventionOptions(engine="set_only"),
+    )
     assert do_log.state is TraceState.SPEC_STALE
 
     fork = do_log.fork("phase14")
-    assert fork.parent_run() is do_log
+    assert fork._parent_run() is do_log
 
     model = _LinearRelu()
     x = torch.randn(2, 3)
     rerun_log = _capture(model, x)
-    rerun_log.run(model, x)
+    rerun_log = rerun_log.run(model, x)
     assert rerun_log.state is TraceState.RERUN_PROPAGATED
-    with pytest.warns(DeprecationWarning, match="append"):
-        rerun_log.run(model, torch.randn(1, 3), append=True)
+    rerun_log.append(torch.randn(1, 3), model=model)
     assert rerun_log.state is TraceState.APPENDED
 
 
@@ -352,29 +350,44 @@ def test_axis_a_public_verbs_success_paths() -> None:
         # ``ValueError`` (untyped -- see the module TODO; do not weaken this test to hide it).
         (
             "set",
-            lambda log: log.set(tl.func("missing"), torch.zeros(1, 3), confirm_mutation=True),
+            lambda log: log.do(
+                tl.func("missing"),
+                torch.zeros(1, 3),
+                intervention=tl.options.InterventionOptions(engine="set_only"),
+            ),
             terrors.SiteResolutionError,
         ),
         (
             "attach_hooks",
-            lambda log: log.attach_hooks(tl.func("missing"), _zero_hook, confirm_mutation=True),
+            lambda log: log._attach_hooks(tl.func("missing"), _zero_hook),
             terrors.SiteResolutionError,
         ),
         (
             "do",
             lambda log: log.do(
-                tl.func("relu"), _zero_hook, x=torch.zeros(1, 3), confirm_mutation=True
+                tl.func("relu"),
+                _zero_hook,
+                inputs=torch.zeros(1, 3),
+                intervention=tl.options.InterventionOptions(),
             ),
             terrors.EngineDispatchError,
         ),
-        ("replay", lambda log: log.replay(), terrors.ReplayPreconditionError),
+        (
+            "replay",
+            lambda log: log.do(
+                tl.func("relu"),
+                _zero_hook,
+                intervention=tl.options.InterventionOptions(),
+            ),
+            terrors.ReplayPreconditionError,
+        ),
         # NOTE (untyped-error finding, follow-up): ``log.run(model)`` with no forward input
         # raises a bare ``ValueError`` instead of a typed catalog error. Pinned to the real
         # type so a wrong-exception mutation still fails; product raise is unchanged here.
         ("rerun", lambda log: log.run(_ReluAdd()), ValueError),
         (
             "append",
-            lambda log: log.run(_ReluAdd(), torch.ones(1, 4), append=True),
+            lambda log: log.append(torch.ones(1, 4), model=_ReluAdd()),
             terrors.AppendMismatchError,
         ),
     ),
@@ -388,7 +401,11 @@ def test_axis_a_public_verbs_failure_paths(
 
     log = _capture()
     if verb == "replay":
-        log._intervention_spec.clear()
+        # A predicate recording keeps no per-op argument templates (a default capture
+        # does), so the replay engine refuses before any edit runs.
+        log = tl.record(
+            _ReluAdd(), torch.tensor([[-1.0, 2.0, 3.0]]), save=tl.func("relu")
+        ).to_trace()
     with pytest.raises(expected_exc) as excinfo:
         operation(log)
     assert str(excinfo.value)
@@ -401,19 +418,19 @@ def test_axis_b_replay_and_rerun_match_for_graph_stable_hook() -> None:
     replay_log = _capture(_ReluAdd(), x)
     rerun_log = _capture(_ReluAdd(), x)
 
-    replay_log.attach_hooks(tl.func("relu"), _zero_hook, confirm_mutation=True)
-    rerun_log.attach_hooks(tl.func("relu"), _zero_hook, confirm_mutation=True)
-    replay_log.replay()
-    rerun_log.run(_ReluAdd(), x)
+    confirm = tl.options.InterventionOptions()
+    stage = tl.options.InterventionOptions(engine="set_only")
+    replay_log.do(tl.func("relu"), _zero_hook, intervention=confirm)
+    rerun_log.do({tl.func("relu"): _zero_hook}, intervention=stage)
+    rerun_log = rerun_log.run(_ReluAdd(), x)
 
     replay_output = replay_log[replay_log.output_layers[0]].out
     rerun_output = rerun_log[rerun_log.output_layers[0]].out
     assert torch.equal(replay_output, rerun_output)
 
 
-@pytest.mark.smoke
 def test_axis_i_list_logs_snapshot_survives_concurrent_log_creation() -> None:
-    """``tl.list_logs()`` returns valid snapshots while logs are created concurrently."""
+    """``tl.io.list_traces()`` returns valid snapshots while logs are created concurrently."""
 
     errors: list[BaseException] = []
     snapshots: list[tuple[tl.Trace, ...]] = []
@@ -430,10 +447,10 @@ def test_axis_i_list_logs_snapshot_survives_concurrent_log_creation() -> None:
 
         try:
             torch.manual_seed(seed)
-            snapshots.append(list_logs())
+            snapshots.append(list_traces())
             with capture_lock:
                 _capture(_ReluAdd(), torch.randn(1, 3))
-            snapshots.append(list_logs())
+            snapshots.append(list_traces())
         except BaseException as exc:  # pragma: no cover - failure path is asserted below.
             errors.append(exc)
 
@@ -446,7 +463,7 @@ def test_axis_i_list_logs_snapshot_survives_concurrent_log_creation() -> None:
     assert errors == []
     assert snapshots
     assert all(isinstance(snapshot, tuple) for snapshot in snapshots)
-    assert all(hasattr(log, "layer_list") for snapshot in snapshots for log in snapshot)
+    assert all(hasattr(log, "_layer_list") for snapshot in snapshots for log in snapshot)
 
 
 def _weak_log_reference() -> tuple[int, weakref.ReferenceType[tl.Trace]]:
@@ -470,16 +487,95 @@ def test_axis_i_log_registry_uses_weakref_cleanup() -> None:
     gc.collect()
 
     assert log_ref() is None
-    assert all(id(log) != log_id for log in list_logs())
+    assert all(id(log) != log_id for log in list_traces())
 
 
 def test_helper_axis_ambiguity_uses_catalog_error() -> None:
-    """Vector helpers fail with ``AxisAmbiguityError`` when feature_axis is omitted."""
+    """``tl.steer`` without dim fails with ``AmbiguousAxisError`` when two axes match."""
 
     hook = tl.steer(torch.ones(3))()
 
-    with pytest.raises(terrors.AxisAmbiguityError, match="feature_axis"):
-        hook(torch.ones(2, 3), hook=None)
+    with pytest.raises(terrors.AmbiguousAxisError, match=r"matches dims \[0, 1\].*pass dim="):
+        hook(torch.ones(3, 3), ctx=None)
+
+
+@pytest.mark.parametrize(
+    ("shape", "axis"),
+    [((2, 5, 6), 2), ((2, 6, 5), 1), ((6, 4), 0)],
+)
+def test_steer_infers_the_only_axis_matching_the_direction_length(
+    shape: tuple[int, ...], axis: int
+) -> None:
+    """A vector direction lands on the one out axis whose size equals its length."""
+
+    direction = torch.arange(6, dtype=torch.float32)
+    out = torch.randn(*shape)
+    view = [1] * len(shape)
+    view[axis] = 6
+
+    inferred = tl.steer(direction, 4.0)()(out, ctx=None)
+    explicit = tl.steer(direction, 4.0, dim=axis)()(out, ctx=None)
+
+    assert torch.equal(inferred, out + 4.0 * direction.reshape(view))
+    assert torch.equal(inferred, explicit)
+
+
+def test_steer_inference_runs_inside_a_trace() -> None:
+    """``tl.steer(direction, m)`` on a ``[batch, seq, d_model]`` site needs no dim."""
+
+    model = torch.nn.Sequential(torch.nn.Linear(8, 8))
+    x = torch.randn(2, 3, 8)
+    direction = torch.linspace(-1.0, 1.0, 8)
+    with torch.no_grad():
+        clean = model(x)
+
+    edited = tl.trace(model, x, intervene=tl.when(tl.module("0"), tl.steer(direction, 4.0)))
+
+    assert torch.allclose(edited.output_ops[0].out, clean + 4.0 * direction)
+
+
+@pytest.mark.parametrize(
+    ("shape", "dims"),
+    [((6, 6), "[0, 1]"), ((2, 6, 6), "[1, 2]"), ((6, 3, 6), "[0, 2]")],
+)
+def test_steer_refuses_to_guess_between_matching_axes(shape: tuple[int, ...], dims: str) -> None:
+    """Two or more axes with the direction's length refuse and name every matching dim."""
+
+    hook = tl.steer(torch.ones(6), 4.0)()
+
+    with pytest.raises(terrors.AmbiguousAxisError) as info:
+        hook(torch.zeros(*shape), ctx=None)
+
+    message = str(info.value)
+    assert f"matches dims {dims} of out shape {shape}" in message
+    assert "pass dim=" in message
+
+
+def test_steer_explicit_dim_chooses_between_matching_axes() -> None:
+    """``dim=`` still resolves an out where the inference would refuse."""
+
+    direction = torch.arange(3, dtype=torch.float32)
+    out = torch.zeros(3, 3)
+
+    rows = tl.steer(direction, 1.0, dim=0)()(out, ctx=None)
+    cols = tl.steer(direction, 1.0, dim=1)()(out, ctx=None)
+
+    assert torch.equal(rows, direction.reshape(3, 1).expand(3, 3))
+    assert torch.equal(cols, direction.reshape(1, 3).expand(3, 3))
+
+
+def test_steer_refuses_when_no_axis_matches_the_direction_length() -> None:
+    """A direction whose length matches no out axis refuses and says to pass dim=."""
+
+    hook = tl.steer(torch.ones(768), 4.0)()
+
+    with pytest.raises(terrors.AmbiguousAxisError) as info:
+        hook(torch.zeros(2, 5, 7), ctx=None)
+
+    message = str(info.value)
+    assert "length 768" in message
+    assert "matches no dim of out shape (2, 5, 7)" in message
+    assert "pass dim=" in message
 
 
 def test_bundle_member_error_raised_for_missing_bundle_site() -> None:
@@ -488,10 +584,10 @@ def test_bundle_member_error_raised_for_missing_bundle_site() -> None:
     x = torch.randn(1, 3)
     first = _capture(_ReluAdd(), x)
     second = _capture(_ReluAdd(), x)
-    bundle = tl.bundle({"first": first, "second": second})
+    bundle = tl.Bundle({"first": first, "second": second})
 
     with pytest.raises(terrors.BundleMemberError, match="failed to resolve"):
-        bundle.node(tl.func("missing"))
+        bundle.at(tl.func("missing"))
 
 
 def test_graph_shape_mismatch_error_raised_for_executable_spec(
@@ -501,7 +597,7 @@ def test_graph_shape_mismatch_error_raised_for_executable_spec(
 
     x = torch.randn(1, 3)
     log = _capture(_ReluAdd(), x)
-    log.attach_hooks(tl.func("relu"), tl.zero_ablate(), confirm_mutation=True)
+    log._attach_hooks(tl.func("relu"), tl.zero_ablate())
     path = tmp_path / "graph_shape_mismatch.tlspec"
     log.save_intervention(path, level="portable")
     spec = load_intervention_spec(path)
@@ -518,12 +614,12 @@ def test_intervention_ready_composes_with_deferred_selective_grads() -> None:
         _ReluAdd(),
         torch.randn(1, 3, requires_grad=True),
         capture=tl.options.CaptureOptions(
-            intervention_ready=True,
+            replayable=True,
             save_grads=["relu"],
         ),
     )
     trace[trace.output_layers[0]].out.sum().backward()
-    assert {op.layer_type for op in trace.layer_list if op.has_grad} == {"relu"}
+    assert {op.type for op in trace._layer_list if op.has_grad} == {"relu"}
 
 
 def test_splice_module_device_error_raised_for_device_mismatch() -> None:
@@ -534,7 +630,7 @@ def test_splice_module_device_error_raised_for_device_mismatch() -> None:
             _ReluAdd(),
             torch.randn(1, 3),
             capture=tl.options.CaptureOptions(
-                intervention_ready=True,
+                replayable=True,
                 hooks={tl.func("relu"): tl.splice_module(_MetaReturn())},
             ),
         )
@@ -544,11 +640,11 @@ def test_direct_write_executable_save_error_raised(tmp_path: Path) -> None:
     """Executable intervention saves reject direct activation writes by default."""
 
     log = _capture()
-    relu = next(layer for layer in log.layer_list if layer.func_name == "relu")
+    relu = next(layer for layer in log._layer_list if layer.func_name == "relu")
     with pytest.warns(terrors.DirectActivationWriteWarning, match="direct Op out writes"):
         relu.out = relu.out
 
-    with pytest.raises(terrors.DirectWriteInExecutableSaveError, match="Direct out writes"):
+    with pytest.raises(terrors.DirectWriteSaveError, match="Direct out writes"):
         log.save_intervention(tmp_path / "direct_write.tlspec")
 
 
@@ -590,7 +686,7 @@ def _manifest_alias(name: str) -> str:
         Name or alias expected in the cited test source.
     """
 
-    aliases = {"SpecPortabilityError": "OpaqueCallableInExecutableSaveError"}
+    aliases = {"SpecPortabilityError": "OpaqueCallableError"}
     return aliases.get(name, name)
 
 
@@ -615,7 +711,7 @@ def test_selection_error_kind_matrix_refusal() -> None:
     """
 
     act = tl.units("relu_1_2", [(0, 0, 1, 1)])
-    param = tl.params("weight")
+    param = tl.param("weight")
     with pytest.raises(terrors.SelectionError) as excinfo:
         act & param
     assert excinfo.value.fields["code"] == "selection_kind_incompatible"

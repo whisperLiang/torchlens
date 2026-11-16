@@ -1,49 +1,57 @@
 """Exhaustive drafts and foundational output-container helpers."""
 
-import copy
 from collections import OrderedDict, defaultdict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import torch
 
-from ...ir.container import (
+from ..._ir.container import (
     ContainerSpec,
     DictKey,
     NamedField,
     OutputPathComponent,
     TupleIndex,
 )
-from ...ir.events import (
+from ..._ir.events import (
     ArgTemplateRef,
     FunctionCallRef,
     ModuleFrame,
 )
-from ...ir.intervention import FireResult
-from ...utils._torch_compat import (
+from ..._ir.intervention import FireResult
+from ..._ir.op_record import (
+    AncestryFacet,
+    AnnotationsFacet,
+    AutogradFacet,
+    ControlFacet,
+    GraphFacet,
+    InterventionFacet,
+    ModulesFacet,
+    OpCore,
+    OpRecord,
+    ParamsFacet,
+    PolicyFacet,
+    TransformFacet,
+)
+from ..._utils._torch_compat import (
     torch_structseq_field_names,
 )
-from ...utils.introspection import (
+from ..._utils.introspection import (
     get_vars_of_type_from_obj,
+)
+from ._ops_freeze_refs import (
+    _copy_parent_arg_positions,
+    _exhaustive_capture_policy,
+    _exhaustive_freeze_refs,
+    _exhaustive_output_ref,
+    _param_refs_from_fields,
+    _resolve_call_function_ref,
 )
 
 if TYPE_CHECKING:
-    from ...data_classes.trace import Trace
-    from ...ir.op_record import OpRecord
+    from ..._data_classes.trace import Trace
+    from ..._ir.op_record import OpRecord
 
-if TYPE_CHECKING:
-    from .ops import (
-        _SAFE_DEFAULT_FACTORIES,
-        _build_container_spec,
-        _build_edge_use_records,
-        _exhaustive_capture_policy,
-        _exhaustive_freeze_refs,
-        _exhaustive_output_ref,
-        _literal_value_supported,
-        _param_refs_from_fields,
-        _parent_edges_from_fields,
-        _resolve_call_function_ref,
-    )
 
 __all__ = (
     "_op_record_from_log",
@@ -74,24 +82,9 @@ def _op_record_from_log(
 
     Reads the final exhaustive draft (``fields_dict``) through the shared
     ref builders; facet PRESENCE mirrors
-    ``op_record_from_event`` applied to the equivalent compat event (S5:
+    ``op_record_from_event`` applied to the equivalent compat event (an
     absent facet != fabricated empty facet).
     """
-
-    from ...ir.op_record import (
-        AncestryFacet,
-        AnnotationsFacet,
-        AutogradFacet,
-        ControlFacet,
-        GraphFacet,
-        InterventionFacet,
-        ModulesFacet,
-        OpCore,
-        OpRecord,
-        ParamsFacet,
-        PolicyFacet,
-        TransformFacet,
-    )
 
     tensor_ref, module_stack, transformed_ref, backend_semantics = _exhaustive_freeze_refs(
         fields_dict, tensor, module_stack
@@ -105,7 +98,7 @@ def _op_record_from_log(
         raw_index=fields_dict["raw_index"],
         type_index=fields_dict["type_index"],
         step_index=fields_dict["step_index"] or 0,
-        pass_index=fields_dict["pass_index"],
+        pass_index=fields_dict["pass_number"],
         parents=_parent_edges_from_fields(fields_dict),
         output=_exhaustive_output_ref(fields_dict, tensor_ref, transformed_ref),
         is_bottom_level=True,
@@ -134,7 +127,7 @@ def _op_record_from_log(
     parent_params = tuple(fields_dict["parent_params"])
     is_scalar_bool = fields_dict["is_scalar_bool"]
     bool_value = fields_dict["bool_value"]
-    intervention_replaced = fields_dict["intervention_replaced"]
+    is_edited = fields_dict["is_edited"]
     return OpRecord(
         core=core,
         function=_resolve_call_function_ref(fields_dict, call_ref_box),
@@ -146,7 +139,7 @@ def _op_record_from_log(
             has_saved_args=fields_dict["has_saved_args"],
         ),
         graph=GraphFacet(
-            parent_arg_positions=copy.deepcopy(fields_dict["parent_arg_positions"]),
+            parent_arg_positions=_copy_parent_arg_positions(fields_dict["parent_arg_positions"]),
             edge_uses=tuple(
                 fields_dict["_edge_uses"]
                 or _build_edge_use_records(
@@ -154,6 +147,7 @@ def _op_record_from_log(
                     fields_dict["parent_arg_positions"],
                     fields_dict["_label_raw"],
                     fields_dict["func_call_id"],
+                    func_name=fields_dict.get("func_name"),
                 )
             ),
             unattributed_tensor_args=tuple(fields_dict.get("unattributed_tensor_args") or ()),
@@ -233,10 +227,10 @@ def _op_record_from_log(
         intervention=(
             InterventionFacet(
                 intervention_fired=bool(fire_results),
-                intervention_replaced=intervention_replaced,
+                is_edited=is_edited,
                 fire_results=fire_results,
             )
-            if (bool(fire_results) or intervention_replaced or fire_results)
+            if (bool(fire_results) or is_edited or fire_results)
             else None
         ),
     )
@@ -262,7 +256,7 @@ def _is_namedtuple_instance(value: Any) -> bool:
 def _torch_return_type_fields(value: Any) -> tuple[str, ...]:
     """Return public field names for a ``torch.return_types`` structseq.
 
-    r35 hon1_4: delegates to the shared repr-independent helper in
+    Delegates to the shared repr-independent helper in
     ``utils/_torch_compat.py`` (``__match_args__`` primary; identity round-trip
     fallback when it is absent; refusal otherwise). Structural facts must NEVER derive
     from ``repr()``/``str()`` of tensor-bearing values -- a wrapped tensor repr
@@ -336,7 +330,7 @@ def _try_build_container_spec(
     value
         Child output value to describe.
     _depth
-        Internal recursion depth forwarded to the guarded builder (r-b4 R27-4).
+        Internal recursion depth forwarded to the guarded builder.
     _in_progress
         Internal path-scoped container-id set forwarded to the guarded builder.
 
@@ -480,15 +474,36 @@ def _object_holds_tensor(value: Any) -> bool:
 def _leaf_is_reconstructable(item: Any) -> bool:
     """Return whether a childless (``_build_container_spec is None``) output leaf can be restored.
 
-    A tensor leaf is filled from the flat leaf stream; an opaque container that
-    still HOLDS tensors keeps the status-quo BFS capture. A pure non-tensor leaf we
-    cannot represent (``memoryview``, an arbitrary object with no tensors) makes the
-    enclosing container non-reconstructable so replay is honestly UNVERIFIABLE
-    instead of crashing on a missing leaf (advertise-then-crash).
+    A tensor leaf is filled from the flat leaf stream and an encodable literal
+    is rebuilt in place. ANY other leaf makes the enclosing container
+    non-reconstructable (recorded ``opaque``), so replay is honestly
+    UNVERIFIABLE and the runnable save refuses at preflight instead of
+    advertising a contract the codec cannot fill: a pure non-tensor object
+    (``memoryview``, an arbitrary object with no tensors) AND a tensor-HOLDING
+    opaque object (HuggingFace ``DynamicCache``) alike. The latter must not pass
+    as a leaf: the spec would then declare one slot where the capture's BFS
+    fallback holds several tensors, and the rebuild would run dry with a bare
+    ``ValueError``. The BFS tolerance that still CAPTURES those tensors
+    lives in the output walker, not here; this predicate is the spec builder's.
     """
 
     if isinstance(item, torch.Tensor):
         return True
-    if _literal_value_supported(item) or isinstance(item, torch.Size):
-        return True
-    return _object_holds_tensor(item)
+    return bool(_literal_value_supported(item) or isinstance(item, torch.Size))
+
+
+# Late imports: the split modules of this package import one another (cycles), so each
+# imports its siblings once every definition above exists.
+from ._ops_arguments import (  # noqa: E402
+    _build_edge_use_records,
+    _literal_value_supported,
+)
+from ._ops_capture_records import (  # noqa: E402
+    _parent_edges_from_fields,
+)
+from ._ops_containers import (  # noqa: E402
+    _build_container_spec,
+)
+from .ops import (  # noqa: E402
+    _SAFE_DEFAULT_FACTORIES,
+)

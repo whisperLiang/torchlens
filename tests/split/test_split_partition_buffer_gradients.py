@@ -199,6 +199,7 @@ def test_readonly_buffer_operand_does_not_require_connected_training_boundary() 
     torch.testing.assert_close(model.offset, torch.ones(4))
 
 
+@pytest.mark.cuda
 @pytest.mark.parametrize("prefix,suffix", [("cpu", "cuda"), ("cuda", "cpu")])
 @pytest.mark.parametrize("retain_trace", [False, True])
 @pytest.mark.parametrize("microbatch", [None, 2])

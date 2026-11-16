@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from .._constants import _is_suffixed_raw_label
+from .._errors import AmbiguousOpLookupError
+
 if TYPE_CHECKING:
-    from ..data_classes.trace import Trace
-    from .invariants import (
-        _SPECIAL_LIST_FLAG_PAIRS,
-        MetadataInvariantError,
-    )
+    from .._data_classes.trace import Trace
 
 __all__ = (
     "_check_trace_self_consistency",
@@ -39,10 +38,10 @@ def _check_trace_self_consistency(ml: Trace) -> None:
     name = "trace_self_consistency"
 
     # op_labels vs layer_list length
-    if len(ml.op_labels) != len(ml.layer_list):
+    if len(ml.op_labels) != len(ml._layer_list):
         raise MetadataInvariantError(
             name,
-            f"len(op_labels)={len(ml.op_labels)} != len(layer_list)={len(ml.layer_list)}",
+            f"len(op_labels)={len(ml.op_labels)} != len(layer_list)={len(ml._layer_list)}",
         )
 
     # No duplicate labels
@@ -55,36 +54,35 @@ def _check_trace_self_consistency(ml: Trace) -> None:
     # sets because buffer_layers stores pass-qualified labels while
     # layer_labels strips the pass suffix -- they use different formats.
     expected_ops = sum(
-        1 for lpl in ml.layer_list if not (lpl.is_input or lpl.is_output or lpl.is_buffer)
+        1 for lpl in ml._layer_list if not (lpl.is_input or lpl.is_output or lpl.graph.is_buffer)
     )
     expected_ops += _retained_orphan_computational_count(ml, name)
-    if ml.num_ops != expected_ops:
+    if ml._num_ops != expected_ops:
         raise MetadataInvariantError(
             name,
-            f"num_ops={ml.num_ops} != expected computational layers={expected_ops}",
+            f"num_ops={ml._num_ops} != expected computational layers={expected_ops}",
         )
 
-    # Param counts must be deduplicated by layer_label because
-    # multi-pass layers share the same params -- counting each pass would
-    # double-count.  This matches the summation logic in labeling.py:116-122.
-    seen_no_pass: set[str] = set()
-    expected_param_sum = 0
-    expected_num_params = 0
-    for lpl in ml.layer_list:
-        if lpl.layer_label not in seen_no_pass:
-            expected_param_sum += lpl.num_param_tensors
-            expected_num_params += lpl.num_params
-            seen_no_pass.add(lpl.layer_label)
-    if ml.num_param_tensors != expected_param_sum:
+    # Param counts follow PARAMETER OBJECT IDENTITY: param_logs is
+    # object-deduplicated at the pre-forward scan, so trace totals must equal
+    # its sums exactly. A per-unique-layer summation would double-count a
+    # parameter consumed by more than one layer (tied embeddings, weight-reused
+    # layers) and silently drop declared-but-never-executed parameters. This
+    # matches the summation logic in labeling.py (_tally_params_by_identity).
+    param_logs = list(ml._param_logs or [])
+    expected_param_sum = len(param_logs)
+    expected_num_params = sum(int(pl.num_params) for pl in param_logs)
+    if ml._num_param_tensors != expected_param_sum:
         raise MetadataInvariantError(
             name,
-            f"num_param_tensors={ml.num_param_tensors} != "
-            f"sum(unique num_param_tensors)={expected_param_sum}",
+            f"num_param_tensors={ml._num_param_tensors} != "
+            f"len(param_logs)={expected_param_sum} (parameter-identity basis)",
         )
     if ml.num_params != expected_num_params:
         raise MetadataInvariantError(
             name,
-            f"num_params={ml.num_params} != sum(unique num_params)={expected_num_params}",
+            f"num_params={ml.num_params} != sum(param_logs num_params)="
+            f"{expected_num_params} (parameter-identity basis)",
         )
 
     if ml.num_params_trainable + ml.num_params_frozen != ml.num_params:
@@ -99,19 +97,19 @@ def _check_trace_self_consistency(ml: Trace) -> None:
         raise MetadataInvariantError(name, "No output layers found")
 
     # Timing
-    if ml.capture_duration < 0:
-        raise MetadataInvariantError(name, f"capture_duration={ml.capture_duration} < 0")
-    if ml.capture_start_time > ml.capture_end_time:
+    if ml._provenance_duration < 0:
+        raise MetadataInvariantError(name, f"capture_duration={ml._provenance_duration} < 0")
+    if ml._provenance_start_time > ml._provenance_end_time:
         raise MetadataInvariantError(
             name,
-            f"capture_start_time={ml.capture_start_time} > capture_end_time={ml.capture_end_time}",
+            f"capture_start_time={ml._provenance_start_time} > capture_end_time={ml._provenance_end_time}",
         )
 
     # Tensor counts
-    if ml.num_tensors < ml.num_saved_ops:
+    if len(ml) < ml._num_saved_ops:
         raise MetadataInvariantError(
             name,
-            f"num_tensors={ml.num_tensors} < num_saved_ops={ml.num_saved_ops}",
+            f"len(trace)={len(ml)} < num_saved_ops={ml._num_saved_ops}",
         )
 
 
@@ -138,11 +136,11 @@ def _retained_orphan_computational_count(ml: Trace, name: str) -> int:
         records established during postprocessing.
     """
     orphan_logs = tuple(getattr(ml, "_orphan_logs", ()))
-    retained_orphans = tuple(log for log in orphan_logs if getattr(log, "is_orphan", False))
+    retained_orphans = tuple(log for log in orphan_logs if record_member(log, "is_orphan", False))
     if not retained_orphans:
         return 0
 
-    if not getattr(ml, "keep_orphans", False):
+    if not ml._options_keep_orphans:
         raise MetadataInvariantError(name, "retained orphan logs require keep_orphans=True")
 
     orphan_raw_labels = list(getattr(ml, "_orphan_labels", ()))
@@ -160,7 +158,7 @@ def _retained_orphan_computational_count(ml: Trace, name: str) -> int:
             "retained orphan islands must mark every _orphan_logs entry is_orphan=True",
         )
 
-    active_labels = {layer.layer_label for layer in ml.layer_list}
+    active_labels = {layer.layer_label for layer in ml._layer_list}
     for orphan in retained_orphans:
         island_edges = set(orphan.parents) | set(orphan.children)
         active_edges = island_edges & active_labels
@@ -173,7 +171,7 @@ def _retained_orphan_computational_count(ml: Trace, name: str) -> int:
     return sum(
         1
         for orphan in retained_orphans
-        if not (orphan.is_input or orphan.is_output or orphan.is_buffer)
+        if not (orphan.is_input or orphan.is_output or orphan.graph.is_buffer)
     )
 
 
@@ -194,7 +192,7 @@ def _retained_orphan_op_labels(ml: Trace) -> set[str]:
     return {
         orphan.label
         for orphan in getattr(ml, "_orphan_logs", ())
-        if getattr(orphan, "is_orphan", False)
+        if record_member(orphan, "is_orphan", False)
     }
 
 
@@ -215,7 +213,7 @@ def _retained_orphan_layer_labels(ml: Trace) -> set[str]:
     return {
         orphan.layer_label
         for orphan in getattr(ml, "_orphan_logs", ())
-        if getattr(orphan, "is_orphan", False)
+        if record_member(orphan, "is_orphan", False)
     }
 
 
@@ -234,7 +232,7 @@ def _check_special_layer_lists(ml: Trace) -> None:
     retained_orphans_by_label = {
         orphan.label: orphan
         for orphan in getattr(ml, "_orphan_logs", ())
-        if getattr(orphan, "is_orphan", False)
+        if record_member(orphan, "is_orphan", False)
     }
     for list_attr, flag_attr, label_kind in _SPECIAL_LIST_FLAG_PAIRS:
         special_list = getattr(ml, list_attr)
@@ -256,18 +254,18 @@ def _check_special_layer_lists(ml: Trace) -> None:
             lpl = (
                 retained_orphans_by_label[label]
                 if label in retained_orphans_by_label
-                else ml[label]
+                else (ml[label] if label_kind == "op" else ml.layers[label])
             )
-            if not getattr(lpl, flag_attr):
+            if not record_member(lpl, flag_attr):
                 raise MetadataInvariantError(
                     name,
                     f"{label_kind.title()} {label} is in {list_attr} but {flag_attr}=False",
                 )
 
         # Reverse: every layer/op with the flag is in the list.
-        for lpl in ml.layer_list:
+        for lpl in ml._layer_list:
             label = lpl.label if label_kind == "op" else lpl.layer_label
-            if getattr(lpl, flag_attr) and label not in special_set:
+            if record_member(lpl, flag_attr) and label not in special_set:
                 raise MetadataInvariantError(
                     name,
                     f"{label_kind.title()} {label} has {flag_attr}=True but is not in {list_attr}",
@@ -275,12 +273,12 @@ def _check_special_layer_lists(ml: Trace) -> None:
 
 
 def _check_capture_edge_survival(trace: Trace) -> None:
-    """Reconcile the final graph against the sealed capture-time edge truth (r29 F3b).
+    """Reconcile the final graph against the sealed capture-time edge truth.
 
     The per-op identity witness (``dropped_edge_tensor_args``) is stamped at
     CAPTURE, so an edge dropped anywhere DOWNSTREAM of it -- the 20-step
-    postprocess pipeline, a later graph mutation -- was invisible whenever the
-    payload was trivial (the value sweep's blind class): removing an edge from
+    postprocess pipeline, a later graph mutation -- is invisible whenever the
+    payload is trivial (the value sweep's blind class): removing an edge from
     ``parents`` + ``parent_arg_positions`` symmetrically left every
     self-consistency check green. This invariant closes that stage gap: every
     capture-observed (slot -> producer) pair sealed on the Trace at op-record
@@ -315,24 +313,24 @@ def _check_capture_edge_survival(trace: Trace) -> None:
     # otherwise) -- the many-to-one raw->layer_label map cannot.
     ops_by_raw = {
         getattr(op, "_label_raw", None): op
-        for op in trace.layer_list
+        for op in trace._layer_list
         if getattr(op, "_label_raw", None) is not None
     }
-    for op in trace.layer_list:
+    for op in trace._layer_list:
         raw_label = getattr(op, "_label_raw", None)
         edges = truth.get(raw_label) if raw_label is not None else None
         if not edges:
             continue
-        if getattr(op, "interventions", None):
+        if getattr(op, "edits", None):
             continue
-        positions = getattr(op, "parent_arg_positions", None) or {}
+        positions = record_member(op, "parent_arg_positions", None) or {}
         recorded = set(op.parents or ())
         recorded.update(
             label
             for domain in ("args", "kwargs")
             for label in (positions.get(domain) or {}).values()
         )
-        # r33 F-1: reconcile each sealed triplet AT ITS EXACT SLOT, not by
+        # reconcile each sealed triplet AT ITS EXACT SLOT, not by
         # label-set membership. Set membership let two corruptions through:
         # a slot PERMUTATION between value-identical surviving producers (the
         # swapped labels are both still "present somewhere"), and an argpos
@@ -374,6 +372,139 @@ def _check_capture_edge_survival(trace: Trace) -> None:
             )
 
 
+def _check_op_label_resolution(ml: Trace) -> None:
+    """Check that every stored Op label resolves, through ``trace.ops``, to its own Op.
+
+    Graph edges, boundary lists and users name an Op by its final labels: the
+    pass-qualified ``label``, the bare ``layer_label`` of a single-pass layer, and
+    the suffixed raw label. ``Trace.__getitem__`` resolves through
+    ``layer_dict_all_keys``, while ``trace.ops`` has its own alias indexes, so the
+    two lookups can disagree. A label that ``trace.ops`` answers with a different
+    Op, or refuses because two Ops claim it, is silent corruption for every
+    consumer that reads through ``trace.ops``; this check fails on it rather than
+    letting the topology check (which resolves through ``Trace.__getitem__``)
+    pass it.
+    """
+
+    name = "graph_topology"
+    if getattr(type(ml), "ops", None) is None and "ops" not in getattr(ml, "__dict__", {}):
+        # A duck-typed stand-in without an ops accessor (the mutant-test fakes)
+        # has no second lookup that could disagree with ``ml[label]``. A real
+        # ``Trace`` always defines ``ops``, so this never applies to one. The
+        # check is reported as not run, never passed silently.
+        # deferred: cycle validation
+        from ._diagnostics import ValidationDiagnostic, record_validation_diagnostic
+
+        record_validation_diagnostic(
+            ml,
+            ValidationDiagnostic(
+                check_name="op_label_resolution_unchecked",
+                message="Op label resolution not checked: this object has no ops accessor.",
+                extra={"invariant": name},
+            ),
+        )
+        return
+    ops = ml.ops
+    for entry in ml._layer_list:
+        layer_label = getattr(entry, "layer_label", None)
+        pass_index = getattr(entry, "pass_number", None)
+        num_passes = getattr(entry, "num_passes", None)
+        labels = [entry.label]
+        label_raw = entry._label_raw
+        if _is_suffixed_raw_label(label_raw):
+            # A suffixed raw label names exactly its op; an unsuffixed one is a
+            # raw spelling that a final label may legitimately outrank.
+            labels.append(label_raw)
+        if isinstance(layer_label, str) and isinstance(pass_index, int):
+            labels.append(f"{layer_label}:{pass_index}")
+        if isinstance(layer_label, str) and (not isinstance(num_passes, int) or num_passes <= 1):
+            labels.append(layer_label)
+        for label in labels:
+            if not isinstance(label, str):
+                continue
+            try:
+                resolved = ops[label]
+            except (AmbiguousOpLookupError, KeyError) as exc:
+                raise MetadataInvariantError(
+                    name,
+                    f"Op {entry.label!r} label {label!r} does not resolve to it "
+                    f"through trace.ops: {exc}",
+                ) from exc
+            if resolved is not entry:
+                raise MetadataInvariantError(
+                    name,
+                    f"Op {entry.label!r} label {label!r} resolves through trace.ops "
+                    f"to a different op {resolved.label!r} (raw "
+                    f"{resolved._label_raw!r}); a final label must name its own op",
+                )
+
+
+def _edge_mismatch_message(label: str, other: str, relation: str, reverse: str, stored: Any) -> str:
+    """One bidirectionality finding, naming the counterpart's stored list verbatim.
+
+    The stored spellings stay visible so a corrupt-but-fuzzy-resolvable label
+    (``'input'`` for ``'input_1'``) is reported as stored, never as resolved.
+    """
+
+    return (
+        f"Layer {label} lists {other} as {relation}, but {other} does not list {label} as "
+        f"{reverse} (stored {reverse}s: {list(stored)!r})"
+    )
+
+
+def _label_aliases(entry: Any, fallback: str) -> set[str]:
+    """Return the spellings that identify EXACTLY ``entry``, pass included.
+
+    The alias set exists for ONE job: an edge may store a record's
+    pass-qualified op label while the counterpart stores the bare layer
+    label, so both spellings of the SAME record must be accepted.
+
+    It must NOT fold in the whole ``recurrent_ops`` group. That widening gave
+    the bidirectionality check zero resolution inside a multi-pass layer: an
+    edge repointed from ``layer:N`` to ``layer:M`` satisfied both the forward
+    and the reverse test, and because a forward repoint creates no ordering
+    violation ``graph_ordering`` did not fire either -- so the exact
+    corruption class loop grouping and removal/collapse repointing produce
+    passed the full suite silently on every RNN/LSTM/shared-block model. The
+    identical corruption on a NON-recurrent control was caught instantly,
+    which isolated the cause to this set. Pass-metadata corruption itself is
+    owned by ``loop_detection_invariants``, which runs BEFORE this check, so
+    the pass-qualified spelling is safe to demand here.
+
+    The bare ``layer_label`` is an alias only for a SINGLE-pass record; for a
+    multi-pass record it names the group, not the record, which is precisely
+    the resolution this check needs.
+
+    Parameters
+    ----------
+    entry:
+        Layer-like record whose independently stored labels should be read.
+    fallback:
+        Lookup label used to resolve ``entry``.
+
+    Returns
+    -------
+    set[str]
+        The bare and pass-qualified spellings of ``entry`` itself.
+    """
+
+    aliases = {fallback}
+    layer_label = getattr(entry, "layer_label", None)
+    pass_index = getattr(entry, "pass_number", None)
+    num_passes = getattr(entry, "num_passes", None)
+    single_pass = not isinstance(num_passes, int) or num_passes <= 1
+    if isinstance(layer_label, str):
+        if single_pass:
+            aliases.add(layer_label)
+        if isinstance(pass_index, int):
+            # The exact pass-qualified spelling, derived from the two stored
+            # fields rather than the ``Layer.label`` accessor (which
+            # intentionally raises on corrupt pass metadata -- an invariant
+            # check must report the owning contract, not leak that error).
+            aliases.add(f"{layer_label}:{pass_index}")
+    return aliases
+
+
 def _check_graph_topology(ml: Trace) -> None:
     """Check C: parent-child edge bidirectionality and stored-flag consistency.
 
@@ -386,76 +517,23 @@ def _check_graph_topology(ml: Trace) -> None:
       ``parents`` (the arg map may not invent edges the graph does not have).
     - Input layers have no parents.
     - out_versions_by_child keys are a subset of children.
+    - Every Op's final labels resolve through ``trace.ops`` to that same Op
+      (``_check_op_label_resolution``, run last).
 
-    Round-26 W3-3 note: this check previously also "compared"
-    ``has_parents``/``has_siblings``/``has_co_parents`` against
-    ``len(parents)``/``len(siblings)``/``len(co_parents)``. Those three are
-    read-only ``Op`` PROPERTIES defined as exactly those length tests
-    (op.py), so the comparisons were tautologies that could never fail on any
-    trace -- security theater, not a tripwire. They were removed rather than
-    kept; ``has_children`` is the only stored capture-time flag with
-    independent information, and the ``parent_arg_positions`` cross-check
-    below is a real two-independent-structures consistency test that replaces
-    them.
+    Note: ``has_parents``/``has_siblings``/``has_co_parents`` are deliberately
+    NOT compared against ``len(parents)``/``len(siblings)``/``len(co_parents)``.
+    Those three are read-only ``Op`` PROPERTIES defined as exactly those length
+    tests (op.py), so such comparisons would be tautologies that could never
+    fail on any trace. ``has_children`` is the only stored capture-time flag
+    with independent information, and the ``parent_arg_positions`` cross-check
+    below is a real two-independent-structures consistency test.
     """
     name = "graph_topology"
     label_set = set(ml.layer_labels) | set(ml.op_labels)
     output_set = set(ml.output_layers)
 
-    def label_aliases(entry: Any, fallback: str) -> set[str]:
-        """Return the spellings that identify EXACTLY ``entry``, pass included.
-
-        The alias set exists for ONE job: an edge may store a record's
-        pass-qualified op label while the counterpart stores the bare layer
-        label, so both spellings of the SAME record must be accepted.
-
-        It must NOT fold in the whole ``recurrent_ops`` group. That widening gave
-        the bidirectionality check zero resolution inside a multi-pass layer: an
-        edge repointed from ``layer:N`` to ``layer:M`` satisfied both the forward
-        and the reverse test, and because a forward repoint creates no ordering
-        violation ``graph_ordering`` did not fire either -- so the exact
-        corruption class loop grouping and removal/collapse repointing produce
-        passed the full suite silently on every RNN/LSTM/shared-block model. The
-        identical corruption on a NON-recurrent control was caught instantly,
-        which isolated the cause to this set. Pass-metadata corruption itself is
-        owned by ``loop_detection_invariants``, which runs BEFORE this check, so
-        the pass-qualified spelling is safe to demand here.
-
-        The bare ``layer_label`` is an alias only for a SINGLE-pass record; for a
-        multi-pass record it names the group, not the record, which is precisely
-        the resolution this check needs.
-
-        Parameters
-        ----------
-        entry:
-            Layer-like record whose independently stored labels should be read.
-        fallback:
-            Lookup label used to resolve ``entry``.
-
-        Returns
-        -------
-        set[str]
-            The bare and pass-qualified spellings of ``entry`` itself.
-        """
-
-        aliases = {fallback}
-        layer_label = getattr(entry, "layer_label", None)
-        pass_index = getattr(entry, "pass_index", None)
-        num_passes = getattr(entry, "num_passes", None)
-        single_pass = not isinstance(num_passes, int) or num_passes <= 1
-        if isinstance(layer_label, str):
-            if single_pass:
-                aliases.add(layer_label)
-            if isinstance(pass_index, int):
-                # The exact pass-qualified spelling, derived from the two stored
-                # fields rather than the ``Layer.label`` accessor (which
-                # intentionally raises on corrupt pass metadata -- an invariant
-                # check must report the owning contract, not leak that error).
-                aliases.add(f"{layer_label}:{pass_index}")
-        return aliases
-
-    for lpl in ml.layer_list:
-        lpl_aliases = label_aliases(lpl, lpl.layer_label)
+    for lpl in ml._layer_list:
+        lpl_aliases = _label_aliases(lpl, lpl.layer_label)
         # Report the PASS-QUALIFIED spelling: on a multi-pass layer the bare layer
         # label names every pass, so a bare-label message could not tell the reader
         # which pass's edge is corrupt.
@@ -463,7 +541,7 @@ def _check_graph_topology(ml: Trace) -> None:
 
         # Parent-child bidirectionality. Stored edge labels must EXACT-MATCH a
         # canonical layer/op label, and that membership test fires BEFORE any
-        # ``ml[...]`` resolution (B3R7-R05 sol): ``Trace.__getitem__`` is the
+        # ``ml[...]`` resolution: ``Trace.__getitem__`` is the
         # user-facing INTELLIGENT lookup, so a corrupted-but-fuzzy-resolvable
         # spelling (``'input'`` for ``'input_1'``) resolves successfully and a
         # post-resolution guard on the RESOLVED record's ``layer_label`` can
@@ -485,7 +563,7 @@ def _check_graph_topology(ml: Trace) -> None:
             if not lpl_aliases.intersection(parent.children):
                 raise MetadataInvariantError(
                     name,
-                    f"Layer {label} lists {p} as parent, but {p} does not list {label} as child",
+                    _edge_mismatch_message(label, p, "parent", "child", parent.children),
                 )
 
         for c in lpl.children:
@@ -500,7 +578,7 @@ def _check_graph_topology(ml: Trace) -> None:
             if not lpl_aliases.intersection(child.parents):
                 raise MetadataInvariantError(
                     name,
-                    f"Layer {label} lists {c} as child, but {c} does not list {label} as parent",
+                    _edge_mismatch_message(label, c, "child", "parent", child.parents),
                 )
 
         # Stored-flag consistency. has_children is set during capture and does
@@ -509,14 +587,14 @@ def _check_graph_topology(ml: Trace) -> None:
         # ONLY stored flag with independent information; the derived
         # has_parents/has_siblings/has_co_parents properties recompute from the
         # very lists a comparison would use, so checking them is vacuous -- see
-        # the round-26 W3-3 note in the docstring.)
+        # the note in the docstring.)
         non_output_children = [
             c for c in lpl.children if c not in output_set and ml[c].layer_label not in output_set
         ]
-        if lpl.has_children != (len(non_output_children) > 0):
+        if lpl.graph.has_children != (len(non_output_children) > 0):
             raise MetadataInvariantError(
                 name,
-                f"Layer {label}: has_children={lpl.has_children} but "
+                f"Layer {label}: has_children={lpl.graph.has_children} but "
                 f"non-output children={non_output_children}",
             )
 
@@ -531,13 +609,13 @@ def _check_graph_topology(ml: Trace) -> None:
         parent_alias_set = set(lpl.parents)
         for parent_label in lpl.parents:
             parent_entry = ml[parent_label]
-            parent_alias_set.update(label_aliases(parent_entry, parent_label))
+            parent_alias_set.update(_label_aliases(parent_entry, parent_label))
         # The arg map's top-level domain is CLOSED: every writer uses exactly
         # the "args"/"kwargs" buckets, and the per-entry checks below iterate
         # only those two, so a foreign top-level key (e.g. a label used as a
-        # domain, the B3R7-R05-2 plant shape) would otherwise never be
+        # domain) would otherwise never be
         # examined at all -- an unguarded domain on relation metadata.
-        foreign_domains = set(lpl.parent_arg_positions) - {"args", "kwargs"}
+        foreign_domains = set(lpl.call.parent_arg_positions) - {"args", "kwargs"}
         if foreign_domains:
             raise MetadataInvariantError(
                 name,
@@ -546,7 +624,9 @@ def _check_graph_topology(ml: Trace) -> None:
                 f"'args' and 'kwargs'",
             )
         for arg_domain in ("args", "kwargs"):
-            for position, attributed_label in lpl.parent_arg_positions.get(arg_domain, {}).items():
+            for position, attributed_label in lpl.call.parent_arg_positions.get(
+                arg_domain, {}
+            ).items():
                 try:
                     attributed_entry = ml[attributed_label]
                 except (KeyError, ValueError):
@@ -555,7 +635,7 @@ def _check_graph_topology(ml: Trace) -> None:
                     # missing parent"); this check owns only the
                     # resolvable-but-not-a-parent inconsistency.
                     continue
-                attributed_aliases = label_aliases(attributed_entry, attributed_label)
+                attributed_aliases = _label_aliases(attributed_entry, attributed_label)
                 if attributed_aliases & parent_alias_set:
                     continue
                 raise MetadataInvariantError(
@@ -582,18 +662,21 @@ def _check_graph_topology(ml: Trace) -> None:
                 f"Layer {label}: out_versions_by_child has keys not in children: {extra}",
             )
 
-    _check_sibling_relation_derivation(ml, name, label_aliases)
+    _check_sibling_relation_derivation(ml, name, _label_aliases)
+    # Last, so every structural finding above reports its own contract first;
+    # this check compares two lookups over a structurally sound graph.
+    _check_op_label_resolution(ml)
 
 
 def _check_sibling_relation_derivation(ml: Trace, name: str, label_aliases: Any) -> None:
     """Derive ``siblings``/``co_parents`` from the edge tables and compare.
 
-    The round-26 W3-3 removal deleted the ``has_siblings``/``has_co_parents``
-    tautologies (property vs its own length) but left the WHOLE relation family
-    with no tripwire at all: an ``Op.siblings`` implementation drifting from its
-    documented semantics -- exactly the pass-spelling self-inclusion bug, where
-    every multi-pass op listed ITSELF as its own sibling -- shipped through
-    repr, ``to_pandas()``, and every consumer with zero invariant hits.
+    Comparing ``has_siblings``/``has_co_parents`` to their own lengths would be
+    tautological, so this check covers the WHOLE relation family instead: an
+    ``Op.siblings`` implementation drifting from its documented semantics --
+    for example the pass-spelling self-inclusion bug, where every multi-pass
+    op lists ITSELF as its own sibling -- would otherwise ship through repr,
+    ``to_pandas()``, and every consumer with zero invariant hits.
 
     This is an independent re-derivation of the documented spec from the
     ``parents``/``children`` edge tables (a second implementation, not a call
@@ -606,7 +689,7 @@ def _check_sibling_relation_derivation(ml: Trace, name: str, label_aliases: Any)
     * ``has_siblings``/``has_co_parents`` mirror their lists' emptiness;
     * unresolvable edge labels are skipped (they are ``graph_topology``'s
       bidirectionality finding, and the properties skip them identically);
-    * orphan-registry records resolve through ``ml.orphans``, as the
+    * orphan-registry records resolve through ``ml.graph.orphans``, as the
       properties document.
 
     Cost is bounded by the same parent-children/child-parents walk the
@@ -625,13 +708,13 @@ def _check_sibling_relation_derivation(ml: Trace, name: str, label_aliases: Any)
             record = ml[entry_label]
         except (KeyError, ValueError):
             try:
-                record = ml.orphans[entry_label]
+                record = ml.graph.orphans[entry_label]
             except KeyError:
                 record = None
         resolution_cache[entry_label] = record
         return record
 
-    for lpl in ml.layer_list:
+    for lpl in ml._layer_list:
         own_spellings = label_aliases(lpl, lpl.layer_label)
         report_label = max(own_spellings, key=len)
         for relation, forward_field, reverse_field in (
@@ -650,7 +733,7 @@ def _check_sibling_relation_derivation(ml: Trace, name: str, label_aliases: Any)
                     if candidate is None or candidate.is_output:
                         continue
                     expected.add(candidate_label)
-            stored = list(getattr(lpl, relation))
+            stored = list(record_member(lpl, relation))
             if len(stored) != len(set(stored)) or set(stored) != expected:
                 raise MetadataInvariantError(
                     name,
@@ -660,9 +743,18 @@ def _check_sibling_relation_derivation(ml: Trace, name: str, label_aliases: Any)
                     f"{relation.rstrip('s').replace('_', '-')})",
                 )
             has_flag = f"has_{relation}"
-            if bool(getattr(lpl, has_flag)) != bool(expected):
+            if bool(record_member(lpl, has_flag)) != bool(expected):
                 raise MetadataInvariantError(
                     name,
-                    f"Layer {report_label}: {has_flag}={getattr(lpl, has_flag)} but the "
+                    f"Layer {report_label}: {has_flag}={record_member(lpl, has_flag)} but the "
                     f"derived {relation} list has {len(expected)} members",
                 )
+
+
+# Late imports: the split modules of this package import one another (cycles), so each
+# imports its siblings once every definition above exists.
+from .._utils._record_group_table import record_member  # noqa: E402
+from ._invariants import (  # noqa: E402
+    _SPECIAL_LIST_FLAG_PAIRS,
+    MetadataInvariantError,
+)

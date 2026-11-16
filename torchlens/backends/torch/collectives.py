@@ -12,7 +12,7 @@ runs inside ``pause_logging()`` (interior collapse), the node is emitted by
 the ordinary producer, and downstream ops parent on it through the standard
 label machinery.
 
-Every boundary carries the C0 ``collective_boundary_v1`` payload in its
+Every boundary carries the ``collective_boundary_v1`` payload in its
 portable ``annotations["collective"]`` namespace: the two-field
 ``group_uid`` correlation key with an issue-ticked per-``(uid, channel)``
 seq, role-indexed tensor entries with dual-geometry slots, the three-phase
@@ -42,8 +42,24 @@ from typing import Any, Protocol
 
 import torch
 
-from ..._transport import to_cpu_contiguous
+from torchlens._distributed._dtensor import dtensor_dual_geometry
+from torchlens._distributed._lifecycle import (
+    _patch_modules,
+    armed_state,
+    next_seq,
+    resolve_group_identity,
+    restore_wrapped_attr,
+)
+
+from ..._data_classes.internal_types import FuncExecutionContext
+from ..._transport import digest_byte_view
+from ..._utils._tensor_label import get_tensor_label, set_tensor_label
+from ..._utils.rng import log_current_autocast_state, log_current_rng_states
+from ..._utils.tensor_utils import safe_copy
 from ...errors._base import CompatibilityError
+from ._ops_capture_records import _record_label_version_snapshot
+from ._ops_emission import apply_live_hooks_to_outputs, log_function_output_tensors
+from .wrappers import _propagate_mutation_label_to_storage_aliases, _register_inplace_live_grad_hook
 
 __all__ = [
     "COLLECTIVE_SITES",
@@ -91,6 +107,13 @@ class WildcardRecvUnsupportedError(CompatibilityError, RuntimeError):
     A wildcard recv has no determinate peer, so no correlation channel exists
     for it; capture refuses rather than recording an uncorrelatable boundary.
     ``fields["kind"]`` is ``"wildcard_recv_unsupported"``.
+
+    Examples
+    --------
+    >>> issubclass(WildcardRecvUnsupportedError, tl.errors.CompatibilityError)
+    True
+    >>> issubclass(WildcardRecvUnsupportedError, RuntimeError)
+    True
     """
 
 
@@ -311,20 +334,17 @@ def _digest_tensor(tensor: torch.Tensor) -> str:
     """Byte-exact SHA-256 of a tensor's values (dtype-agnostic)."""
 
     # detach-ok: read-only digest snapshot; no retained gradient payload crosses this boundary.
-    flat = to_cpu_contiguous(tensor).reshape(-1)
-    if flat.numel() == 0:
-        return hashlib.sha256(b"").hexdigest()
-    # Buffer-protocol digest (r7 R35-3): identical bytes to the old
+    # Buffer-protocol digest: identical bytes to the old
     # ``tobytes`` spelling (this digest PERSISTS in collective annotations,
     # so byte identity is load-bearing) without the whole-payload copy.
-    return hashlib.sha256(flat.view(torch.uint8).numpy().data).hexdigest()
+    return hashlib.sha256(digest_byte_view(tensor)).hexdigest()
 
 
 def _role_entry(role: str, index: int, tensor: torch.Tensor) -> dict[str, Any]:
     """One role-indexed entry; dual-geometry slots stay None for plain tensors.
 
     The physical ``shape`` is ALWAYS the local bytes actually held; for a
-    DTensor value (reachable once C2 relaxes the dtensor refusal) the logical
+    DTensor value (reachable once the dtensor refusal is relaxed) the logical
     side is declared explicitly alongside it.
     """
 
@@ -339,7 +359,6 @@ def _role_entry(role: str, index: int, tensor: torch.Tensor) -> dict[str, Any]:
         "mesh_coords": None,
         "shard_offset": None,
     }
-    from torchlens.distributed._dtensor import dtensor_dual_geometry
 
     geometry = dtensor_dual_geometry(tensor)
     if geometry is not None:
@@ -368,11 +387,11 @@ def _resolve_root(bound: dict[str, Any], group: Any, src_or_dst: str) -> int | N
 def _c10d_group_seq(group: Any) -> tuple[int | None, str | None]:
     """Read c10d's private per-group sequence number, or disclose why not.
 
-    Routed through ``_torch_compat`` (``HAS_C10D_GROUP_SEQ``, r-b4 R26-2
+    Routed through ``_torch_compat`` (``HAS_C10D_GROUP_SEQ``
     shape): a private-API rename used to silently and permanently disable
     this redundant correlation cross-check -- the only in-band detector in
     the base-misalignment neighborhood -- with zero visibility in
-    ``doctor()`` / ``compat.report()``.
+    ``tl.report.doctor()``.
 
     Returns
     -------
@@ -382,12 +401,12 @@ def _c10d_group_seq(group: Any) -> tuple[int | None, str | None]:
         indistinguishable downstream from honest capability absence, so the
         only in-band base-misalignment cross-check vanished with zero
         visibility. It now demotes the capability through the standard
-        degradation channel (visible in ``doctor()`` / ``compat.report()``)
+        degradation channel (visible in ``tl.report.doctor()``)
         and returns the ``"c10d_group_seq_read_failed"`` disclosure token for
         the boundary record where the witness vanished.
     """
 
-    from torchlens.utils._torch_compat import (
+    from torchlens._utils._torch_compat import (
         mark_torch_capability_missing,
         probe_c10d_capabilities,
     )
@@ -515,8 +534,6 @@ def _build_payload(
 def _journal_boundary(trace: Any, payload: dict[str, Any], op_labels: list[str]) -> None:
     """Append a boundary to the trace-level distributed journal."""
 
-    from torchlens.distributed._lifecycle import armed_state
-
     entry = dict(payload)
     entry["op_labels_raw"] = list(op_labels)
     record = trace.annotations.setdefault("distributed", {})
@@ -549,18 +566,6 @@ def _emit_boundary_op(
     """
 
     from ... import _state
-    from ...data_classes.internal_types import FuncExecutionContext
-    from ...utils.tensor_utils import safe_copy
-    from ._tl import get_tensor_label, set_tensor_label
-    from .ops import (
-        _record_label_version_snapshot,
-        apply_live_hooks_to_outputs,
-        log_function_output_tensors,
-    )
-    from .wrappers import (
-        _propagate_mutation_label_to_storage_aliases,
-        _register_inplace_live_grad_hook,
-    )
 
     raw_replay = partial(original, *args, **kwargs)
     raw_replay.__tl_collective_info__ = payload  # type: ignore[attr-defined]
@@ -660,8 +665,6 @@ def _make_collective_wrap(site: CollectiveSite, original: Callable[..., Any]) ->
         its own ``TypeError`` anyway).
         """
 
-        from torchlens.distributed._lifecycle import armed_state, next_seq, resolve_group_identity
-
         state = armed_state()
         if state is None or _inside_boundary():
             with _BoundaryScope():
@@ -685,7 +688,7 @@ def _make_collective_wrap(site: CollectiveSite, original: Callable[..., Any]) ->
             and _state._active_owner_thread_id == threading.get_ident()
         )
         if capturing and site.unsupported:
-            from torchlens.distributed._recognizer import (
+            from torchlens._distributed._recognizer import (
                 UNCAPTURED_COLLECTIVE_OP,
                 UncapturedCollectiveOpError,
             )
@@ -695,6 +698,7 @@ def _make_collective_wrap(site: CollectiveSite, original: Callable[..., Any]) ->
                 "boundary schema does not support a root-only aggregate tensor. "
                 "Use torch.distributed.gather with a per-rank tensor list.",
                 kind=UNCAPTURED_COLLECTIVE_OP,
+                code=UNCAPTURED_COLLECTIVE_OP,
                 layer=3,
                 func=f"torch.distributed.{site.attr}",
                 reason="single_tensor_gather_unsupported",
@@ -772,8 +776,8 @@ def _make_collective_wrap(site: CollectiveSite, original: Callable[..., Any]) ->
             with _BoundaryScope():
                 return original(*args, **kwargs)
 
-        trace = _state._active_trace
-        if getattr(trace, "capture_mode", None) == "predicate":
+        trace: Any = _state._active_trace  # non-None: ``capturing`` checked it
+        if trace._options_mode == "predicate":
             raise CompatibilityError(
                 "Fastlog cannot represent collective boundary journals; refusing before "
                 "the collective executes instead of returning a Recording that omits it.",
@@ -785,9 +789,7 @@ def _make_collective_wrap(site: CollectiveSite, original: Callable[..., Any]) ->
         async_op = bool(bound.get("async_op", False)) or site.attr in ("isend", "irecv")
         witness_policy = str(getattr(trace, "distributed_witness", "none") or "none")
 
-        from ...utils.rng import log_current_autocast_state, log_current_rng_states
-
-        save_rng = getattr(trace, "save_rng_states", False)
+        save_rng = trace._options_save_rng
         rng_states = log_current_rng_states(torch_only=True) if save_rng else {}
         autocast_state = log_current_autocast_state()
         contribution_digests: list[str] | None = None
@@ -848,7 +850,6 @@ def install_collective_wraps(originals: dict[tuple[Any, str], Any]) -> None:
 
     if not torch.distributed.is_available():
         return
-    from torchlens.distributed._lifecycle import _patch_modules
 
     canonical_modules = (torch.distributed, torch.distributed.distributed_c10d)
     # Snapshot before mutating either canonical namespace: auxiliary modules
@@ -880,10 +881,8 @@ def remove_collective_wraps(originals: dict[tuple[Any, str], Any]) -> None:
 
     A site re-patched by a third party after installation is left in place
     with a warning instead of being clobbered back to the pristine function
-    (see :func:`torchlens.distributed._lifecycle.restore_wrapped_attr`).
+    (see :func:`torchlens._distributed._lifecycle.restore_wrapped_attr`).
     """
-
-    from torchlens.distributed._lifecycle import restore_wrapped_attr
 
     first_failure: Exception | None = None
     for (module, attr), original in list(originals.items()):

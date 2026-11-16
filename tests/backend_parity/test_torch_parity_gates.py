@@ -34,13 +34,13 @@ from _oracle_env import (
 from torch import nn
 
 import torchlens as tl
-from torchlens._io import FieldPolicy
-from torchlens.constants import (
+from torchlens._constants import (
     LAYER_PASS_LOG_FIELD_ORDER,
     MODEL_LOG_FIELD_ORDER,
 )
-from torchlens.data_classes.op import Op
-from torchlens.data_classes.trace import Trace
+from torchlens._data_classes.op import Op
+from torchlens._data_classes.trace import Trace
+from torchlens._io import FieldPolicy
 from torchlens.options import CaptureOptions
 
 pytestmark = pytest.mark.backend_parity
@@ -168,10 +168,10 @@ def _default_trace() -> Trace:
         model,
         x,
         capture=CaptureOptions(
-            layers_to_save="all",
-            random_seed=1701,
-            save_arg_values=True,
+            seed=1701,
+            save_args=True,
         ),
+        save="all",
     )
 
 
@@ -186,7 +186,7 @@ def _selective_trace() -> Trace:
 
     _guard_update_generation()
     model, x = _seeded_branchy_input()
-    return tl.trace(model, x, save=tl.func("tanh"), capture=CaptureOptions(random_seed=1702))
+    return tl.trace(model, x, save=tl.func("tanh"), capture=CaptureOptions(seed=1702))
 
 
 def _backward_ready_trace() -> Trace:
@@ -204,13 +204,13 @@ def _backward_ready_trace() -> Trace:
         model,
         x,
         capture=CaptureOptions(
-            layers_to_save="all",
             save_grads="all",
             backward_ready=True,
-            random_seed=1701,
+            seed=1701,
         ),
+        save="all",
     )
-    trace.log_backward(trace[trace.output_layers[0]].out.sum())
+    trace.backward(trace[trace.output_layers[0]].out.sum())
     return trace
 
 
@@ -388,11 +388,11 @@ def _op_projection(op: Any) -> dict[str, Any]:
         "func_name": op.func_name,
         "parents": list(op.parents),
         "children": list(op.children),
-        "parent_arg_positions": _normalize(op.parent_arg_positions),
+        "parent_arg_positions": _normalize(op.call.parent_arg_positions),
         "has_saved_activation": bool(op.has_saved_activation),
-        "has_saved_args": bool(op.has_saved_args),
+        "has_saved_args": bool(op.call.has_saved_args),
         "has_grad": bool(op.has_grad),
-        "num_saved_grads": len(op.grads),
+        "num_saved_grads": len(op.autograd.grads),
         "shape": _normalize(op.shape),
         "dtype": _normalize(op.dtype),
         "dtype_ref": None if op.dtype_ref is None else str(op.dtype_ref),
@@ -421,22 +421,22 @@ def _trace_projection(trace: Trace) -> dict[str, Any]:
     """
 
     return {
-        "backend": trace.backend,
-        "module_identity_mode": trace.module_identity_mode,
-        "param_source": trace.param_source,
-        "num_ops": trace.num_ops,
-        "num_saved_ops": trace.num_saved_ops,
-        "has_backward_pass": trace.has_backward_pass,
-        "num_backward_passes": trace.num_backward_passes,
+        "backend": trace.provenance.backend,
+        "module_identity_mode": trace.options.module_identity_mode,
+        "param_source": trace.provenance.param_source,
+        "num_ops": trace._num_ops,
+        "num_saved_ops": len(trace.saved_ops),
+        "has_backward_pass": trace.autograd.has_backward_pass,
+        "num_backward_passes": len(trace.autograd.backward_passes),
         "output_layers": list(trace.output_layers),
-        "ops": [_op_projection(op) for op in trace.layer_list],
+        "ops": [_op_projection(op) for op in trace._layer_list],
         "lookup_keys": {
             "ops": list(trace.ops.keys()),
             "layers": list(trace.layers.keys()),
             "saved_ops": list(trace.saved_ops.keys()),
             "params": list(trace.params.keys()),
             "modules": list(trace.modules.keys()),
-            "grad_fns": list(trace.grad_fns.keys()),
+            "grad_fns": list(trace.autograd.grad_fns.keys()),
         },
     }
 
@@ -484,7 +484,7 @@ def _portable_surviving_fields(spec: dict[str, FieldPolicy]) -> list[str]:
     Parameters
     ----------
     spec:
-        ``PORTABLE_STATE_SPEC`` policy mapping for one record class.
+        ``_PORTABLE_STATE_SPEC`` policy mapping for one record class.
 
     Returns
     -------
@@ -532,8 +532,8 @@ def _dataframe_projection(trace: Trace) -> dict[str, Any]:
     return {
         "model_field_order": list(MODEL_LOG_FIELD_ORDER),
         "op_field_order": list(LAYER_PASS_LOG_FIELD_ORDER),
-        "trace_portable_fields": sorted(_portable_surviving_fields(Trace.PORTABLE_STATE_SPEC)),
-        "op_portable_fields": sorted(_portable_surviving_fields(Op.PORTABLE_STATE_SPEC)),
+        "trace_portable_fields": sorted(_portable_surviving_fields(Trace._PORTABLE_STATE_SPEC)),
+        "op_portable_fields": sorted(_portable_surviving_fields(Op._PORTABLE_STATE_SPEC)),
         "dataframe_columns": [column for column in frame.columns if column != "output_role"],
         "stable_rows": rows,
     }
@@ -553,7 +553,7 @@ def _public_accessor_projection(trace: Trace) -> dict[str, Any]:
         Stable public accessor projection.
     """
 
-    first_compute = next(op for op in trace.layer_list if op.func_name not in {"none", None})
+    first_compute = next(op for op in trace._layer_list if op.func_name not in {"none", None})
     return {
         "ops": {
             "keys": list(trace.ops.keys()),
@@ -588,10 +588,10 @@ def _public_accessor_projection(trace: Trace) -> dict[str, Any]:
         "grad_adjacent": {
             "op_label": first_compute.label,
             "has_grad": bool(first_compute.has_grad),
-            "num_saved_grads": len(first_compute.grads),
+            "num_saved_grads": len(first_compute.autograd.grads),
             "grad_is_none": first_compute.grad is None,
             "grad_for_bwd1_shape": _normalize(
-                first_compute.grad_for(bwd=1).shape if first_compute.has_grad else None
+                first_compute.autograd.grad_for(bwd=1).shape if first_compute.has_grad else None
             ),
         },
     }
@@ -616,7 +616,7 @@ def test_tlspec_roundtrip_and_manifest_goldens(tmp_path: Path) -> None:
 
     trace = _default_trace()
     bundle_path = tmp_path / "default_trace.tlspec"
-    tl.save(trace, bundle_path)
+    trace.save(bundle_path)
     loaded = cast(Trace, tl.load(bundle_path))
 
     regenerated = _assert_projection_matches_golden(
@@ -649,9 +649,9 @@ def test_semantic_output_fields_do_not_add_dataframe_columns() -> None:
 
     projection = _dataframe_projection(_default_trace())
     semantic_fields = {
-        "transform_repr",
-        "decoded_output",
-        "output_postprocessor",
+        "_activation_transform_repr",
+        "_decoded_output",
+        "_provenance_output_postprocessor",
         "output_id2label",
         "output_num_classes",
     }
@@ -700,7 +700,7 @@ def test_serialization_mutation_fails_gate(tmp_path: Path) -> None:
     _skip_during_golden_update()
     trace = _default_trace()
     bundle_path = tmp_path / "serialization_mutation.tlspec"
-    tl.save(trace, bundle_path)
+    trace.save(bundle_path)
     projection = _manifest_projection(bundle_path)
     projection["schema_version"] = 999
     with pytest.raises(AssertionError):
@@ -713,7 +713,7 @@ def test_saved_payload_deletion_fails_gate(tmp_path: Path) -> None:
     _skip_during_golden_update()
     trace = _default_trace()
     bundle_path = tmp_path / "payload_deletion.tlspec"
-    tl.save(trace, bundle_path)
+    trace.save(bundle_path)
     blob_dir = bundle_path / "blobs"
     first_blob = next(blob_dir.iterdir())
     first_blob.unlink()
@@ -739,7 +739,7 @@ def test_bundle_copy_preserves_manifest_gate(tmp_path: Path) -> None:
     trace = _default_trace()
     source_path = tmp_path / "source.tlspec"
     copied_path = tmp_path / "copied.tlspec"
-    tl.save(trace, source_path)
+    trace.save(source_path)
     shutil.copytree(source_path, copied_path)
     _skip_regenerated(
         _assert_projection_matches_golden(

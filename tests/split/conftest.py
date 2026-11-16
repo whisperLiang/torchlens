@@ -112,7 +112,7 @@ def pytest_configure(config: pytest.Config) -> None:
                 environment.setenv(name, value)
         config.add_cleanup(environment.undo)
 
-        from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
+        from torchlens._utils._torch_compat import get_dynamo_optimized_module_type
 
         get_dynamo_optimized_module_type(force_probe=True)
         _isolate_tinygrad_llvm(environment)

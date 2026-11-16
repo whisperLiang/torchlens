@@ -18,8 +18,6 @@ from torchlens.receptive_field._errors import (
 from torchlens.receptive_field._types import ReceptiveFieldStatus
 from torchlens.receptive_field._validation import check_geometric_metadata_invariants
 
-pytestmark = pytest.mark.smoke
-
 
 class _TwoStage(nn.Module):
     """Exercise pointwise and whole-extent propagation after a missing grid."""
@@ -42,7 +40,7 @@ def test_missing_grid_taints_both_directions_without_dropping_paths(reduction: b
     """Keep tensor-to-tensor dependencies uncertain across a gridless boundary."""
 
     trace = tl.trace(_TwoStage(reduction), torch.ones((2, 3)))
-    boundary = next(op for op in trace.layer_list if op.func_name == "relu")
+    boundary = next(op for op in trace._layer_list if op.func_name == "relu")
     original_shape = boundary.shape
     boundary.shape = None
 
@@ -74,7 +72,7 @@ def test_missing_grid_is_not_the_scalar_grid_in_cache_identity() -> None:
     """A boundary becoming a true scalar must invalidate both cached solutions."""
 
     trace = tl.trace(_TwoStage(), torch.tensor(1.0))
-    boundary = next(op for op in trace.layer_list if op.func_name == "relu")
+    boundary = next(op for op in trace._layer_list if op.func_name == "relu")
     assert boundary.shape == ()
     scalar_revision = _engine._graph_revision(trace)
     scalar_solution = _engine.solve(trace)
@@ -92,21 +90,22 @@ def test_gridless_explicit_endpoint_refuses_typed(direction: str) -> None:
     """An explicit boundary endpoint is unavailable, not an empty scalar grid."""
 
     trace = tl.trace(_TwoStage(), torch.ones((2, 3)))
-    boundary = next(op for op in trace.layer_list if op.func_name == "relu")
+    boundary = next(op for op in trace._layer_list if op.func_name == "relu")
     boundary.shape = None
 
-    with pytest.raises(ReceptiveFieldUnavailableError, match="no tensor output grid"):
+    with pytest.raises(ReceptiveFieldUnavailableError, match="no tensor output grid") as raised:
         if direction == "receptive":
             _engine.solve_from(trace, boundary)
         else:
             solve_projective(trace, [boundary])
+    assert raised.value.fields["code"] == "rf_tensor_grid_unavailable"
 
 
 def test_gridless_boundary_does_not_disable_tensor_metadata_tripwire() -> None:
     """The ordinary tensor descriptor invariants still reject a forged exact claim."""
 
     trace = tl.trace(_TwoStage(), torch.ones((2, 3)))
-    boundary = next(op for op in trace.layer_list if op.func_name == "relu")
+    boundary = next(op for op in trace._layer_list if op.func_name == "relu")
     boundary.shape = None
     solution = _engine.solve(trace)
     descriptor = next(iter(solution.per_op[trace.output_ops[0].label].values()))
@@ -155,7 +154,7 @@ def test_jax_nontensor_region_boundaries_pass_geometric_metadata(kind: str) -> N
         )[1]
 
     trace = tl.trace(model, ({}, jnp.ones((2, 3))), backend="jax")
-    boundaries = [op for op in trace.layer_list if op.shape is None]
+    boundaries = [op for op in trace._layer_list if op.shape is None]
     assert len(boundaries) == 1
     boundary = boundaries[0]
     assert boundary.parents and boundary.children

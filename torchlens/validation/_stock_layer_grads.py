@@ -11,6 +11,10 @@ import torch
 from torch import nn
 from torch.utils.hooks import RemovableHandle
 
+from .._utils.introspection import get_vars_of_type_from_obj
+from .._utils.rng import set_random_seed
+from ._live_model_state import load_state_dict_restore, restore_state_dict_if_changed
+
 _PASS_INDEX_PARSE_WARNED = False
 ModuleOutputGradKey = tuple[str, int, int]
 
@@ -32,6 +36,10 @@ class _StockModuleGradCollector:
         self._hook_handles: list[RemovableHandle] = []
         self._tensor_hook_handles: list[RemovableHandle] = []
         self.identity_output_addresses: set[ModuleOutputGradKey] = set()
+        #: Every module-output leaf the stock forward enumerated in this run,
+        #: gradient or not: the comparator's proof that a stock None means
+        #: "autograd produced no gradient here", not "stock never saw it".
+        self.reached_output_keys: set[ModuleOutputGradKey] = set()
 
     def install(self, model: nn.Module) -> None:
         """Install one forward hook per named module.
@@ -92,6 +100,7 @@ def _make_post_hook(
         input_ids = {id(leaf) for leaf in _tensor_leaves(args)}
         for output_index, leaf_out in enumerate(output_leaves):
             output_key = (*key, output_index)
+            collector.reached_output_keys.add(output_key)
             if isinstance(module, nn.Identity) or id(leaf_out) in input_ids:
                 collector.identity_output_addresses.add(output_key)
                 continue
@@ -105,7 +114,7 @@ def _make_post_hook(
 def _make_tensor_grad_hook(
     collector: _StockModuleGradCollector,
     key: ModuleOutputGradKey,
-) -> Callable[[torch.Tensor], torch.Tensor]:
+) -> Callable[[torch.Tensor | None], torch.Tensor | None]:
     """Build a tensor hook that snapshots one module-output gradient.
 
     Parameters
@@ -117,17 +126,42 @@ def _make_tensor_grad_hook(
 
     Returns
     -------
-    Callable[[torch.Tensor], torch.Tensor]
+    Callable[[torch.Tensor | None], torch.Tensor | None]
         Tensor hook that records a clone and returns the incoming gradient unchanged.
     """
 
-    def _tensor_grad_hook(grad: torch.Tensor) -> torch.Tensor:
-        """Snapshot a stock module-output gradient without retaining output grads."""
+    def _tensor_grad_hook(grad: torch.Tensor | None) -> torch.Tensor | None:
+        """Snapshot a stock module-output gradient without retaining output grads.
 
+        Autograd hands ``None`` to a tensor hook when the tensor is one output
+        of a multi-output node (``split``, ``unbind``, an LSTM) whose sibling
+        carried the gradient and this one did not; no gradient reached the
+        output, so nothing is recorded and the key stays "reached, no grad".
+        """
+
+        if grad is None:
+            return None
         collector.stock_module_output_grads[key] = grad.detach().clone()
         return grad
 
     return _tensor_grad_hook
+
+
+def _to_tuple_method(obj: Any) -> Callable[[], Any] | None:
+    """Return ``obj.to_tuple`` when it is a callable attribute, else ``None``.
+
+    Probed through ``getattr`` under a broad ``except``: a ``dict`` subclass
+    whose ``__getattr__`` raises ``KeyError`` for a missing name (the
+    ``Pack``/``AttrDict`` idiom) defeats ``hasattr``, which swallows only
+    ``AttributeError``, and a model output of that shape used to escape the
+    stock pass as an untyped ``KeyError``.
+    """
+
+    try:
+        method = getattr(obj, "to_tuple", None)
+    except Exception:  # noqa: BLE001 -- a hostile ``__getattr__`` is the guarded case
+        return None
+    return method if callable(method) else None
 
 
 def _first_leaf_tensor(obj: Any) -> torch.Tensor | None:
@@ -148,12 +182,8 @@ def _first_leaf_tensor(obj: Any) -> torch.Tensor | None:
         if isinstance(obj, nn.Parameter):
             return None
         return obj
-    if (
-        hasattr(obj, "to_tuple")
-        and callable(getattr(obj, "to_tuple", None))
-        and isinstance(obj, dict)
-    ):
-        to_tuple = getattr(obj, "to_tuple")
+    to_tuple = _to_tuple_method(obj)
+    if to_tuple is not None and isinstance(obj, dict):
         try:
             leaf = _first_leaf_tensor(to_tuple())
         except Exception:
@@ -172,9 +202,9 @@ def _first_leaf_tensor(obj: Any) -> torch.Tensor | None:
             if leaf is not None:
                 return leaf
         return None
-    if hasattr(obj, "to_tuple") and callable(getattr(obj, "to_tuple", None)):
+    if to_tuple is not None:
         try:
-            return _first_leaf_tensor(obj.to_tuple())
+            return _first_leaf_tensor(to_tuple())
         except Exception:
             return None
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
@@ -203,12 +233,8 @@ def _tensor_leaves(obj: Any) -> list[torch.Tensor]:
         if isinstance(obj, nn.Parameter):
             return []
         return [obj]
-    if (
-        hasattr(obj, "to_tuple")
-        and callable(getattr(obj, "to_tuple", None))
-        and isinstance(obj, dict)
-    ):
-        to_tuple = getattr(obj, "to_tuple")
+    to_tuple = _to_tuple_method(obj)
+    if to_tuple is not None and isinstance(obj, dict):
         try:
             return _tensor_leaves(to_tuple())
         except Exception:
@@ -223,9 +249,9 @@ def _tensor_leaves(obj: Any) -> list[torch.Tensor]:
         for value in obj.values():
             leaves.extend(_tensor_leaves(value))
         return leaves
-    if hasattr(obj, "to_tuple") and callable(getattr(obj, "to_tuple", None)):
+    if to_tuple is not None:
         try:
-            return _tensor_leaves(obj.to_tuple())
+            return _tensor_leaves(to_tuple())
         except Exception:
             return []
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
@@ -233,7 +259,13 @@ def _tensor_leaves(obj: Any) -> list[torch.Tensor]:
         for field in dataclasses.fields(obj):
             leaves.extend(_tensor_leaves(getattr(obj, field.name)))
         return leaves
-    return []
+    # Any other object: the same BFS the capture's output walk falls back to
+    # (``_walk_output_tensors_with_paths``), so a module returning a
+    # ``torch.distributions`` object or another plain object keys its tensor
+    # leaves in the same order on both sides.
+    return list(
+        get_vars_of_type_from_obj(obj, which_type=torch.Tensor, subclass_exceptions=[nn.Parameter])
+    )
 
 
 def _pass_index_from_layer_modules(layer: Any) -> int | None:
@@ -332,47 +364,50 @@ def _candidate_root_module(trace: Any) -> Any | None:
 
 def _stock_layer_grads(
     model: nn.Module,
-    input_args: Any,
-    input_kwargs: Mapping[str, Any],
+    stock_call: tuple[Any, Mapping[str, Any]],
     *,
     loss_fn: Callable[[Any], torch.Tensor],
-    random_seed: int,
+    seed: int,
     state_dict_snapshot: Mapping[str, torch.Tensor],
-) -> tuple[dict[ModuleOutputGradKey, torch.Tensor], set[ModuleOutputGradKey]]:
+) -> tuple[
+    dict[ModuleOutputGradKey, torch.Tensor], set[ModuleOutputGradKey], set[ModuleOutputGradKey]
+]:
     """Run a stock forward/backward pass and collect module-output grads.
 
     Parameters
     ----------
     model:
         Model to execute.
-    input_args:
-        Positional inputs.
-    input_kwargs:
-        Keyword inputs.
+    stock_call:
+        Positional inputs and keyword inputs, as one pair.
     loss_fn:
         Loss function mapping model output to a scalar tensor.
-    random_seed:
+    seed:
         Seed used for deterministic stock execution.
     state_dict_snapshot:
         State dict restored after the stock pass.
 
     Returns
     -------
-    tuple[dict[ModuleOutputGradKey, torch.Tensor], set[ModuleOutputGradKey]]
-        Captured stock module-output grads and identity-output addresses.
+    tuple[dict[ModuleOutputGradKey, torch.Tensor], set[ModuleOutputGradKey], set[ModuleOutputGradKey]]
+        Captured stock module-output grads, identity-output addresses, and
+        every module-output key the stock forward reached in this run.
     """
 
-    from ..utils.rng import set_random_seed
-
+    input_args, input_kwargs = stock_call
     collector = _StockModuleGradCollector()
     collector.install(model)
     try:
-        set_random_seed(random_seed)
+        set_random_seed(seed)
         output = model(*input_args, **dict(input_kwargs))
         loss = loss_fn(output)
         loss.backward()
         collector.collect_grads_after_backward()
-        return dict(collector.stock_module_output_grads), set(collector.identity_output_addresses)
+        return (
+            dict(collector.stock_module_output_grads),
+            set(collector.identity_output_addresses),
+            set(collector.reached_output_keys),
+        )
     finally:
         collector.cleanup()
-        model.load_state_dict(state_dict_snapshot)
+        restore_state_dict_if_changed(model, state_dict_snapshot, load_state_dict_restore)

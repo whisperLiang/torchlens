@@ -16,8 +16,8 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.errors import TrainingModeConfigError
-from torchlens.fastlog import CaptureSpec
-from torchlens.fastlog.exceptions import PredicateError
+from torchlens.recording import CaptureSpec
+from torchlens.recording._exceptions import PredicateError
 
 
 def _model() -> nn.Module:
@@ -36,7 +36,12 @@ def test_save_predicate_invalid_return_carries_predicate_return_invalid() -> Non
     """A save predicate returning an out-of-contract value stamps the code."""
 
     with pytest.raises(PredicateError) as exc_info:
-        tl.record(_model(), _x(), save=lambda ctx: "bogus", on_predicate_error="fail-fast")
+        tl.record(
+            _model(),
+            _x(),
+            save=lambda ctx: "bogus",
+            recording=tl.options.RecordingOptions(on_predicate_error="fail-fast"),
+        )
     assert exc_info.value.fields["code"] == "predicate_return_invalid"
     assert exc_info.value.fields["remedy"]
 
@@ -45,7 +50,7 @@ def test_halt_predicate_non_bool_return_carries_predicate_return_invalid() -> No
     """A halt predicate returning a non-bool stamps the same family code."""
 
     with pytest.raises(PredicateError) as exc_info:
-        tl.trace(_model(), _x(), halt=lambda ctx: 1)
+        tl.trace(_model(), _x(), stop_after=lambda ctx: 1)
     assert exc_info.value.fields["code"] == "predicate_return_invalid"
 
 
@@ -53,7 +58,13 @@ def test_invalid_default_capture_decision_carries_predicate_default_invalid() ->
     """A default_op value outside bool/CaptureSpec stamps the default code."""
 
     with pytest.raises(PredicateError) as exc_info:
-        tl.record(_model(), _x(), default_op="bogus", on_predicate_error="fail-fast")
+        tl.record(
+            _model(),
+            _x(),
+            recording=tl.options.RecordingOptions(
+                default_op="bogus", on_predicate_error="fail-fast"
+            ),
+        )
     assert exc_info.value.fields["code"] == "predicate_default_invalid"
 
 
@@ -64,20 +75,27 @@ def test_accumulated_predicate_failures_carry_predicate_evaluation_failed() -> N
         raise ValueError("boom")
 
     with pytest.raises(PredicateError) as exc_info:
-        tl.record(_model(), _x(), save=raising_predicate, on_predicate_error="accumulate")
+        tl.record(
+            _model(),
+            _x(),
+            save=raising_predicate,
+            recording=tl.options.RecordingOptions(on_predicate_error="accumulate"),
+        )
     assert exc_info.value.fields["code"] == "predicate_evaluation_failed"
     assert exc_info.value.failures
 
 
 def test_keep_grad_integer_dtype_carries_predicate_storage_conflict() -> None:
-    """keep_grad=True with an integer payload dtype stamps the storage code."""
+    """save_grad=True with an integer payload dtype stamps the storage code."""
 
     with pytest.raises(PredicateError) as exc_info:
         tl.record(
             _model(),
             _x(),
-            default_op=CaptureSpec(keep_grad=True, dtype=torch.int32),
-            on_predicate_error="fail-fast",
+            recording=tl.options.RecordingOptions(
+                default_op=CaptureSpec(save_grad=True, dtype=torch.int32),
+                on_predicate_error="fail-fast",
+            ),
         )
     assert exc_info.value.fields["code"] == "predicate_storage_conflict"
 
@@ -98,6 +116,8 @@ def test_record_followed_by_carries_followed_by_unsupported() -> None:
     with pytest.raises(PredicateError) as exc_info:
         tl.record(_model(), _x(), save=tl.func("linear") & tl.followed_by(tl.func("relu")))
     assert exc_info.value.fields["code"] == "followed_by_unsupported"
+    # The remedy names the real door: tl.trace with the lookback knobs on CaptureOptions.
+    assert "tl.trace(save=..., capture=tl.options.CaptureOptions(lookback=" in str(exc_info.value)
 
 
 def test_followed_by_metadata_only_carries_lookback_payload_policy_conflict() -> None:
@@ -108,7 +128,7 @@ def test_followed_by_metadata_only_carries_lookback_payload_policy_conflict() ->
             _model(),
             _x(),
             save=tl.func("linear") & tl.followed_by(tl.func("relu")),
-            lookback=4,
+            capture=tl.options.CaptureOptions(lookback=4),
         )
     assert exc_info.value.fields["code"] == "lookback_payload_policy_conflict"
 
@@ -126,18 +146,6 @@ def test_inference_only_with_backward_ready_carries_inference_only_conflict() ->
     assert exc_info.value.fields["remedy"]
 
 
-def test_backward_ready_with_detach_carries_backward_ready_conflict() -> None:
-    """backward_ready=True plus explicit detaching stamps the conflict code."""
-
-    with pytest.raises(TrainingModeConfigError) as exc_info:
-        tl.trace(
-            _model(),
-            _x(requires_grad=True),
-            capture=tl.options.CaptureOptions(backward_ready=True, detach_saved_activations=True),
-        )
-    assert exc_info.value.fields["code"] == "backward_ready_conflict"
-
-
 def test_integer_activation_transform_carries_transform_not_differentiable() -> None:
     """A non-grad-dtype transform under backward_ready stamps the code."""
 
@@ -145,7 +153,8 @@ def test_integer_activation_transform_carries_transform_not_differentiable() -> 
         tl.trace(
             _model(),
             _x(requires_grad=True),
-            capture=tl.options.CaptureOptions(backward_ready=True),
-            save=tl.options.SaveOptions(activation_transform=lambda t: t.to(torch.int64)),
+            capture=tl.options.CaptureOptions(
+                backward_ready=True, activation_transform=lambda t: t.to(torch.int64)
+            ),
         )
     assert exc_info.value.fields["code"] == "transform_not_differentiable"

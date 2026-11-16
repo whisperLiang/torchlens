@@ -1,356 +1,199 @@
-# TorchLens - Codex Agent Briefing
+# Torchlens project instructions
 
-## Project Overview
-TorchLens extracts activations and computational graph metadata from backend-resolved
-captures into `Trace`, `Layer`, and `Op` objects. The stable default is PyTorch eager
-capture: it lazily wraps PyTorch functions with toggle-gated wrappers on first torch
-capture, runs forward passes with the logging toggle enabled, and records operations.
+Roles are functional: the coordinator owns design and integration, implementers own scoped changes, and reviewers verify evidence. The same rules apply to every harness.
 
-## Model Menagerie (`menagerie/`)
-`menagerie/` is a browsable catalog of 8,500+ entries across ~3,600 neural-net architecture
-families captured with TorchLens (8,533 rows / 3,637 families measured in this checkout,
-2026-08-16; the full corpus incl. locally-validated additions lives on the menagerie machine):
-a queryable catalog (`python -m menagerie.catalog stats|query|recipe`), 2,700+ trace-verified
-hand-built
-historical "classics" (`menagerie/classics/`), and a disk-safe renderer (`menagerie.generate_menagerie`).
-To expand/update the roster — periodically, after a conference cycle, or whenever a stronger model ships
-— use the canonical durable adversarial prompt at **`menagerie/DISCOVER_MODELS.md`** (hostile framing,
-every-axis + non-English + newly-published coverage, family-not-variant discipline, and how to add finds
-to the catalog/`classics/`). Seed it with `python -m menagerie.discover_crawler`.
+TorchLens logs backend-resolved execution into `Trace`, `Layer`, and `Op` objects. The stable default is PyTorch
+eager capture: run a normal forward pass, record operation metadata and activations, then
+inspect the result. Torch function wrapping is lazy in 2.x: `import torchlens` keeps torch
+clean, and the first torch capture calls `wrap_torch()` through model preparation. The
+wrappers then stay installed until an explicit
+`torchlens.backends.torch.wrappers.unwrap_torch()`.
 
-## Architecture
-See `.project-context/architecture.md` for the older full map and
-`.project-context/state_of_torchlens.md` for the current 2.x map. See subpackage
-`CLAUDE.md` files for per-module details.
 
-Key entry points:
-- Main capture: `torchlens/user_funcs.py` - `trace()`, `show_model_graph()`,
-  `draw_backward()`, `validate_forward_pass()`
-- Backend registry: `torchlens/backends/registry.py` - `BackendSpec`, `BackendName`,
-  backend resolution, validation dispatch, and canonical backend errors.
-- Site keys + grouping surface (L1 wave 0, DOCUMENTED-UNSTABLE): every
-  retained op carries the portable structural-position key `op.site_key`
-  (`site_key_v1`, minted at grouping time on every backend,
-  policy-independent, the cross-capture bridging relation);
-  `Layer.site_key` / `Layer.site_peers` / `Layer.shape_summary` are the
-  Layer surface (typed refusals `layer_site_ambiguous` /
-  `site_key_unavailable`); `grouping=` is the closed-vocabulary knob
-  ("structural" default; others refuse typed pre-D1/S2) mirrored on
-  `trace.grouping`, with the load-validated `grouping_policy_v1` stamp on
-  `trace.grouping_policy` (C1-C8 coherence; degrade-settlement monotonic).
-  Persisted rows are live as of the tlspec v8 bump (load-validated); join/fold
-  machinery in `torchlens/postprocess/_site_key.py` / `_site_join.py` /
-  `_grouping_stamp.py`.
-- Agent surface (both spellings DOCUMENTED-UNSTABLE pending naming
-  ratification): `Trace.to_agent_json(max_ops=None)` emits the self-describing
-  JSON-serializable `torchlens.agent_trace.v1` dump (capture honesty facts,
-  counts, pass-qualified op rows with graph edges, module hierarchy, embedded
-  navigation guide; payloads never inlined; `max_ops` truncation disclosed).
-  `tl.report.explain(trace, max_tokens=N)` budget-prunes the text report by
-  whole sections low-value-first with a disclosed `Truncation` section;
-  capture-status honesty facts and partial-capture failure evidence never
-  drop; refuses typed with `format="json"`. `torchlens.bridge.mcp` (extra
-  `torchlens[mcp]`, mcp>=2.0) serves read-only MCP stdio tools over saved
-  `.tlspec` artifacts + environment (doctor / api_map / load_overview /
-  agent_dump / explain); no user-code execution, no mutation.
-  Doc: `docs/for-ai-agents.md`.
-- Structure-only capture (DOCUMENTED-UNSTABLE, D8-default):
-  `tl.trace(model, x, capture=CaptureOptions(structure_only=True))` records
-  structure + shape/dtype HYPOTHESES, never values; value consumers refuse
-  typed through `torchlens.capture.structure_only` (contract:
-  `docs/reference/structure_only_capabilities.md`); value-dependent branches
-  refuse device-neutrally at the user's source line;
-  `trace.discharge_against(real_trace)` corroborates/refutes hypotheses.
-- Selection algebra (L6; core spellings slate-ratified subject to D7, rest
-  DOCUMENTED-UNSTABLE): `tl.Selection` (composable query AST) /
-  `selection.resolve(trace)` -> `tl.ResolvedSelection` (frozen, trace-bound,
-  session-only). Operators `| & - ~` + reflected, no `__xor__`; two-level
-  denotation (family + elements, zero-mask entries retained); region
-  producers (BaseSelector, RF box/gradient, FacetSpec, Op, Layer) implement
-  `__selection__`; kinds ACT|PARAM|EDGE closed; refusals ride
-  `SelectionError` (`selection_*` codes). Producers `tl.units`/`tl.params`/
-  `tl.random_selection`; value producers `tl.top_k`/`tl.top_fraction`/
-  `tl.threshold`/`tl.sign` (read the resolution trace's retained
-  activations at resolve time, exact-as-set, `within=None` = every retained
-  tensor site, unsaved payloads refuse `value_not_saved`, complex ordered
-  comparisons refuse `value_criterion_invalid`); statistical producers
-  `tl.dead`/`tl.saturated`/`tl.low_variance` (explicitly multi-sample:
-  `samples=` iterable of >= 2 Traces, Bundle iterates; dead/saturated are
-  dispositional `upper_bound` claims, low_variance is the `exact` sample
-  statistic; the single-capture form is `sign(site,'zero')`); graph
-  producers `tl.neighborhood(of, hops=, direction=)` / `tl.between(sources,
-  sinks)` (structural position on the executed DAG: n-hop region and the
-  source-to-sink influence sub-DAG; whole-site exact masks, family
-  semantics, empty = disclosure; pure functions over the one
-  `selection_graph._TraceGraph` substrate a future motif producer extends).
-  `trace.between(sources, sinks)` presents the same region as a
-  `TraceSlice` (frozen presenter, never a Trace: member ops, internal
-  edges, EXPLICIT `boundary_in_edges`/`boundary_out_edges`, no
-  save/replay/validate — `tl.save` refuses `slice_save_unsupported`;
-  `__selection__` lifts it back into the algebra);
-  `trace.subgraph(selection)` is the general slice door for any ACT region.
-  statistic; the single-capture form is `sign(site,'zero')`); comparative
-  producers `tl.changed`/`tl.top_changed` (subject-vs-ONE-reference
-  directional delta, exact-as-set; structure mismatches and self-comparison
-  refuse typed, never silently intersect; PARAM refuses — no capture-time
-  weight payloads) and `tl.stable_across_passes`/`tl.pass_variance`
-  (cross-pass range/variance on recurrent layers, pass-qualified, >= 2
-  window passes per layer or `population_too_small`, masks land on every
-  window pass-site); subspace producer `tl.subspace(within, basis, *,
-  origin=, method=, dim=, tol=)` (direction/subspace SUPPORT-SET selection —
-  set, not projection; mandatory basis provenance with sha256 digest riding
-  `provenance.source` and do() audits; extent mismatch on the bound axis
-  refuses `basis_dim_mismatch`, never broadcast/truncate; geometry-only
-  resolution, unsaved sites resolve).
-  Cross-run (stage 4a): `resolved.align_to(target)`
-  re-binds ACT selections across runs on L1 site keys, same-policy captures
-  only (`selection_alignment_invalid`, closed six-reason set); `do()` still
-  refuses foreign resolved selections typed. Parameter substitution
-  (DOCUMENTED-UNSTABLE): `fork.do(tl.params(name, mask=None), edit)` applies
-  the edit "as if" the parameter were changed, replay engine only — the value
-  each consumer sees is substituted at its derived occurrence address via the
-  tier-(ii) edge-substitution store (`substitution_kind="param"`, re-spliced
-  on cone recomputation), the live `nn.Parameter` is never written, and
-  rerun/set_only refuse `param_substitution_engine_unsupported`. Recurrently
-  reused params (tied weights, multi-pass consumers) substitute at EVERY
-  consumption via pass-qualified staging; what still refuses
-  `param_substitution_occurrence_underivable` (fail-closed): nested container
-  positions, released legacy captures, bare pass-ambiguous consumer
-  spellings, and consumer inventories omitting a pass.
-- Pass-qualified replay (JMT-ruled 2026-08-17; refusal spelling
-  DOCUMENTED-UNSTABLE): the replay/push engine keys cone traversal, the
-  overlay, hook targets, and commits by pass-qualified op labels
-  (`Op.label`, `label:pass`), so multi-pass edits touch exactly the
-  addressed pass, recompute downstream passes, and commit every pass's
-  record; strict multi-pass replay works and the spurious multi-pass
-  `ControlFlowDivergenceWarning` is gone. A bare layer label naming a
-  multi-pass layer refuses typed with a teaching message naming every
-  pass-qualified spelling (`multipass_bare_label_ambiguous` on
-  string/`tl.label` addressing; `selection_unresolvable` /
-  `multipass_bare_label` on `tl.units`); single-pass bare labels stay
-  accepted and `log[label].__selection__()` is the all-passes spelling.
-- Edge substitution (L6 stage 3; DOCUMENTED-UNSTABLE): `trace.edges` is the
-  dataflow edge family (EdgeUseRecords; requires an `intervention_ready`
-  capture, refusal `edge_provenance_unavailable`; canonical occurrence
-  address `(child_func_call_id, arg_kind, arg_path)`).
-  `fork.do(edge_selection, edit)` replaces the value CONSUMED on the edge on
-  the replay/push engine only (`edge_intervention_engine_unsupported`
-  otherwise); the substituted value rides `Op.edge_substitutions` (+
-  `edge_replacement_stamps`, `FireRecord.edge_address`; persisted as of
-  tlspec v8) while capture truth stays unmodified, and uncorroborated
-  entries FAIL validation (`edge_intervention_boundary`).
-- Backward residuals (L9; DOCUMENTED-UNSTABLE): per-fire timing -- one clock
-  (`perf_counter`), per-node keyed-LIFO pairing, stamps on the runtime
-  `GradFnFired` event only; live-only `trace.grad_fn_fire_timings` (loaded
-  traces refuse `grad_fn_fire_timing_unavailable`); as of the tlspec v8
-  coordinated bump the persisted GradFnCall timing fields carry the per-fire
-  `perf_counter` semantics, discriminated by the persisted
-  `Trace.grad_fn_timing_provenance`. Checkpoint invocation
-  tokens: classified non-reentrant `_checkpoint_hook` enters mint per-trace
-  ordinal tokens; pack evidence count-only, unpack evidence backward-derived
-  to L1 site keys; persisted `Trace.checkpoint_invocation_witness` with
-  degrade flags D1-D6; the ambiguity refusal is S2-authored (R-L9-1) and its
-  identity-read accessors are unshipped until the amendment lands.
-  Implicit-boundary: journal/scavenge/finalize split with the finalize guard
-  in-routine (never inside an engine invocation), identity-checked
-  engine-drain close callback, sync-point backstop always armed,
-  `BackwardPassEnd.close_path` sidecar-only disclosure. Grouped floor:
-  `trace.grad_fn_site_summary` per-site backward rollups (read-only L1
-  consumption).
-- Predicate runtime extension point (DOCUMENTED-UNSTABLE, S4 seam):
-  `torchlens.ir.predicate_registry` — `PredicateProtocol` (one positional
-  concrete `RecordContext`), `coerce_predicate(value, slot="save"|"halt"|"until")`
-  (raw callables incl. `BaseSelector` returned BY IDENTITY; registered names
-  via a slot-aware enforcing wrapper), `register_predicate(name)` (no
-  user-object mutation, no loader-consulted attribute). Registry INERT until
-  consumers adopt names. Contract: `docs/reference/predicate_runtime.md`.
-- Sparse capture: `tl.record(model, x, save=...)` is torch-only in backend v1; it returns
-  `Recording`, and `Recording.to_trace()` materializes full graph structure with explicit
-  errors for unsaved payload reads. Forward exceptions default to
-  `on_forward_error="raise"`; `on_forward_error="attach_partial"` attaches
-  `exc.partial_recording` and re-raises, while `on_forward_error="return_partial"` returns a
-  failed partial `Recording`. Failed partials set `status="partial_error"`, `failed=True`,
-  string-only error metadata, `n_ops_completed`, and best-effort `last_event_*` fields.
-  user-op failures exclude the failing call; TL-side capture failures may include a
-  skipped/partial current-call event. Trace failed captures separately expose
-  `exc.partial_log`, recoverable with `tl.partial.from_failed_capture(exc)`.
-- Every capture product carries one settled typed outcome: `Trace.outcome` /
-  `Recording.outcome` / `PartialTrace.outcome` return a frozen `CaptureOutcome`
-  (COMPLETE / HALTED / ABORTED_NONFINITE / FAILED+phase / UNATTESTED / UNKNOWN),
-  persisted as `_capture_outcome` (tlspec v7) and validated fail-closed at load.
-  Capability gates N1-N5 branch on `tl.errors.CaptureOutcomeError.fields["code"]`;
-  swallowed halt/nonfinite signals raise `tl.errors.StopSignalSwallowedError`.
-  Doc of record: `docs/reference/capture_outcomes.md`.
-- Queryable nonfinite record (spellings DOCUMENTED-UNSTABLE): `trace.nonfinite_ops`
-  (pass-qualified labels of ops whose output held NaN/Inf) +
-  `trace.nonfinite_coverage` (evidence basis and coverage counts). Default
-  captures serve it from the memoized saved-payload scan at zero capture cost;
-  `CaptureOptions(track_nonfinite=True)` opts into capture-time per-op checks
-  covering unsaved ops, with device flags drained in one batch at the finalize
-  seam (never a per-op CUDA sync). `raise_on_nan` is independent and unchanged.
-- Attribution kit (DOCUMENTED-UNSTABLE): `torchlens.attribution` ships
-  `integrated_gradients`, `occlusion`, `grad_cam`, and the display-only
-  `overlay` renderer, all operating on Traces. Doc of record:
-  `docs/reference/attribution.md`; glossary carries the unstable index.
-- Kernel telemetry (optional CUDA/CUPTI adapter, DOCUMENTED-UNSTABLE):
-  importing `torchlens.kernel_telemetry` installs `gpu_kernels` views over
-  the ATen execution profile; rows persist as of tlspec v8 (`FieldPolicy.KEEP`)
-  and counts are lower bounds wherever `mode_paused_interior` is non-empty.
-  Doc of record: `docs/reference/kernel_telemetry.md`.
-- Lazy decoration: `torchlens/backends/torch/model_prep.py:_ensure_model_prepared()` calls
-  `wrap_torch()` and the belt/rescue stale-reference machinery
-- Forward-pass orchestration: `torchlens/capture/trace.py`
-- Postprocess: `torchlens/postprocess/__init__.py` current 26-step pipeline (declared
-  contract keys `0`..`20` plus fractional inserts `11.5`/`11.75`/`15.5`/`16.5`/`17.5` in
-  `postprocess/_contracts.py::POSTPROCESS_STEP_CONTRACTS`)
-- Portable I/O: `torchlens/_io/bundle.py`, `torchlens/_io/tlspec.py`, `torchlens/io/__init__.py`
-- Intervention: `torchlens/intervention/` plus top-level selector/helper aliases. Live
-  `trace(intervene=...)` runs on torch, on the eager Paddle preview
-  (`torchlens/backends/paddle/interventions.py`; forward-only, builtin helper adapters
-  `zero_ablate`/`scale`/`add`/`replace_with`, corroborated validation carve-out), and on the
-  eager TF preview (static-label, two-level writable layer, fail-closed site reachability;
-  see invariant 15). `trace(halt=...)` runs on torch and Paddle; the remaining previews
-  refuse typed.
-- Visualization encoding channel (UNSTABLE naming, keyword-only): `Trace.draw(color_by=...)`
-  fills op nodes from a sequential ramp (field name / scalar builtin / callable), dot-layout-only
-  (AUTO forces dot; explicit rank refuses `encoding_requires_dot_layout`), legend-disclosed via
-  the tri-state `show_legend` (`None`=AUTO channel-only legend, `True`/`False` historical; explicit
-  `False` honored). Rolled multi-pass field sources resolve through the name-keyed allowlist in
-  `torchlens/visualization/_encoding.py`; varying/first-pass-only sources stay unencoded with a
-  legend note (honest-visuals tripwire), and unclassified sources refuse `encoding_source_invalid`.
-  Wave-1 size channel `Trace.draw(size_by=..., scale=...)` (UNSTABLE, D4 default-applied):
-  scalar field / `"dims"` (non-batch numel) / callable mapped to width/height MINIMUMS
-  (`fixedsize=false`, area clamped 4x default, fonts never scale, strictly opt-in). Rolled
-  multi-pass sources that cannot be certified single-valued refuse `size_by_rolled_varying`
-  (size refuses where color degrades); `total_*` sums encode + aggregation legend line; the
-  funnel drops NodeSpec width/height on image nodes; `scale=` without `size_by` refuses
-  `scale_requires_size_by`. Wave-1 rank channel `Trace.draw(stack_by=...)` (UNSTABLE,
-  strictly opt-in): annotation -> `rank=same` groups (`newrank=true`); `True`/`"auto"` is
-  licensed by global pass_index monotonicity (else `stack_by_auto_underivable`), explicit
-  field/callable bypasses with caption disclosure, rolled refuses
-  `stack_by_requires_unrolled`, sibling ordering no-ops while stacking. Checked suppression
-  (UNSTABLE `show_redundant_args`, DEFAULT-ON): labels omit constructor args PROVEN equal to
-  captured shape dims (closed torch-family table; mismatch/unavailable stays visible;
-  `show_redundant_args=True` shows all).
-- Visualization: `Trace.draw(order_siblings=True)` applies a Graphviz-only verified
-  sibling-ordering post-pass for forward unrolled graphs under the node cap.
-  `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart
-  collapse for rolled and unrolled graphs, where float `t` in `[0.0, 1.0]` follows the public
-  monotone schedule (`0.0 == "none"`, `1.0 == "max"`). `auto` is the first schedule point whose
-  visible count enters the readable band, but its implementation remains frozen for compatibility.
-  `None` preserves defaults (`"none"` has no run folding; `"auto"`/`"max"` use band-pressure
-  folding), `True` folds eligible repeated runs even with `collapse="none"`, and `False` disables
-  run folding. `collapse="max"` may emit segment boxes; `(xN)`, ellipsis, and segment labels must
-  stay honest about hidden calls or ranges. `Trace.collapse_plan(mode=...)` returns the diagnostic
-  plan, and `Trace.collapse_schedule()` returns the float schedule metadata. Smart collapse
-  has a preflight compute ceiling `COLLAPSE_OPTIMIZER_MAX_OPS` (2000 ops,
-  `torchlens.visualization.collapse_optimizer`): above it the optimizer DECLINES with a
-  `TorchLensWarning` -- `draw(collapse="auto"|"max")` renders uncollapsed,
-  `Trace.collapse_plan()` refuses typed (`collapse_plan_unavailable`), and
-  `collapse_schedule()` degrades to its single full-graph step; reduce the rendered graph first (`module=` focus,
-  `vis_call_depth`, rolled mode).
+## Required reference reading
 
-Common unified capture patterns:
+The referenced sections below are part of these instructions and retain their obligations. Before any code change, read conventions, critical invariants, known gotchas, and the glossary/docs contract. Before changing an API, feature, or module boundary, also read the corresponding surface, architecture, and feature reference. Paths in reference text are relative to the repository root.
 
-```python
-import torchlens as tl
+## Install
 
-torch_trace = tl.trace(
-    model,
-    x,
-    backend="torch",
-    capture=tl.options.CaptureOptions(intervention_ready=True),
-)
-tf_trace = tl.trace(tf_model, tf_x, backend="tf")
-relu_trace = tl.trace(model, x, save=tl.func("relu"))
-windowed = tl.trace(
-    model,
-    x,
-    save=tl.func("conv2d") & tl.followed_by(tl.func("relu")),
-    lookback=4,
-    lookback_payload_policy="detached_raw",
-)
-patched = tl.trace(
-    model,
-    x,
-    save=tl.func("relu"),
-    intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
-)
-streamed = tl.trace(model, x, save=tl.in_module("encoder"), storage=tl.to_disk("run.tlspec"))
-recording = tl.record(model, x, save=tl.func("relu"))
-trace_from_recording = recording.to_trace()
-# D18: eval-mode BatchNorm is runnable on the default live path (no value-changing
-# buffer writes); train-mode buffer writers refuse with the typed BufferSinkRoutingError
-# (RunnableErrorCode.BUFFER_SINK_ROUTING_MUTABLE, provisional/documented-unstable).
-run_result = torch_trace.run(inputs=x, seed=42)
-runnable_path = "architecture.tlspec"
-tl.save(torch_trace, runnable_path, level="runnable", include_weights=True)
-loaded_trace = tl.load(runnable_path)
-verified = loaded_trace.run(inputs=x, seed=42, on_divergence="raise")
-overview_svg = torch_trace.draw(collapse="auto", vis_fileformat="svg", vis_save_only=True)
-module_scores = torch_trace.module_collapse_order
-
-# Influence geometry follows the real captured DAG in both directions.
-op = torch_trace["relu_1_2"]
-rf_box = op.receptive_field.at((10, 10))
-unit = op.receptive_field.center_unit(batch_index=0)
-rf_check = op.receptive_field.check(unit)
-outgoing_box = op.projective_field.at((10, 10))
-layer_to_layer = op.receptive_field.at((10, 10), source=torch_trace.input_ops[0])
-rf_table = torch_trace.receptive_fields(level="layer")
-pf_table = torch_trace.projective_fields(level="layer")
-# Gradient verification needs requires_grad inputs, backward_ready=True, and
-# save_mode="reference"; verify().verdict is PASS / FAIL / INDETERMINATE.
-armed_trace = tl.trace(model, x.requires_grad_(True),
-                       capture=tl.options.CaptureOptions(backward_ready=True),
-                       save_mode="reference")
-armed_op = armed_trace["relu_1_2"]
-armed_unit = armed_op.receptive_field.center_unit(batch_index=0)
-rf_gradient = armed_op.receptive_field.gradient(armed_unit, retain_graph=True)
-rf_results = tl.receptive_field.verify(armed_trace, units="center")
-# show(gradient=True) recomputes the gradient WITHOUT retain_graph and frees the
-# autograd graph -- call it last (or re-capture) if later backward passes are needed.
-rf_image = armed_op.receptive_field.show(armed_unit, gradient=True)
-# tl.validate(model, x, scope="receptive_field") captures an armed trace itself.
+```bash
+pip install torchlens
+pip install -e ".[dev,test,tabular,viz]"  # local development: the extras CI installs
 ```
 
+Graphviz rendering needs Graphviz (`apt install graphviz` on Debian/Ubuntu; on Debian forky
+and Ubuntu 26.04 or later also `libgvplugin-neato-layout8`, the neato engine rank layout needs). Optional
+extras gate appliance and bridge namespaces; see `pyproject.toml` for the current list.
+
+## Torch Version Compatibility
+
+TorchLens supports torch 2.1 -> 2.15 for eager torch capture (the newest gating CI row; newer releases run in the non-gating nightly canary). The declared floor stays
+`torch>=2.1`; torch 2.0 may work best-effort through guarded fallbacks, but it is not a
+declared support floor.
+
+Every fragile torch-private-API probe or cross-version torch signature must route through
+`torchlens/_utils/_torch_compat.py`. Feature-detect the runtime capability; do not parse
+`torch.__version__` for behavioral branching. Every graceful degradation must flip a named
+`HAS_*` capability flag and be visible through the torch capability snapshot in
+`torchlens.report.doctor()`.
+
+## Model Menagerie and the classics corpus
+
+The model menagerie (catalog, crawler, and the full classics battery) is its own project and no
+longer lives in this repo; its public gallery is https://modelmenagerie.ai. TorchLens keeps a
+coverage-chosen sample of those classics as a test corpus in `tests/classics_corpus/` (see its
+`README.md`): a comprehensive `slow` tier plus a small `smoke` subset.
+
+## Common Patterns
+
+Required reading for this area: [Common Patterns](docs/internal/agent-reference/common-patterns.md).
+Before steering, patching or capturing in a loop, pick the path in [Performance: choosing a fast path](docs/guides/fast_paths.md).
+
+## Current 2.x Surface
+
+Required reading for this area: [Current 2.x Surface](docs/internal/agent-reference/current-2-x-surface.md).
+
+## Anti-Patterns
+
+- Do not log `torch.compile`, TorchScript, or `torch.export` artifacts; log the eager
+  source module.
+- Do not expect `torch.func` / functorch transforms to expose per-element internal ops;
+  TorchLens captures transform calls as boundary nodes with provenance edges.
+- Do not run captures concurrently across Python threads or worker processes.
+- Do not expect fused kernels to expose hidden internal tensors.
+- Do not put opaque callables in portable artifacts unless audit-only behavior is
+  acceptable.
+- Do not add new top-level API names casually; use submodules. Interim-phase policy is remove-and-rename, never deprecation shims (scripts/checks/deprecation_inventory.py pins the package deprecation-free).
+- Major-version bumps happen only on the maintainer's explicit command; commit messages never carry `!` types or BREAKING CHANGE footers; `.github/MAJOR_RELEASE_APPROVED` is created only on that command.
+
+## Validation Integrity (LOCKED PRINCIPLE — never violate)
+
+The `validation/` pipeline (forward replay, backward checks, metadata invariants) is a
+**TRIPWIRE, not a formality.** Its entire purpose is to CATCH capture bugs — ops that
+weren't traced, wrong replay inputs, broken metadata, silent corruption.
+
+**NEVER weaken, loosen, exempt, broaden a tolerance, or skip a validation check / invariant
+to make a test pass.** A validation failure is the system *working*: ROOT-CAUSE it and fix
+the actual bug. Silencing a failing check defeats the entire point and lets exactly the kind
+of silent breakage validation exists to prevent ship undetected.
+
+The ONLY legitimate exemption is behavior that is **correct by design and provably outside the
+check's contract** (e.g. a user-injected intervention tensor genuinely has no traceable
+function to replay). Even then the carve-out must be NARROW (only the intended case) and must
+NOT mask the unintended case — e.g. an auto-synthesized placeholder op appearing during PLAIN
+capture is a capture bug, and validation must STILL fail on it.
+
+Replacement-op exemptions cover genuine user interventions only; a placeholder op during plain
+capture is a capture gap to fix, never to exempt.
+
+## Keep the glossary + docs in lockstep with code (LOCKED)
+
+The glossary is the canonical API spec (maintained privately; `docs/reference/glossary.md` is
+the public copy of its definitions; the name tables and keyword rows the name checks read live in
+`docs/internal/reference/name_index.md` and `name_index_keywords.md`); code conforms to it. Renaming, adding or removing any
+PUBLIC name (dataclass field, `@property`, method, top-level `tl.*` name, kwarg) updates, in the
+SAME change, the glossary entry, the examples in `docs/internal/agent-reference/`, and the audit notebooks
+(`notebooks/audit/`) and `examples/` that use it. A change that leaves them stale is INCOMPLETE.
+Required reading for the full rule (canonical re-file, old-name grep) and the runnable-state
+contracts filed with it: [lockstep reference](docs/internal/agent-reference/keep-the-glossary-docs-in-lockstep-with-code-locked.md).
+
+## Internal notes stay PRIVATE (LOCKED — this repo is PUBLIC)
+
+`johnmarktaylor91/torchlens` is a **public** GitHub repo. Internal planning, riffing, sprint
+specs, adversarial reviews, STATE/SUMMARY files, and the working task tracker are
+**maintainer-only** and must NEVER be committed.
+
+- **Private (gitignored, never commit):** all of `.research/`, and `.project-context` EXCEPT the
+  two whitelisted curated docs. The agent task tracker `todos.md` in `.project-context` and the
+  agent-facing glossary copy `torchlens_glossary.md` beside it are private (the canonical glossary
+  is maintained privately).
+- **Public (the only tracked `.project-context` files):** `architecture.md`,
+  `state_of_torchlens.md`. The user-facing glossary is `docs/reference/glossary.md` (shipped)
+  — a separate, curated artifact, NOT the agent copy.
+- **Enforcement:** `.gitignore` excludes them and a `no-internal-notes` pre-commit hook
+  (`.pre-commit-config.yaml`) HARD-FAILS any commit that stages a private path. Never `git add -f`
+  to bypass it; never `git rm` the local files (they are your working notes). Long-form
+  reports go to the maintainer's private research location, not the repo.
+- **Agent knowledge (private, hub only):** the `knowledge` folder in `.project-context` holds
+  `torchlens_ui_api_sprint_inputs.md` (read first when the UI/API sprint starts),
+  `torchlens_hardening_protocol.md` (the TorchLens hardening run record; general rules live in the
+  maintainer's private hardening protocol), `torchlens_memory_lifetime.md` and `torchlens_test_isolation.md`.
+
+## Testing Tiers
+
+```bash
+ruff check . --fix
+mypy torchlens/
+pytest tests/<files for the code you touched> -x --tb=short     # per-step gate: targeted suites (seconds-minutes)
+python scripts/smoke_ci_parity.py -n 4                          # commit-level gate: smoke in CI's pinned enforcing environment
+OMP_NUM_THREADS=1 pytest tests/ -m smoke -n 4 -x --tb=short     # quick smoke in your own venv (not the gate)
+pytest tests/ -m "not rare and not slow and not heavy" -x --tb=short  # mid backstop (heavy = 5-20s tests)
+pytest tests/ -m "not rare and not slow" -x --tb=short  # phase-boundary backstop; public API/boundaries
+```
+
+Byte goldens enforce only in the pinned environment (python 3.10, torch 2.13.0) and fail closed
+outside it and outside CI, so only the script's answer equals CI's (`tests/AGENTS.md`, "The smoke tier").
+
+Tiers by cost (every tier's count: `tests/tiers/collection.json`): `smoke` selects
+~0.4k tests (398/24,763 collect-only, measured 2026-11-16),
+a coverage-chosen subset (re-selected 2026-11-03 to 250-400 cases) of the former ~1.5k-test tier that holds every per-package coverage
+floor (see `tests/AGENTS.md`, "The smoke tier"). The smoke wall measurement (measured 2026-11-03, one
+4-core Linux worker, `-n 4`, one torch thread per worker) took 80s (~1 min) after about 50s
+of collection. The size ceiling is `SMOKE_TIER_SIZE_CEILING`
+(400) in `tests/conftest.py`. Smoke is NOT
+sub-minute and NOT a per-step gate — per-step verification is the targeted test files for
+the code touched; smoke is the commit-level gate, `not rare and not slow and not heavy`
+the mid backstop, and `not slow` the phase-boundary backstop. Partition: `smoke` tests
+must each run <5s measured, `heavy` carries the 5-20s tests, `slow` the >20s ones.
+`tests/_tiers_plugin.py` refuses a session at collection when `smoke` combines with
+`heavy`/`slow`/`serial`/`rare` (markers are additive — the test would still run under
+`-m smoke`). Duration is a repository check, not a runtime tripwire: `tests/tiers/durations.csv`
+records every test file's measured test count, summed seconds, slowest test and loosest tier
+marker, and `scripts/tier_durations.py check` (the `tier-durations` row of
+`scripts/checks/run_all.py`) holds smoke/unmarked files to budget 5s and heavy 20s per test
+(the slowest measured test per file in `tests/tiers/durations.csv`, allowed up to 4x under a
+parallel or coverage-instrumented measurement, plus a 2s grace). Regenerate the file from a
+`--junitxml` run with `python scripts/tier_durations.py regenerate --source-commit SHA --junit
+FILE --workers N`; `python scripts/tier_durations.py shards --count N --index I` prints one
+duration-balanced shard of test files for a parallel gate. `pytest-xdist` ships in the
+`dev` extra: run `OMP_NUM_THREADS=1 pytest tests/ -m smoke -n N` with N equal to the cores you
+declared (never `-n auto`). Measured 2026-11-05 on an 8-core Linux worker: the 381-test selection ran in 70-93 s at
+`-n 4` after about 32 s of collection. Every worker collects first, so the gain shrinks below 4 workers.
+Smoke runs collect only the smoke file list: under `-m smoke` the tiers plugin skips every test
+module off it before import, and `python scripts/tier_durations.py files --tier smoke` recomputes
+the list from the tree on every call, so nothing needs regenerating. Measured 2026-11-02 on a
+4-core Linux worker: smoke collection took about 40-45 s, serial or `-n 4`, against about 60-65 s
+for the whole tree; passing the listed files as arguments took 130-140 s, because pytest re-walks
+the directory for every file argument.
+
+Use `pytest.importorskip()` for optional migration dependencies. Keep tests
+deterministic and run documentation examples when they are meant to be executable.
+
+## Architecture
+
+Required reading for this area: [Architecture](docs/internal/agent-reference/architecture.md).
+
+## Brainpipe (F20; spellings DOCUMENTED-UNSTABLE)
+
+Required reading for this area: [Brainpipe (F20; spellings DOCUMENTED-UNSTABLE)](docs/internal/agent-reference/brainpipe-f20-spellings-documented-unstable.md).
+
 ## Conventions
-- **This repo is PUBLIC; internal notes stay private.** Never commit `.research/` or
-  `.project-context/` (except `architecture.md` / `state_of_torchlens.md`) — they are
-  gitignored and a `no-internal-notes` pre-commit hook hard-fails on them. Never `git add -f`
-  to bypass. See CLAUDE.md "Internal notes stay PRIVATE (LOCKED)".
-- Conventional commits: prefer `docs(scope):`, `chore(scope):`, `test(scope):` for
-  non-release changes; never use major-bump markers casually.
-- TorchLens host-object metadata lives under `obj._tl`; sub-fields are snake_case and
-  new metadata should extend a `TorchLensMeta` subclass rather than adding `tl_*` attrs.
-- `_raw_` prefix for pre-postprocessing state; `_final_` for post-processed state
-- FIELD_ORDER constants in `constants.py` define canonical field sets; update both class
-  fields and constants when adding fields
-- NumPy-format docstrings on all functions
-- Type hints on all functions
-- Import order: stdlib -> third-party -> local (enforced by ruff)
-- Line length: 100
-- `tl.receptive_field` is lazy; entity-level `receptive_field` / `projective_field` siblings
-  pair with `Trace.receptive_fields()` / `Trace.projective_fields()` tables.
-- EPISODE CAPTURE (torch-only, spellings DOCUMENTED-UNSTABLE): `tl.trace(episode_root, x,
-  episode=tl.options.EpisodeSpec(stepped_module=model, n_steps=N))` captures one wrapped
-  multi-step generation run as ONE product with a per-step status ledger at
-  `trace.annotations["episode"]` (disclosure, never a settlement authority; persists
-  plainly as of the tlspec v8 coordinated bump, load-validated fail-closed). DIAGNOSTIC-TIER: cost is superlinear
-  in step count — tens of steps, never hundreds. Bundles carry the optional S6
-  member-relation table (`member_relations=`, `Bundle.relate`,
-  `Bundle.derive_episode_status`). Doc of record: `docs/reference/episode_capture.md`;
-  refusal codes in `docs/reference/error_refusal_contract.md`.
+
+Required reading for this area: [Conventions](docs/internal/agent-reference/conventions.md).
 
 ## Quality Gates
+
 Every task must pass before completion unless the task explicitly narrows verification:
 
 ```bash
 ruff format .
 ruff check . --fix
 mypy torchlens/
-pytest tests/ -m smoke -x --tb=short
+python scripts/smoke_ci_parity.py -n 4
 ```
+
+Byte goldens enforce only in the pinned environment (python 3.10, torch 2.13.0); the script runs
+smoke there, so its answer is CI's.
 
 (CI lint runs `ruff format --check` plus `ruff check` over `torchlens tests scripts tools
 benchmarks examples notebooks`; run `ruff format` locally or the format-check leg fails.)
@@ -361,316 +204,20 @@ For changes touching module boundaries or public API, also run:
 pytest tests/ -m "not rare and not slow" -x --tb=short
 ```
 
-On Windows, `pwsh -File scripts/check_windows.ps1 -Broad` runs these gates with
-UTF-8 subprocesses and the existing Visual Studio C++ Build Tools environment
-loaded for `torch.compile` checks. It uses `.venv` by default (`-Python` overrides
-the interpreter); install the declared dev/test dependencies first. Use `-Proxy URL`
-when model downloads need a proxy; it applies only to the check process. Golden
-environments are listed in `tests/oracle_environments.md`.
-
 ## Critical Invariants
-1. `_state.py` imports no torchlens modules EXCEPT the one sanctioned cycle-safe leaf
-   import of `CaptureError` from `.errors._base` (documented in `_state.py` itself).
-2. `pause_logging()` must wrap internal torch ops during logging (`safe_copy`,
-   `activation_transform`). `get_memory_amount()` deliberately does NOT toggle it:
-   it resolves the unwrapped size methods once instead (hot-path perf, `08dca260`).
-3. Wrappers are persistent after lazy installation; `_logging_enabled` gates behavior.
-4. FIELD_ORDER constants and class definitions must stay in sync.
-5. Module suffixes are appended to `equivalence_class` at op creation before loop detection.
-6. RNG state capture/restore must happen before `active_logging()` context.
-7. There is no standalone `postprocess_fast()` orchestrator. Refresh captures run the full
-   `postprocess()` entry point against the established Trace state; Step 0 reads the sealed
-   `CapturedRunCore.events` snapshot and `RefreshProjector` applies refreshed payloads onto
-   the existing graph.
-8. `_tracing_finished` is set once at finalization and mirrored onto every retained op
-   (`backends/_finalize.py`); nothing resets it per pass.
-9. Portable `.tlspec` public schema is manifest-only; executable callables are not portable.
-9a. Rehydration floor: artifacts older than torchlens 2.33 (`tlspec_version` 6) refuse to load
-    with the typed `tl.errors.ArtifactVersionBelowFloorError`; legacy field-alias resurrection
-    ladders are deleted. Legacy 2.16 intervention specs remain loadable (floor covers Trace
-    rehydration only).
-10. `backward_ready=True` rejects contradictory detaching/disk-save settings and preserves user
-    `requires_grad` choices.
-10a. `inference_only=True` wraps forward capture in `torch.no_grad()` for forward-only analysis
-     and is mutually exclusive with backward-related capture because it discards autograd history.
-11. Sibling ordering is forward/unrolled/dot-only; collapsed, rolled, backward, focused,
-    conditional, and large graphs must conservatively no-op. Predicate-based smart collapse
-    keeps sibling ordering enabled when endpoints survive as rendered nodes.
-12. Predicate `save=` is the ONLY selective-capture spelling; the old
-    `record(keep_op=...)` / `record(keep_module=...)` alias kwargs are removed and raise
-    TypeError (`dry_run` likewise takes `save=` only). Module-boundary event recording is
-    gated by `default_module=`, which records ALL module enter/exit events uniformly —
-    predicate-gated module-event selection has no public spelling
-    (`docs/reference/deprecations.md` has the honest capability statement).
-13. `torch.func` / functorch transforms are captured as boundary ops; do not expect their
-    per-element internal eager operations to appear unless a future expand-inside mode exists.
-14. Public backend-neutral state (`Trace.backend`, `module_identity_mode`, `param_source`,
-    `dtype_ref`, `device_ref`, `backend_address`, `resolver_status`) must stay in docs,
-    glossary, FIELD_ORDER, and serialization compatibility gates together.
-15. TensorFlow `backend="tf"` / `backend="tensorflow"` targets Keras 3 on TF>=2.16 with
-    `keras.backend.backend() == "tensorflow"`. Eager `op_callbacks` capture is the shipped primary
-    path; the graph-only FuncGraph static importer is implemented for compiled/SavedModel entries
-    (opaque regions stay unverified); derived gradients (leaf + exact T1 intermediates) ship
-    for eager entries via `tl.backends.tf.GradOptions` with divergence refusal, and graph-only
-    captures refuse `grad_options` typed; static-label `intervene=` ships for eager entries
-    through the two-level writable layer (module-boundary + curated functional wrap) with
-    fail-closed site reachability; `halt=`, `recipes=`, and true backward capture are deferred.
-    All four eager previews (tf/mlx/tinygrad/paddle) group recurrent calls into multi-pass
-    layers through the neutral grouper; `recurrence_detection` stores the EFFECTIVE value
-    (the TF static FuncGraph path stays ungrouped at `False`), validation sidecars stay keyed
-    to raw capture identities, and tamper tests prove stale-label oracles fail closed.
-16. Smart-collapse metadata is computed, not serialized: `Module.collapse_score`,
-    `Trace.module_collapse_order`, and `Trace.collapse_order(weights=..., mode=...)` must stay
-    out of `*_FIELD_ORDER` schemas until the policy is intentionally stabilized.
-17. `Trace.load_state_dict(sd)` on a loaded sparse runnable Trace validates and stages state only;
-   it never executes the DAG or writes values into the sparse core. User staging overrides the
-   optional embedded capture state, and N1-a random fallback must name every initialized slot.
-17a. `include_weights=True` is runnable-save-only and bundles the full capture-time `state_dict`
-    (named parameters plus persistent buffers) in a separate `state_dict_v1` blob family. The
-    sparse core remains tensor-value-free; load uses the ordinary strict binder and reports
-    `embedded_capture_state`, never a reconstructed model. Used NON-persistent buffers are always
-    shipped in the REQUIRED `runnable_nonpersistent_buffer_v1` family (not gated on either include
-    flag) and are part of the declared state model -- a default runnable save of such a model
-    carries those tensor values (disclosed via the manifest and a one-time save warning).
-17b. `include_activations=True` is runnable-save-only and archives exactly the capture-time
-    `save=`-selected `out`/`transformed_out` payloads in a separate `selected_activation_v2`
-    family, whose eligibility metadata includes physical `InputAttestationFingerprint` records.
-    `Trace.archived_activations` is inspection/attestation-only and never seeds execution.
-    Original-input, capture-equivalent real-state runs must byte-attest saved raw slots before
-    exposure; mismatch raises `numeric_attestation_failed` with rollback, while changed-input
-    (logical OR physical), random/non-equivalent-state, and nondeterministic-capture-context runs
-    report `not_applicable`. `attested` implies `verified` and unpoisoned, always.
-17c. Runnable descriptors are `sparse_recorded_taken_path_v2` (call recipe
-    `non_tensor_args_tensor_slots_context_and_obligations_v3`): every call carries a REQUIRED
-    explicit `CallExecutionContext` (autocast with affirmative disabled state + grad/inference
-    mode) and the descriptor carries one `AmbientExecutionContext`, both restored at replay or
-    refused typed. Absent context records only ever mean a legacy v1 artifact, which loads
-    analysis-only. r71 A closes the witness-strip class with a structural obligation/discharge
-    invariant: `WITNESS_FAMILY_REGISTRY` v2 (`witness_family_registry_v2`) covers EVERY
-    verdict-steering witness family -- the four direct control kinds plus the shape families plus
-    two claim-only families -- each row naming its independent replay-structural anchor. Every
-    obligation is stamped on its owning replay record (`control_obligations` /
-    `control_dependencies` on calls, `host_escape` / `inert_sink` on slots,
-    `captured_requires_grad` / `captured_grad_fn` / `host_escape_disposition` on state bindings,
-    the REQUIRED `input_boundary` record) and discharged by an exact witness XOR a typed
-    `WitnessCoverageGap`; `witness_completeness` is DERIVED from the gap ledger (the summary is a
-    redundant assertion, never authority), and the required-witness inventory is a redundant
-    mirror. No record deletion can improve a verdict; the ONE out-of-scope boundary is coherent
-    reauthoring (an honest capture of a weaker program), documented in the contract's threat-model
-    subsection.
-18. `Trace.run(inputs=..., seed=...)` is transactional for live and loaded sparse providers, runs
-    internal sparse calls under `pause_logging()`, and returns `RunResult(output, trace, report)`.
-    Stage 6 enforces input/state, per-call/output, and control-witness honesty before exposure;
-    default divergence raises with rollback, while `return_diverged` is the sole monotonic poisoned
-    opt-in. Incomplete witness coverage is `unverifiable`; sparse-only and ineligible activation
-    runs report numeric attestation as `not_applicable`.
-18a. `Trace.run(inputs=..., fast=True)` is an explicit stateful static-loop mode: loaded sparse
-    traces must first settle an ordinary run as `verified`, then may reuse staged state, compiled
-    binders, and one result Trace; live traces use native forward plus targeted module hooks and
-    only explicitly requested functional collection. Per-call input, path, output structure/shape/
-    dtype, and control-witness guards remain mandatory; divergence always raises. `fast=False`
-    preserves the full transaction and attestation contract. The session handle
-    `Trace._fast_run_session` is a session-time `FieldPolicy.DROP` field (ordered under a private
-    name, never persisted), ledgered in
-    `tests/test_schema_lockstep.py::PRIVATE_ORDERED_DROP_FIELDS`.
-19. Runnable public vocabulary is frozen in `torchlens.runnable`: readiness is `ready|unavailable`,
-    faithfulness is `verified|diverged|unverifiable`, state source is
-    `live_model_state|embedded_capture_state|user_state_dict|random_initialization|not_applicable`,
-    and divergence policy is `raise|return_diverged`. Error handling uses `RunnableErrorCode`, never
-    exception-message matching. r37 adds the frozen codes `state_alias_topology_unsupported`
-    (save-time refusal of distinct-object overlapping/unprovable bound-state alias topology; tied
-    live-identity state stages as ONE alias-group allocation instead) and `context_field_invalid`
-    (parse-time refusal of persisted execution-context values outside their closed vocabulary).
-    The complete taxonomy and payload rules live in
-    `docs/reference/runnable_tlspec_contract.md`.
-19a. r37 honesty boundaries: zero-tensor-leaf model outputs and namedtuple/mapping/registered
-    containers carrying extra per-instance state refuse at runnable save
-    (`missing_output_container_contract`; one per-kind capability table --
-    `CONTAINER_KIND_CAPABILITIES` -- governs capture proof, save refusal, and forged-flag-proof
-    load recompute; `tl.register_container` gains an explicit `state_complete=` declaration).
-    Host nondeterminism outside the two replayable global engines (RNG instances incl.
-    outside-held NumPy Generators via a chained `sys`/`threading.setprofile` classifier + a cheap
-    model-attribute state digest (no process-wide gc scan), bare
-    `_random.Random`, unseeded-construction `randbits` entropy, `SystemRandom`/`secrets`, OS
-    entropy, `uuid4`, `default_rng`, the full clock family incl. `datetime.now`/`localtime`/
-    `os.times`/`getrusage`) permanently ceilings replay at `unverifiable` + `not_applicable`;
-    monitor uncertainty (install/chain/restore/inventory failure) downgrades completeness to
-    INCOMPLETE; a realistic pre-existing-thread persistent-generator draw is witnessed by the
-    setprofile classifier / model digest, and only an externally-held generator drawn on a
-    pre-existing non-hooked thread is a documented residual (a benign background thread never
-    ceilings a capture). Loaded-sparse and live
-    providers settle through ONE finalizer
-    (identical verdict class): a live opaque-container output is `unverifiable`+poisoned, a
-    parse-refused descriptor degrades every payload family to analysis-only, and an inexecutable
-    divergent input raises `PathDivergenceError`; structseq trust keys on the resolution authority
-    (`spec.type_module`), never the spoofable `__module__`. Alias proofs run on absolute device-scoped byte
-    intervals (storage-pointer equality never decides); the recorded default device enters as a
-    scoped `with torch.device(...)`; CUDA state stages lazily and atomically at run preparation
-    with a no-allocation readiness capability gate.
+
+Required reading for this area: [Critical Invariants](docs/internal/agent-reference/critical-invariants.md).
 
 ## Known Gotchas
-- Intervention-spec loads tolerate foreign `custom` callable keys for safe analysis without importing
-  their modules. Resolving one for execution denies by default because imports execute top-level code;
-  trusted execution may use `trust_custom_callables=True`, while
-  `allowed_custom_callable_modules={"my_trusted_module"}` is narrower and remains restrictive even if
-  the boolean is also true. TorchLens-owned `torchlens.*` custom callables and the fixed trusted
-  namespaces resolve without an opt-in.
-- `Trace.forward_peak_memory` on CPU/MPS is only the cheap host RSS (or MPS allocator) delta and
-  legitimately reads `0` for small models. The `tracemalloc` Python-allocation peak is opt-in via
-  `CaptureOptions(measure_python_peak_memory=True)` because the allocator hook costs 1.7x-2.5x
-  total capture time. Never assert `forward_peak_memory > 0` on the default path.
-- Distributed/sharded state is detected in `torchlens/_distributed.py` and refused at capture entry
-  with `DistributedCaptureUnsupportedError`; the same detection feeds the `dtensor` / `device_mesh` /
-  `tensor_parallel` / `pipeline_parallel` rows of `tl.compat.report`, so the two cannot drift.
-  `dtensor`, active TP hooks/styles, and `pipeline_parallel` refuse; dense parameters do not make a
-  `PrepareModuleInput` redistribution safe. Only a bare inert mesh is informational. Detection is
-  capability-probed (`HAS_DTENSOR`, `HAS_DEVICE_MESH`, `HAS_PIPELINING`), never version-parsed, and
-  bounded to inspectable instance state (12 levels / 4096 objects). Slots/descriptor-only holders,
-  opaque user-wrapped TP hooks, over-bound state, and tensors created inside `forward` remain
-  disclosed residuals. The `dtensor` finding identifies refused state precisely via per-site
-  dual geometry on `finding.geometry`.
-- Explicit `torch.distributed` python collectives in a traced forward become first-class boundary
-  nodes under the distributed opt-in (`tl.distributed.arm()` at process start, REQUIRED for
-  MPMD/spawn ranks; lazy arming covers initialized SPMD first-captures). The portable payload is
-  `op.annotations["collective"]` (`collective_boundary_v1`: correlation key, role entries, event
-  and witness disclosures) plus the trace-level group-lifecycle ledger in
-  `trace.annotations["distributed"]`. `CaptureOptions(distributed_witness="digest")` opts into
-  byte-exact contribution/destination digests. Async completions record
-  `completion_binding="unobserved"`; wildcard recv refuses typed; collective-crossing traces
-  refuse runnable save and forward-replay validation
-  (`collective_boundary_runnable_unsupported`) while metadata invariants run in full. Arming
-  relaxes no tier-(a) refusal (DTensor/TP/FSDP2/PP still refuse). Distributed rank processes
-  (initialized process group, non-daemonic) are the sanctioned exception to the
-  main-process-only capture guard.
-- `tl.merge_ranks([trace_or_path, ...])` merges N rank cores into a `MergedTrace` presenter at
-  their explicit collective boundaries (rung C1); `tl.merge_report(...)` diagnoses without
-  constructing. The derivation is audit-first (a conflicted membership never joins and never
-  becomes a presence gap), aligns seq counters as deltas from each rank's first recorded key,
-  and treats witness digests as demote-only evidence. Artifacts save as `merged-directory`
-  bundles whose descriptor is a cache: loads rederive from the rank cores and refuse typed on
-  any inequality. Frozen enums + error/finding codes: `torchlens.merged` +
-  `docs/reference/merged_trace_contract.md` (ordered-equality gated). p2p/pipeline (C3) and
-  DTensor topologies (C2) refuse typed; merged replay does not exist.
-- TORCH SPLIT MEMORY (DOCUMENTED-UNSTABLE): `run_prefix` runs under `no_grad`;
-  `run_training_prefix` keeps the connected graph. `train_suffix` / `train_suffix_result`
-  accept keyword-only `microbatch_size=None`, `microbatch_reduction="mean"`, and
-  `target_slicer=None`. Mean chunks weight by `b_i/B`; sum requires a custom sum loss.
-  One optimizer zero/step per logical batch; schema-based boundary slices reconstruct
-  full gradients for one prefix backward. The logical boundary transports once; chunk
-  graphs release after backward. Microbatch size never changes graph/cache identity.
-  Runtime-local state pools share only frozen parameters with certified read-only,
-  nonaliasing uses; mutation, unknown uses, buffers, and trainable replicas stay separate.
-  Doc and runnable example: `docs/reference/split_memory.md`.
-- BATCH-POLYMORPHIC SPLIT RUNTIME (`torchlens/split/`, spellings DOCUMENTED-UNSTABLE):
-  `tl.split.prepare()` retains a canonical `B=1` capture plus ONE empirical `B=2` probe.
-  The probe checks generated replay against native output structure, exact shape/dtype and
-  numeric values; passing permits extrapolation subject to existing shape guards, NOT a proof
-  for every positive B. Hidden Python branches at untested batches may silently return wrong
-  results. Failed/unavailable probes restrict execution to the captured batch. A genuine B=1
-  failure may fall back to a B=2 capture, captured-only on other backends. MLX probes B=3
-  after this fallback for native BatchNorm's minimum training batch. `dynamic_batch`,
-  `supports_dynamic_batch`, and user-configured low/high ranges remain deleted. Inspect
-  `runtime.batch_validation`, capability `shape_diagnostics.batch_validation`, and boundary
-  `runtime_batch_validation` (captured/sampled/extrapolated). Declare axis SEMANTICS with
-  `SplitFeatures.batch_axes` (JSON Pointer -> axis), use `{}` to explicitly declare no batch
-  axes (fixed input shapes, no canonical resize/probe), or leave it `None` to let
-  `torchlens/split/batching.py` infer them conservatively from the caller's example; nested
-  input trees rebatch through the shape program's own flattening. Auto inference only considers
-  rank >= 2 top-level tensors with matching leading extents; unbatched scalars/vectors keep their
-  shapes, and one-dimensional batches need explicit axes. The B=2 probe also supplies
-  empirical shape witnesses, never universal proof. An inexecutable probe yields no evidence.
-  A batch-VARYING run
-  over unproven relations refuses typed (`ShapeProgram.require_batch_resolvable`); replaying at
-  the captured batch stays allowed. `tl.split.prepare_graph()` captures before selection;
-  `GraphPartition` is the sole canonical compute-node set. `.analyze(partition)` returns
-  `PartitionAnalysis` without segments; `.materialize(analysis)` creates a runtime;
-  `.repartition(partition)` inherits current state on the same graph.
-  `.compute_dag()` exposes existing native calls with tensor-value data edges,
-  effect order and minimal co-location obligations for external placement;
-  `dag.to_partition(call_ids)` expands complete native output sets for the same planner.
-  `PlacementPlan.across(prefix, suffix)` / `SplitRuntime.with_placement()` bind
-  segment state per device through `SegmentState` (`referenced` vs `owned`, one replica per
-  source identity so tied params keep one identity; `prefix_parameters()` /
-  `suffix_parameters()`), with runtime boundary and boundary-gradient transport. Segment-state
-  placement is supported by Torch and MLX (`adapter.supports_state_placement`); other backends refuse an
-  explicit plan typed but still move boundaries with `ReplayBoundary.to(device)`. Semantic
-  split identity and cache keys exclude batch entirely. MLX supports generated eager split
-  replay, boundary caches, functional split training with private native optimizer state, and
-  native device/stream placement (CPU/GPU requires the installed MLX backend). BatchNorm buffers,
-  Dropout/native PRNG keys, tied parameters across the cut, and suffix microbatch training are
-  supported. Connected steps commit optimizers at prefix backward, summing tied gradients once;
-  one shared optimizer steps once, separate optimizers assign tied state to the prefix owner.
-  Training
-  boundaries carry prefix identity/state-version evidence; cached or detached boundaries
-  refuse prefix backward. True backward capture remains unsupported.
-  Rebinding/recutting preserves effective owned state (same-device values shared, moved values
-  replicated without source-model writes); merging divergent tied replicas or divergent
-  inference/training prefix values into a shared suffix refuses. ReplayBoundary validates
-  structural compatibility without comparing model parameter values.
-  Torch placement relocates device arguments and implicit factories. Canonical input resizing
-  preserves repeated objects and identical-geometry Torch aliases; other overlapping/unprovable
-  views refuse before capture. Probe replay uses aligned B=2 per-call RNG in a temporary graph,
-  never modifying retained B=1 RNG metadata; zero-valued dimensions stay concrete in the ABI.
-- `CaptureOptions(save_budget=...)` is a per-device ceiling on retained activation bytes, default
-  `"auto"` = half of measurable available memory. Exhaustive, predicate, and deferred
-  `Op.save_activation()` paths pre-admit the primary source-sized RAM copy before allocation, then
-  reconcile alias-aware physical storage. Transform
-  deltas and cross-device temporaries cannot always be known pre-allocation, so this is not a general
-  OOM guarantee. Predicate disk-only saves are exempt; exhaustive
-  `capture=tl.options.CaptureOptions(layers_to_save="all")` plus `to_disk(...)`
-  stays budgeted until postprocess eviction (the bare flat `layers_to_save=` kwarg is a deprecated
-  alias and warns). Unmeasurable auto devices warn on first charge.
-- Streamed disk writes are ASYNC BY DEFAULT for `trace(storage=tl.to_disk(...))` (spellings
-  DOCUMENTED-UNSTABLE): one FIFO worker overlaps blob serialize+write+sha256 with the forward,
-  payloads snapshot at submission, `to_disk(max_pending_bytes=)` (256 MiB default) blocks capture
-  when the disk falls behind, a failed write raises typed `TorchLensIOError` + PARTIAL, finalize
-  drains before publish, and bundles are byte-identical to sync. `async_writes=False` opts out;
-  `tl.record` streaming stays synchronous and refuses an explicit `True`.
-- On torch >= 2.6 (`HAS_SET_STANCE`), every capture holds
-  `torch.compiler.set_stance("force_eager")` scoped to the forward (entered inside
-  `prepare_compiled_capture`; skipped when `torch._dynamo` was never imported), so compiled plain
-  attributes and free functions run their ORIGINAL eager Python: interiors are fully logged with
-  ordinary verified semantics, zero compiles happen during capture, compiled caches survive with at
-  most ONE bounded recompile on the next compiled call afterward (wrapper install/uninstall guard
-  invalidation), and the plain-attribute pause-logging bypass is NOT installed. The paragraph below
-  is the torch < 2.6 / no-stance fallback, pinned byte-for-byte by the `_no_stance` tamper tests in
-  `test_dynamo_fake_guard.py`.
-- A Dynamo-traced region reached during capture is bypassed in the wrapper (see
-  `_is_inside_dynamo_compilation`), warning once per forward and setting
-  `trace._raw_transform_escape_detected` (which licenses the unattributable-output tolerance,
-  exactly like the functorch guard beside it) plus `trace._raw_dynamo_region_detected`, which is
-  the top-precedence `capture_verification_reason` -- `"dynamo_region_not_logged"` -- at BOTH
-  verdict sites (`completeness_witness._finalize_census` and the `escape_detection` capture-scope
-  `finally`, the last writer). Without the dedicated flag the Trace blamed
-  `owner_thread_tripwire_changed`, since compiling spawns threads. Plain compiled-callable
-  attributes are also inventoried before forward and invoked with logging paused, conservatively
-  arming the same flags on cold/warm runs where `is_compiling()` may never fire; global/free hot
-  callables remain disclosed. Compiled child `nn.Module`s are still unwrapped to eager BEFORE
-  capture, so their interiors stay logged -- there
-  is a test asserting the bypass did not regress that into a silent gap. Fake/functional tensors on
-  inputs or params refuse at capture entry in `_robustness.py`; never let one reach the metadata
-  path, where `data_ptr()` on a FakeTensor is a torch-flagged bug.
-- `__wrapped__` is removed from built-in function wrappers to avoid `inspect.unwrap`
-  failures.
-- Fast-path module decoration skips `_record_module_entry_metadata`; alignment state must be
-  replicated manually.
-- `get_memory_amount()` deliberately avoids `pause_logging()`: it resolves the
-  UNWRAPPED `nelement()`/`element_size()` methods without toggling global logging
-  state per tensor (hot-path perf commit `08dca260`); re-adding the toggle is a
-  regression, not a fix.
-- If a `@property` raises `AttributeError`, Python falls through to `__getattr__`; use
-  `ValueError` for TorchLens multi-pass access errors.
-- `copy()` on `Op` shallow-copies selected graph fields and deep-copies the rest.
-- `torchlens.__version__` and `pyproject.toml` are release-pipeline state; do not update them
-  in feature/docs tasks unless release work explicitly asks for it.
+
+Required reading for this area: [Known Gotchas](docs/internal/agent-reference/known-gotchas.md).
 
 ## Build & Test
 
 ```bash
-pip install -e ".[dev]"
-pip install -e ".[test]"
+pip install -e ".[dev,test,tabular,viz]"
 pip install build && python -m build
-pytest tests/ -m smoke
+python scripts/smoke_ci_parity.py -n 4  # commit-level gate
 pytest tests/ -m "not rare and not slow"
 pytest tests/
 ruff format && ruff check --fix

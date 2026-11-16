@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from ..backends import resolve_backend_spec
-from ..backends.registry import TORCH_BACKEND_NAME
+from ..backends.registry import TORCH_BACKEND_NAME, resolve_backend_spec
 from .adapters import resolve_split_adapter
 from .context import SplitGraph
 from .errors import SplitErrorContext, SplitUnsupportedError
@@ -80,6 +79,7 @@ def _prepare_graph(
                 split_point=request.boundary,
                 reason="unsupported split replay",
             ),
+            code=SplitUnsupportedError.code,
         )
     if request.trainable and not adapter.supports_training:
         raise SplitUnsupportedError(
@@ -89,6 +89,7 @@ def _prepare_graph(
                 split_point=request.boundary,
                 reason="unsupported split training",
             ),
+            code=SplitUnsupportedError.code,
         )
     require_placement_support(adapter, request.placement, split_point=request.boundary)
 
@@ -105,6 +106,7 @@ def _prepare_graph(
                 split_point=request.boundary,
                 reason="compact_capture_unsupported",
             ),
+            code=SplitUnsupportedError.code,
         )
 
     capture, canonical_inputs, canonical_kwargs, batch_spec = capture_canonical_model(
@@ -173,6 +175,14 @@ def prepare_graph(
     SplitGraph
         Shared graph and shape metadata with analysis and materialization doors.
         No persistent executable segments or private parameter replicas are created.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> partition = graph.compute_dag().to_partition(())
+    >>> runtime = graph.materialize(graph.analyze(partition))
+    >>> runtime.replay(torch.ones(4, 3)).shape
+    torch.Size([4, 2])
     """
     return _prepare_graph(
         model,
@@ -207,9 +217,16 @@ def prepare(
     -------
     SplitRuntime
         Runtime produced by the same two-stage graph workflow.
+
+    Examples
+    --------
+    >>> request = tl.SplitRequest(tl.split.GraphPartition(frozenset()))
+    >>> runtime = tl.prepare(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3), request)
+    >>> runtime.replay(torch.ones(2, 3)).shape
+    torch.Size([2, 2])
     """
     graph = _prepare_graph(model, inputs, request, input_kwargs=input_kwargs)
     return graph.materialize(graph.analyze(request.partition))
 
 
-__all__ = ["prepare", "prepare_graph"]
+__all__ = ("prepare", "prepare_graph")

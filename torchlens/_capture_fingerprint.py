@@ -19,32 +19,6 @@ from . import _state
 from ._transport import digest_byte_view
 
 
-def _iter_tensor_inputs(obj: Any) -> list[torch.Tensor]:
-    """Collect tensor leaves from a nested input object.
-
-    Parameters
-    ----------
-    obj:
-        Arbitrary nested input object.
-
-    Returns
-    -------
-    list[torch.Tensor]
-        Tensor leaves in traversal order.
-    """
-
-    tensors: list[torch.Tensor] = []
-    if isinstance(obj, torch.Tensor):
-        return [obj]
-    if isinstance(obj, dict):
-        for key in sorted(obj.keys(), key=repr):
-            tensors.extend(_iter_tensor_inputs(obj[key]))
-    elif isinstance(obj, (list, tuple)):
-        for item in obj:
-            tensors.extend(_iter_tensor_inputs(item))
-    return tensors
-
-
 def _hash_tensor_content(tensor: torch.Tensor) -> str:
     """Return a content hash for a tensor.
 
@@ -70,14 +44,13 @@ def _hash_tensor_content(tensor: torch.Tensor) -> str:
     """
 
     with _state.pause_logging():
-        # Frame the LOGICAL dtype (b5-opus-R35-1 twin; same rule as the
+        # Frame the LOGICAL dtype (same rule as the
         # op.py dedup digest) so a bfloat16 input can never hash identically
         # to the float32 tensor of the same values -- a dtype change must be
-        # a capture-cache MISS. r7 R35 (fable): the old bf16->f32 transport
-        # upcast copy is GONE -- the shared byte view transports bf16 (and
-        # float8 friends) natively, and this digest is process-local cache
-        # keying, so the byte change is invisible. r8 R35: the transport +
-        # uint8 reinterpret live in ONE authority (``_transport``), which
+        # a capture-cache MISS. The shared byte view transports bf16 (and
+        # float8 friends) natively with no upcast copy, and this digest is
+        # process-local cache keying, so the byte change is invisible. The
+        # transport + uint8 reinterpret live in ONE authority (``_transport``), which
         # also resolves lazy conj/neg bits -- the hand-rolled view here
         # crashed on ``x.conj()`` inputs.
         shape = tuple(tensor.shape)
@@ -98,6 +71,41 @@ def _hash_tensor_content(tensor: torch.Tensor) -> str:
     return hasher.hexdigest()
 
 
+def _hash_input_tensor_value(tensor: torch.Tensor) -> str:
+    """Return a VALUE-LEVEL digest of one input tensor.
+
+    Frames the shape, the LOGICAL dtype (pre-transport, so a bfloat16 input
+    can never collide with the float32 tensor of the same values), and the
+    raw payload bytes. Unlike :func:`_hash_tensor_content` (a capture-cache
+    key), this digest deliberately EXCLUDES device placement and
+    ``requires_grad``: it backs the Bundle comparison gate's value-level
+    input-identity predicate, where "the same input values" must
+    compare equal across a save/load round trip or a device move. The
+    persisted ``input_digest`` carrier reuses
+    this exact derivation, so live-derived and persisted digests stay
+    comparable.
+
+    Parameters
+    ----------
+    tensor:
+        Input tensor to digest.
+
+    Returns
+    -------
+    str
+        SHA-256 hex digest over ``(shape, logical_dtype)`` plus payload bytes.
+    """
+
+    with _state.pause_logging():
+        shape = tuple(tensor.shape)
+        logical_dtype = str(tensor.dtype)
+        payload = digest_byte_view(tensor)
+    hasher = hashlib.sha256()
+    hasher.update(repr((shape, logical_dtype)).encode("utf-8"))
+    hasher.update(payload)
+    return hasher.hexdigest()
+
+
 _INPUT_FRAGMENT_DEPTH_CEILING = 64
 
 
@@ -109,7 +117,7 @@ def _forward_input_fragment(value: Any, depth: int = 0) -> object:
     forward input (``use_relu=False`` after a ``use_relu=True`` capture), a
     changed kwarg NAME over the same tensor value, or a restructured input
     container keyed identically to the original capture and ``cache=True``
-    served the WRONG trace (r8 b4 R39, opus end-to-end repro). This walker
+    served the WRONG trace (opus end-to-end repro). This walker
     frames the FULL nested structure: containers recursively (dict keys AND
     values, sequences in order, sets order-insensitively), tensors by
     content hash, and every non-container non-tensor leaf through
@@ -233,7 +241,7 @@ def _callable_code_digest(func: Any, depth: int = 0) -> str:
     forwards share one code object while their closure cells configure
     DIFFERENT traced programs (``def make(k): def f(x): return x * k``), so
     omitting the cells collided them on one key and ``cache=True`` served
-    the WRONG activations (r8 b4 R39, fable probe). Cell values reduce
+    the WRONG activations (fable probe). Cell values reduce
     through :func:`_attribute_state_fragment` under the shared depth
     ceiling; an unhashable cell mints a never-matching fragment there
     (always-miss, never a false hit), and a not-yet-filled cell hashes a
@@ -375,7 +383,7 @@ def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
         member_reprs = sorted(repr(_attribute_state_fragment(item, depth + 1)) for item in value)
         return ("set", len(value), tuple(member_reprs))
     if type(value).__module__ == "numpy" and hasattr(value, "tobytes"):
-        # grind-r5 b7 R22 (fable+opus): object-dtype buffers serialize raw
+        # Object-dtype buffers serialize raw
         # POINTERS -- content-blind (in-place mutation keeps the pointers) and
         # address-churning cross-process -- so they are unhashable here, and a
         # failed read must mint the never-matching token like every ceiling
@@ -385,7 +393,7 @@ def _attribute_state_fragment(value: Any, depth: int = 0) -> object:
         if getattr(getattr(value, "dtype", None), "hasobject", False):
             return _never_matching_fragment("ndarray-object-dtype")
         try:
-            # Buffer-protocol digest (r7 R35-3): ``tobytes`` materialized a
+            # Buffer-protocol digest: ``tobytes`` materialized a
             # whole-payload copy; a non-contiguous array contiguizes first
             # (same C-order bytes, so the digest is unchanged) and a
             # contiguous one hashes zero-copy.

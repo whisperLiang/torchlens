@@ -7,9 +7,9 @@ from types import BuiltinFunctionType, MethodDescriptorType, WrapperDescriptorTy
 from typing import Any
 
 from .. import _state
-from ..utils._torch_compat import get_variable_functions_class
-from ..utils._torch_symbols import torch_attr
-from ..utils.rng import execute_with_restored_rng_autocast
+from .._utils._torch_compat import get_variable_functions_class
+from .._utils._torch_symbols import torch_attr
+from .._utils.rng import execute_with_restored_rng_autocast
 from .errors import SplitErrorContext, SplitUnsupportedError
 
 
@@ -103,6 +103,7 @@ def route_stochastic_call(
             context=SplitErrorContext(
                 backend="torch", split_point="", reason="rng_device_unavailable"
             ),
+            code=SplitUnsupportedError.code,
         )
     source, target = torch.device(str(origin)), torch.device(destination)
     if target.type == "cuda" and target.index is None:
@@ -115,6 +116,7 @@ def route_stochastic_call(
             context=SplitErrorContext(
                 backend="torch", split_point="", reason="rng_device_state_unsupported"
             ),
+            code=SplitUnsupportedError.code,
         )
     rng_states = getattr(node.op, "func_rng_states", None)
     has_device_state = (
@@ -133,6 +135,7 @@ def route_stochastic_call(
             context=SplitErrorContext(
                 backend="torch", split_point="", reason="rng_state_unavailable"
             ),
+            code=SplitUnsupportedError.code,
         )
     with _state.pause_logging(), torch.device(source):
         moved_args = _map_tensors(args, lambda value: value.to(source))

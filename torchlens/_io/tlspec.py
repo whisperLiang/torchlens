@@ -5,25 +5,33 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import platform
+import re
 import shutil
-import sys
 import uuid
-from collections.abc import Iterable
-from datetime import datetime, timezone
-from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
 
 import torch
-from safetensors.torch import save_file
 
 from .. import __version__ as TORCHLENS_VERSION
+from .._data_classes._trace_missing_attrs import is_live_trace
 from .._errors import InvalidArgumentError
-from ..backends import get_backend_spec
-from . import TLSPEC_VERSION, TorchLensIOError
-from ._durability import fsync_dir, fsync_tree
-from .manifest import Manifest, TensorEntry, sha256_of_file
+from .._utils._record_group_table import record_member
+from . import TLSPEC_VERSION, refuse_bundle_exists
+from ._durability import _restrict_mode, _restrict_tree_modes, fsync_dir, fsync_tree
+from ._staging import settle_failed_staging
+from ._tlspec_identity import _backend_v2_fields, _model_fingerprint, _model_signature, _safe_len
+from ._tlspec_json_helpers import _json_int_or_none, _json_str_or_none, _utc_timestamp
+from .format3.container import write_members
+from .format3.writer import EnvelopeSpec, envelope_fields
+from .manifest import Manifest, TensorEntry, _runtime_python_version
 from .paths import reject_symlink_path
+
+BUNDLE_RELATIONS_FILE = "relations.json"
+"""Bundle member list and relation table (3.0 bundle layout)."""
+_MEMBER_SLUG_LIMIT = 64
+"""Characters of a member name kept in its directory name."""
 
 _PARTIAL_SENTINEL = "PARTIAL"
 """In-progress marker matching ``bundle.py``/``streaming.py``; ``cleanup_tmp``
@@ -40,24 +48,6 @@ def _reject_symlink_path(path: Path, *, context: str) -> None:
     )
 
 
-def _restrict_mode(path: Path, mode: int) -> None:
-    """Best-effort tighten a written ``.tlspec`` path's permissions (POSIX only).
-
-    Permission parity with ``_io/bundle.py::_restrict_mode`` and the streaming
-    writer (R59): ``mkdir`` / file writes honor the ambient umask, so under
-    umask 002 the bundle directory and its sidecars were left group-writable
-    while the core bundle writer tightens them. The publish rename preserves
-    ``tmp_path``'s mode, so tightening the staged directory tightens the
-    published bundle. Best-effort: a filesystem that ignores mode bits is not a
-    save failure.
-    """
-
-    if os.name != "posix":
-        return
-    with contextlib.suppress(OSError):
-        path.chmod(mode)
-
-
 # NOTE: ``TLSPEC_VERSION`` is imported (not redefined) from ``torchlens._io``
 # so there is a single source of truth for the on-disk ``tlspec_version``
 # manifest field. It previously had a second, independent definition here
@@ -66,52 +56,36 @@ def _restrict_mode(path: Path, mode: int) -> None:
 TLSPEC_SCHEMA_VERSION = 1
 TLSPEC_MANIFEST_FILENAME = "manifest.json"
 TLSPEC_VALID_SAVE_LEVELS = ("audit", "executable_with_callables", "portable", "runnable")
-TlspecKind = Literal["intervention", "trace", "bundle"]
+TlspecKind = Literal["intervention", "trace", "bundle", "recipe"]
 TlspecSaveLevel = Literal["audit", "executable_with_callables", "portable", "runnable"]
 
-_EMPTY_META_HASH = sha256(repr([]).encode("utf-8")).hexdigest()
 
+def _member_slug(name: object) -> str:
+    """Return the filesystem-safe part of a member directory name."""
 
-def _safe_len(value: Any) -> int:
-    """Return ``len(value)`` or zero when unavailable.
-
-    Parameters
-    ----------
-    value:
-        Object to measure.
-
-    Returns
-    -------
-    int
-        Length or zero.
-    """
-
-    try:
-        return len(value)
-    except TypeError:
-        return 0
+    slug = re.sub(r"[^A-Za-z0-9_.-]", "_", str(name)).strip(".")
+    return slug[:_MEMBER_SLUG_LIMIT] or "member"
 
 
 class _TlSpecWriter:
     """Write unified ``.tlspec`` manifests and bundle payloads."""
 
     @classmethod
-    def write_trace_manifest(
+    def build_trace_manifest(
         cls,
         *,
-        path: Path,
         trace: Any,
         legacy_manifest: Manifest,
         save_level: str,
         sparse_run: dict[str, Any] | None = None,
         scrubbed_state: dict[str, Any] | None = None,
-    ) -> None:
-        """Write a unified manifest for a saved ``Trace`` payload.
+    ) -> dict[str, Any]:
+        """Build the unified manifest fields of a saved ``Trace`` payload.
+
+        The 3.0 writer adds its envelope fields on top and writes the result.
 
         Parameters
         ----------
-        path:
-            Destination ``manifest.json`` path.
         trace:
             Source model log.
         legacy_manifest:
@@ -143,30 +117,53 @@ class _TlSpecWriter:
         # which of two same-named keys wins.
         unified_fields.pop("tlspec_version", None)
         manifest.update(unified_fields)
-        backend_name = str(getattr(trace, "backend", "torch"))
+        backend_name = str(trace._provenance_backend if is_live_trace(trace) else "torch")
         if backend_name != "torch" or sparse_run is not None:
-            spec = get_backend_spec(backend_name)
             manifest.update(
-                {
-                    "schema_version": 2,
-                    "backend": backend_name,
-                    "backend_runtime": cls._backend_runtime(trace, backend_name=backend_name),
-                    "torch_version": torch.__version__ if backend_name == "torch" else None,
-                    "model_fingerprint": cls._backend_model_fingerprint(
-                        trace,
-                        backend_name=backend_name,
-                    ),
-                    "body_format": spec.serialization_policy.body_format,
-                    "backward_summary": None,
-                    "derived_gradient_summary": cls._derived_gradient_summary(trace),
-                    "payload_policy": cls._payload_policy(
-                        backend_name=backend_name,
-                        tensor_entries=legacy_manifest.tensors,
-                    ),
-                }
+                _backend_v2_fields(
+                    trace, backend_name=backend_name, tensor_entries=legacy_manifest.tensors
+                )
             )
         if sparse_run is not None:
             manifest["run"] = sparse_run
+        return manifest
+
+    @classmethod
+    def write_trace_manifest(
+        cls,
+        *,
+        path: Path,
+        trace: Any,
+        legacy_manifest: Manifest,
+        save_level: str,
+        sparse_run: dict[str, Any] | None = None,
+        scrubbed_state: dict[str, Any] | None = None,
+    ) -> None:
+        """Write the unified manifest of a saved ``Trace`` payload.
+
+        Parameters
+        ----------
+        path:
+            Destination ``manifest.json`` path.
+        trace:
+            Source model log.
+        legacy_manifest:
+            Existing portable-I/O manifest fields required by the loader.
+        save_level:
+            Save level recorded in the public schema.
+        sparse_run:
+            Authoritative sparse runnable descriptor, or ``None``.
+        scrubbed_state:
+            Portable trace state whose remapped identities must feed public sites.
+        """
+
+        manifest = cls.build_trace_manifest(
+            trace=trace,
+            legacy_manifest=legacy_manifest,
+            save_level=save_level,
+            sparse_run=sparse_run,
+            scrubbed_state=scrubbed_state,
+        )
         cls.write_json(path, manifest)
 
     @classmethod
@@ -175,12 +172,12 @@ class _TlSpecWriter:
         *,
         path: Path,
         log: Any,
-        spec_json: dict[str, Any],
-        tensor_entries: list[TensorEntry],
-        legacy_format_version: str,
+        recipe: dict[str, Any],
+        target_manifest: list[Any],
         save_level: str,
+        envelope: dict[str, Any],
     ) -> None:
-        """Write a unified manifest for an intervention spec.
+        """Write the manifest of a ``kind="intervention"`` artifact.
 
         Parameters
         ----------
@@ -188,14 +185,14 @@ class _TlSpecWriter:
             Destination ``manifest.json`` path.
         log:
             Source model log carrying the intervention recipe.
-        spec_json:
-            Serialized intervention spec payload.
-        tensor_entries:
-            Persisted tensor entries.
-        legacy_format_version:
-            Legacy intervention ``format_version`` value.
+        recipe:
+            The recipe document written to ``intervention.json``.
+        target_manifest:
+            Resolved target rows the replay compatibility check compares.
         save_level:
             Save level recorded in the public schema.
+        envelope:
+            The 3.0 envelope fields (written last, so ``files`` is complete).
         """
 
         if save_level == "runnable":
@@ -205,21 +202,19 @@ class _TlSpecWriter:
                 remedy="use 'audit', 'executable_with_callables', or 'portable'",
                 artifact_kind="intervention",
             )
-        intervention_metadata = cls._intervention_compat_metadata(spec_json)
-        manifest = {
-            "format_version": legacy_format_version,
-            "tensor_entries": [entry.to_dict() for entry in tensor_entries],
-        }
-        manifest.update(
-            cls.build_manifest(
-                kind="intervention",
-                source=log,
-                tensor_entries=tensor_entries,
-                save_level=save_level,
-                spec_compat_info=intervention_metadata,
-                intervention_compat_metadata=intervention_metadata,
-            )
+        intervention_metadata = cls._intervention_compat_metadata(
+            {**recipe, "target_manifest": target_manifest}
         )
+        manifest = cls.build_manifest(
+            kind="intervention",
+            source=log,
+            tensor_entries=[],
+            save_level=save_level,
+            spec_compat_info=intervention_metadata,
+            intervention_compat_metadata=intervention_metadata,
+        )
+        manifest.pop("tensor_entries", None)
+        manifest.update(envelope)
         cls.write_json(path, manifest)
 
     @classmethod
@@ -255,7 +250,7 @@ class _TlSpecWriter:
             )
         target_path = Path(path)
         _reject_symlink_path(target_path, context="bundle tlspec target")
-        # Target-PREFIXED staging/backup names (R38+R59, one defect two labs):
+        # Target-PREFIXED staging/backup names (one defect two labs):
         # the old target-independent ``tmp.<hex>`` / ``tmp.bak.<hex>`` names
         # were invisible to ``cleanup_tmp(target)`` (it globs
         # ``{name}.tmp.*`` / ``{name}.bak.*``), so a SIGKILL between the two
@@ -266,10 +261,9 @@ class _TlSpecWriter:
         # deleted) so a failure during the final swap can restore it. It stays
         # ``None`` unless we actually move an existing target out of the way.
         backup_path: Path | None = None
-        body_filename = "body.safetensors"
         try:
             if target_path.exists() and not overwrite:
-                raise FileExistsError(f"Bundle path already exists: {target_path}")
+                refuse_bundle_exists(target_path, overwritable=True)
             tmp_path.mkdir(parents=True)
             _restrict_mode(tmp_path, 0o700)
             # Sweepable from birth: mark the staging dir PARTIAL so a SIGKILL
@@ -277,37 +271,19 @@ class _TlSpecWriter:
             # removes without ``force=True``; the sentinel comes off right
             # before the durability fsync + publish swap.
             (tmp_path / _PARTIAL_SENTINEL).write_text("", encoding="utf-8")
-            save_file({}, str(tmp_path / body_filename))
             member_records = cls._write_bundle_members(bundle, tmp_path=tmp_path, save_level=level)
             bundle_metadata: dict[str, Any] = {
                 "members": member_records,
                 "baseline_name": getattr(bundle, "baseline_name", None),
             }
             cls._add_gated_member_relations(bundle, bundle_metadata)
-            cls.write_json(tmp_path / "bundle.json", bundle_metadata)
+            cls._add_lineage_sections(bundle, bundle_metadata)
+            cls._add_preserved_sections(bundle, bundle_metadata)
+            cls.write_json(tmp_path / BUNDLE_RELATIONS_FILE, bundle_metadata)
 
-            manifest = cls.build_manifest(
-                kind="bundle",
-                source=bundle,
-                tensor_entries=[],
-                save_level=level,
-                spec_compat_info=None,
-                intervention_compat_metadata=None,
-            )
-            manifest["body_index"] = [
-                {
-                    "filename": body_filename,
-                    "dtype": "none",
-                    "shape": [],
-                    "num_elements": 0,
-                    "intended_use": "bundle_marker",
-                    "sha256": sha256_of_file(tmp_path / body_filename),
-                }
-            ]
+            manifest = cls._bundle_manifest(bundle, tmp_path=tmp_path, save_level=level)
             cls.write_json(tmp_path / TLSPEC_MANIFEST_FILENAME, manifest)
-            _restrict_mode(tmp_path / body_filename, 0o600)
-            _restrict_mode(tmp_path / "bundle.json", 0o600)
-            _restrict_mode(tmp_path / TLSPEC_MANIFEST_FILENAME, 0o600)
+            _restrict_tree_modes(tmp_path)
             # Durability before publish: fsync every written file and
             # directory so a power/OS crash after the rename below cannot
             # publish a bundle holding zero-length or partial members.
@@ -332,7 +308,7 @@ class _TlSpecWriter:
                 # success). Mirror ``torchlens/_io/bundle.py`` and refuse
                 # instead of live-destroying a concurrently-published artifact.
                 if not overwrite:
-                    raise FileExistsError(f"Bundle path already exists: {target_path}")
+                    refuse_bundle_exists(target_path, overwritable=True)
                 backup_path = target_path.parent / f"{target_path.name}.bak.{uuid.uuid4().hex}"
                 os.replace(target_path, backup_path)
             os.replace(tmp_path, target_path)
@@ -345,34 +321,108 @@ class _TlSpecWriter:
                 # lose the new bundle, so a cleanup failure must not fail the
                 # save nor trigger a spurious restore.
                 shutil.rmtree(backup_path, ignore_errors=True)
-        except BaseException:
+        except BaseException as exc:
             # ``BaseException`` (not ``Exception``) so an interrupt unwinding
             # mid-swap still restores the old bundle; ``raise`` re-raises the
             # original unchanged, preserving control-flow semantics.
-            if tmp_path.exists():
-                shutil.rmtree(tmp_path, ignore_errors=True)
             if backup_path is not None and not target_path.exists() and backup_path.exists():
                 # The swap did not install the new bundle; put the old one back
                 # exactly where it was. If this restore itself fails, the old
                 # bundle survives under ``backup_path`` as a recovery artifact.
                 with contextlib.suppress(OSError):
                     os.replace(backup_path, target_path)
+            # An older bundle left at the target keeps the staging dir PARTIAL for tl.load.
+            settle_failed_staging(tmp_path, target_path, overwrite=overwrite, primary=exc)
             raise
+
+    @classmethod
+    def _bundle_manifest(cls, bundle: Any, *, tmp_path: Path, save_level: str) -> dict[str, Any]:
+        """Build the container manifest of a staged bundle directory.
+
+        Members are 3.0 trace artifacts under ``members/<index>-<name>/``; the
+        container manifest carries the 3.0 envelope and digests every staged
+        file, members included, so it is built after the members are written.
+        """
+
+        manifest = cls.build_manifest(
+            kind="bundle",
+            source=bundle,
+            tensor_entries=[],
+            save_level=save_level,
+            spec_compat_info=None,
+            intervention_compat_metadata=None,
+        )
+        manifest.pop("body_index", None)
+        manifest.update(envelope_fields(tmp_path, EnvelopeSpec("bundle", save_level)))
+        return manifest
 
     @staticmethod
     def _add_gated_member_relations(bundle: Any, bundle_metadata: dict[str, Any]) -> None:
-        """Write the S6 ``member_relations`` key into ``bundle.json``.
+        """Write the ``member_relations`` key into ``bundle.json``.
 
         The key persists plainly as of the tlspec v8 coordinated bump; the
-        load side validates it against the closed S6 row schema and re-checks
-        R1 against the loaded member names. An empty table writes nothing
-        (S6 R7: absence means a plain bundle).
+        load side validates it against the closed row schema and re-checks
+        that every endpoint names a loaded member. An empty table writes
+        nothing (absence means a plain bundle).
         """
 
         relation_table = getattr(bundle, "_member_relations", None)
         if relation_table is None or len(relation_table.rows) == 0:
             return
         bundle_metadata["member_relations"] = relation_table.to_payload()
+
+    @staticmethod
+    def _add_lineage_sections(bundle: Any, bundle_metadata: dict[str, Any]) -> None:
+        """Write the lineage sections into ``bundle.json``.
+
+        The split-off join shapes: container
+        identity (``bundle_id`` / ``forked_from_bundle_id``), per-member
+        ``member_construction`` origin anchors, the hash-chained
+        ``operations`` chronology, and the ``member_effect_tables`` registry.
+        Empty surfaces write nothing (entry-dark on plain bundles; an older
+        reader in the same unreleased window sees only known keys).
+        """
+
+        bundle_id = getattr(bundle, "_bundle_id", None)
+        if bundle_id:
+            bundle_metadata["bundle_id"] = bundle_id
+        forked_from = getattr(bundle, "_forked_from_bundle_id", None)
+        if forked_from:
+            bundle_metadata["forked_from_bundle_id"] = forked_from
+        anchors = getattr(bundle, "_member_construction", None)
+        if anchors:
+            bundle_metadata["member_construction"] = {
+                name: dict(anchor) for name, anchor in anchors.items()
+            }
+        operations = getattr(bundle, "_operations", None)
+        if operations:
+            bundle_metadata["operations"] = [row.to_payload() for row in operations]
+        effect_tables = getattr(bundle, "_effect_tables", None)
+        if effect_tables:
+            bundle_metadata["member_effect_tables"] = {
+                operation_id: table.to_payload() for operation_id, table in effect_tables.items()
+            }
+
+    @staticmethod
+    def _add_preserved_sections(bundle: Any, bundle_metadata: dict[str, Any]) -> None:
+        """Re-emit preserved unknown namespaced ``bundle.json`` sections.
+
+        Loader doctrine leg (c) (the amendment): sections a load
+        preserved opaque write back verbatim so re-save never silently
+        destroys another provider's well-formed data. A preserved key can
+        never collide with a writer-owned key — the loader only preserves
+        NAMESPACED (dotted) keys and the writer's own keys are bare.
+        """
+
+        preserved = getattr(bundle, "preserved_sections", None)
+        if not preserved:
+            return
+        for key, value in preserved.items():
+            if key in bundle_metadata:
+                # Defensive: never let carried data shadow a writer-owned
+                # section (unreachable while writer keys stay bare).
+                continue
+            bundle_metadata[key] = value
 
     @classmethod
     def _write_bundle_members(
@@ -399,17 +449,12 @@ class _TlSpecWriter:
             Member metadata records.
         """
 
-        members = getattr(bundle, "members", {})
-        if not isinstance(members, dict):
-            raise TorchLensIOError("Bundle writer expected a mapping of members.")
-        members_path = tmp_path / "members"
-        members_path.mkdir()
-        records: list[dict[str, str]] = []
-        for index, (name, trace) in enumerate(members.items()):
-            relative_path = Path("members") / f"{index:04d}.tlspec"
-            trace.save(tmp_path / relative_path, level=save_level)
-            records.append({"name": str(name), "path": relative_path.as_posix()})
-        return records
+        return write_members(
+            bundle,
+            tmp_path,
+            level=save_level,
+            write_member=lambda trace, member_path, level: trace.save(member_path, level=level),
+        )
 
     @classmethod
     def build_manifest(
@@ -446,17 +491,18 @@ class _TlSpecWriter:
         """
 
         level = coerce_tlspec_save_level(save_level)
-        model_signature = cls._model_signature(source, kind=kind)
+        model_signature = _model_signature(source, kind=kind)
         return {
             "tlspec_version": TLSPEC_VERSION,
             "kind": kind,
             "created_at": getattr(source, "_source_bundle_created_at", None) or _utc_timestamp(),
             "torchlens_version": TORCHLENS_VERSION,
-            "python_version": _python_version(),
+            "python_version": _runtime_python_version(),
             "torch_version": torch.__version__,
+            "platform": f"{platform.system().lower()}-{platform.machine().lower()}",
             "schema_version": TLSPEC_SCHEMA_VERSION,
             "model_signature": model_signature,
-            "model_fingerprint": cls._model_fingerprint(source, model_signature, kind=kind),
+            "model_fingerprint": _model_fingerprint(source, model_signature, kind=kind),
             "sites": cls._sites(source, kind=kind),
             "spec_compat_info": spec_compat_info,
             "body_format": "safetensors",
@@ -485,251 +531,6 @@ class _TlSpecWriter:
             handle.flush()
             os.fsync(handle.fileno())
 
-    @staticmethod
-    def _backend_runtime(source: Any, *, backend_name: str) -> dict[str, Any]:
-        """Build a schema v2 backend runtime fingerprint.
-
-        Parameters
-        ----------
-        source:
-            Trace being serialized.
-        backend_name:
-            Registered backend name.
-
-        Returns
-        -------
-        dict[str, Any]
-            JSON-ready backend runtime metadata.
-        """
-
-        spec = get_backend_spec(backend_name)
-        runtime_name = spec.serialization_policy.runtime_name or backend_name
-        runtime_config = getattr(source, "backend_runtime_config", None)
-        if not isinstance(runtime_config, dict):
-            runtime_config = {}
-        device_summary = getattr(source, "backend_runtime_device_summary", None)
-        if not isinstance(device_summary, dict):
-            device_summary = {}
-        runtime_version = getattr(source, "backend_runtime_version", "0.0.metadata")
-        return {
-            "name": runtime_name,
-            "version": None if runtime_version is None else str(runtime_version),
-            "runtime_config": runtime_config,
-            "device_summary": device_summary,
-            "compat_policy": {"policy": "metadata-only"},
-        }
-
-    @staticmethod
-    def _payload_policy(
-        *,
-        backend_name: str,
-        tensor_entries: list[TensorEntry],
-    ) -> dict[str, Any]:
-        """Build a schema v2 payload policy object.
-
-        Parameters
-        ----------
-        backend_name:
-            Registered backend name.
-        tensor_entries:
-            Saved tensor entries used to derive payload kinds.
-
-        Returns
-        -------
-        dict[str, Any]
-            JSON-ready payload policy metadata.
-        """
-
-        spec = get_backend_spec(backend_name)
-        payload_kinds = []
-        if spec.capabilities.payload_materialization:
-            payload_kinds = sorted({entry.kind for entry in tensor_entries})
-        return {
-            "policy": spec.serialization_policy.payload_policy,
-            "materialization_supported": spec.capabilities.payload_materialization,
-            "payload_kinds": payload_kinds,
-        }
-
-    @staticmethod
-    def _derived_gradient_summary(source: Any) -> dict[str, Any] | None:
-        """Build schema-v2 derived-gradient summary metadata.
-
-        Parameters
-        ----------
-        source:
-            Trace being serialized.
-
-        Returns
-        -------
-        dict[str, Any] | None
-            JSON-ready derived-gradient summary, or ``None`` when absent.
-        """
-
-        leaf_records = getattr(source, "derived_grads", {})
-        intermediate_records = getattr(source, "intermediate_derived_grads", {})
-        leaf_count = _safe_len(leaf_records)
-        intermediate_count = _safe_len(intermediate_records)
-        if leaf_count == 0 and intermediate_count == 0:
-            return None
-        provenance_kinds = sorted(
-            {
-                str(record.provenance.get("kind"))
-                for accessor in (leaf_records, intermediate_records)
-                for record in getattr(accessor, "values", lambda: ())()
-                if getattr(record, "provenance", None) is not None
-                and record.provenance.get("kind") is not None
-            }
-        )
-        return {
-            "num_leaf_records": leaf_count,
-            "num_intermediate_records": intermediate_count,
-            "provenance_kinds": provenance_kinds,
-        }
-
-    @classmethod
-    def _backend_model_fingerprint(cls, source: Any, *, backend_name: str) -> dict[str, Any]:
-        """Build a schema v2 backend-owned model fingerprint.
-
-        Parameters
-        ----------
-        source:
-            Trace being serialized.
-        backend_name:
-            Registered backend name.
-
-        Returns
-        -------
-        dict[str, Any]
-            JSON-ready backend fingerprint.
-        """
-
-        model_signature = cls._model_signature(source, kind="trace")
-        graph_shape_hash = getattr(source, "graph_shape_hash", None)
-        return {
-            "backend_fingerprint": {
-                "backend": backend_name,
-                "model_signature": model_signature,
-                "graph_digest": graph_shape_hash or "metadata-only",
-                "module_identity_mode": getattr(source, "module_identity_mode", None),
-                "param_source": getattr(source, "param_source", None),
-            }
-        }
-
-    @classmethod
-    def _model_signature(cls, source: Any, *, kind: TlspecKind) -> str:
-        """Return the module-qualified model identity for a source object.
-
-        Parameters
-        ----------
-        source:
-            Source object.
-        kind:
-            Public object kind.
-
-        Returns
-        -------
-        str
-            Module-qualified identity string.
-        """
-
-        if kind == "bundle":
-            return "torchlens.intervention.bundle.Bundle"
-        model_class_qualname = getattr(source, "model_class_qualname", None)
-        if isinstance(model_class_qualname, str) and model_class_qualname:
-            return model_class_qualname
-        model = _source_model(source)
-        if model is not None:
-            model_type = type(model)
-            return f"{model_type.__module__}.{model_type.__qualname__}"
-        source_type = type(source)
-        return f"{source_type.__module__}.{source_type.__qualname__}"
-
-    @classmethod
-    def _model_fingerprint(
-        cls,
-        source: Any,
-        model_signature: str,
-        *,
-        kind: TlspecKind,
-    ) -> dict[str, Any]:
-        """Build the public model fingerprint object.
-
-        Parameters
-        ----------
-        source:
-            Source object.
-        model_signature:
-            Module-qualified model identity.
-        kind:
-            Public object kind.
-
-        Returns
-        -------
-        dict[str, Any]
-            Fingerprint metadata.
-        """
-
-        if kind == "bundle":
-            return cls._bundle_fingerprint(source, model_signature)
-
-        source_fingerprint = getattr(source, "_source_bundle_model_fingerprint", None)
-        if isinstance(source_fingerprint, dict):
-            return dict(source_fingerprint)
-
-        model = _source_model(source)
-        if model is not None:
-            parameter_hash = _hash_named_tensor_meta(model.named_parameters())
-            buffer_hash = _hash_named_tensor_meta(model.named_buffers())
-        else:
-            raw_parameter_hash = getattr(source, "param_hash_quick", None)
-            if isinstance(raw_parameter_hash, str) and len(raw_parameter_hash) == 64:
-                parameter_hash = raw_parameter_hash
-            else:
-                parameter_hash = _EMPTY_META_HASH
-            buffer_hash = _EMPTY_META_HASH
-        return {
-            "parameter_meta_hash": parameter_hash,
-            "buffer_meta_hash": buffer_hash,
-            "class_qualname": model_signature,
-            "extra_metadata": _extra_metadata_for_source(source),
-        }
-
-    @classmethod
-    def _bundle_fingerprint(cls, bundle: Any, model_signature: str) -> dict[str, Any]:
-        """Build a combined fingerprint for a ``Bundle``.
-
-        Parameters
-        ----------
-        bundle:
-            Bundle object.
-        model_signature:
-            Bundle class identity.
-
-        Returns
-        -------
-        dict[str, Any]
-            Bundle-level fingerprint metadata.
-        """
-
-        members = getattr(bundle, "members", {})
-        member_fingerprints = []
-        if isinstance(members, dict):
-            for name, member in members.items():
-                signature = cls._model_signature(member, kind="trace")
-                member_fingerprints.append(
-                    (name, cls._model_fingerprint(member, signature, kind="trace"))
-                )
-        parameter_hash = sha256(repr(member_fingerprints).encode("utf-8")).hexdigest()
-        return {
-            "parameter_meta_hash": parameter_hash,
-            "buffer_meta_hash": _EMPTY_META_HASH,
-            "class_qualname": model_signature,
-            "extra_metadata": {
-                "member_names": list(members) if isinstance(members, dict) else [],
-                "baseline_name": getattr(bundle, "baseline_name", None),
-            },
-        }
-
     @classmethod
     def _sites(cls, source: Any, *, kind: TlspecKind) -> list[dict[str, Any]]:
         """Return site descriptors for a source object.
@@ -757,9 +558,9 @@ class _TlSpecWriter:
                         sites.append(site)
             return sites
         layers = (
-            source.get("layer_list", [])
+            source.get("_layer_list", [])
             if isinstance(source, dict)
-            else getattr(source, "layer_list", [])
+            else (source._layer_list if is_live_trace(source) else [])
         )
         sites = []
         for layer in layers if isinstance(layers, list) else []:
@@ -770,7 +571,7 @@ class _TlSpecWriter:
                     "layer_label": str(getattr(layer, "layer_label", "")),
                     "pass_index": _json_int_or_none(getattr(layer, "call_index", None)),
                     "op_kind": _json_str_or_none(
-                        getattr(layer, "equivalence_class", None)
+                        record_member(layer, "equivalence_class", None)
                         or getattr(layer, "func_name", None)
                     ),
                 }
@@ -838,15 +639,21 @@ class _TlSpecWriter:
         """
 
         grad_kinds = {"grad", "transformed_grad", "grad_fn_grad"}
-        backend_name = str(getattr(source, "backend", "torch"))
+        backend_name = str(source._provenance_backend if is_live_trace(source) else "torch")
         saved_grad_records = 0
         if backend_name == "torch":
             saved_grad_records = _safe_len(getattr(source, "saved_grad_ops", None))
         return {
-            "has_backward_pass": bool(getattr(source, "has_backward_pass", False)),
-            "num_backward_passes": int(getattr(source, "num_backward_passes", 0) or 0),
-            "num_grad_fns": int(getattr(source, "num_grad_fns", 0) or 0),
-            "num_grad_fn_calls": int(getattr(source, "num_grad_fn_calls", 0) or 0),
+            "has_backward_pass": bool(
+                source._autograd_has_backward_pass if is_live_trace(source) else False
+            ),
+            "num_backward_passes": int(
+                (source._num_backward_passes if is_live_trace(source) else 0) or 0
+            ),
+            "num_grad_fns": _safe_len(source._grad_fn_logs if is_live_trace(source) else None),
+            "num_grad_fn_calls": _safe_len(
+                getattr(getattr(source, "autograd", None), "grad_fn_calls", None)
+            ),
             "num_saved_grad_records": saved_grad_records,
             "gradient_blob_count": sum(1 for entry in tensor_entries if entry.kind in grad_kinds),
             "gradient_blob_kinds": sorted(
@@ -933,130 +740,6 @@ def coerce_tlspec_save_level(save_level: str) -> TlspecSaveLevel:
             argument="save_level",
         )
     return save_level  # type: ignore[return-value]
-
-
-def _source_model(source: Any) -> torch.nn.Module | None:
-    """Return the weakly-held source model when available.
-
-    Parameters
-    ----------
-    source:
-        Trace-like source object.
-
-    Returns
-    -------
-    torch.nn.Module | None
-        Source model, or ``None`` when unavailable.
-    """
-
-    source_ref = getattr(source, "_source_model_ref", None)
-    if source_ref is None:
-        return None
-    model = source_ref()
-    return model if isinstance(model, torch.nn.Module) else None
-
-
-def _hash_named_tensor_meta(named_tensors: Iterable[tuple[str, torch.Tensor]]) -> str:
-    """Hash ``(name, shape, dtype)`` metadata for named tensors.
-
-    Parameters
-    ----------
-    named_tensors:
-        Iterable of named tensor pairs.
-
-    Returns
-    -------
-    str
-        SHA-256 hex digest.
-    """
-
-    entries = [(name, tuple(tensor.shape), str(tensor.dtype)) for name, tensor in named_tensors]
-    return sha256(repr(entries).encode("utf-8")).hexdigest()
-
-
-def _extra_metadata_for_source(source: Any) -> dict[str, Any]:
-    """Return JSON-safe extra metadata for a model-log-like source.
-
-    Parameters
-    ----------
-    source:
-        Source object.
-
-    Returns
-    -------
-    dict[str, Any]
-        Extra metadata object.
-    """
-
-    return {
-        "model_class_name": _json_str_or_none(getattr(source, "model_class_name", None)),
-        "graph_shape_hash": _json_str_or_none(getattr(source, "graph_shape_hash", None)),
-        "input_signature_hash": _json_str_or_none(getattr(source, "input_signature_hash", None)),
-    }
-
-
-def _json_str_or_none(value: Any) -> str | None:
-    """Return a string for JSON output, preserving ``None``.
-
-    Parameters
-    ----------
-    value:
-        Raw value.
-
-    Returns
-    -------
-    str | None
-        JSON-safe string or ``None``.
-    """
-
-    if value is None:
-        return None
-    return str(value)
-
-
-def _json_int_or_none(value: Any) -> int | None:
-    """Return an int for JSON output when possible.
-
-    Parameters
-    ----------
-    value:
-        Raw value.
-
-    Returns
-    -------
-    int | None
-        JSON-safe int or ``None``.
-    """
-
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    return None
-
-
-def _python_version() -> str:
-    """Return the runtime Python version string.
-
-    Returns
-    -------
-    str
-        ``major.minor.micro`` version string.
-    """
-
-    return f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-
-
-def _utc_timestamp() -> str:
-    """Return a UTC ISO 8601 timestamp.
-
-    Returns
-    -------
-    str
-        UTC timestamp with ``Z`` suffix.
-    """
-
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 __all__ = [

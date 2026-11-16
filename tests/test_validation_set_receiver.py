@@ -1,0 +1,469 @@
+"""``Tensor.set_`` receiver values never reach its output (AGT-2473).
+
+``buf.set_(source)`` rebinds the receiver to the source's storage, so the
+perturbation check must not demand that the receiver (arg 0) influence the
+output, exactly as for ``copy_`` and ``fill_``. The carve-out is the arg-0
+position only: the SOURCE at arg 1 carries every output value and a dead source
+edge must still fail perturbation.
+
+The other two overloads validate end to end. ``set_()`` empties the buffer and
+``set_(storage, offset, size, stride)`` points it into another buffer's
+storage; the restore puts each moved tensor back on its own storage before it
+restores values, and the storage argument is saved by value at the call, so
+replay reads the bytes the call read and a wrong offset or size still fails.
+"""
+
+from __future__ import annotations
+
+import copy
+import warnings
+from collections.abc import Iterator
+from typing import Any
+
+import pytest
+import torch
+from _validation_capture import _capture, _quiet_validate
+from torch import nn
+
+import torchlens as tl
+from torchlens._user_public_impls import _validate_forward_pass_torch
+from torchlens._validation_state_snapshot import (
+    restore_snapshot_if_changed,
+    snapshot_state_for_restore,
+)
+from torchlens.options import CaptureOptions
+from torchlens.validation._core import validate_saved_outs
+from torchlens.validation._diagnostics import get_validation_failure
+
+
+class _SetToSource(nn.Module):
+    """Rebinds a buffer to a fresh source tensor, then reads it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("b", torch.rand(4))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            self.b.set_(x * 3)
+        return x + self.b
+
+
+class _SetToNothing(nn.Module):
+    """``set_()`` with no source empties the buffer."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("b", torch.rand(4))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            self.b.set_()
+        return x * 2 + self.b.sum()
+
+
+class _SetToStorageView(nn.Module):
+    """``set_(storage, offset, size, stride)`` views another tensor's storage."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("b", torch.rand(4))
+        self.register_buffer("src", torch.arange(8, dtype=torch.float32))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            self.b.set_(self.src.untyped_storage(), 2, (4,), (1,))
+        return x + self.b
+
+
+def test_dead_set_source_edge_still_fails_perturbation() -> None:
+    """A replay that ignores the SOURCE is caught: arg 1 stays perturbation-tested.
+
+    The planted ``set_`` returns the saved output whatever source it is given,
+    so plain replay still matches; only the perturbation of the source parent
+    can expose it, and the arg-0 carve-out must not excuse it.
+    """
+
+    baseline, baseline_truth = _capture(_SetToSource(), torch.rand(4))
+    try:
+        status = validate_saved_outs(baseline, [baseline_truth], validate_metadata=False)
+        assert status.state == "passed"
+    finally:
+        baseline.cleanup()
+
+    trace, ground_truth = _capture(_SetToSource(), torch.rand(4))
+    try:
+        set_op = next(op for op in trace._layer_list if op.func_name == "set_")
+        source_label = set_op.call.parent_arg_positions["args"][1]
+        frozen = set_op.out.detach().clone()
+
+        def source_blind_set_(receiver: torch.Tensor, *args: object, **kwargs: object):
+            return receiver.set_(frozen.clone())
+
+        source_blind_set_.__name__ = set_op.func.__name__
+        set_op.func = source_blind_set_
+        status = validate_saved_outs(trace, [ground_truth], validate_metadata=False)
+        assert status.state == "failed"
+        failure = get_validation_failure(trace)
+        assert failure is not None
+        assert failure.check_name == "perturbation"
+        assert failure.op_label is not None and failure.op_label.startswith("set_")
+        assert source_label in failure.extra["perturbed_parents"]
+    finally:
+        trace.cleanup()
+
+
+class _SetParameterToNothing(nn.Module):
+    """``set_()`` on a parameter empties it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.w = nn.Parameter(torch.rand(4))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            self.w.set_()
+        return x * 2 + self.w.sum()
+
+
+class _GrowBuffer(nn.Module):
+    """``set_(source)`` with a larger source grows the buffer."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("b", torch.rand(4))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            self.b.set_(torch.cat([x, x]) * 3)
+        return x + self.b[:4] + self.b[4:]
+
+
+class _SetToWholeStorage(nn.Module):
+    """``set_(storage)`` views a whole storage from offset 0."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("b", torch.rand(4))
+        self.register_buffer("src", torch.arange(8, dtype=torch.float32))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            self.b.set_(self.src.untyped_storage())
+        return x + self.b[2:6]
+
+
+class _ResizeBuffer(nn.Module):
+    """``resize_`` grows a buffer in place (same storage, new size)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("b", torch.rand(4))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            self.b.resize_(8)
+        return x * 2
+
+
+class _UnsqueezeBuffer(nn.Module):
+    """``unsqueeze_`` changes a buffer's shape on its own storage."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("b", torch.rand(4))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            self.b.unsqueeze_(0)
+        return x + self.b[0]
+
+
+class _TransposeBuffer(nn.Module):
+    """``transpose_`` changes a buffer's shape and strides on its own storage."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("b", torch.rand(2, 2))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            self.b.transpose_(0, 1)
+        return x + self.b.reshape(4)
+
+
+class _SetToStorageViewThenOverwrite(_SetToStorageView):
+    """The storage overload, then a write to the source storage after the read."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = super().forward(x)
+        with torch.no_grad():
+            self.src.mul_(-1.0)
+        return out
+
+
+_SHAPE_CHANGING = [
+    _SetToNothing,
+    _SetParameterToNothing,
+    _GrowBuffer,
+    _SetToStorageView,
+    _SetToWholeStorage,
+]
+_GEOMETRY_WRITES = [_UnsqueezeBuffer, _TransposeBuffer]
+_VALIDATING_CASES = [
+    (model_cls, copy_fails) for model_cls in _SHAPE_CHANGING for copy_fails in (False, True)
+]
+
+
+def _state_by_name(model: nn.Module) -> dict[str, torch.Tensor]:
+    """Return every parameter and buffer object by name."""
+
+    return {**dict(model.named_parameters()), **dict(model.named_buffers())}
+
+
+def _assert_restored(
+    model: nn.Module, objects: dict[str, torch.Tensor], values: dict[str, torch.Tensor]
+) -> None:
+    """Assert the same tensor objects hold their own storage, geometry and pre-call values.
+
+    Every model here registers contiguous tensors, so the clones in ``values``
+    carry the original strides.
+    """
+
+    live = _state_by_name(model)
+    assert live.keys() == objects.keys()
+    for name, tensor in live.items():
+        assert tensor is objects[name], name
+        assert tensor.shape == values[name].shape, name
+        assert tensor.stride() == values[name].stride(), name
+        assert torch.equal(tensor, values[name]), name
+    pointers = [tensor.untyped_storage().data_ptr() for tensor in live.values()]
+    assert len(set(pointers)) == len(pointers), "a restored tensor still aliases another"
+
+
+@pytest.fixture
+def failing_model_deepcopy(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[type]]:
+    """Make ``copy.deepcopy`` refuse the listed model classes (validation's live fallback)."""
+
+    failing: list[type] = []
+    real_deepcopy = copy.deepcopy
+
+    def deepcopy(obj: Any, memo: Any = None, _nil: Any = None) -> Any:
+        if failing and isinstance(obj, tuple(failing)):
+            raise RuntimeError("model refuses deepcopy")
+        return real_deepcopy(obj, memo)
+
+    monkeypatch.setattr(copy, "deepcopy", deepcopy)
+    yield failing
+
+
+@pytest.mark.parametrize(("model_cls", "copy_fails"), _VALIDATING_CASES)
+def test_set_overloads_validate_and_leave_the_model_restored(
+    model_cls: type[nn.Module], copy_fails: bool, failing_model_deepcopy: list[type]
+) -> None:
+    """Validation returns True and the caller's tensors keep their objects, shapes and values.
+
+    On the live fallback the forward runs on the caller's model, whose
+    rebound tensor must go back on its own storage: a value-only restore
+    refuses the new shape, or copies through the alias into another buffer.
+    """
+
+    if copy_fails:
+        failing_model_deepcopy.append(model_cls)
+    torch.manual_seed(0)
+    model = model_cls()
+    objects = _state_by_name(model)
+    values = {name: tensor.detach().clone() for name, tensor in objects.items()}
+    assert _quiet_validate(model, torch.rand(4)) is True
+    _assert_restored(model, objects, values)
+
+
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
+@pytest.mark.parametrize(
+    "model_cls",
+    [
+        pytest.param(_SetToStorageView, id="AGT-2475"),
+    ],
+)
+def test_set_repros_validate_on_the_default_copy_path(model_cls: type[nn.Module]) -> None:
+    """The default (deep-copy) path returns True with no failure recorded.
+
+    Validation re-traces the copy from its post-forward state, where the
+    buffer already holds the binding ``set_`` applies. The re-trace must
+    capture the graph the first trace captured.
+    """
+
+    torch.manual_seed(0)
+    model = model_cls()
+    objects = _state_by_name(model)
+    values = {name: tensor.detach().clone() for name, tensor in objects.items()}
+    traces: list[Any] = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        verdict = _validate_forward_pass_torch(model, torch.rand(4), _trace_observer=traces.append)
+    (trace,) = traces
+    assert get_validation_failure(trace) is None
+    assert verdict is True
+    _assert_restored(model, objects, values)
+
+
+def _storage_view_trace(
+    model_cls: type[nn.Module] = _SetToStorageView,
+) -> tuple[nn.Module, Any, Any, Any]:
+    """Capture a fresh ``model_cls`` and return it, the trace, its ground truth and its ``set_`` op.
+
+    The ground truth runs on a copy, so the capture starts from the model's
+    initial state (``_capture`` runs the model itself first).
+    """
+
+    model = model_cls()
+    x = torch.rand(4)
+    ground_truth = copy.deepcopy(model)(x)
+    trace = tl.trace(model, x, capture=CaptureOptions(save_args=True), save="all")
+    set_op = next(op for op in trace._layer_list if op.func_name == "set_")
+    return model, trace, ground_truth, set_op
+
+
+def test_storage_argument_is_saved_by_value_at_the_call() -> None:
+    """Replay reads the bytes the storage held at the call, not its later contents."""
+
+    model, trace, ground_truth, set_op = _storage_view_trace(_SetToStorageViewThenOverwrite)
+    try:
+        saved_storage = set_op.call.saved_args[1]
+        assert isinstance(saved_storage, torch.UntypedStorage)
+        assert saved_storage.data_ptr() != model.src.untyped_storage().data_ptr()
+        with torch.no_grad():
+            model.src.zero_()
+        saved_values = torch.frombuffer(bytearray(bytes(saved_storage)), dtype=torch.float32)
+        assert torch.equal(saved_values, torch.arange(8, dtype=torch.float32))
+        assert torch.equal(set_op.out, torch.arange(2, 6, dtype=torch.float32))
+        status = validate_saved_outs(trace, [ground_truth], validate_metadata=False)
+        assert status.state == "passed"
+    finally:
+        trace.cleanup()
+
+
+@pytest.mark.parametrize(
+    ("position", "wrong_value"),
+    [(2, 3), (3, (3,))],
+    ids=["wrong-offset", "wrong-size"],
+)
+def test_wrong_storage_view_still_fails_replay(position: int, wrong_value: object) -> None:
+    """A replay that reads the wrong offset or size of the saved storage fails."""
+
+    _model, trace, ground_truth, set_op = _storage_view_trace()
+    try:
+        assert validate_saved_outs(trace, [ground_truth], validate_metadata=False).state == (
+            "passed"
+        )
+    finally:
+        trace.cleanup()
+
+    _model, trace, ground_truth, set_op = _storage_view_trace()
+    try:
+        set_op.call.saved_args[position] = wrong_value
+        status = validate_saved_outs(trace, [ground_truth], validate_metadata=False)
+        assert status.state == "failed"
+        failure = get_validation_failure(trace)
+        assert failure is not None
+        assert failure.check_name == "forward_replay"
+        assert failure.op_label is not None and failure.op_label.startswith("set_")
+    finally:
+        trace.cleanup()
+
+
+@pytest.mark.parametrize("model_cls", [*_SHAPE_CHANGING, _ResizeBuffer, *_GEOMETRY_WRITES])
+def test_restore_rebinds_moved_or_reshaped_state_before_loading_values(
+    model_cls: type[nn.Module], failing_model_deepcopy: list[type]
+) -> None:
+    """The snapshot restore puts moved or reshaped state back on its recorded geometry.
+
+    Called directly, ``restore_snapshot_if_changed`` rebinds a ``set_``-moved
+    or resized tensor to its own storage before it loads values. Through the
+    live fallback, an in-place geometry write (``unsqueeze_``, ``transpose_``)
+    reaches the same restore, returns a verdict instead of raising, and leaves
+    the caller's buffer on its recorded shape and strides.
+    """
+
+    torch.manual_seed(0)
+    model = model_cls()
+    objects = _state_by_name(model)
+    values = {name: tensor.detach().clone() for name, tensor in objects.items()}
+    snapshot = snapshot_state_for_restore(model)
+    model(torch.rand(4))
+    restore_snapshot_if_changed(
+        model, snapshot, lambda module, state: module.load_state_dict(state)
+    )
+    _assert_restored(model, objects, values)
+    if model_cls in _GEOMETRY_WRITES:
+        failing_model_deepcopy.append(model_cls)
+        assert isinstance(_quiet_validate(model, torch.rand(4)), bool)
+        _assert_restored(model, objects, values)
+
+
+@pytest.mark.parametrize("model_cls", [_GrowBuffer, _SetToNothing, _SetToStorageView])
+def test_set_receiver_binds_to_the_buffer_value_it_held_before_the_call(
+    model_cls: type[nn.Module],
+) -> None:
+    """The receiver slot of ``set_`` reads the buffer source saved before the call.
+
+    The rebind moves the receiver to another storage, so the post-call label
+    gate refuses its stamp; the receiver must keep its own pre-call source
+    rather than gain a second buffer source holding the post-call value.
+    """
+
+    torch.manual_seed(0)
+    model = model_cls()
+    before = model.b.detach().clone()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trace = tl.trace(model, torch.rand(4), capture=CaptureOptions(save_args=True), save="all")
+    try:
+        set_op = next(op for op in trace._layer_list if op.func_name == "set_")
+        receiver_label = set_op.call.parent_arg_positions["args"][0]
+        source = trace[receiver_label]
+        assert torch.equal(source.out, before)
+        assert [label for label in set_op.parents if label.startswith("buffer")] == [receiver_label]
+    finally:
+        trace.cleanup()
+
+
+class _DataRebindThenSet(nn.Module):
+    """An untraced ``.data=`` rebind of a buffer to input data, then ``set_`` on it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("b", torch.rand(4))
+        self.register_buffer("other", torch.rand(4))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            self.b.data = x * 3
+            self.b.set_(self.other)
+        return x + self.b
+
+
+def test_data_rebind_then_set_does_not_bind_the_receiver_to_its_old_value() -> None:
+    """A ``set_`` receiver rebound by ``.data=`` earlier is not re-pinned to its old buffer source.
+
+    The receiver held the input-derived ``x * 3`` when ``set_`` read it, so binding its
+    slot to the buffer source saved before the ``.data=`` rebind would hide input data
+    behind state; either the slot is not bound to that value or validation fails.
+    """
+
+    torch.manual_seed(0)
+    model = _DataRebindThenSet()
+    before = model.b.detach().clone()
+    x = torch.rand(4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trace = tl.trace(model, x, capture=CaptureOptions(save_args=True), save="all")
+    try:
+        set_op = next(op for op in trace._layer_list if op.func_name == "set_")
+        receiver_label = set_op.call.parent_arg_positions["args"].get(0)
+        stale = receiver_label is not None and torch.equal(trace[receiver_label].out, before)
+        assert not stale, "set_ receiver bound to the buffer value from before the .data= rebind"
+    finally:
+        trace.cleanup()
+    torch.manual_seed(0)
+    assert isinstance(_quiet_validate(_DataRebindThenSet(), x), bool)

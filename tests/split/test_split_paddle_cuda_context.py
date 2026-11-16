@@ -175,14 +175,16 @@ def test_gpu_split_restores_foreign_context_and_matches_native_training() -> Non
 
             trace = tl.trace(
                 model, x, backend='paddle',
-                grad_options=tl.backends.paddle.GradOptions(loss_fn=lambda output: output.sum()),
+                capture=tl.options.CaptureOptions(
+                    grad_options=tl.backends.paddle.GradOptions(loss_fn=lambda output: output.sum())
+                ),
             )
             assert_restored()
             for name, expected in zip(
                 ['inputs.0', *(f'params.{name}' for name, _ in model.named_parameters())],
                 expected_gradients, strict=True,
             ):
-                assert_close(trace.derived_grads[name].grad, expected)
+                assert_close(trace.autograd.derived_grads[name].grad, expected)
 
             def functional(inputs, weight, bias):
                 return paddle.nn.functional.relu(

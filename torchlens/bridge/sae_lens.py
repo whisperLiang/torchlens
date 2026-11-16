@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from .._entry_refusals import refuse_sae_encoder, refuse_sae_reconstructor
 from ._utils import out_at
 
 
-def encode(log: Any, site: Any, sae: Any) -> Any:
+def encode(trace: Any, site: Any, sae: Any) -> Any:
     """Encode a TorchLens out with an SAE Lens-compatible SAE.
 
     Parameters
     ----------
-    log:
+    trace:
         TorchLens ``Trace`` containing saved outs.
     site:
         Layer label, selector, or layer object to encode.
@@ -30,6 +31,15 @@ def encode(log: Any, site: Any, sae: Any) -> Any:
         If SAE Lens is unavailable.
     TypeError
         If ``sae`` cannot encode an out.
+
+    Examples
+    --------
+    >>> # requires: sae_lens
+    >>> clf = nn.Sequential(nn.Flatten(), nn.Linear(12, 3)).eval()
+    >>> trace = tl.trace(clf, torch.randn(1, 12))
+    >>> latents = tl.bridge.sae_lens.encode(trace, "linear", nn.Linear(3, 5))
+    >>> tuple(latents.shape)
+    (1, 5)
     """
 
     try:
@@ -39,37 +49,53 @@ def encode(log: Any, site: Any, sae: Any) -> Any:
             "SAE Lens bridge requires the `sae` extra: install torchlens[sae]."
         ) from exc
 
-    out = out_at(log, site)
+    out = out_at(trace, site)
     if hasattr(sae, "encode"):
         return sae.encode(out)
     if callable(sae):
         return sae(out)
-    raise TypeError("SAE Lens bridge expected an SAE with encode(...) or a callable SAE.")
+    refuse_sae_encoder(sae)
 
 
-def decode(log: Any, site: Any, sae: Any) -> Any:
-    """Decode a TorchLens out with an SAE Lens-compatible SAE.
+def reconstruct(trace: Any, site: Any, sae: Any) -> Any:
+    """Return an SAE Lens-compatible SAE's reconstruction of a TorchLens out.
+
+    The site's activation is encoded, then the latents are decoded:
+    ``sae.decode(sae.encode(out))``. A callable without ``encode`` and
+    ``decode`` is called on the activation, since an SAE Lens ``SAE``'s
+    forward pass is that same encode-then-decode. To decode latents you
+    already hold, call ``sae.decode(latents)`` directly; to measure the
+    reconstruction's causal effect, use ``torchlens.bridge.sae.splice``.
 
     Parameters
     ----------
-    log:
+    trace:
         TorchLens ``Trace`` containing saved outs.
     site:
-        Layer label, selector, or layer object to decode.
+        Layer label, selector, or layer object to reconstruct.
     sae:
-        SAE object exposing ``decode`` or a callable SAE.
+        SAE object exposing ``encode`` and ``decode``, or a callable SAE.
 
     Returns
     -------
     Any
-        Decoded out returned by the SAE.
+        Reconstruction returned by the SAE.
 
     Raises
     ------
     ImportError
         If SAE Lens is unavailable.
     TypeError
-        If ``sae`` cannot decode an out.
+        If ``sae`` cannot reconstruct an out.
+
+    Examples
+    --------
+    >>> # requires: sae_lens
+    >>> clf = nn.Sequential(nn.Flatten(), nn.Linear(12, 3)).eval()
+    >>> trace = tl.trace(clf, torch.randn(1, 12))
+    >>> recon = tl.bridge.sae_lens.reconstruct(trace, "linear", nn.Linear(3, 3))
+    >>> tuple(recon.shape)
+    (1, 3)
     """
 
     try:
@@ -79,12 +105,12 @@ def decode(log: Any, site: Any, sae: Any) -> Any:
             "SAE Lens bridge requires the `sae` extra: install torchlens[sae]."
         ) from exc
 
-    out = out_at(log, site)
-    if hasattr(sae, "decode"):
-        return sae.decode(out)
+    out = out_at(trace, site)
+    if callable(getattr(sae, "encode", None)) and callable(getattr(sae, "decode", None)):
+        return sae.decode(sae.encode(out))
     if callable(sae):
         return sae(out)
-    raise TypeError("SAE Lens bridge expected an SAE with decode(...) or a callable SAE.")
+    refuse_sae_reconstructor(sae)
 
 
-__all__ = ["decode", "encode"]
+__all__ = ["encode", "reconstruct"]

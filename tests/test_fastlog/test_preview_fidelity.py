@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import pytest
 import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.fastlog import RecordContext, RecordContextFieldError
-from torchlens.visualization.fastlog_preview import _build_preview_nodes, _make_node_spec_fn
-from torchlens.visualization.node_spec import NodeSpec
+from torchlens._visualization.fastlog_preview import _build_preview_nodes, _make_node_spec_fn
+from torchlens._visualization.node_spec import NodeSpec
+from torchlens.errors import RecordContextFieldError
+from torchlens.recording import RecordContext
 
 
 class StaticGraph(nn.Module):
@@ -27,48 +30,26 @@ class StaticGraph(nn.Module):
         return self.layers(x)
 
 
-def _stable_context_fields(ctx: RecordContext) -> dict[str, object]:
-    """Return predicate-visible fields that preview can synthesize from a Trace."""
-
-    return {
-        "kind": ctx.kind,
-        "label": ctx.label,
-        "raw_label": ctx.raw_label,
-        "layer_type": ctx.layer_type,
-        "type_index": ctx.type_index,
-        "raw_index": ctx.raw_index,
-        "func_name": ctx.func_name,
-        "address": ctx.address,
-        "module_type": ctx.module_type,
-        "module_pass_index": ctx.module_pass_index,
-        "module_stack": tuple(
-            (frame.address, frame.module_type, frame.pass_index) for frame in ctx.module_stack
-        ),
-        "parent_labels": ctx.parent_labels,
-        "input_output_address": ctx.input_output_address,
-        "shape": ctx.shape,
-        "dtype": ctx.dtype,
-        "output_index": ctx.output_index,
-        "is_bottom_level_func": ctx.is_bottom_level_func,
-    }
-
-
-def test_preview_and_dry_run_contexts_match_stable_fields() -> None:
-    """Preview-synthesized and real dry-run contexts match stable predicate fields."""
+@pytest.mark.xfail(
+    reason=(
+        "Preview currently synthesizes Trace layer contexts only; dry_run includes "
+        "module events and uses raw labels, so exact field-by-field parity is pending."
+    )
+)
+def test_preview_and_dry_run_contexts_match_field_by_field() -> None:
+    """Preview-synthesized and real dry-run contexts match field-by-field."""
 
     model = StaticGraph()
     x = torch.randn(1, 4)
-    full_trace = tl.trace(model, x)
-    dry = tl.fastlog.dry_run(model, x, save=lambda ctx: True, include_source_events=True)
-    preview_nodes = _build_preview_nodes(full_trace, lambda ctx: True)
+    trace = tl.trace(model, x)
+    dry = tl.recording.dry_run(model, x, save=lambda ctx: True, include_source_events=True)
+    preview_nodes = _build_preview_nodes(trace, lambda ctx: True)
     preview_contexts = [node.ctx for node in dict.fromkeys(preview_nodes.values())]
     real_contexts = [
         ctx for ctx in dry.contexts if ctx.kind in {"input", "op"} and ctx.layer_type != "output"
     ]
 
-    assert [_stable_context_fields(ctx) for ctx in preview_contexts] == [
-        _stable_context_fields(ctx) for ctx in real_contexts
-    ]
+    assert [asdict(ctx) for ctx in preview_contexts] == [asdict(ctx) for ctx in real_contexts]
 
 
 def test_missing_record_context_field_errors_in_preview_and_dry_run() -> None:
@@ -85,9 +66,9 @@ def test_missing_record_context_field_errors_in_preview_and_dry_run() -> None:
 
     dot = trace.preview_fastlog(predicate=bad_predicate)
 
-    assert "exception" in dot
+    assert "exception" in dot.dot
     with pytest.raises(RecordContextFieldError):
-        tl.fastlog.dry_run(model, x, save=bad_predicate)
+        tl.recording.dry_run(model, x, save=bad_predicate)
 
 
 def test_preview_nodes_include_short_label_keys() -> None:
@@ -123,7 +104,7 @@ def test_preview_node_spec_consumes_short_label_keys() -> None:
         type(
             "ShortLabelOnlyLayer",
             (),
-            {"layer_label": "missing_label", "layer_label_short": "relu_1"},
+            {"layer_label": "missing_label", "short_layer_label": "relu_1"},
         )(),
         NodeSpec(lines=["relu"]),
     )

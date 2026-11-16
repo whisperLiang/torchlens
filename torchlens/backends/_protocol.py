@@ -5,16 +5,25 @@ from __future__ import annotations
 from contextlib import AbstractContextManager
 from typing import Any, Protocol
 
-from ..ir.events import OpEvent
-from ..ir.intervention import FireResult, FunctionEventInput
-from ..ir.predicate import RecordContext
-from ..ir.refs import ReservedLabel, TensorRef
-from ..ir.semantics import BackendSemantics, CapturePolicy
-from ..ir.workspaces import RawGraphWorkspace
+from .._ir.events import OpEvent
+from .._ir.intervention import FireResult, FunctionEventInput
+from .._ir.predicate import RecordContext
+from .._ir.refs import ReservedLabel, TensorRef
+from .._ir.semantics import BackendSemantics, CapturePolicy
+from .._ir.workspaces import RawGraphWorkspace
 
 
 class CaptureBackend(Protocol):
-    """Protocol implemented by backend-specific capture adapters."""
+    """Protocol implemented by backend-specific capture adapters.
+
+    Examples
+    --------
+    >>> adapter = tl.backends.spec("torch").capture_backend()
+    >>> (adapter.name, adapter.supports_backward_capture)
+    ('torch', True)
+    >>> all(hasattr(adapter, member) for member in ("wrap", "unwrap", "start_session"))
+    True
+    """
 
     name: str
     supports_backward_capture: bool
@@ -63,16 +72,16 @@ class CaptureBackend(Protocol):
         self,
         session: object,
         model: object,
-        input_args: object,
+        inputs: object,
         input_kwargs: dict[Any, Any] | None,
     ) -> tuple[list[Any], dict[Any, Any], list[str], object]:
         """Normalize inputs, copy caller-owned values, and detect the model device."""
         ...
 
-    def fetch_label_move_input_tensors(
+    def _fetch_label_move_input_tensors(
         self,
         session: object,
-        input_args: list[Any],
+        inputs: list[Any],
         input_arg_names: list[str],
         input_kwargs: dict[Any, Any],
         model_device: object,
@@ -253,10 +262,6 @@ class CaptureBackend(Protocol):
         """Materialize a backend-safe payload copy under the given policy."""
         ...
 
-    def copy_replacement_metadata(self, session: object, src: object, dst: object) -> None:
-        """Copy backend metadata from an intervention source to replacement."""
-        ...
-
     def emit_function_outputs(
         self,
         session: object,
@@ -281,8 +286,7 @@ class CaptureBackend(Protocol):
             Active backend capture session.
         trace_state:
             The session trace's raw-graph workspace, passed as the explicit
-            ownership token (M10: the flat TraceBuildState dissolved into
-            named per-phase workspaces).
+            ownership token.
 
         Returns
         -------
@@ -298,7 +302,7 @@ class CaptureBackend(Protocol):
         """
         ...
 
-    def cleanup_halted_forward_session(self, session: object, prepared_model: object) -> None:
+    def cleanup_stopped_forward_session(self, session: object, prepared_model: object) -> None:
         """Clean up backend state after a halted forward capture.
 
         Parameters
@@ -330,13 +334,15 @@ class CaptureBackend(Protocol):
         prepared_model:
             Backend-prepared model object, or a backend-specific cleanup tuple.
         exc:
-            Exception raised by the forward capture.
+            Exception the capture door is about to raise: a
+            ``TraceCaptureError`` wrapping the forward's exception, or a
+            TorchLens error propagating as itself.
 
         Returns
         -------
         None
-            Session metadata is cleared in place and exception diagnostics may
-            be attached to ``exc``.
+            Session metadata is cleared in place and the partial capture may
+            be attached to ``exc`` as ``partial_trace``.
         """
         ...
 

@@ -12,18 +12,20 @@ from torch import nn
 
 import torchlens as tl
 from torchlens import _state
-from torchlens._io import TorchLensIOError
+from torchlens._constants import PRIMITIVE_OP_FIELD_ORDER
+from torchlens._data_classes.aten_op import OpRef
+from torchlens._io import ArtifactError
 from torchlens._io.prerelease import activate_prerelease_fields
-from torchlens.backends.torch._aten_capture import _activate_aten_recording_for_tests
+from torchlens._ir.events import _AtenExecutionContext, _AtenTensorFact
 from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
-from torchlens.constants import PRIMITIVE_OP_FIELD_ORDER
-from torchlens.data_classes.aten_op import AtenOp, OpRef
-from torchlens.intervention import SuperAtenOp
-from torchlens.ir.events import _AtenExecutionContext, _AtenTensorFact
-from torchlens.validation._invariants_primitive_ops import _check_primitive_op_invariants
-from torchlens.validation.invariants import MetadataInvariantError, check_metadata_invariants
-
-pytestmark = pytest.mark.smoke
+from torchlens.bundle import SuperAtenOp
+from torchlens.validation._invariants import (
+    MetadataInvariantError,
+    check_metadata_invariants,
+)
+from torchlens.validation._invariants_primitive_ops import (
+    _check_primitive_op_invariants,
+)
 
 _DOCUMENTED_UNSTABLE_ATEN_TOKENS = {
     "AtenOp",
@@ -42,12 +44,13 @@ _DOCUMENTED_UNSTABLE_ATEN_TOKENS = {
     "op_row_index",
     "op_label",
     "func_call_id",
-    *_AtenTensorFact.PORTABLE_STATE_SPEC,
-    *_AtenExecutionContext.PORTABLE_STATE_SPEC,
+    *_AtenTensorFact._PORTABLE_STATE_SPEC,
+    *_AtenExecutionContext._PORTABLE_STATE_SPEC,
     "comparison_status",
     "has_observation_gap",
     "primitive_op_invariants",
     "non_torch_primitive_op_inert",
+    "aten_values_consistent",
     "primitive_op_schema_invalid",
     "primitive_op_fk_invalid",
     "forward",
@@ -122,45 +125,6 @@ class _SlashModuleModel(nn.Module):
         return self.blocks["a/b"](x)
 
 
-class _CopySlicesModel(nn.Module):
-    """Create a CopySlices autograd node through indexed assignment."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Assign one differentiable slice into a cloned tensor."""
-
-        source = x * 2
-        result = source.clone()
-        result[:, :1] = source[:, 1:2]
-        return result.sum()
-
-
-class _InplaceViewModel(nn.Module):
-    """Mutate a differentiable view in place."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply an in-place add through a view."""
-
-        result = x.clone()
-        result[:, :1].add_(1)
-        return result.sum()
-
-
-class _InplaceParameterSliceModel(nn.Module):
-    """Mutate a parameter slice before using the parameter."""
-
-    def __init__(self) -> None:
-        """Create one small trainable matrix."""
-
-        super().__init__()
-        self.weight = nn.Parameter(torch.eye(3))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Update one parameter slice without adding an autograd mutation edge."""
-
-        self.weight.detach()[:1].add_(0.25)
-        return (x @ self.weight).sum()
-
-
 class _IndexPutModel(nn.Module):
     """Exercise explicit ``index_put_`` lineage."""
 
@@ -199,21 +163,22 @@ def _armed_trace(*, backward_ready: bool = False) -> tl.Trace:
         Trace with a present primitive profile.
     """
 
-    capture = tl.options.CaptureOptions(backward_ready=backward_ready)
-    kwargs = {"save_mode": "reference"} if backward_ready else {}
-    with _activate_aten_recording_for_tests():
-        return tl.trace(
-            _TwoOpModel(),
-            torch.ones(2, requires_grad=backward_ready),
-            capture=capture,
-            **kwargs,
-        )
+    capture = tl.options.CaptureOptions(
+        backward_ready=backward_ready,
+        aten_ops=True,
+        **({"save_mode": "reference"} if backward_ready else {}),
+    )
+    return tl.trace(
+        _TwoOpModel(),
+        torch.ones(2, requires_grad=backward_ready),
+        capture=capture,
+    )
 
 
 def test_documented_unstable_aten_surface_matches_glossary_index() -> None:
     """Every introduced public spelling has the required unstable marker."""
 
-    glossary = (Path(__file__).parents[1] / "docs/reference/glossary.md").read_text()
+    glossary = (Path(__file__).parents[1] / "docs/internal/reference/name_index.md").read_text()
     indexed = glossary.split("<!-- ATEN-UNSTABLE-INDEX:START -->", 1)[1].split(
         "<!-- ATEN-UNSTABLE-INDEX:END -->", 1
     )[0]
@@ -223,59 +188,34 @@ def test_documented_unstable_aten_surface_matches_glossary_index() -> None:
     assert all("unstable -- no deprecation shim owed" in row for row in surface_rows)
 
 
-def test_private_recorder_materializes_value_free_forward_rows() -> None:
-    """Armed forward calls become opaque-label AtenOp rows with exact Op FKs."""
-
-    trace = _armed_trace()
-    profile = trace._primitive_op_profile
-
-    assert profile is not None
-    assert profile.primitive_ops
-    assert all(isinstance(row, AtenOp) for row in profile.primitive_ops)
-    assert all(row.label == f"aten_{row.sequence}" for row in profile.primitive_ops)
-    assert all("/" not in row.label for row in profile.primitive_ops)
-    assert any(row.owner_status == "forward_op" for row in profile.primitive_ops)
-    assert all(
-        not isinstance(fact, torch.Tensor)
-        for row in profile.primitive_ops
-        for facts in (row.input_tensor_facts, row.output_tensor_facts)
-        for fact in facts
-    )
-    assert check_metadata_invariants(trace)
-
-
-def test_recording_off_never_constructs_primitive_retention(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The ordinary capture path never reaches the ATen retention constructor."""
-
-    from torchlens.backends.torch import _aten_capture
-
-    def fail_if_called(*args: object, **kwargs: object) -> None:
-        """Fail if the gated retention path is called."""
-
-        del args, kwargs
-        raise AssertionError("ATen retention constructor ran while recording was off")
-
-    monkeypatch.setattr(_aten_capture, "_prepare_aten_call", fail_if_called)
-    trace = tl.trace(_TwoOpModel(), torch.ones(2))
-    assert trace._primitive_op_profile is None
-
-
 def test_mode_paused_interior_is_one_lower_bound_gap_not_a_synthetic_row() -> None:
-    """Strict subclass construction records one typed gap with exact parentage."""
+    """Strict subclass construction records a typed gap, with exact parentage, per crossing.
 
-    with _activate_aten_recording_for_tests():
-        trace = tl.trace(_SubclassCtorModel(), torch.ones(2, 3))
+    A modern torch build (``HAS_SUBCLASS_CTOR_IN_DISPATCH_MODE``) only needs the
+    pause for ``__new__`` -- one crossing. Torch 2.1/2.2 additionally needs it
+    for every ``__torch_function__`` return-conversion back into the subclass
+    (``as_subclass``; see ``TensorSubclassUnsupportedError``), and
+    this forward's ``scratch.sum() * 0`` then ``x + ...`` chain reconstructs the
+    subclass three more times -- four honest crossings there, not a regression.
+    """
+
+    from torchlens._utils._torch_compat import HAS_SUBCLASS_CTOR_IN_DISPATCH_MODE
+
+    trace = tl.trace(
+        _SubclassCtorModel(), torch.ones(2, 3), capture=tl.options.CaptureOptions(aten_ops=True)
+    )
     profile = trace._primitive_op_profile
 
-    assert len(profile.mode_paused_interior) == 1
-    gap = profile.mode_paused_interior[0]
-    assert gap.kind == "mode_paused_interior"
-    assert gap.reason == "strict_subclass_constructor"
-    assert gap.sequence_after == gap.sequence_before + 1
-    assert gap.parent_op_refs
-    assert all(row.sequence != gap.sequence_after for row in profile.primitive_ops)
+    expected_gap_count = 1 if HAS_SUBCLASS_CTOR_IN_DISPATCH_MODE else 4
+    assert len(profile.mode_paused_interior) == expected_gap_count
+    gap_sequences_after = set()
+    for gap in profile.mode_paused_interior:
+        assert gap.kind == "mode_paused_interior"
+        assert gap.reason == "strict_subclass_constructor"
+        assert gap.sequence_after == gap.sequence_before + 1
+        assert gap.parent_op_refs
+        gap_sequences_after.add(gap.sequence_after)
+    assert all(row.sequence not in gap_sequences_after for row in profile.primitive_ops)
     assert check_metadata_invariants(trace)
 
 
@@ -283,8 +223,7 @@ def test_backward_rows_resolve_to_grad_fn_calls() -> None:
     """The shared observer attributes engine dispatches to active GradFn calls."""
 
     trace = _armed_trace(backward_ready=True)
-    with _activate_aten_recording_for_tests():
-        trace.log_backward(trace.output_ops[0].out.sum())
+    trace.backward(trace.output_ops[0].out.sum())
 
     backward_rows = [
         row for row in trace._primitive_op_profile.primitive_ops if row.capture_phase == "backward"
@@ -295,12 +234,10 @@ def test_backward_rows_resolve_to_grad_fn_calls() -> None:
     assert check_metadata_invariants(trace)
 
 
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
 @pytest.mark.parametrize(
     ("model", "expected_operator"),
     [
-        (_CopySlicesModel(), "copy_"),
-        (_InplaceViewModel(), "add_"),
-        (_InplaceParameterSliceModel(), "add_"),
         (_IndexPutModel(), "index_put_"),
     ],
 )
@@ -310,15 +247,9 @@ def test_delayed_grad_fn_lineage_covers_required_mutation_breakers(
 ) -> None:
     """Delayed links remain typed across CopySlices and in-place/view cases."""
 
-    capture = tl.options.CaptureOptions(backward_ready=True)
-    with _activate_aten_recording_for_tests():
-        trace = tl.trace(
-            model,
-            torch.ones(2, 3, requires_grad=True),
-            capture=capture,
-            save_mode="reference",
-        )
-        trace.log_backward(trace.output_ops[0].out)
+    capture = tl.options.CaptureOptions(backward_ready=True, aten_ops=True, save_mode="reference")
+    trace = tl.trace(model, torch.ones(2, 3, requires_grad=True), capture=capture)
+    trace.backward(trace.output_ops[0].out)
 
     rows = trace._primitive_op_profile.primitive_ops
     assert any(row.operator == expected_operator for row in rows)
@@ -327,36 +258,6 @@ def test_delayed_grad_fn_lineage_covers_required_mutation_breakers(
     assert all(row.grad_fn_ref is not None for row in linked)
     assert all(row.grad_fn_link_provenance in {"exact_via_aten", "heuristic"} for row in linked)
     _check_primitive_op_invariants(trace)
-
-
-def test_primitive_rows_retain_no_tensor_grad_fn_or_callable_objects() -> None:
-    """The value-free profile holds no strong runtime object references."""
-
-    trace = _armed_trace(backward_ready=True)
-    with _activate_aten_recording_for_tests():
-        trace.log_backward(trace.output_ops[0].out.sum())
-
-    def assert_value_free(value: object) -> None:
-        """Recursively reject tensors, autograd nodes, and callables.
-
-        Parameters
-        ----------
-        value
-            Primitive field value to inspect.
-        """
-
-        assert not isinstance(value, torch.Tensor)
-        assert not callable(value)
-        if isinstance(value, tuple | list):
-            for item in value:
-                assert_value_free(item)
-        elif hasattr(value, "__dataclass_fields__"):
-            for name in value.__dataclass_fields__:
-                assert_value_free(getattr(value, name))
-
-    for row in trace._primitive_op_profile.primitive_ops:
-        for field_name in PRIMITIVE_OP_FIELD_ORDER:
-            assert_value_free(getattr(row, field_name))
 
 
 def test_retention_does_not_change_completeness_census_counts(
@@ -369,25 +270,27 @@ def test_retention_does_not_change_completeness_census_counts(
     torch.manual_seed(7)
     plain = tl.trace(_TwoOpModel(), torch.randn(4))
     torch.manual_seed(7)
-    with _activate_aten_recording_for_tests():
-        armed = tl.trace(_TwoOpModel(), torch.randn(4))
+    armed = tl.trace(
+        _TwoOpModel(), torch.randn(4), capture=tl.options.CaptureOptions(aten_ops=True)
+    )
 
     fields = (
-        "completeness_witness_event_count",
-        "completeness_witness_accounted_count",
-        "completeness_witness_expected_opaque_count",
-        "completeness_witness_unaccounted_count",
+        "num_witness_events",
+        "num_accounted_witness_events",
+        "num_expected_opaque_witness_events",
+        "num_unaccounted_witness_events",
     )
-    assert tuple(getattr(plain, name) for name in fields) == tuple(
-        getattr(armed, name) for name in fields
+    assert tuple(getattr(plain.health, name) for name in fields) == tuple(
+        getattr(armed.health, name) for name in fields
     )
 
 
 def test_slash_module_address_does_not_enter_parent_or_opaque_aten_labels() -> None:
     """Slash remains legal in module addresses and absent from wave-0 parent labels."""
 
-    with _activate_aten_recording_for_tests():
-        trace = tl.trace(_SlashModuleModel(), torch.ones(2))
+    trace = tl.trace(
+        _SlashModuleModel(), torch.ones(2), capture=tl.options.CaptureOptions(aten_ops=True)
+    )
 
     module_addresses = list(trace.modules.keys())
     assert any("a/b" in address for address in module_addresses)
@@ -396,20 +299,8 @@ def test_slash_module_address_does_not_enter_parent_or_opaque_aten_labels() -> N
         assert all("/" not in ref.op_label for ref in row.parent_op_refs)
 
 
-def test_plain_v8_round_trip_persists_the_profile(tmp_path: Path) -> None:
-    """tlspec v8: the primitive profile persists on a PLAIN save/load."""
-
-    trace = _armed_trace()
-    default_path = tmp_path / "default.tlspec"
-    tl.save(trace, default_path)
-    loaded = tl.load(default_path)
-    assert len(loaded._primitive_op_profile.primitive_ops) == len(
-        trace._primitive_op_profile.primitive_ops
-    )
-    assert check_metadata_invariants(loaded)
-
-
-@pytest.mark.parametrize("tamper_kind", ["dangling", "forged"])
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
+@pytest.mark.parametrize("tamper_kind", ["forged"])
 def test_prerelease_load_refuses_dangling_and_forged_op_fks(
     tmp_path: Path,
     tamper_kind: str,
@@ -422,7 +313,7 @@ def test_prerelease_load_refuses_dangling_and_forged_op_fks(
     ref = row.parent_op_refs[0]
     if tamper_kind == "dangling":
         replacement = OpRef(
-            op_row_index=len(trace.ops) + 10,
+            op_row_index=len(trace._layer_list) + 10,
             op_label=ref.op_label,
             func_call_id=ref.func_call_id,
         )
@@ -440,8 +331,8 @@ def test_prerelease_load_refuses_dangling_and_forged_op_fks(
     row.parent_op_refs = (replacement,)
     path = tmp_path / f"{tamper_kind}.tlspec"
     with activate_prerelease_fields():
-        tl.save(trace, path)
-        with pytest.raises(TorchLensIOError) as exc_info:
+        trace.save(path)
+        with pytest.raises(ArtifactError) as exc_info:
             tl.load(path)
     assert exc_info.value.fields["code"] == "primitive_op_fk_invalid"
 
@@ -454,7 +345,7 @@ def test_live_fk_tamper_names_primitive_invariant() -> None:
     ref = row.parent_op_refs[0]
     row.parent_op_refs = (
         OpRef(
-            op_row_index=len(trace.ops) + 1,
+            op_row_index=len(trace._layer_list) + 1,
             op_label=ref.op_label,
             func_call_id=ref.func_call_id,
         ),

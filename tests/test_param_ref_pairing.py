@@ -15,8 +15,6 @@ from torch import nn
 import torchlens  # noqa: F401 -- full package init before backend submodule imports
 import torchlens.backends.torch.ops  # noqa: F401 -- ops.py must initialize before _ops_capture_records
 
-pytestmark = pytest.mark.smoke
-
 
 def _fields_dict_for(params: list[nn.Parameter]) -> dict:
     from torchlens.backends.torch.tensor_tracking import _process_parent_param_ops
@@ -29,8 +27,8 @@ def _fields_dict_for(params: list[nn.Parameter]) -> dict:
 
 
 def test_tied_param_occurrences_each_get_their_own_ref() -> None:
-    from torchlens.backends.torch._ops_capture_records import _param_refs_from_fields
-    from torchlens.backends.torch._tl import get_param_meta
+    from torchlens._utils._tensor_label import get_param_meta
+    from torchlens.backends.torch._ops_freeze_refs import _param_refs_from_fields
 
     param_a = nn.Parameter(torch.randn(2, 3))
     param_b = nn.Parameter(torch.randn(4))
@@ -49,7 +47,7 @@ def test_tied_param_occurrences_each_get_their_own_ref() -> None:
 
 
 def test_unbarcoded_param_refuses_loudly() -> None:
-    from torchlens.backends.torch._ops_capture_records import _param_refs_from_fields
+    from torchlens.backends.torch._ops_freeze_refs import _param_refs_from_fields
 
     stray = nn.Parameter(torch.randn(2))
     with pytest.raises(RuntimeError, match="barcode"):

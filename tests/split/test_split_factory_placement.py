@@ -87,6 +87,7 @@ def test_implicit_factory_placement_is_scoped() -> None:
         assert torch.ones(4).device.type == "meta"
 
 
+@pytest.mark.cuda
 @pytest.mark.parametrize("kind", ["ones", "zeros", "arange"])
 @pytest.mark.parametrize("explicit_device", [False, True])
 def test_cpu_captured_factory_runs_on_cuda_suffix(kind: str, explicit_device: bool) -> None:

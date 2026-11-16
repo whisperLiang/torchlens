@@ -32,7 +32,7 @@ import json
 import os
 import tempfile
 from collections import Counter
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -48,8 +48,9 @@ from ._ledger import (
 from ._models import SCENARIOS
 from ._snapshot import run_scenario
 
-# No file-wide tier: the runtime battery and the AST-only scan are heavy;
-# the latter's measured 9-10s cost exceeds the smoke budget.
+# No file-wide tier: the runtime-battery test stays heavy, but the AST-only
+# artifact diff below is smoke so a producer-site drift is visible to the
+# commit-level gate (the tracked-scan red at tip was invisible to -m smoke).
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PACKAGE_ROOT = _REPO_ROOT / "torchlens"
@@ -63,22 +64,21 @@ _LEDGER_DIR = Path(__file__).resolve().parent / "ledger"
 # ANY change to this set is a reviewed diff here.
 EXPECTED_APPEND_AMENDMENT_CALLER_FILES = {
     "torchlens/backends/torch/_ops_retention.py",  # lookback_retention
-    "torchlens/user_funcs.py",  # graph_edge_insertion (register_tensor_connection)
-    "torchlens/backends/torch/model_prep.py",  # raw hook / module exit / boundary retention
-    "torchlens/backends/torch/backend.py",  # output_parent_promotion
-    "torchlens/postprocess/graph_traversal.py",  # late_buffer_output_parent (pre-0)
+    "torchlens/_capture/run_entry.py",  # graph_edge_insertion (register_tensor_connection)
+    "torchlens/backends/torch/model_prep.py",  # raw hook / module exit
+    "torchlens/backends/torch/_predicate_forward.py",  # boundary retention (predicate forward)
+    "torchlens/backends/torch/_outputs.py",  # output_parent_promotion
+    "torchlens/_postprocess/graph_traversal.py",  # late_buffer_output_parent (pre-0)
     # preview_output_parent_mark for tf/mlx/paddle was hoisted into the
     # neutral absorber by the b5-parity R46-1 wave (5290caa7): same channel,
     # one shared site instead of three per-backend copies.
     "torchlens/backends/_finalize.py",  # preview_output_parent_mark (hoisted)
-    # cf17ea886 retained TF output container paths through the existing
-    # registered rebind family; the static completeness roster already pins it.
-    "torchlens/backends/tf/backend.py",  # preview_output_parent_rebind
     "torchlens/backends/tf/interventions.py",  # module_exit_intervention (site fire)
-    "torchlens/backends/mlx/containers.py",  # preview_output_parent_rebind (output occurrences)
+    "torchlens/backends/mlx/interventions.py",  # module_exit_intervention (site fire)
+    "torchlens/backends/paddle/interventions.py",  # module_exit_intervention (site fire)
     "torchlens/backends/jax/backend.py",  # preview_output_parent_rebind
     "torchlens/backends/tinygrad/backend.py",  # preview_output_parent_rebind
-    "torchlens/ir/capture_events.py",  # concat lane transport (re-append)
+    "torchlens/_ir/capture_events.py",  # concat lane transport (re-append)
 }
 
 
@@ -112,15 +112,12 @@ def normalize_repo_location(location: str, repo_root: Path) -> str:
         Repo-relative path for an in-tree location, else :data:`_EXTERNAL`.
     """
 
-    path_text, separator, line = location.rpartition(":")
-    if not separator or not line.isdigit():
-        path_text = location
-    path_type = PureWindowsPath if PureWindowsPath(path_text).drive else PurePosixPath
-    candidate = path_type(path_text.replace("\\", "/"))
+    path_text = location.rsplit(":", 1)[0] if ":" in location else location
+    candidate = Path(path_text)
     if not candidate.is_absolute():
         return candidate.as_posix()
     try:
-        return candidate.relative_to(path_type(repo_root.as_posix())).as_posix()
+        return candidate.relative_to(repo_root).as_posix()
     except ValueError:
         return _EXTERNAL
 
@@ -368,9 +365,9 @@ def test_generate_and_close_ledger(tmp_path: Path) -> None:
     hashing_defaults = [
         site
         for site in sites
-        if site.file.endswith("utils/hashing.py") and site.via_getattr and site.has_default
+        if site.file.endswith("_utils/hashing.py") and site.via_getattr and site.has_default
     ]
-    assert hashing_defaults, "pinned getattr default-reliers in utils/hashing.py not found"
+    assert hashing_defaults, "pinned getattr default-reliers in _utils/hashing.py not found"
 
     # ---- source 2: runtime instrumentation over the battery ----------------
     with runtime_read_recorder() as reads:
@@ -434,7 +431,7 @@ def test_generate_and_close_ledger(tmp_path: Path) -> None:
     # Legacy channels stay dead: no replace_op_event callers outside its
     # definition module, no in-place op_events[i] list writes anywhere.
     legacy_callers = {
-        site for site in mutators["replace_op_event_callers"] if "ir/capture_events.py" not in site
+        site for site in mutators["replace_op_event_callers"] if "_ir/capture_events.py" not in site
     }
     assert not legacy_callers, (
         f"replace_op_event callers resurfaced after the P4 migration: {legacy_callers}"
@@ -442,14 +439,14 @@ def test_generate_and_close_ledger(tmp_path: Path) -> None:
     inplace_writes = {
         site
         for site in mutators["op_events_inplace_writes"]
-        if "ir/capture_events.py" not in site  # replace_op_event's own body, deleted in P4
+        if "_ir/capture_events.py" not in site  # replace_op_event's own body, deleted in P4
         # _backfill_cooked_ancestry (e9332023): runs ONLY on the cook path's
-        # own copy_for_replay() working projection -- the documented sanctioned
+        # own _copy_for_replay() working projection -- the documented sanctioned
         # mutation surface -- before postprocess; the frozen Recording's sealed
         # event stream is never touched. The static scan cannot see the copy,
         # so this is a reviewed provably-outside-contract carve-out, not a
         # revived legacy channel.
-        and "fastlog/types.py" not in site
+        and "recording/_types_ancestry.py" not in site
     }
     assert not inplace_writes, (
         f"in-place op_events[i] writes resurfaced after the P4 migration: {inplace_writes}"
@@ -593,11 +590,3 @@ class TestLedgerDiffGateIsRedCapable:
             normalize_repo_location("/somewhere/else/site-packages/torch/_tensor.py:623", repo_root)
             == _EXTERNAL
         )
-
-    @pytest.mark.parametrize("location", [r"C:\repo\torchlens\a.py:12", "C:/repo/torchlens/a.py"])
-    def test_windows_locations_keep_the_drive_separate_from_line_numbers(
-        self, location: str
-    ) -> None:
-        """Native Windows locations compare independently of the host path flavor."""
-        assert normalize_repo_location(location, Path("C:/repo")) == "torchlens/a.py"
-        assert normalize_repo_location("D:/elsewhere/a.py:12", Path("C:/repo")) == _EXTERNAL

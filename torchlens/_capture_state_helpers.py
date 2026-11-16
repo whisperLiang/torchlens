@@ -14,28 +14,51 @@ import warnings
 import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+import numpy as np
 import torch
 from torch import nn
 
 from . import _state
+from ._capture._fused_attention_hold import hold_fused_attention_fastpath_off
+from ._data_classes.trace import Trace
+from ._plain_attr_fidelity import (
+    _PLAIN_ATTR_IGNORED_NAMES,
+    _module_plain_attr_names,
+    copy_model_for_validation,
+    is_registered_tensor_alias,
+    restore_simple_plain_attrs_on_copy,
+)
+from ._plain_attr_values import (
+    RICH_SNAPSHOT_TYPES,
+    hashable_snapshot,
+    is_identity_value,
+    is_immutable_value,
+    is_snapshot_object,
+    restore_rich_value,
+    rich_values_equal,
+    snapshot_rich_value,
+)
 from ._trace_selector_helpers import _stable_cache_fragment
-from .data_classes.trace import Trace
-from .utils._torch_compat import (
+from ._utils._package_frames import external_warning_stacklevel, is_torchlens_code
+from ._utils._torch_compat import (
     force_eager_stance_scope,
     get_dynamo_optimized_module_type,
     get_fsdp_wrapper_type,
     is_dynamo_compiled_callable,
 )
+from ._utils.input_leaves import move_input_tensor
+from ._utils.tensor_leaves import iter_tensors
+from ._utils.tensor_utils import _is_uninitialized_lazy_tensor as _is_uninitialized_param
+from ._validation_state_snapshot import describe_copy_failure, warn_copy_failed
+from .backends.torch._tracing_pass import lift_hop_entry_compiles
+from .errors._base import transparent_contextmanager
 
-# Content-fingerprint / attribute-fragment family: split to _capture_fingerprint.py
-# under the R43 file-size ratchet. Re-exported here because the historical import
-# surface for the capture-cache key helpers is torchlens._capture_state_helpers.
+# Content-fingerprint / attribute-fragment family (split to _capture_fingerprint.py), re-exported:
+# the historical import surface for the capture-cache key helpers is this module.
 from ._capture_fingerprint import (  # noqa: F401  isort: skip
-    _iter_tensor_inputs,
     _ATTRIBUTE_FRAGMENT_DEPTH_CEILING,
     _ATTRIBUTE_FRAGMENT_ITEM_CEILING,
     _attribute_state_fragment,
@@ -43,6 +66,7 @@ from ._capture_fingerprint import (  # noqa: F401  isort: skip
     _fingerprint_model_content,
     _forward_input_fragment,
     _hash_code_object_into,
+    _hash_input_tensor_value,
     _hash_tensor_content,
     _never_matching_fragment,
 )
@@ -81,9 +105,6 @@ unchanged while a class is alive; a class that has been collected can no longer
 be the subject of a duplicate warning, since any later model is by definition a
 different type.
 """
-_PLAIN_ATTR_IGNORED_NAMES = frozenset({"_parameters", "_buffers", "_modules"})
-_PLAIN_ATTR_MAX_CONTAINER_ITEMS = 128
-_PLAIN_ATTR_MAX_TENSOR_NUMEL = 4096
 _PLAIN_ATTR_MAX_DEPTH = 64
 _COMPILED_MODEL_UNWRAP_WARNED = False
 _COMPILED_FORCED_EAGER_WARNED = False
@@ -104,10 +125,16 @@ class CompiledCapturePrep:
         original eager Python and their interiors are logged with full verified
         semantics; when ``False`` (torch < 2.6, or the stance failed to
         engage), inventoried sites keep the honest bypass-and-disclose path.
+    fused_attention_held:
+        Dotted addresses of the ``nn.MultiheadAttention`` /
+        ``nn.TransformerEncoderLayer`` modules whose fused fast path
+        :func:`hold_fused_attention_fastpath_off` holds off for the capture
+        scope; empty when the model has none or torch lacks the public switch.
     """
 
     sites: tuple[str, ...]
     force_eager_stance: bool
+    fused_attention_held: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -268,8 +295,9 @@ def _warn_compiled_plain_callables_forced_eager_once(sites: tuple[str, ...]) -> 
         f"{', '.join(sites)}; this capture runs their original eager Python under "
         "torch.compiler.set_stance('force_eager'), so their interiors ARE logged. "
         "Compiled caches are untouched; captured values are eager-path values, and "
-        "TorchLens wrapper install/uninstall can cost one bounded recompile on the "
-        "next compiled call after capture.",
+        "TorchLens wrapper install/uninstall can cost a bounded burst of "
+        "recompilations on the first compiled call after each capture, then steady "
+        "state.",
         UserWarning,
         stacklevel=4,
     )
@@ -293,7 +321,7 @@ def _warn_compiled_model_unwrapped_once() -> None:
         "TorchLens: compiled model detected; tracing the eager source module it wraps "
         "(torch.compile semantics such as fusion are not traced).",
         UserWarning,
-        stacklevel=3,
+        stacklevel=external_warning_stacklevel(),
     )
 
 
@@ -420,7 +448,7 @@ def _make_compiled_callable_bypass(
     return bypass
 
 
-@contextmanager
+@transparent_contextmanager
 def bypass_compiled_plain_callables(model: nn.Module) -> Iterator[None]:
     """Temporarily route direct compiled attributes through a logging pause.
 
@@ -493,7 +521,7 @@ def _restore_callable_swaps(swaps: Any, *, only_if_bypassed: bool) -> None:
         raise first_error
 
 
-@contextmanager
+@transparent_contextmanager
 def prepare_compiled_capture(model: nn.Module) -> Iterator[CompiledCapturePrep]:
     """Prepare compiled submodules and plain callables for honest eager capture.
 
@@ -511,7 +539,7 @@ def prepare_compiled_capture(model: nn.Module) -> Iterator[CompiledCapturePrep]:
     Notes
     -----
     Compiled child ``nn.Module`` slots are unwrapped to their eager sources in
-    both regimes (the conservative design confirmed by the 2026-08-12 tri-lab
+    both regimes (the conservative design confirmed by the 2026-08-12 design-review
     compile reconcile). On torch >= 2.6 the capture then runs under
     ``torch.compiler.set_stance("force_eager")``: every compiled callable
     (plain attribute or free function) executes its original eager Python, so
@@ -521,19 +549,23 @@ def prepare_compiled_capture(model: nn.Module) -> Iterator[CompiledCapturePrep]:
     ``dynamo_region_not_logged`` ceiling.
     """
 
-    with unwrap_compiled_submodules(model):
+    with unwrap_compiled_submodules(model), hold_fused_attention_fastpath_off(model) as held:
         sites = compiled_plain_callable_sites(model)
-        with force_eager_stance_scope() as stance_active:
+        with force_eager_stance_scope() as stance_active, lift_hop_entry_compiles():
             if stance_active:
                 if sites:
                     _warn_compiled_plain_callables_forced_eager_once(sites)
-                yield CompiledCapturePrep(sites=sites, force_eager_stance=True)
+                yield CompiledCapturePrep(
+                    sites=sites, force_eager_stance=True, fused_attention_held=held
+                )
             else:
                 with bypass_compiled_plain_callables(model):
-                    yield CompiledCapturePrep(sites=sites, force_eager_stance=False)
+                    yield CompiledCapturePrep(
+                        sites=sites, force_eager_stance=False, fused_attention_held=held
+                    )
 
 
-@contextmanager
+@transparent_contextmanager
 def unwrap_compiled_submodules(model: nn.Module) -> Iterator[None]:
     """Temporarily replace compiled child slots with their eager source modules.
 
@@ -762,6 +794,14 @@ def _snapshot_module_plain_attr_value(module: nn.Module, name: str, attr_path: s
     managed_snapshot = _managed_plain_tensor_attr_snapshot(module, name, value)
     if managed_snapshot is not None:
         return managed_snapshot
+    if is_registered_tensor_alias(module, value):
+        # The state_dict restore owns these values; the plain state is the aliasing.
+        if isinstance(value, torch.Tensor):
+            return _PlainAttrIdentitySnapshot(value=value, value_type_name=type(value).__name__)
+        return type(value)(
+            None if item is None else _PlainAttrIdentitySnapshot(item, type(item).__name__)
+            for item in value
+        )
     return _snapshot_plain_attr_value(value, attr_path)
 
 
@@ -789,8 +829,8 @@ def _snapshot_plain_attr_value(
     Raises
     ------
     RuntimeError
-        If the value is not small and value-comparable enough for the fallback
-        validation restore. External objects remain unsupported in this path.
+        If the value cannot be captured whole for the fallback validation
+        restore (opaque external objects, cycles, nesting past the depth bound).
     """
 
     if _depth > _PLAIN_ATTR_MAX_DEPTH:
@@ -798,9 +838,11 @@ def _snapshot_plain_attr_value(
             "TorchLens validation deepcopy fallback cannot snapshot plain "
             f"attribute '{attr_path}' beyond {_PLAIN_ATTR_MAX_DEPTH} container levels."
         )
-    if isinstance(value, (list, tuple, dict, set, frozenset)):
+    if value is not None and not isinstance(value, (bool, int, float, complex, str, bytes)):
         value_id = id(value)
         if value_id in _seen:
+            if is_snapshot_object(value):  # a back-reference: the ancestor holds its state
+                return _PlainAttrIdentitySnapshot(value=value, value_type_name=type(value).__name__)
             raise RuntimeError(
                 "TorchLens validation deepcopy fallback cannot snapshot cyclic plain "
                 f"attribute '{attr_path}'."
@@ -820,22 +862,24 @@ def _snapshot_plain_attr_value(
         return value
     if value is None or isinstance(value, (bool, int, float, complex, str, bytes)):
         return value
-    if _is_identity_stable_plain_attr(value):
+    if is_immutable_value(value):
+        return value  # torch.device, torch.dtype and other immutable values
+    if isinstance(value, np.generic) and not isinstance(value, np.void):
+        # NumPy scalars (``np.prod`` of a list) are immutable values. A structured
+        # ``np.void`` read from an array is a writable view into it, so it is not.
+        return value
+    if _is_identity_stable_plain_attr(value) or is_identity_value(value):
         return _PlainAttrIdentitySnapshot(value=value, value_type_name=type(value).__name__)
-    if isinstance(value, torch.Tensor):
-        if value.numel() > _PLAIN_ATTR_MAX_TENSOR_NUMEL:
-            raise RuntimeError(
-                "TorchLens validation deepcopy fallback cannot snapshot plain "
-                f"attribute '{attr_path}' because its tensor value has {value.numel()} "
-                "elements. Non-registered large mutable state is unsupported."
-            )
-        return value.detach().clone()
+    rich = snapshot_rich_value(  # tensors, arrays, generators and plain objects, whole
+        value,
+        attr_path,
+        lambda item, path: _snapshot_plain_attr_value(
+            item, path, _seen=child_seen, _depth=_depth + 1
+        ),
+    )
+    if rich is not NotImplemented:
+        return rich
     if isinstance(value, list):
-        if len(value) > _PLAIN_ATTR_MAX_CONTAINER_ITEMS:
-            raise RuntimeError(
-                "TorchLens validation deepcopy fallback cannot snapshot plain "
-                f"attribute '{attr_path}' because its list has {len(value)} items."
-            )
         return [
             _snapshot_plain_attr_value(
                 item,
@@ -853,11 +897,6 @@ def _snapshot_plain_attr_value(
         )
         if is_e3nn_irreps_tuple:
             tuple_len = tuple.__len__(value)
-            if tuple_len > _PLAIN_ATTR_MAX_CONTAINER_ITEMS:
-                raise RuntimeError(
-                    "TorchLens validation deepcopy fallback cannot snapshot plain "
-                    f"attribute '{attr_path}' because its e3nn Irreps has {tuple_len} items."
-                )
             items = tuple(
                 _snapshot_plain_attr_value(
                     tuple.__getitem__(value, index),
@@ -879,17 +918,12 @@ def _snapshot_plain_attr_value(
                 attributes=cast(dict[str, Any], attributes),
             )
         try:
-            tuple_len = len(value)
+            len(value)  # a tuple subclass whose length raises cannot be walked
         except Exception as exc:
             raise RuntimeError(
                 "TorchLens validation deepcopy fallback cannot snapshot plain "
                 f"attribute '{attr_path}' because its tuple length is unavailable."
             ) from exc
-        if tuple_len > _PLAIN_ATTR_MAX_CONTAINER_ITEMS:
-            raise RuntimeError(
-                "TorchLens validation deepcopy fallback cannot snapshot plain "
-                f"attribute '{attr_path}' because its tuple has {tuple_len} items."
-            )
         return tuple(
             _snapshot_plain_attr_value(
                 item,
@@ -900,11 +934,6 @@ def _snapshot_plain_attr_value(
             for index, item in enumerate(value)
         )
     if isinstance(value, dict):
-        if len(value) > _PLAIN_ATTR_MAX_CONTAINER_ITEMS:
-            raise RuntimeError(
-                "TorchLens validation deepcopy fallback cannot snapshot plain "
-                f"attribute '{attr_path}' because its dict has {len(value)} items."
-            )
         snapshot = {}
         for key, item in value.items():
             try:
@@ -920,7 +949,7 @@ def _snapshot_plain_attr_value(
                     f"attribute '{attr_path}' because one of its dict keys is unsupported."
                 ) from exc
             try:
-                hash(key_snapshot)
+                hashable_snapshot(key_snapshot)
             except TypeError as exc:
                 raise RuntimeError(
                     "TorchLens validation deepcopy fallback cannot snapshot plain "
@@ -935,11 +964,6 @@ def _snapshot_plain_attr_value(
             )
         return snapshot
     if isinstance(value, (set, frozenset)):
-        if len(value) > _PLAIN_ATTR_MAX_CONTAINER_ITEMS:
-            raise RuntimeError(
-                "TorchLens validation deepcopy fallback cannot snapshot plain "
-                f"attribute '{attr_path}' because its set has {len(value)} items."
-            )
         snapshot_items = [
             _snapshot_plain_attr_value(
                 item,
@@ -950,7 +974,7 @@ def _snapshot_plain_attr_value(
             for item in value
         ]
         try:
-            return type(value)(snapshot_items)
+            return type(value)(hashable_snapshot(item) for item in snapshot_items)
         except TypeError as exc:
             raise RuntimeError(
                 "TorchLens validation deepcopy fallback cannot snapshot plain "
@@ -986,14 +1010,12 @@ def _plain_attr_values_equal(left: Any, right: Any, attr_path: str) -> bool:
         If the values cannot be compared without ambiguity.
     """
 
+    if isinstance(left, RICH_SNAPSHOT_TYPES) or isinstance(right, RICH_SNAPSHOT_TYPES):
+        return rich_values_equal(left, right, attr_path, _plain_attr_values_equal)
     if isinstance(left, _PlainAttrIdentitySnapshot) or isinstance(
         right, _PlainAttrIdentitySnapshot
-    ):
-        if not isinstance(left, _PlainAttrIdentitySnapshot) or not isinstance(
-            right, _PlainAttrIdentitySnapshot
-        ):
-            return False
-        return left.value is right.value
+    ):  # both identity snapshots of the very same object
+        return type(left) is type(right) and left.value is right.value
     if isinstance(left, _PlainAttrManagedTensorSnapshot) or isinstance(
         right, _PlainAttrManagedTensorSnapshot
     ):
@@ -1055,6 +1077,10 @@ def _plain_attr_values_equal(left: Any, right: Any, attr_path: str) -> bool:
                 "TorchLens validation deepcopy fallback cannot compare plain "
                 f"attribute '{attr_path}' by value."
             ) from exc
+    if isinstance(left, np.generic) or isinstance(right, np.generic):
+        if not isinstance(left, np.generic) or not isinstance(right, np.generic):
+            return False
+        return left.dtype == right.dtype and bool(left == right)
     try:
         result = left == right
     except Exception as exc:
@@ -1090,62 +1116,46 @@ def _plain_attr_restore_value(snapshot: Any) -> Any:
         return getattr(snapshot.module, snapshot.name)
     if isinstance(snapshot, _PlainAttrE3nnTupleSnapshot):
         return copy.deepcopy(snapshot.value)
+    if type(snapshot) in (list, tuple, set, frozenset):  # nested identity snapshots restore too
+        return type(snapshot)(_plain_attr_restore_value(item) for item in snapshot)
+    if type(snapshot) is dict:
+        return {key: _plain_attr_restore_value(item) for key, item in snapshot.items()}
+    if isinstance(snapshot, RICH_SNAPSHOT_TYPES):
+        return restore_rich_value(
+            snapshot,
+            _snapshot_plain_attr_value,
+            _plain_attr_values_equal,
+            _plain_attr_restore_value,
+        )
+    if isinstance(snapshot, torch.Tensor):  # a capture observer's raw clone
+        return snapshot.detach().clone()
     return _snapshot_plain_attr_value(snapshot, "<snapshot>")
-
-
-def _module_plain_attr_names(
-    module: nn.Module,
-    ignored_names: frozenset[str] = frozenset(),
-) -> set[str]:
-    """Return plain attribute names to snapshot for a module.
-
-    Parameters
-    ----------
-    module:
-        Module whose non-registered attributes should be inspected.
-    ignored_names:
-        Infrastructure-owned attribute names excluded from the snapshot.
-
-    Returns
-    -------
-    set[str]
-        Attribute names excluding registered parameter, buffer, and child
-        module storage.
-    """
-
-    return set(module.__dict__) - _PLAIN_ATTR_IGNORED_NAMES - ignored_names
 
 
 class _ModuleTreePlainAttrSnapshot:
     """Snapshot of small value-comparable plain attributes in a module tree."""
 
-    def __init__(
-        self,
-        model: nn.Module,
-        *,
-        ignored_names: frozenset[str] = frozenset(),
-    ) -> None:
+    copy_failure: str = ""  # why the deepcopy this snapshot replaces failed, if it did
+
+    def __init__(self, model: nn.Module) -> None:
         """Capture a model's plain module-tree attributes.
 
         Parameters
         ----------
         model:
             Model whose ``modules()`` tree should be snapshotted.
-        ignored_names:
-            Infrastructure-owned attribute names that must remain installed.
         """
 
         self._entries: list[tuple[nn.Module, str, str, Any]] = []
         self._module_attr_names: dict[int, tuple[nn.Module, set[str], str]] = {}
         self._unsupported_attr_paths: list[str] = []
-        self._ignored_names = ignored_names
         module_counts: dict[str, int] = {}
         for module in model.modules():
             module_type = type(module).__name__
             module_index = module_counts.get(module_type, 0)
             module_counts[module_type] = module_index + 1
             module_path = f"{module_type}[{module_index}]"
-            attr_names = _module_plain_attr_names(module, self._ignored_names)
+            attr_names = _module_plain_attr_names(module)
             self._module_attr_names[id(module)] = (module, attr_names, module_path)
             for name in sorted(attr_names):
                 attr_path = f"{module_path}.{name}"
@@ -1194,6 +1204,26 @@ class _ModuleTreePlainAttrSnapshot:
 
         return tuple(self._unsupported_attr_paths)
 
+    def _remove_added_attrs(self) -> None:
+        """Delete plain attributes that did not exist when the snapshot was taken.
+
+        Raises
+        ------
+        RuntimeError
+            If an added attribute cannot be deleted.
+        """
+
+        for module, original_names, module_path in self._module_attr_names.values():
+            added_names = _module_plain_attr_names(module) - original_names
+            for name in sorted(added_names):
+                try:
+                    delattr(module, name)
+                except Exception as exc:
+                    raise RuntimeError(
+                        "TorchLens validation deepcopy fallback could not remove "
+                        f"new plain attribute '{module_path}.{name}' before the logged run."
+                    ) from exc
+
     def restore_changed_attrs(self) -> None:
         """Restore attributes whose values changed since the snapshot.
 
@@ -1204,20 +1234,11 @@ class _ModuleTreePlainAttrSnapshot:
             after restoration.
         """
 
-        for module, original_names, module_path in self._module_attr_names.values():
-            added_names = _module_plain_attr_names(module, self._ignored_names) - original_names
-            for name in sorted(added_names):
-                try:
-                    delattr(module, name)
-                except Exception as exc:
-                    raise RuntimeError(
-                        "TorchLens validation deepcopy fallback could not remove "
-                        f"new plain attribute '{module_path}.{name}' before the logged run."
-                    ) from exc
+        self._remove_added_attrs()
         for module, name, attr_path, snapshot in self._entries:
             try:
                 current_snapshot = _snapshot_module_plain_attr_value(module, name, attr_path)
-            except AttributeError:
+            except (AttributeError, RuntimeError):  # deleted, or now unsnapshottable: changed
                 current_snapshot = None
                 changed = True
             else:
@@ -1226,13 +1247,20 @@ class _ModuleTreePlainAttrSnapshot:
                 continue
             restore_value = _plain_attr_restore_value(snapshot)
             try:
-                setattr(module, name, restore_value)
+                if isinstance(restore_value, nn.Parameter) and name not in module._parameters:
+                    # A plain attribute aliasing a registered Parameter (identity
+                    # snapshot): ``nn.Module.__setattr__`` would REGISTER it as a new
+                    # parameter, changing the module's state_dict, so write the
+                    # instance namespace it came from.
+                    module.__dict__[name] = restore_value
+                else:
+                    setattr(module, name, restore_value)
             except Exception as exc:
                 raise RuntimeError(
                     "TorchLens validation deepcopy fallback could not restore plain "
                     f"attribute '{attr_path}' before the logged run."
                 ) from exc
-            restored_snapshot = _snapshot_plain_attr_value(getattr(module, name), attr_path)
+            restored_snapshot = _snapshot_module_plain_attr_value(module, name, attr_path)
             if not _plain_attr_values_equal(restored_snapshot, snapshot, attr_path):
                 raise RuntimeError(
                     "TorchLens validation deepcopy fallback restored plain "
@@ -1259,22 +1287,19 @@ def _model_for_ground_truth_validation(
     """
 
     try:
-        copied_model = copy.deepcopy(model)
+        copied_model = copy_model_for_validation(model)
         _strip_copied_forward_decorations(copied_model)
         return copied_model, None
-    except Exception:
-        model_type = type(model)
-        if model_type not in _VALIDATION_DEEPCOPY_WARNING_TYPES:
-            _VALIDATION_DEEPCOPY_WARNING_TYPES.add(model_type)
-            warnings.warn(
-                "TorchLens validate_forward_pass could not deepcopy the model for the "
-                "ground-truth run; falling back to state_dict snapshot/restore. "
-                "Non-registered mutable state may cause false negatives for this model.",
-                RuntimeWarning,
-                stacklevel=3,
-            )
+    except Exception as exc:  # noqa: BLE001 - any copy failure falls back; the warning names it
+        copy_failure = describe_copy_failure(exc)
+        if type(model) not in _VALIDATION_DEEPCOPY_WARNING_TYPES:
+            _VALIDATION_DEEPCOPY_WARNING_TYPES.add(type(model))
+            warn_copy_failed(model, exc, run="ground-truth")
+        del exc  # its traceback would pin the partial copy's tensors on the device
         try:
-            return model, _ModuleTreePlainAttrSnapshot(model)
+            snapshot = _ModuleTreePlainAttrSnapshot(model)
+            snapshot.copy_failure = copy_failure
+            return model, snapshot
         except RuntimeError:
             warnings.warn(
                 "TorchLens validate_forward_pass could not snapshot non-registered mutable "
@@ -1292,11 +1317,12 @@ def _strip_copied_forward_decorations(model: nn.Module) -> None:
     Parameters
     ----------
     model:
-        Deep-copied validation model whose submodules may carry instance-level
-        TorchLens forward wrappers closing over the source modules.
+        Deep-copied validation model. Captures leave no forward wrapper behind
+        and a deepcopy never carries one, so this only acts on a wrapper that a
+        shallow copy taken mid-capture shares with its source module.
     """
 
-    from .backends.torch._tl import is_forward_call_decorated
+    from ._utils._tensor_label import is_forward_call_decorated
 
     for module in model.modules():
         current_forward = module.__dict__.get("forward", None)
@@ -1307,48 +1333,6 @@ def _strip_copied_forward_decorations(model: nn.Module) -> None:
             module.forward = cast(Callable[..., Any], original_forward)
         else:
             module.__dict__.pop("forward", None)
-
-
-def _restore_simple_plain_attrs_on_copy(source: nn.Module, copied: nn.Module) -> None:
-    """Align simple plain attributes on a validation copy with its source.
-
-    Parameters
-    ----------
-    source:
-        Original module tree.
-    copied:
-        Deep-copied module tree that should represent ``source`` at validation
-        entry.
-    """
-
-    simple_types = (type(None), bool, int, float, complex, str, bytes)
-    # The two trees are zipped POSITIONALLY, so a deepcopy that adds or drops a
-    # submodule (a __deepcopy__ hook, lazy child materialization) used to
-    # silently shift every later pair and align attributes onto the WRONG
-    # modules (T11.10). Arity is checked BEFORE the loop (a lazy strict zip
-    # would fire only at exhaustion, after shifted pairs already mutated the
-    # copy); on mismatch the caller's existing fallback validates against the
-    # live model with a disclosure.
-    source_modules = list(source.modules())
-    copied_modules = list(copied.modules())
-    if len(source_modules) != len(copied_modules):
-        raise ValueError(
-            "Validation deepcopy changed the module tree arity: source has "
-            f"{len(source_modules)} modules but the copy has {len(copied_modules)}; "
-            "positional attribute restoration would misalign."
-        )
-    for source_module, copied_module in zip(source_modules, copied_modules, strict=True):
-        source_names = _module_plain_attr_names(source_module)
-        copied_names = _module_plain_attr_names(copied_module)
-        for name in sorted(source_names & copied_names):
-            source_value = getattr(source_module, name)
-            copied_value = getattr(copied_module, name)
-            if not isinstance(source_value, simple_types):
-                continue
-            if not isinstance(copied_value, simple_types):
-                continue
-            if source_value != copied_value:
-                setattr(copied_module, name, source_value)
 
 
 def _model_for_validation_replay(
@@ -1369,43 +1353,20 @@ def _model_for_validation_replay(
     """
 
     try:
-        copied_model = copy.deepcopy(model)
+        copied_model = copy_model_for_validation(model)
         _strip_copied_forward_decorations(copied_model)
-        _restore_simple_plain_attrs_on_copy(model, copied_model)
+        restore_simple_plain_attrs_on_copy(model, copied_model)
         return copied_model, None, True
-    except Exception:
-        warnings.warn(
-            "TorchLens validation replay against live model state; model could not be copied.",
-            RuntimeWarning,
-            stacklevel=3,
-        )
+    except Exception as exc:  # noqa: BLE001 - any copy failure falls back; the warning names it
+        copy_failure = describe_copy_failure(exc)
+        warn_copy_failed(model, exc, run="replay")
+        del exc  # its traceback would pin the partial copy's tensors on the device
         try:
-            return model, _ModuleTreePlainAttrSnapshot(model), False
+            snapshot = _ModuleTreePlainAttrSnapshot(model)
+            snapshot.copy_failure = copy_failure
+            return model, snapshot, False
         except RuntimeError:
             return model, None, False
-
-
-def decide_recording_of_batch(trace: Trace, predicate: Callable[[Trace], bool]) -> bool:
-    """Retroactively keep or discard a captured batch log.
-
-    Parameters
-    ----------
-    trace:
-        Captured log to decide on.
-    predicate:
-        Callable receiving the log and returning whether to keep it.
-
-    Returns
-    -------
-    bool
-        True when the log was kept.
-    """
-
-    keep = bool(predicate(trace))
-    if not keep:
-        trace.cleanup()
-    trace.recording_kept = keep
-    return keep
 
 
 def _qualname_for_model(model: nn.Module) -> str:
@@ -1444,9 +1405,15 @@ def _fingerprint_model_weights(model: nn.Module) -> str:
         SHA-256 hex digest of parameter metadata.
     """
 
-    entries = [
-        (name, tuple(param.shape), str(param.dtype)) for name, param in model.named_parameters()
-    ]
+    entries: list[tuple[str, object, str]] = []
+    for name, param in model.named_parameters():
+        if _is_uninitialized_param(param):
+            # Lazy modules (nn.LazyLinear etc.) carry UninitializedParameter
+            # until the first forward; shape access raises. Fingerprint the
+            # lazy state explicitly -- it IS the pre-forward identity.
+            entries.append((name, "uninitialized", str(param.dtype)))
+            continue
+        entries.append((name, tuple(param.shape), str(param.dtype)))
     return hashlib.sha256(repr(entries).encode("utf-8")).hexdigest()
 
 
@@ -1465,7 +1432,7 @@ def _input_id_for_relationship_evidence(input_args: Any) -> int:
         the input container.
     """
 
-    tensors = _iter_tensor_inputs(input_args)
+    tensors = list(iter_tensors(input_args, sort_keys=True))
     if len(tensors) == 1:
         return id(tensors[0])
     return id(input_args)
@@ -1485,9 +1452,17 @@ def _hash_input_signatures(input_args: Any, input_kwargs: Any) -> str:
     -------
     str
         SHA-256 hex digest over tensor shapes, dtypes, and devices.
+
+    Notes
+    -----
+    This digest is SHAPE-LEVEL by design (it backs the reported
+    ``shared_graph_same_input`` / ``shared_graph_diff_input`` relationship
+    vocabulary). It is deliberately NOT accepted as proof of input equality
+    by the Bundle comparison gate, which requires the value-level
+    :func:`_hash_input_tensor_value` evidence instead (a shape/dtype/device hash is value-blind).
     """
 
-    tensors = _iter_tensor_inputs((input_args, input_kwargs))
+    tensors = list(iter_tensors((input_args, input_kwargs), sort_keys=True))
     entries = [(tuple(tensor.shape), str(tensor.dtype), str(tensor.device)) for tensor in tensors]
     return hashlib.sha256(repr(entries).encode("utf-8")).hexdigest()
 
@@ -1586,7 +1561,7 @@ def _iter_plain_instance_attributes(module: nn.Module) -> Iterator[tuple[str, An
     A blanket leading-underscore skip is WRONG here: user underscore
     attributes (``self._num_layers``) routinely determine the traced program,
     and skipping them served the wrong cached trace across a changed
-    ``self._n`` (r3 b4-opus-R39-1, reopened through the bfcdde2d fix's own
+    ``self._n`` (reopened through the bfcdde2d fix's own
     filter). Only the exact bare-``nn.Module`` baseline names are excluded;
     class-specific torch-internal extras (RNN ``_flat_weights``,
     MultiheadAttention ``_qkv_same_embed_dim``) participate harmlessly --
@@ -1654,9 +1629,6 @@ def _fingerprint_model_implementation(model: nn.Module) -> str:
     return hasher.hexdigest()
 
 
-_TORCHLENS_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
 def _is_torchlens_instrumentation(func: Any) -> bool:
     """Return whether an instance ``forward`` is TorchLens' own prepared wrapper.
 
@@ -1672,12 +1644,13 @@ def _is_torchlens_instrumentation(func: Any) -> bool:
     code = getattr(target, "__code__", None)
     if not isinstance(code, types.CodeType):
         return False
-    # The separator matters: a bare prefix match also claimed sibling installs
-    # such as ``site-packages/torchlens_contrib/model.py``, silently EXCLUDING
-    # a user-owned forward override from the implementation signature (edits
-    # then hit the stale cache).
-    filename = os.path.normcase(os.path.normpath(code.co_filename))
-    return filename.startswith(os.path.normcase(_TORCHLENS_PACKAGE_DIR + os.sep))
+    # Spelling-independent, separator-checked (``_package_frames``): a bare
+    # prefix match once claimed sibling installs such as
+    # ``site-packages/torchlens_contrib/model.py``, silently EXCLUDING a
+    # user-owned forward override from the implementation signature (edits then
+    # hit the stale cache), and a raw-filename match missed the wrapper itself
+    # when the package was imported through a ``sys.path`` entry of ``"."``.
+    return is_torchlens_code(code)
 
 
 def _capture_cache_dir(cache_dir: str | Path | None) -> Path:
@@ -1729,7 +1702,7 @@ def _capture_cache_key(
         # so the FULL forward-input structure participates -- non-tensor
         # inputs, kwarg names, and container shape. The tensor-leaf-only
         # input hash let ``trace(model, x, use_relu=False)`` hit the cached
-        # ``use_relu=True`` capture and serve the WRONG trace (r8 b4 R39).
+        # ``use_relu=True`` capture and serve the WRONG trace.
         "schema": 5,
         "torchlens": __import__("torchlens").__version__,
         "torch": torch.__version__,
@@ -1818,7 +1791,7 @@ def _prepare_log_for_capture_cache(trace: Trace) -> None:
         Log to make pickle-compatible in place.
     """
 
-    for layer in getattr(trace, "layer_list", []):
+    for layer in trace._layer_list:
         for field_name in (
             "out",
             "transformed_out",
@@ -1828,10 +1801,10 @@ def _prepare_log_for_capture_cache(trace: Trace) -> None:
             value = _raw_cache_payload_field(layer, field_name)
             if isinstance(value, torch.Tensor):
                 layer._internal_set(field_name, value.detach().cpu())
-        layer.grad_fn_handle = None
-        layer._internal_set("saved_args", _detach_nested_for_cache(layer.saved_args))
-        layer._internal_set("saved_kwargs", _detach_nested_for_cache(layer.saved_kwargs))
-    for layer_log in getattr(trace, "layer_logs", {}).values():
+        layer._autograd_grad_fn_handle = None
+        layer._internal_set("saved_args", _detach_nested_for_cache(layer.call.saved_args))
+        layer._internal_set("saved_kwargs", _detach_nested_for_cache(layer.call.saved_kwargs))
+    for layer_log in trace._layer_logs.values():
         # ``Layer.transformed_out``/``transformed_grad`` are read-only proxies that read
         # through to the underlying ``Layer.ops[i]`` -- the real tensors live on the Op
         # objects, which expose ``_internal_set`` (the Layer view does not, so a raw
@@ -1843,7 +1816,7 @@ def _prepare_log_for_capture_cache(trace: Trace) -> None:
                 value = _raw_cache_payload_field(op, field_name)
                 if isinstance(value, torch.Tensor):
                     op._internal_set(field_name, value.detach().cpu())
-        layer_log.grad_fn_handle = None
+        layer_log._autograd_grad_fn_handle = None
     trace.__dict__.pop("_container_ordinals_by_output_op_label", None)
     trace.__dict__.pop("_container_ordinals_by_input_func_call_id", None)
     if trace.__dict__.get("_predicate_save_options") is not None:
@@ -2062,7 +2035,7 @@ def _move_tensors_to_device(obj: Any, device: torch.device | str) -> Any:
     is returned as well -- leaving a tensor on its own device is a loud, ordinary device
     error, while silently substituting a different container class is not.
 
-    r2-B3 sweep (the walker was the ONE input walker without the shared guards):
+    sweep (the walker was the ONE input walker without the shared guards):
 
     * cycle/depth bounded through the shared input-boundary ceiling -- this walker
       runs FIRST for dataclass/non-``dict``-Mapping trees (the ``_simple_leaves``
@@ -2074,7 +2047,7 @@ def _move_tensors_to_device(obj: Any, device: torch.device | str) -> Any:
       field values -- counters incremented, RNG drawn, derived tensors recomputed --
       and the post-move snapshot honestly witnessed the substituted program), and
       field presence reads through the raw-MRO channel, never ``hasattr`` (a live
-      hook the r71-C inertness contract promises never runs);
+      hook the inertness contract promises never runs);
     * registered containers -- the kind that WINS every other walker's dispatch --
       descend through their own ``flatten``/``unflatten`` instead of silently
       falling through unmoved;
@@ -2085,7 +2058,7 @@ def _move_tensors_to_device(obj: Any, device: torch.device | str) -> Any:
     try:
         moved = _move_tensors_to_device_inner(obj, device)
     except RecursionError as exc:
-        from torchlens._input_walk import raise_input_tree_stack_refusal
+        from torchlens._utils._input_tree import raise_input_tree_stack_refusal
 
         raise_input_tree_stack_refusal(exc)
         raise  # unreachable: the refusal always raises
@@ -2110,10 +2083,8 @@ def _move_tensors_to_device_inner(
         Subtree to move.
     device:
         Target device.
-    _depth:
-        Internal recursion depth (callers must not supply this).
-    _in_progress:
-        Internal path-scoped ancestor-id set (callers must not supply this).
+    _depth, _in_progress:
+        Internal recursion depth and path-scoped ancestor-id set (callers must not supply these).
     """
 
     import dataclasses as _dataclasses
@@ -2127,13 +2098,13 @@ def _move_tensors_to_device_inner(
         raise_input_tree_cycle_refusal,
         raise_input_tree_depth_refusal,
     )
-    from torchlens.ir.container import get_registered_container
+    from torchlens._ir.container import get_registered_container
 
     if isinstance(obj, torch.Tensor):
         target = torch.device(device) if not isinstance(device, torch.device) else device
         if obj.device == target:
             return _UNMOVED
-        return obj.to(device)
+        return move_input_tensor(obj, device)
 
     registration = None if isinstance(obj, type) else get_registered_container(type(obj))
     is_dataclass_instance = _dataclasses.is_dataclass(obj) and not isinstance(obj, type)
@@ -2142,7 +2113,7 @@ def _move_tensors_to_device_inner(
     if registration is None and not (is_dataclass_instance or is_mapping or is_sequence):
         return _UNMOVED
 
-    # The shared input-boundary guards (r-b4 R27-1): this walker runs BEFORE the
+    # The shared input-boundary guards: this walker runs BEFORE the
     # guarded walkers for dataclass / non-``dict``-Mapping / registered trees, so
     # it must refuse typed on cycles and over-depth itself.
     if _depth >= INPUT_TREE_MAX_DEPTH:
@@ -2151,7 +2122,7 @@ def _move_tensors_to_device_inner(
         _in_progress = set()
     obj_id = id(obj)
     if obj_id in _in_progress:
-        # B3R4-R12-2: report the REAL closed-vocabulary kind the descent
+        # report the REAL closed-vocabulary kind the descent
         # gated on -- the old mapping/sequence binary reported a cyclic
         # dataclass or registered container as kind="sequence".
         if registration is not None:
@@ -2217,7 +2188,7 @@ def _move_tensors_to_device_inner(
             # A tuple SUBCLASS (namedtuple, structseq, torch.Size, user class):
             # the shared identity-verified ladder, probing under pause_logging so
             # no constructor side effect can enter the captured graph.
-            from torchlens.utils.arg_handling import rebuild_tuple_like
+            from torchlens._utils.arg_handling import rebuild_tuple_like
 
             rebuilt = rebuild_tuple_like(obj_type, moved_sequence)
             return rebuilt if rebuilt is not None else _UNMOVED
@@ -2255,7 +2226,7 @@ def _move_tensors_to_device_inner(
         if is_mapping:
             # Handles dict, UserDict, BatchEncoding, OrderedDict, MappingProxyType, and
             # any read-only custom Mapping (the last three used to be skipped entirely).
-            # Every arm is INERT (b3-opus-R12-2): the historical
+            # Every arm is INERT: the historical
             # ``type(obj)(moved_mapping)`` re-ran the user's constructor (whose
             # side effects entered the captured program) and RESET same-class
             # instance state, which the instance-state witness then honestly
@@ -2281,7 +2252,7 @@ def _move_tensors_to_device_inner(
                 ]
                 if type(obj) is dict:
                     return dict(moved_pairs)
-                from torchlens.utils.arg_handling import rebuild_mapping_like
+                from torchlens._utils.arg_handling import rebuild_mapping_like
 
                 rebuilt = rebuild_mapping_like(obj, moved_pairs)
                 return rebuilt if rebuilt is not None else _UNMOVED
@@ -2296,7 +2267,7 @@ def _move_tensors_to_device_inner(
             moved_state, changed = _children(state_items[name] for name in state_names)
             if not changed:
                 return _UNMOVED
-            from torchlens.utils.arg_handling import _inert_state_enumeration_total
+            from torchlens._utils.arg_handling import _inert_state_enumeration_total
 
             if not _inert_state_enumeration_total(type(obj), ()):
                 return _UNMOVED
@@ -2319,7 +2290,7 @@ def _move_tensors_to_device_inner(
         obj_type = type(obj)
         if obj_type is list:
             return list(moved_sequence)
-        from torchlens.utils.arg_handling import rebuild_list_like
+        from torchlens._utils.arg_handling import rebuild_list_like
 
         rebuilt = rebuild_list_like(obj, moved_sequence)
         return rebuilt if rebuilt is not None else _UNMOVED

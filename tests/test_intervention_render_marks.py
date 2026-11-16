@@ -1,0 +1,576 @@
+"""How a forward picture marks an intervention (JMT's 29 Oct 2026 pick, F2).
+
+The edited node gets a purple ring and a bold purple edit row (``Δ zero_ablate``);
+the header names the edit; the downstream highlighter (a translucent purple
+underlay under changed arrows and node outlines) is off by default and drawn
+as an SVG step after layout on both layout engines.
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+import torch
+from example_models import TinyReluAdd
+from support.cairosvg_skip import require_cairosvg
+from torch import nn
+
+import torchlens as tl
+from torchlens._visualization._edit_highlighter import HighlighterStyle, highlight_svg
+from torchlens._visualization._edit_marks import (
+    EditMark,
+    EditRow,
+    edit_marks_by_site,
+    edit_rows,
+    header_edit_line,
+    short_edit_text,
+)
+from torchlens._visualization.node_spec import intervention_sites_for_log
+from torchlens.errors import TorchLensWarning
+from torchlens.intervention._types import Edit, FireRecord
+from torchlens.options import CaptureOptions
+
+pytestmark = pytest.mark.usefixtures("root_edits_in_place")  # D.12: no per-call mutation keyword
+
+PURPLE = "#7B1FA2"
+
+
+def _traced(intervene: Any = None) -> tl.Trace:
+    """Trace ``relu(x) + 1`` with a zero ablation at the relu."""
+
+    return tl.trace(
+        TinyReluAdd(),
+        torch.randn(2, 3),
+        intervene=intervene or tl.when(tl.func("relu"), tl.zero_ablate()),
+    )
+
+
+@pytest.mark.smoke
+def test_edit_text_rule() -> None:
+    """Name alone without arguments; short literals written in; stand-ins otherwise."""
+
+    def named_fn() -> torch.Tensor:
+        """Return a fixed replacement tensor."""
+
+        return torch.zeros(1)
+
+    assert short_edit_text(tl.zero_ablate()) == "zero_ablate"
+    assert short_edit_text(tl.scale(0.5)) == "scale(0.5)"
+    assert short_edit_text(tl.clamp(low=0, high=1)) == "clamp(low=0, high=1)"
+    assert short_edit_text(tl.add_noise(0.1)) == "add_noise(0.1)"
+    assert short_edit_text(tl.steer(torch.ones(3))) == "steer(v)"
+    # A label argument is written in (built directly: swap_with refuses a bare label at run time).
+    assert short_edit_text(Edit("swap_with", args=("relu_2_1",))) == "swap_with(relu_2_1)"
+    assert short_edit_text(tl.replace_with(named_fn)) == "replace_with(named_fn)"
+    assert short_edit_text(tl.replace_with(lambda: torch.zeros(1))) == "replace_with(fn)"
+    assert short_edit_text(tl.clip_norm(0.5)) == "clip_norm(0.5)"
+    # A source trace recorded by identity reads like a trace argument: its short label, else
+    # ``trace``; the class and object id stay out of the drawn text (they set a GPT-2
+    # drawing's width at 3x a block).
+    identity = (("source_model_class", "transformers.models.gpt2.Model"), ("source_object_id", "1"))
+    unnamed = Edit("patch_from", kwargs=(*identity, ("source_trace_label", "")))
+    assert short_edit_text(unnamed) == "patch_from(trace)"
+    named = Edit("patch_from", kwargs=(*identity, ("source_trace_label", "france")))
+    assert short_edit_text(named) == "patch_from(france)"
+
+
+def test_node_rows_cap_at_three_then_more() -> None:
+    """Several edits take one row each in order, three at most, then ``+N more``."""
+
+    marks = [EditMark(short=f"e{index}", full="", detail="") for index in range(5)]
+    rows = edit_rows(marks, PURPLE)
+    assert [str(row) for row in rows] == ["Δ e0", "Δ e1", "Δ e2", "+2 more"]
+    assert all(isinstance(row, EditRow) and row.color == PURPLE for row in rows)
+
+
+def _fired_site(label: str, *edits: Any) -> SimpleNamespace:
+    """Return a stand-in site whose fire records name ``edits``."""
+
+    records = [
+        FireRecord(target_label=label, edit=edit, timestamp=float(index))
+        for index, edit in enumerate(edits)
+    ]
+    return SimpleNamespace(label=label, layer_label=label, edits=records)
+
+
+def test_header_edit_line_forms() -> None:
+    """One edit, several comma-separated, one edit on many sites, and the cap."""
+
+    trace = SimpleNamespace(_intervention_spec=None)
+    one = header_edit_line(trace, [_fired_site("linear_1_1", tl.zero_ablate())], PURPLE)
+    assert one == (
+        f'1 edit:&#160;<FONT COLOR="{PURPLE}">Δ zero_ablate&#160;&#160;</FONT>on linear_1_1'
+    )
+    # The gap after the token is inside the coloured run, so it is part of where
+    # Graphviz places "on"; a leading space on the next run or a bold token let the
+    # drawn name run into "on" ("zero_ablateon"). The SVG output collapses the gap
+    # to one space where it joins the runs (test_header_edit_line_is_one_svg_text...).
+    assert "<B>" not in one
+    many = [_fired_site(f"linear_{i}_1", tl.zero_ablate()) for i in range(12)]
+    assert header_edit_line(trace, many, PURPLE).endswith("&#160;&#160;</FONT>on 12 layers")
+    two = header_edit_line(
+        trace,
+        [_fired_site("relu_1_1", tl.zero_ablate()), _fired_site("relu_2_1", tl.scale(0.5))],
+        PURPLE,
+    )
+    assert two is not None and two.startswith("2 edits:&#160;")
+    assert ",&#160;<FONT" in two and "scale(0.5)" in two
+    four = [
+        _fired_site("a_1_1", tl.zero_ablate()),
+        _fired_site("b_1_1", tl.scale(0.5)),
+        _fired_site("c_1_1", tl.add_noise(0.1)),
+        _fired_site("d_1_1", tl.clip_norm(1.0)),
+    ]
+    assert header_edit_line(trace, four, PURPLE) == "4 edits (marked)"
+
+
+def _svg_group(svg: str, cls: str) -> str:
+    """Return the first SVG group whose class list contains ``cls``."""
+
+    match = re.search(rf'<g id="[^"]+" class="[^"]*\b{cls}\b[^"]*">', svg)
+    assert match is not None, cls
+    return svg[match.start() : svg.index("</g>", match.end())]
+
+
+_SAMPLE_SVG = """<svg><g id="graph0" class="graph"><title>G</title>
+<g id="node1" class="node tl_edited"><title>a</title>
+<g id="a_node1"><a xlink:title="x"><polygon fill="grey" stroke="#7B1FA2" points="0,0 1,1"/></a></g>
+</g>
+<g id="node2" class="node tl_downstream"><title>b</title>
+<ellipse fill="white" stroke="black" cx="5" cy="5" rx="2" ry="1"/>
+</g>
+<g id="node3" class="node"><title>c</title><ellipse fill="white" stroke="black" cx="9" cy="9" rx="2" ry="1"/></g>
+<g id="edge1" class="edge"><title>a&#45;&gt;b</title>
+<path fill="none" stroke="black" d="M0,0C1,1 2,2 3,3"/>
+<polygon fill="black" stroke="black" points="3,3 4,4 3,4"/>
+</g>
+<g id="edge2" class="edge"><title>c&#45;&gt;a</title><path fill="none" stroke="black" d="M9,9L0,0"/></g>
+<g id="edge3" class="edge"><title>b:out&#45;&gt;c</title><path fill="none" stroke="black" d="M5,5L9,9"/></g>
+</g></svg>"""
+
+
+def test_highlight_svg_lays_underlays_where_f2_says() -> None:
+    """Out-edges of marked nodes and downstream outlines get an underlay; nothing else does."""
+
+    style = HighlighterStyle(color=PURPLE, opacity=0.25)
+    out = highlight_svg(_SAMPLE_SVG, style)
+    underlay = 'stroke="#7B1FA2" stroke-opacity="0.25" stroke-width="8"'
+    edge1 = out[out.index('<g id="edge1"') : out.index('<g id="edge2"')]
+    assert edge1.count(underlay) == 2  # shaft and arrowhead
+    assert edge1.index(underlay) < edge1.index('stroke="black"')  # painted underneath
+    edge2 = out[out.index('<g id="edge2"') : out.index('<g id="edge3"')]
+    assert underlay not in edge2  # into the edited node: plain
+    edge3 = out[out.index('<g id="edge3"') :]
+    assert underlay in edge3  # from a downstream node, through a port
+    assert _svg_group(out, "tl_downstream").count(underlay) == 1
+    assert underlay not in _svg_group(out, "tl_edited")  # the ring is the edited mark
+    node3 = out[out.index('<g id="node3"') : out.index('<g id="edge1"')]
+    assert underlay not in node3
+    assert highlight_svg(
+        _SAMPLE_SVG.replace("tl_edited", "").replace("tl_downstream", ""), style
+    ) == (_SAMPLE_SVG.replace("tl_edited", "").replace("tl_downstream", ""))
+
+
+def test_highlighter_warns_when_the_format_cannot_carry_it(tmp_path: Path) -> None:
+    """A raster format other than PDF or PNG draws without the highlighter and says so."""
+
+    trace = _traced()
+    try:
+        with pytest.warns(TorchLensWarning) as record:
+            trace.draw(
+                file_format="jpg",
+                path=str(tmp_path / "cone"),
+                show_cone=True,
+            )
+    finally:
+        trace.cleanup()
+    codes = [getattr(entry.message, "fields", {}).get("code") for entry in record]
+    assert codes.count("viz_highlighter_not_drawn") == 1
+    assert (tmp_path / "cone.jpg").exists()
+
+
+class _SharedLinearTwice(nn.Module):
+    """One linear layer called twice, so its layer has two passes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lin = nn.Linear(3, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the shared projection twice around a ReLU."""
+
+        for _call in range(2):
+            x = torch.relu(self.lin(x))
+        return x
+
+
+def test_backward_edit_marks_its_own_pass(tmp_path: Path) -> None:
+    """A backward edit staged on pass 2 of a two-pass layer names pass 2, and only it.
+
+    A gradient site ``tl.grad("<layer>:2")`` resolves to the one pass it names;
+    the staged edit row must key by that same pass, or the ringed node would
+    read ``edit`` instead of the edit's name.
+    """
+
+    def named_backward(grad: torch.Tensor, *, ctx: Any) -> torch.Tensor:
+        return grad
+
+    torch.manual_seed(0)
+    trace = tl.trace(
+        _SharedLinearTwice(),
+        torch.randn(2, 3, requires_grad=True),
+        capture=tl.options.CaptureOptions(backward_ready=True),
+    )
+    try:
+        linear = next(layer for layer in trace._layer_logs.values() if layer.layer_type == "linear")
+        assert linear.num_passes == 2
+        second = trace[f"{linear.layer_label}:2"]
+        trace.do(
+            tl.grad(second.label),
+            named_backward,
+            intervention=tl.options.InterventionOptions(engine="set_only"),
+        )
+        sites = intervention_sites_for_log(trace)
+        assert [site.label for site in sites] == [second.label]
+        marks = edit_marks_by_site(trace, sites)
+        assert [mark.short for mark in marks[second.label]] == ["hook(named_backward)"]
+        dot = trace.draw(
+            file_format="dot",
+            rolled=False,
+            path=str(tmp_path / "shared"),
+        ).dot
+    finally:
+        trace.cleanup()
+    edited = [line for line in dot.splitlines() if "tl_edited" in line]
+    assert len(edited) == 1
+    assert "hook(named_backward)" in edited[0]
+
+
+_PATCHED_IMPORT_PROBE = """
+import sys
+from torchlens._visualization import node_spec
+if "torchlens._visualization._render_common" in sys.modules:
+    print("PRELOADED")
+    raise SystemExit(0)
+real = node_spec.intervention_site_and_cone_labels
+node_spec.intervention_site_and_cone_labels = lambda trace, *, show_cone: (set(), {"x"})
+try:
+    node_spec.make_intervention_node_spec_fn(
+        object(), show_cone=True, graph_overrides=None, user_node_spec_fn=None
+    )
+finally:
+    node_spec.intervention_site_and_cone_labels = real
+from torchlens._visualization import _render_common
+print("BOUND_REAL" if _render_common.intervention_site_and_cone_labels is real else "BOUND_PATCH")
+"""
+
+
+def test_building_the_edit_callback_imports_no_render_module() -> None:
+    """Building the intervention callback never first-imports the render modules.
+
+    The render modules bind ``node_spec``'s helpers by value when imported, so a
+    first import while a helper is patched (a test that monkeypatches
+    ``intervention_site_and_cone_labels``) kept the patch for the rest of the
+    process: later ``as_node`` renders lost their hook node. A fresh interpreter
+    makes the first import deterministic.
+    """
+
+    result = subprocess.run(
+        [sys.executable, "-c", _PATCHED_IMPORT_PROBE],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    outcome = result.stdout.strip().splitlines()[-1]
+    if outcome == "PRELOADED":
+        pytest.skip("importing node_spec already loads the render modules")
+    assert outcome == "BOUND_REAL"
+
+
+def test_highlighter_pdf_and_png_from_processed_svg(tmp_path: Path) -> None:
+    """PDF and PNG carry the highlighter: they are written from the processed SVG."""
+
+    require_cairosvg()
+    trace = _traced()
+    try:
+        for fileformat in ("pdf", "png"):
+            trace.draw(
+                file_format=fileformat,
+                path=str(tmp_path / "cone"),
+                show_cone=True,
+            )
+    finally:
+        trace.cleanup()
+    assert (tmp_path / "cone.pdf").read_bytes().startswith(b"%PDF")
+    png = (tmp_path / "cone.png").read_bytes()
+    assert png.startswith(b"\x89PNG")
+    from PIL import Image
+
+    with Image.open(tmp_path / "cone.png") as image:
+        pixels = image.convert("RGB").getdata()
+        # The translucent purple over white is a pale violet no other mark uses.
+        assert any(r > g + 20 and b > g + 20 and r > 180 and b > 180 for r, g, b in pixels)
+    assert not list(tmp_path.glob("*.highlight.svg"))
+
+
+class _BlockThenHead(nn.Module):
+    """A block (``block``: linear, relu, linear) then a linear head, for folded boxes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.block = nn.Sequential(nn.Linear(3, 3), nn.ReLU(), nn.Linear(3, 3))
+        self.head = nn.Linear(3, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the block, then the head."""
+
+        return self.head(self.block(x))
+
+
+def _box_lines(dot: str, address: str) -> list[str]:
+    """Return the DOT node lines of the folded box for ``address``."""
+
+    return [line for line in dot.splitlines() if f"@{address}" in line and "box3d" in line]
+
+
+@pytest.mark.parametrize("rolled", [False, True])
+def test_folded_box_holding_an_edit_carries_the_edit_mark(tmp_path: Path, rolled: bool) -> None:
+    """A collapsed module box containing an edited op gets the ring, the edit row and the class."""
+
+    torch.manual_seed(0)
+    trace = tl.trace(
+        _BlockThenHead(),
+        torch.randn(2, 3),
+        intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
+    )
+    try:
+        dot = trace.draw(file_format="dot", depth=1, rolled=rolled, path=str(tmp_path / "box")).dot
+        seen: list[str] = []
+        user = trace.draw(
+            file_format="dot",
+            depth=1,
+            rolled=rolled,
+            path=str(tmp_path / "user"),
+            collapsed_node_spec_fn=lambda module, spec: seen.append(spec.color) or None,
+        ).dot
+    finally:
+        trace.cleanup()
+    (block,) = _box_lines(dot, "block")
+    assert "tl_edited" in block and "zero_ablate" in block
+    assert "penwidth=2.5" in block and PURPLE.lower() in block.lower()
+    assert all("tl_edited" not in line for line in _box_lines(dot, "head"))
+    assert "Δ" in block
+    assert PURPLE in seen  # the user callback runs after the mark and sees it
+    assert _box_lines(user, "block") == [block]
+
+
+def _header(trace: tl.Trace) -> str:
+    """Return the header edit line of ``trace``'s drawing."""
+
+    line = header_edit_line(trace, intervention_sites_for_log(trace), PURPLE)
+    assert line is not None
+    return line
+
+
+def test_header_names_the_edited_site_not_the_replacement_op() -> None:
+    """A module edit's header names the module address; an op edit names its op.
+
+    The module edit's value sits in its own ``interventionreplacement`` op, and
+    the header used to name that op (``on interventionreplacement_1_5``).
+    """
+
+    torch.manual_seed(0)
+    x = torch.randn(2, 3)
+    captured = tl.trace(
+        _BlockThenHead(), x, intervene=tl.when(tl.module("block"), tl.zero_ablate())
+    )
+    clean = tl.trace(_BlockThenHead(), x, save="all", capture=CaptureOptions(replayable=True))
+    fork = clean.fork("edited")
+    try:
+        assert _header(captured).endswith("</FONT>on block")
+        fork.do(tl.module("block"), tl.zero_ablate())
+        assert _header(fork).endswith("</FONT>on block")
+        relu = next(op.layer_label for op in fork._layer_list if op.func_name == "relu")
+        fork.do(tl.label(relu), tl.scale(0.5))
+        both = _header(fork)
+    finally:
+        for trace in (captured, clean, fork):
+            trace.cleanup()
+    assert "</FONT>on block" in both and f"</FONT>on {relu}" in both
+    assert "interventionreplacement" not in both
+
+
+def test_folded_box_without_an_edit_is_unchanged(tmp_path: Path) -> None:
+    """An unedited trace draws its boxes with no edit mark."""
+
+    torch.manual_seed(0)
+    trace = tl.trace(_BlockThenHead(), torch.randn(2, 3))
+    try:
+        dot = trace.draw(file_format="dot", depth=1, path=str(tmp_path / "plain")).dot
+    finally:
+        trace.cleanup()
+    assert _box_lines(dot, "block") and "tl_edited" not in dot
+
+
+def test_header_edit_line_is_one_svg_text_with_its_pieces_in_order(tmp_path: Path) -> None:
+    """The header's edit line is one ``<text>``: browsers lay its pieces out one after another.
+
+    Graphviz places each font run at its own x; a browser's wider bold run then
+    covered the space before ``on`` (``zero_ablateon``). The label pads that gap
+    with two spaces for Graphviz's own layout (PNG, PDF); the browser shows one.
+    """
+
+    trace = _traced()
+    try:
+        path = trace.draw(file_format="svg", path=str(tmp_path / "header")).path
+    finally:
+        trace.cleanup()
+    svg = Path(path).read_text(encoding="utf-8")
+    line = re.search(r"<text [^>]*>(<tspan[^>]*>1 edit:.*?)</text>", svg)
+    assert line is not None, "the edit line is not one text element"
+    pieces = re.findall(r"<tspan[^>]*>([^<]*)</tspan>", line.group(1))
+    assert "".join(pieces) == "1 edit: Δ zero_ablate on relu_1_1"
+    assert "x=" not in "".join(re.findall(r"<tspan[^>]*>", line.group(1)))
+
+
+def test_saved_and_displayed_svg_flow_the_header_edit_line(tmp_path: Path) -> None:
+    """``Drawing.save`` to SVG and the notebook display flow the edit line as ``draw`` does.
+
+    They render from the DOT source on their own path; before, its runs kept
+    Graphviz's x positions and overlapped in Chromium (``source_trace_label=…on)``).
+    """
+
+    trace = _traced()
+    try:
+        drawing = trace.draw(file_format="dot", path=str(tmp_path / "source"))
+        saved = Path(drawing.save(tmp_path / "saved.svg")).read_text(encoding="utf-8")
+        shown = drawing._repr_svg_() or ""
+    finally:
+        trace.cleanup()
+    for svg in (saved, shown):
+        line = re.search(r"<text [^>]*>(<tspan[^>]*>1 edit:.*?)</text>", svg)
+        assert line is not None, "the edit line is not one text element"
+        pieces = re.findall(r"<tspan[^>]*>([^<]*)</tspan>", line.group(1))
+        # Graphviz writes the label's non-breaking spaces as U+00A0 on this path.
+        assert "".join(pieces).replace("\xa0", " ") == "1 edit: Δ zero_ablate on relu_1_1"
+
+
+def test_flow_text_runs_joins_only_same_baseline_runs_of_header_and_edited_nodes() -> None:
+    """Runs on one baseline join; a lone run, another baseline and plain nodes keep their bytes."""
+
+    from torchlens._visualization._svg_text_runs import flow_text_runs
+
+    run = '<text text-anchor="start" x="{x}" y="{y}" font-size="14.00">{t}</text>\n'
+    svg = (
+        '<g id="graph0" class="graph">\n<title>G</title>\n'
+        + run.format(x=8, y=-30, t="Model")
+        + run.format(x=8, y=-10, t="2 edits: ")
+        + run.format(x=56, y=-10, t="Δ zero_ablate")
+        + '<!-- a -->\n<g id="node1" class="node">\n<title>a</title>\n'
+        + run.format(x=1, y=5, t="Δ")
+        + run.format(x=9, y=5, t=" scale")
+        + '</g>\n<!-- b -->\n<g id="node2" class="node tl_edited">\n<title>b</title>\n'
+        + '<g id="a_node2"><a xlink:title="t">\n'
+        + run.format(x=1, y=7, t="Δ")
+        + run.format(x=9, y=7, t=" scale")
+        + "</a>\n</g>\n</g>\n"
+    )
+    flowed = flow_text_runs(svg)
+    assert run.format(x=8, y=-30, t="Model") in flowed
+    assert flowed.count("<tspan") == 4  # header edit line + the edited node's row
+    assert run.format(x=1, y=5, t="Δ") in flowed  # an unedited node is untouched
+    assert flow_text_runs(flowed) == flowed
+    # Padding at a run's edge moves only Graphviz's next run; flowed, the gap is one space.
+    padded = (
+        '<g id="graph0" class="graph">\n'
+        + run.format(x=8, y=-10, t="1 edit:\u00a0")
+        + run.format(x=50, y=-10, t="Δ zero_ablate\u00a0\u00a0")
+        + run.format(x=150, y=-10, t="on relu_1_1")
+        + "<!-- a -->\n"
+    )
+    pieces = re.findall(r"<tspan[^>]*>([^<]*)</tspan>", flow_text_runs(padded))
+    assert pieces == ["1 edit:\u00a0", "Δ zero_ablate\u00a0", "on relu_1_1"]
+
+
+def test_patch_from_draws_short_and_keeps_provenance_in_the_tooltip(tmp_path: Path) -> None:
+    """The header and the edited node read ``patch_from(trace)``; the tooltip keeps the source."""
+
+    from torchlens._visualization._edit_marks import edit_marks_by_site
+
+    torch.manual_seed(0)
+    model, x = TinyReluAdd(), torch.randn(2, 3)
+    source = tl.trace(model, x)
+    patched = tl.trace(
+        model, torch.randn(2, 3), intervene=tl.when(tl.func("relu"), tl.patch_from(source))
+    )
+    try:
+        dot = patched.draw(file_format="dot", path=str(tmp_path / "patched")).dot
+        sites = intervention_sites_for_log(patched)
+        marks = [mark for site in edit_marks_by_site(patched, sites).values() for mark in site]
+    finally:
+        patched.cleanup()
+        source.cleanup()
+    assert [mark.short for mark in marks] == ["patch_from(trace)"]
+    assert "source_object_id=" in marks[0].full and "source_model_class=" in marks[0].full
+    drawn = re.sub(r'tooltip="[^"]*"', "", dot)
+    assert "patch_from(trace)" in drawn  # the header line and the node's edit row
+    assert drawn.count("patch_from(trace)") >= 2
+    assert "source_object_id" not in drawn and "source_model_class" not in drawn
+    assert re.search(r'tooltip="[^"]*source_object_id=', dot)
+
+
+@pytest.mark.parametrize(
+    ("fill", "expected"),
+    [
+        ("#FDE725", PURPLE),  # light: the edit purple reads
+        ("#FFFFFF", PURPLE),
+        ("#440154", "#C084FC"),  # very dark: the dark skin's light edit purple
+        ("#3B528B", "#FFFFFF"),  # mid dark: neither purple reads, the label's plain ink
+        ("#21918C", "#111111"),
+    ],
+)
+def test_edit_row_ink_reads_on_every_fill(fill: str, expected: str) -> None:
+    """The edit row keeps the edit colour where it reads (4.5:1), else the ink that does."""
+
+    from torchlens._visualization._edit_marks import edit_row_ink
+    from torchlens._visualization.themes import _contrast_ratio
+
+    ink = edit_row_ink(PURPLE, fill)
+    assert ink == expected
+    assert (_contrast_ratio(ink, fill) or 0.0) >= 4.5
+    assert edit_row_ink(PURPLE, None) == PURPLE
+    assert edit_row_ink(PURPLE, "lightgray") == PURPLE  # an unparseable fill keeps the colour
+
+
+def test_edit_row_on_a_dark_color_by_box_is_readable(tmp_path: Path) -> None:
+    """A folded box painted dark by ``color_by`` draws its edit row in an ink that reads on it."""
+
+    from torchlens._visualization.themes import _contrast_ratio
+
+    torch.manual_seed(0)
+    trace = tl.trace(
+        _BlockThenHead(), torch.randn(2, 3), intervene=tl.when(tl.func("relu"), tl.zero_ablate())
+    )
+    try:
+        dot = trace.draw(
+            file_format="dot",
+            depth=1,
+            color_by={"block": 1.0, "head": 0.0},
+            path=str(tmp_path / "dark"),
+        ).dot
+    finally:
+        trace.cleanup()
+    (block,) = _box_lines(dot, "block")
+    fill = re.search(r'fillcolor="(#[0-9A-Fa-f]{6})"', block)
+    row = re.search(r'<FONT COLOR="([^"]+)"><B><FONT POINT-SIZE="[^"]+">Δ', block)
+    assert fill is not None and row is not None
+    assert (_contrast_ratio(row.group(1), fill.group(1)) or 0.0) >= 4.5, (
+        row.group(1),
+        fill.group(1),
+    )

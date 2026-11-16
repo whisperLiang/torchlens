@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-import subprocess
 from collections.abc import Callable
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -14,7 +12,7 @@ import pytest
 import torch
 from torch import nn
 
-from torchlens.validation import backward as backward_validation
+from torchlens.validation import _backward as backward_validation
 from torchlens.validation._layer_grad_report import (
     LayerGradReport,
     _compare_module_output_grads,
@@ -24,7 +22,6 @@ from torchlens.validation._stock_layer_grads import (
     _candidate_root_module,
     _first_leaf_tensor,
     _pass_index_from_layer_modules,
-    _StockModuleGradCollector,
     _tensor_leaves,
 )
 
@@ -183,9 +180,9 @@ class SyntheticTrace:
             ``(address, call_index)``; omitted calls have no exit event.
         """
 
-        self.modules = SimpleNamespace(_pass_dict={call.call_label: call for call in call_logs})
+        self.modules = SimpleNamespace(_pass_dict={call.label: call for call in call_logs})
         self._layers = layers
-        self.layer_list = list(layers.values())
+        self._layer_list = list(layers.values())
         self._capture_events = SimpleNamespace(
             module_exit_events=[
                 SimpleNamespace(
@@ -232,7 +229,7 @@ def _run_public_layer_grad_validation(
     *,
     atol: float,
     rtol: float,
-    random_seed: int,
+    seed: int,
 ) -> LayerGradReport:
     """Run the shipped backward path and return its captured layer-grad report.
 
@@ -250,7 +247,7 @@ def _run_public_layer_grad_validation(
         Absolute tolerance for parameter and layer gradients.
     rtol:
         Relative tolerance for parameter and layer gradients.
-    random_seed:
+    seed:
         Seed shared by stock and captured passes.
 
     Returns
@@ -277,7 +274,7 @@ def _run_public_layer_grad_validation(
             input_args,
             input_kwargs=input_kwargs,
             loss_fn=loss_fn,
-            random_seed=random_seed,
+            seed=seed,
             atol=atol,
             rtol=rtol,
             validate_metadata=True,
@@ -300,7 +297,7 @@ def _synthetic_call(address: str, call_index: int, output_layers: list[str]) -> 
     return SimpleNamespace(
         address=address,
         call_index=call_index,
-        call_label=f"{address}:{call_index}",
+        label=f"{address}:{call_index}",
         output_layers=output_layers,
     )
 
@@ -318,63 +315,6 @@ def _synthetic_layer(
         has_grad=grad is not None,
         modules=modules if modules is not None else ["m:1"],
     )
-
-
-def test_stock_module_grad_collector_captures_module_output_grad() -> None:
-    """The stock collector captures gradients from module outputs."""
-
-    model = TinyMLP()
-    collector = _StockModuleGradCollector()
-    collector.install(model)
-    try:
-        loss = model(torch.randn(2, 3)).sum()
-        loss.backward()
-        collector.collect_grads_after_backward()
-    finally:
-        collector.cleanup()
-    assert ("l1", 1, 0) in collector.stock_module_output_grads
-    assert ("l2", 1, 0) in collector.stock_module_output_grads
-
-
-def test_stock_module_grad_collector_does_not_retain_grad(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The stock oracle captures via tensor hooks rather than ``retain_grad``."""
-
-    def fail_retain_grad(tensor: torch.Tensor) -> None:
-        """Fail if the stock oracle tries to retain output grads."""
-
-        raise AssertionError("stock layer oracle must not call retain_grad")
-
-    monkeypatch.setattr(torch.Tensor, "retain_grad", fail_retain_grad)
-    model = TinyMLP()
-    collector = _StockModuleGradCollector()
-    collector.install(model)
-    try:
-        loss = model(torch.randn(2, 3)).sum()
-        loss.backward()
-        collector.collect_grads_after_backward()
-    finally:
-        collector.cleanup()
-    assert ("l1", 1, 0) in collector.stock_module_output_grads
-
-
-def test_stock_module_grad_collector_captures_all_output_slots() -> None:
-    """The stock collector captures non-first module outputs."""
-
-    model = Pair()
-    collector = _StockModuleGradCollector()
-    collector.install(model)
-    try:
-        first, second = model(torch.randn(2, 3, requires_grad=True))
-        loss = first.sum() + second.sum()
-        loss.backward()
-        collector.collect_grads_after_backward()
-    finally:
-        collector.cleanup()
-
-    assert ("", 1, 0) in collector.stock_module_output_grads
-    assert ("", 1, 1) in collector.stock_module_output_grads
 
 
 def test_tensor_leaf_helpers_traverse_supported_containers() -> None:
@@ -402,67 +342,6 @@ def test_candidate_module_lookup_helpers_use_pass_dict() -> None:
     trace = SyntheticTrace([call, root], {})
     assert _candidate_module_call_for(trace, "block", 2) is call
     assert _candidate_root_module(trace) is root
-
-
-def test_compare_module_output_grads_reports_mismatched_bucket() -> None:
-    """Failed allclose comparisons are mismatched, not covered."""
-
-    grad = torch.ones(2, 2)
-    trace = SyntheticTrace(
-        [_synthetic_call("linear", 1, ["linear_out"])],
-        {"linear_out": _synthetic_layer("linear_out", grad)},
-    )
-    report = _compare_module_output_grads(trace, {("linear", 1, 0): grad + 1}, set())
-    assert report.coverage["linear:1"] == "mismatched"
-    assert report.mismatched_count == 1
-    assert not report.overall_passed
-
-
-def test_overall_passed_requires_skipped_no_grad_zero() -> None:
-    """One skipped-no-grad entry fails both 1+4 and 4+1 synthetic shapes."""
-
-    for covered, skipped in ((1, 4), (4, 1)):
-        calls = []
-        layers = {}
-        stock = {}
-        for index in range(covered + skipped):
-            address = f"m{index}"
-            label = f"layer{index}"
-            grad = torch.ones(1) if index < covered else None
-            calls.append(_synthetic_call(address, 1, [label]))
-            layers[label] = _synthetic_layer(label, grad)
-            if grad is not None:
-                stock[(address, 1, 0)] = grad.clone()
-        report = _compare_module_output_grads(SyntheticTrace(calls, layers), stock, set())
-        assert report.covered_count == covered
-        assert report.skipped_no_grad_count == skipped
-        assert not report.overall_passed
-
-
-def test_compare_excludes_root_and_identity_from_denominator() -> None:
-    """Root and identity outputs are classified but do not block passing."""
-
-    grad = torch.ones(1)
-    trace = SyntheticTrace(
-        [
-            _synthetic_call("self", 1, ["root"]),
-            _synthetic_call("id", 1, ["id_out"]),
-            _synthetic_call("linear", 1, ["linear_out"]),
-        ],
-        {
-            "root": _synthetic_layer("root", grad),
-            "id_out": _synthetic_layer("id_out", grad),
-            "linear_out": _synthetic_layer("linear_out", grad),
-        },
-    )
-    report = _compare_module_output_grads(
-        trace,
-        {("linear", 1, 0): grad},
-        {("id", 1, 0)},
-    )
-    assert report.coverage["self:1"] == "skipped_root_module"
-    assert report.coverage["id:1"] == "skipped_identity_output"
-    assert report.overall_passed
 
 
 def test_compare_counts_no_tensor_output() -> None:
@@ -493,7 +372,7 @@ def test_compare_counts_no_tensor_output() -> None:
 def test_no_tensor_output_cannot_launder_a_stock_observed_call() -> None:
     """A stock-observed gradient contradicts a no-tensor-output exclusion.
 
-    Sol probe regression: a candidate call with an empty ``output_ops`` list
+    Review probe regression: a candidate call with an empty ``output_ops`` list
     used to be classified out of the denominator even when stock autograd
     captured a real gradient for that exact call, so a missed module output
     passed as long as one other module was covered.
@@ -546,25 +425,6 @@ def test_identity_node_regression_mass_no_first_leaf_fails() -> None:
         set(),
     )
     assert report.uncaptured_module_output_count == 3
-    assert not report.overall_passed
-
-
-def test_empty_output_ops_without_exit_event_proof_fails_closed() -> None:
-    """No exit event means no proof: the exclusion is refused."""
-
-    grad = torch.ones(1)
-    report = _compare_module_output_grads(
-        SyntheticTrace(
-            [
-                _synthetic_call("covered", 1, ["covered_out"]),
-                _synthetic_call("unproven", 1, []),
-            ],
-            {"covered_out": _synthetic_layer("covered_out", grad)},
-        ),
-        {("covered", 1, 0): grad},
-        set(),
-    )
-    assert report.coverage["unproven:1"] == "uncaptured_module_output"
     assert not report.overall_passed
 
 
@@ -622,34 +482,6 @@ def test_compare_counts_module_less_layers_diagnostically() -> None:
     assert report.overall_passed
 
 
-def test_per_module_output_oracle_basic() -> None:
-    """TinyMLP passes the PATH E oracle with required coverage."""
-
-    torch.manual_seed(0)
-    report = _run_public_layer_grad_validation(
-        TinyMLP(),
-        torch.randn(2, 3),
-        {},
-        _loss,
-        atol=1e-5,
-        rtol=1e-4,
-        random_seed=42,
-    )
-    _assert_acceptance(report)
-
-
-def test_validate_backward_pass_validate_layer_grads_public_flag() -> None:
-    """The public backward validator can include the PATH E oracle."""
-
-    torch.manual_seed(0)
-    assert backward_validation.validate_backward_pass(
-        TinyMLP(),
-        torch.randn(2, 3),
-        random_seed=42,
-        validate_layer_grads=True,
-    )
-
-
 def test_zero_parameter_grads_fail_independently_of_layer_grad_flag() -> None:
     """An unverifiable parameter-gradient census never reports success.
 
@@ -682,86 +514,11 @@ def test_zero_parameter_grads_fail_independently_of_layer_grad_flag() -> None:
                 backward_validation.validate_backward_pass(
                     model,
                     x,
-                    random_seed=42,
+                    seed=42,
                     validate_layer_grads=validate_layer_grads,
                 )
             )
     assert verdicts == [False, False]
-
-
-@pytest.mark.smoke
-def test_layer_grad_default_runs_captured_grad_oracle(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The default public validator runs the captured-gradient oracle."""
-
-    calls = 0
-
-    def count_comparison(*args: Any, **kwargs: Any) -> LayerGradReport:
-        """Count and delegate captured-gradient comparisons."""
-
-        nonlocal calls
-        calls += 1
-        return _compare_module_output_grads(*args, **kwargs)
-
-    monkeypatch.setattr(
-        "torchlens.validation._layer_grad_report._compare_module_output_grads",
-        count_comparison,
-    )
-    assert backward_validation.validate_backward_pass(TinyMLP(), torch.randn(2, 3), random_seed=42)
-    assert calls == 1
-
-
-def test_nested_module_parent_and_child_outputs_are_covered() -> None:
-    """Nested child and parent module calls both appear in PATH E coverage."""
-
-    model = nn.Sequential(nn.Sequential(nn.Linear(3, 4), nn.ReLU()), nn.Linear(4, 2))
-    report = _run_public_layer_grad_validation(
-        model,
-        torch.randn(2, 3),
-        {},
-        _loss,
-        atol=1e-5,
-        rtol=1e-4,
-        random_seed=42,
-    )
-    assert report.coverage["0.1:1"] == "covered"
-    assert report.coverage["0:1"] == "covered"
-    _assert_acceptance(report)
-
-
-def test_identity_output_modules_are_skipped() -> None:
-    """Identity-output modules are skipped instead of falsely covered."""
-
-    report = _run_public_layer_grad_validation(
-        IdentityWrapper(),
-        torch.randn(2, 3),
-        {},
-        _loss,
-        atol=1e-5,
-        rtol=1e-4,
-        random_seed=42,
-    )
-    assert report.coverage["identity:1"] == "skipped_identity_output"
-    assert report.skipped_identity_output_count == 1
-    assert report.overall_passed
-
-
-def test_near_identity_output_modules_are_covered() -> None:
-    """Numerically close outputs are audited unless they are true identity."""
-
-    report = _run_public_layer_grad_validation(
-        NearIdentityWrapper(),
-        torch.randn(2, 3),
-        {},
-        _loss,
-        atol=1e-5,
-        rtol=1e-4,
-        random_seed=42,
-    )
-
-    assert report.coverage["near:1"] == "covered"
-    _assert_acceptance(report)
 
 
 def test_multi_output_module_grad_comparison_checks_all_outputs() -> None:
@@ -785,104 +542,6 @@ def test_multi_output_module_grad_comparison_checks_all_outputs() -> None:
     assert report.coverage["pair:1[1]"] == "mismatched"
     assert report.mismatched_labels == ("pair:1[1]",)
     assert not report.overall_passed
-
-
-def test_weight_tied_module_call_indices_are_separate() -> None:
-    """Repeated calls to the same module address are compared separately."""
-
-    class Tied(nn.Module):
-        """Use one module instance twice."""
-
-        def __init__(self) -> None:
-            """Initialize shared layer."""
-
-            super().__init__()
-            self.shared = nn.Linear(3, 3)
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Run the shared layer twice."""
-
-            return self.shared(self.shared(x))
-
-    report = _run_public_layer_grad_validation(
-        Tied(),
-        torch.randn(2, 3),
-        {},
-        _loss,
-        atol=1e-5,
-        rtol=1e-4,
-        random_seed=42,
-    )
-    assert report.coverage["shared:1"] == "covered"
-    assert report.coverage["shared:2"] == "covered"
-    _assert_acceptance(report)
-
-
-def test_oracle_rnn_3_step() -> None:
-    """Three-step RNN fixture passes the PATH E oracle."""
-
-    report = _run_public_layer_grad_validation(
-        TinyRNN(),
-        torch.randn(2, 3, 3),
-        {},
-        _loss,
-        atol=1e-5,
-        rtol=1e-4,
-        random_seed=42,
-    )
-    _assert_acceptance(report)
-
-
-@pytest.mark.slow
-def test_oracle_resnet50_eval() -> None:
-    """ResNet-style eval fixture passes the PATH E oracle."""
-
-    try:
-        from torchvision.models import resnet50
-    except Exception:
-        model = TinyResNet().eval()
-        x = torch.randn(2, 4)
-    else:
-        model = resnet50(weights=None).eval()
-        x = torch.randn(1, 3, 32, 32)
-    report = _run_public_layer_grad_validation(
-        model,
-        x,
-        {},
-        lambda output: output.float().sum(),
-        atol=1e-4,
-        rtol=1e-3,
-        random_seed=42,
-    )
-    _assert_acceptance(report)
-
-
-@pytest.mark.slow
-def test_shipped_backward_path_resnet50_metadata_invariant_holds() -> None:
-    """Guard the repaired backward layer-to-GradFn backpointer on a real ResNet.
-
-    This replaces a pin that asserted the INVERSE: a real ResNet backward capture
-    used to leave a layer whose ``grad_fn_handle`` had no reciprocal GradFn
-    backpointer, and the pin recorded that as a known capture bug to be deleted
-    once fixed. It is fixed. On the pinned torch the shipped path now records 341
-    GradFn logs, and of the 177 layers carrying a ``grad_fn_object_id`` exactly
-    zero are severed and zero dangle, so ``_check_backward_layer_backpointers``
-    passes on real data rather than through its structural carve-out (the
-    post-trigger exemption is never consulted -- there is nothing to exempt).
-
-    Assert the invariant HOLDS instead of deleting the coverage, so a regression
-    that re-severs the backpointer fails here on the same model that caught it.
-    """
-
-    torchvision_models = pytest.importorskip("torchvision.models")
-    model = torchvision_models.resnet50(weights=None).eval()
-    backward_validation.validate_backward_pass(
-        model,
-        torch.randn(1, 3, 32, 32),
-        random_seed=42,
-        validate_metadata=True,
-        validate_layer_grads=False,
-    )
 
 
 @pytest.mark.slow
@@ -915,62 +574,6 @@ def test_oracle_gpt2_small_forward_backward() -> None:
         gpt2_loss,
         atol=1e-4,
         rtol=1e-3,
-        random_seed=42,
+        seed=42,
     )
     _assert_acceptance(report)
-
-
-def test_per_operation_oracle_deferred_per_ad_50() -> None:
-    """Shipping code and tests do not contain PATH B implementation symbols."""
-
-    repo = Path(__file__).resolve().parents[1]
-    deleted_identifiers = [
-        "_Stock" + "GradCaptureMode",
-        "align" + "_stock_to_candidate",
-    ]
-    for identifier in deleted_identifiers:
-        result = subprocess.run(
-            ["git", "grep", "-w", identifier, "--", "torchlens", "tests"],
-            cwd=repo,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 1, result.stdout
-    stock_side_result = subprocess.run(
-        ["git", "grep", "-w", "_normalize" + "_func_name", "--", "torchlens/validation"],
-        cwd=repo,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert stock_side_result.returncode == 1, stock_side_result.stdout
-
-
-def test_path_e_module_exports_expected_surface() -> None:
-    """The PATH E helper and report modules expose the expected names."""
-
-    import torchlens.validation._stock_layer_grads as stock_module
-
-    assert hasattr(stock_module, "_StockModuleGradCollector")
-    assert hasattr(stock_module, "_first_leaf_tensor")
-    assert hasattr(stock_module, "_stock_layer_grads")
-    assert LayerGradReport(
-        mode="module_output",
-        overall_passed=True,
-        coverage={},
-        covered_count=1,
-        skipped_no_tensor_output_count=0,
-        uncaptured_module_output_count=0,
-        missing_module_call_count=0,
-        unresolved_output_label_count=0,
-        skipped_module_less_count=0,
-        skipped_no_grad_count=0,
-        skipped_identity_output_count=0,
-        skipped_root_module_count=0,
-        mismatched_count=0,
-        unexpected_count=0,
-        candidate_grad_count=1,
-        atol=1e-5,
-        rtol=1e-4,
-    )

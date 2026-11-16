@@ -1,0 +1,48 @@
+"""Computational graph visualization via Graphviz."""
+
+from typing import Any
+
+_USER_FUNC_EXPORTS = {
+    "show_model_graph",
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily expose user-facing visualization convenience functions.
+
+    Parameters
+    ----------
+    name:
+        Requested visualization attribute.
+
+    Returns
+    -------
+    Any
+        User-facing visualization helper from ``torchlens._user_funcs``.
+
+    Raises
+    ------
+    AttributeError
+        If ``name`` is not exported by this namespace.
+    """
+
+    if name in _USER_FUNC_EXPORTS:
+        from .. import _user_public_impls  # deferred: startup cost
+
+        return getattr(_user_public_impls, name)
+    if name == "lenses":
+        # Documented subpackage (docs/reference/lenses.md): resolve the
+        # attribute lazily so a bare `torchlens._visualization.lenses` read
+        # works without an eager import. Before this row the attribute
+        # existed only after SOMETHING ELSE imported the subpackage -- the
+        # docs import-resolution gate passed or failed with collection
+        # order (the import-laziness-deletes-read-names class).
+        import importlib
+
+        return importlib.import_module(".lenses", __name__)
+    raise AttributeError(f"module 'torchlens._visualization' has no attribute {name!r}")
+
+
+__all__ = [
+    "show_model_graph",
+]

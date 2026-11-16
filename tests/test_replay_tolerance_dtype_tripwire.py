@@ -1,7 +1,7 @@
 """r7 R74 F1 (opus b9 MED-HIGH, PROVEN): pin the forward-replay tolerance band.
 
 The band behind every per-op replay verdict (`_tolerances_for_dtype`,
-consumed by ``validation/core.py`` with ``allow_tolerance=True``) appeared in
+consumed by ``validation/_core.py`` with ``allow_tolerance=True``) appeared in
 ZERO test files, while the sibling GRAD band is pinned hard
 (``tests/test_grad_tolerance_dtype_tripwire.py``). The comparator's own entry
 self-test is a PRESENCE check, not a TIGHTNESS check: opus binary-searched the
@@ -21,7 +21,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from torchlens.utils.tensor_utils import (
+from torchlens._utils.tensor_utils import (
     _ACCUMULATING_REPLAY_ULP_HEADROOM,
     _DTYPE_FLOAT_TOLERANCES,
     _LOW_PRECISION_REPLAY_ULP_HEADROOM,
@@ -30,8 +30,6 @@ from torchlens.utils.tensor_utils import (
     derive_float_tolerances,
     tensor_nanequal,
 )
-
-pytestmark = pytest.mark.smoke
 
 #: No replay row may ever reach this: bf16 (the loosest shipped row) is
 #: 4 * eps = 3.125e-2, and anything approaching O(1) blesses gross corruption
@@ -98,7 +96,7 @@ def test_rows_are_exactly_the_derived_ulp_model() -> None:
 def test_fp32_row_is_the_exported_legacy_pair() -> None:
     """The facade constants and the fp32 replay row must not drift apart."""
 
-    from torchlens.utils.tensor_utils import (
+    from torchlens._utils.tensor_utils import (
         MAX_FLOATING_POINT_TOLERANCE,
         REL_FLOATING_POINT_TOLERANCE,
     )
@@ -176,8 +174,8 @@ def test_comparator_self_test_bounds_the_effective_band(
     absurdly TIGHT band fails the accept-side sentinel too.
     """
 
-    from torchlens.utils import tensor_utils as tensor_utils_mod
-    from torchlens.validation.core import _comparator_self_test
+    from torchlens._utils import tensor_utils as tensor_utils_mod
+    from torchlens.validation._core import _comparator_self_test
 
     _comparator_self_test()  # healthy band passes
 
@@ -239,12 +237,12 @@ def test_deep_numeric_replay_constants_are_pinned_literals() -> None:
     """R13 fix (e): pin the band-C ceiling/derivation constants literally.
 
     These are absolute verdict ceilings for the deep-numeric replay lane
-    (``validation/core.py``); a silent bump is a tolerance walk-out of the
+    (``validation/_core.py``); a silent bump is a tolerance walk-out of the
     same class as the headroom walk pinned above. Includes the R13
     dynamic-range guard constant introduced with the atol-amplification fix.
     """
 
-    from torchlens.validation import core as validation_core
+    from torchlens.validation import _core as validation_core
 
     assert validation_core.DEEP_NUMERIC_REPLAY_MIN_REDUCTION_DEPTH == 64
     assert validation_core.DEEP_NUMERIC_REPLAY_RTOL == 1e-3

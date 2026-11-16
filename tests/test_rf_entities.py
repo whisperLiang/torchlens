@@ -67,7 +67,7 @@ def _conv_trace() -> tuple[object, object]:
 
     _register_rules()
     trace = tl.trace(nn.Sequential(nn.Conv2d(2, 4, 3)), torch.randn(2, 2, 8, 8))
-    target = next(op for op in trace.layer_list if op.func_name == "conv2d")
+    target = next(op for op in trace._layer_list if op.func_name == "conv2d")
     return trace, target
 
 
@@ -141,8 +141,8 @@ def test_view_mapping_passthrough_at_and_center_unit() -> None:
 
     trace, target = _conv_trace()
     view = target.receptive_field
-    input_op = next(op for op in trace.layer_list if op.is_input)
-    role = str(input_op.io_role)
+    input_op = next(op for op in trace._layer_list if op.is_input)
+    role = str(input_op.graph.io_role)
     descriptor = view.per_input[role]
 
     assert view[role] is descriptor
@@ -152,9 +152,9 @@ def test_view_mapping_passthrough_at_and_center_unit() -> None:
     assert view.size == (3, 3)
     assert view.jump == descriptor.jump
     assert view.center0 == descriptor.center0
-    assert view.layout is descriptor.layout
-    assert view.at((2, 2), input=input_op).unit == (2, 2)
-    assert view.at("center", input=role).unit == (3, 3)
+    assert view.axis_roles is descriptor.axis_roles
+    assert view.at((2, 2), input_op=input_op).unit == (2, 2)
+    assert view.at("center", input_op=role).unit == (3, 3)
 
     with pytest.raises(ReceptiveFieldError, match="batch_index is required"):
         view.center_unit()
@@ -169,22 +169,23 @@ def test_landed_gradient_and_check_are_wired_with_typed_precondition_errors() ->
     trace = tl.trace(
         nn.Conv2d(2, 4, 3),
         inputs,
-        capture=tl.options.CaptureOptions(backward_ready=True),
-        save_mode="reference",
+        capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"),
     )
-    target = next(op for op in trace.layer_list if op.func_name == "conv2d")
-    input_op = next(op for op in trace.layer_list if op.is_input)
+    target = next(op for op in trace._layer_list if op.func_name == "conv2d")
+    input_op = next(op for op in trace._layer_list if op.is_input)
     view = target.receptive_field
 
-    gradient = view.gradient((0, 0, 2, 2), input=input_op, retain_graph=True)
+    gradient = view.probe_grad((0, 0, 2, 2), input_op=input_op, retain_graph=True)
     assert gradient.op_label == target.label
-    validation = view.check((0, 0, 2, 2), input=input_op)
+    validation = view.check((0, 0, 2, 2), input_op=input_op)
     assert validation.status is ReceptiveFieldValidationStatus.PASS
 
     unavailable_trace = tl.trace(nn.Conv2d(2, 4, 3), torch.randn(1, 2, 8, 8))
-    unavailable_target = next(op for op in unavailable_trace.layer_list if op.func_name == "conv2d")
+    unavailable_target = next(
+        op for op in unavailable_trace._layer_list if op.func_name == "conv2d"
+    )
     with pytest.raises(ReceptiveFieldUnavailableError, match="backward_ready=True"):
-        unavailable_target.receptive_field.gradient((0, 0, 2, 2))
+        unavailable_target.receptive_field.probe_grad((0, 0, 2, 2))
 
 
 def test_multi_input_passthrough_names_roles_and_explicit_selection_works() -> None:
@@ -192,14 +193,15 @@ def test_multi_input_passthrough_names_roles_and_explicit_selection_works() -> N
 
     _register_rules()
     trace = tl.trace(_TwoInputAdd(), (torch.randn(1, 3), torch.randn(1, 3)))
-    target = next(op for op in trace.layer_list if op.func_name == "__add__")
+    target = next(op for op in trace._layer_list if op.func_name == "__add__")
     view = target.receptive_field
     roles = tuple(view.per_input)
 
     assert len(roles) == 2
     with pytest.raises(AmbiguousInputError) as caught:
-        _ = view.status
+        _ = view.size
     assert all(role in str(caught.value) for role in roles)
+    assert dict(view.status) == {role: view[role].status for role in roles}
     assert view[roles[0]].io_role == roles[0]
 
 
@@ -241,7 +243,9 @@ def test_multi_output_module_call_reuses_existing_error_and_lists_candidates() -
     assert len(call.output_ops) == 2
     with pytest.raises(MultiOutputModuleError) as caught:
         _ = call.receptive_field
-    assert all(label in str(caught.value) for label in call.output_ops)
+    assert all(trace.ops[label].short_layer_label in str(caught.value) for label in call.output_ops)
+    assert "\n  candidates " in str(caught.value)
+    assert "\n  remedy     " in str(caught.value)
 
 
 def test_tlspec_round_trip_drops_and_recomputes_view(tmp_path: Path) -> None:
@@ -259,7 +263,36 @@ def test_tlspec_round_trip_drops_and_recomputes_view(tmp_path: Path) -> None:
     assert isinstance(recomputed, ReceptiveFieldView)
     assert recomputed is loaded_target.receptive_field
     assert recomputed is not original
-    assert type(loaded_target).PORTABLE_STATE_SPEC["_receptive_field_cache"] is FieldPolicy.DROP
+    assert type(loaded_target)._PORTABLE_STATE_SPEC["_receptive_field_cache"] is FieldPolicy.DROP
+
+
+class _BatchedProductConcat(nn.Module):
+    """A same-rank batched product feeding a concatenation."""
+
+    def forward(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+        """Multiply batched matrices, then join the product with a scaled copy."""
+
+        product = torch.matmul(left, right)
+        return torch.cat([product, product * 2], dim=-1)
+
+
+def test_loaded_trace_reads_operand_shapes_from_recorded_parent_shapes(tmp_path: Path) -> None:
+    """A reloaded trace solves operand-shape rules exactly as the live trace does."""
+
+    from torchlens.receptive_field._validation import check_geometric_metadata_invariants
+
+    _register_rules()
+    trace = tl.trace(_BatchedProductConcat(), (torch.randn(2, 3, 4), torch.randn(2, 4, 5)))
+    path = tmp_path / "rf-operands.tlspec"
+    trace.save(path)
+    loaded = tl.load(path)
+
+    check_geometric_metadata_invariants(loaded)
+    for func_name in ("matmul", "cat"):
+        live_op = next(op for op in trace._layer_list if op.func_name == func_name)
+        loaded_op = loaded.ops[live_op.label]
+        assert _rules.operand_shapes(loaded_op) == _rules.operand_shapes(live_op)
+        assert repr(loaded_op.receptive_field.status) == repr(live_op.receptive_field.status)
 
 
 def test_registry_epoch_invalidation_refreshes_all_cached_views() -> None:
@@ -267,7 +300,7 @@ def test_registry_epoch_invalidation_refreshes_all_cached_views() -> None:
 
     trace, target = _conv_trace()
     first = target.receptive_field
-    input_op = next(op for op in trace.layer_list if op.is_input)
+    input_op = next(op for op in trace._layer_list if op.is_input)
     first_input = input_op.receptive_field
 
     @_rules.register_rf_rule("rf_entity_epoch_probe")

@@ -2,42 +2,27 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
 
+paddle = pytest.importorskip("paddle")
+
+import torch  # noqa: E402
+
 import torchlens as tl  # noqa: E402
+from torchlens._io.format3.codec_policy import backend_materializes  # noqa: E402
 from torchlens._io.payload_codec import get_payload_codec  # noqa: E402
 from torchlens._io.tensor_policy import Ok  # noqa: E402
+from torchlens.backends.registry import get_backend_spec  # noqa: E402
 from torchlens.validation import validate_tlspec  # noqa: E402
-from torchlens.validation.invariants import check_metadata_invariants  # noqa: E402
+from torchlens.validation._invariants import check_metadata_invariants  # noqa: E402
 
-pytestmark = pytest.mark.backend_paddle
+pytestmark = [pytest.mark.backend_paddle, pytest.mark.rare]
 
-paddle: Any
-
-
-def _paddle_runtime_or_skip() -> Any:
-    """Import Paddle unless TensorFlow has made this process unsafe for it."""
-
-    tensorflow_loaded = any(
-        name == "tensorflow" or name.startswith("tensorflow.") for name in sys.modules
-    )
-    if "paddle" not in sys.modules and tensorflow_loaded:
-        pytest.skip("Paddle runtime is unsafe to import after TensorFlow in this process")
-    return pytest.importorskip("paddle")
-
-
-@pytest.fixture(autouse=True)
-def _load_paddle() -> None:
-    """Load Paddle lazily when a Paddle test actually runs."""
-
-    global paddle
-    paddle = _paddle_runtime_or_skip()
-    paddle.seed(0)
+paddle.seed(0)
 
 
 def _tensor_for_dtype(dtype_name: str) -> Any:
@@ -55,12 +40,10 @@ def _tensor_for_dtype(dtype_name: str) -> Any:
     """
 
     if dtype_name == "bool":
-        return paddle.to_tensor(
-            [[True, False], [False, True]], dtype="bool", place=paddle.CPUPlace()
-        )
+        return paddle.to_tensor([[True, False], [False, True]], dtype="bool")
     if dtype_name == "int64":
-        return paddle.to_tensor([[-3, 0], [7, 11]], dtype="int64", place=paddle.CPUPlace())
-    base = paddle.to_tensor([[-1.5, -0.25], [0.125, 3.5]], dtype="float32", place=paddle.CPUPlace())
+        return paddle.to_tensor([[-3, 0], [7, 11]], dtype="int64")
+    base = paddle.to_tensor([[-1.5, -0.25], [0.125, 3.5]], dtype="float32")
     return base.cast(dtype_name)
 
 
@@ -73,7 +56,10 @@ def _assign_trace(value: Any) -> Any:
 def _saved_output(trace: Any) -> Any:
     """Return the saved output payload from a loaded assign trace."""
 
-    output_label = f"{trace.output_layers[0]}:1"
+    # N5: ``trace.output_layers`` entries are already the final pass-qualified
+    # op label (``op.label``, e.g. ``"assign_1_2:1"``); appending another
+    # ``:1`` produced a double-qualified, unresolvable label.
+    output_label = trace.output_layers[0]
     return trace[output_label].out
 
 
@@ -89,7 +75,7 @@ def test_paddle_payload_codec_manifest_fields_are_registered() -> None:
     """Paddle codec should expose schema-v2 logical and transport metadata."""
 
     codec = get_payload_codec("paddle")
-    value = _tensor_for_dtype("bfloat16")
+    value = _tensor_for_dtype("bfloat16").cpu()
 
     assert codec.can_encode(value)
     assert isinstance(codec.validate_for_save(value, strict=True), Ok)
@@ -123,9 +109,31 @@ def test_paddle_default_tlspec_round_trip_materializes_payloads(tmp_path: Path) 
     validate_tlspec(path)
     loaded = tl.load(path)
 
-    assert loaded.backend == "paddle"
+    assert loaded.provenance.backend == "paddle"
     assert check_metadata_invariants(loaded) is True
     _assert_paddle_tensor_equal(_saved_output(loaded), expected)
+
+
+def test_paddle_tlspec_round_trip_keeps_scalar_shape(tmp_path: Path) -> None:
+    """A 0-d op output loads back 0-d, not ``[1]``.
+
+    ``np.ascontiguousarray`` promotes a 0-d host array to shape ``(1,)``; the
+    Paddle materializer passed its result straight to ``paddle.to_tensor``, so a
+    saved scalar came back one-dimensional.
+    """
+
+    x = paddle.to_tensor(np.asarray([[1.0, -2.0], [3.0, 4.0]], dtype=np.float32))
+    trace = tl.trace(lambda value: paddle.sum(value), x, backend="paddle")
+    saved = trace[trace.output_layers[0]].out
+    assert tuple(saved.shape) == ()
+    path = tmp_path / "paddle_scalar.tlspec"
+
+    trace.save(path)
+    loaded = tl.load(path)
+
+    restored = loaded[loaded.output_layers[0]].out
+    assert tuple(restored.shape) == ()
+    np.testing.assert_allclose(restored.numpy(), saved.numpy())
 
 
 def test_paddle_tlspec_manifest_runtime_fingerprint(tmp_path: Path) -> None:
@@ -139,12 +147,15 @@ def test_paddle_tlspec_manifest_runtime_fingerprint(tmp_path: Path) -> None:
 
     assert manifest["schema_version"] == 2
     assert manifest["backend"] == "paddle"
-    assert manifest["torch_version"] is None
+    # Saved format 3 stamps the writer's torch (a writer identity field) on every artifact,
+    # keeps only the include flags in payload_policy, and reads the payload policy and its
+    # materialization from the backend spec.
+    assert manifest["torch_version"] == torch.__version__
     assert manifest["backend_runtime"]["name"] == "paddle"
     assert manifest["backend_runtime"]["version"] == paddle.__version__
     assert manifest["backend_runtime"]["version"] != "0.0.metadata"
-    assert manifest["payload_policy"]["policy"] == "array_payloads"
-    assert manifest["payload_policy"]["materialization_supported"] is True
+    assert get_backend_spec("paddle").serialization_policy.payload_policy == "array_payloads"
+    assert backend_materializes(manifest["backend"]) is True
     assert manifest["body_format"] == "safetensors"
 
 

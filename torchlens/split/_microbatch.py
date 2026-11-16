@@ -17,7 +17,13 @@ from .training import (
 )
 
 
-def _unsupported(runtime: Any, message: str, reason: str) -> SplitUnsupportedError:
+def _unsupported(
+    runtime: Any,
+    message: str,
+    reason: str,
+    *,
+    code: str = SplitUnsupportedError.code,
+) -> SplitUnsupportedError:
     """Build a structured refusal for an unsupported execution policy."""
 
     return SplitUnsupportedError(
@@ -25,6 +31,7 @@ def _unsupported(runtime: Any, message: str, reason: str) -> SplitUnsupportedErr
         context=SplitErrorContext(
             backend=runtime.adapter.name, split_point=runtime.request.boundary, reason=reason
         ),
+        code=code,
     )
 
 
@@ -37,6 +44,7 @@ def _boundary_axes(runtime: Any, boundary: ReplayBoundary) -> dict[str, int | No
             runtime,
             "Microbatch training requires symbolic batch axes.",
             "microbatch_batch_unavailable",
+            code=SplitUnsupportedError.code,
         )
     result: dict[str, int | None] = {}
     for key, schema in runtime.boundary_spec.items():
@@ -46,6 +54,7 @@ def _boundary_axes(runtime: Any, boundary: ReplayBoundary) -> dict[str, int | No
                 runtime,
                 f"Boundary {key!r} has no resolved symbolic shape for microbatch slicing.",
                 "microbatch_boundary_shape_unsupported",
+                code=SplitUnsupportedError.code,
             )
         axes = [index for index, dim in enumerate(shape.dims) if dim.contains(program.batch_symbol)]
         if len(axes) > 1 or any(shape.dims[index].op != "symbol" for index in axes):
@@ -54,6 +63,7 @@ def _boundary_axes(runtime: Any, boundary: ReplayBoundary) -> dict[str, int | No
                 f"Boundary {key!r} must have at most one plain batch symbol axis; "
                 "compound and multiple batch axes cannot be sliced independently.",
                 "microbatch_boundary_shape_unsupported",
+                code=SplitUnsupportedError.code,
             )
         result[key] = axes[0] if axes else None
     return result
@@ -129,6 +139,7 @@ def _run_chunk(
             runtime,
             "Microbatch loss_fn must return a real scalar tensor.",
             "microbatch_loss_invalid",
+            code=SplitUnsupportedError.code,
         )
     scaled = loss * weight
     scaled.backward()
@@ -214,6 +225,7 @@ def train_torch_microbatches(
             runtime,
             "Microbatch training requires a positive logical batch.",
             "microbatch_batch_unavailable",
+            code=SplitUnsupportedError.code,
         )
     program = runtime.trace_graph.shape_program
     sizes = {min(batch, microbatch_size)}
@@ -228,7 +240,12 @@ def train_torch_microbatches(
                 split_point=runtime.request.boundary,
             )
     except SplitBoundaryError as exc:
-        raise _unsupported(runtime, str(exc), "microbatch_shape_unsupported") from exc
+        raise _unsupported(
+            runtime,
+            str(exc),
+            "microbatch_shape_unsupported",
+            code=SplitUnsupportedError.code,
+        ) from exc
     # Transport the logical payload once, detached before copying. Keep original
     # graph-connected prefix tensors solely in the caller's training boundary.
     metadata = {

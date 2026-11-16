@@ -22,8 +22,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.smoke
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Lockstep mirror of .pre-commit-config.yaml no-internal-notes `files:` regex.
@@ -93,7 +91,7 @@ def _git_config_reference_violations(paths_and_texts: list[tuple[str, str]]) -> 
     """Private-path references inside git CONFIG files (rule lines name paths).
 
     r7 R82 (opus b10 MED): ``.gitattributes`` published five internal
-    ``.research/docs-plan-megasprint_PLAN*.md`` filenames in this PUBLIC repo
+    ``.research/docs-plan-project_PLAN*.md`` filenames in this PUBLIC repo
     -- dead LFS rules left behind when the files were untracked (8f74a25b).
     The path gate above cannot see them (the leak is file CONTENT), and the
     pre-commit hook matched staged PATHS only. A git config rule line whose
@@ -135,7 +133,7 @@ def test_git_config_reference_matcher_is_red_capable() -> None:
         [
             (
                 ".gitattributes",
-                ".research/docs-plan-megasprint_PLAN.md filter=lfs diff=lfs merge=lfs -text\n"
+                ".research/docs-plan-project_PLAN.md filter=lfs diff=lfs merge=lfs -text\n"
                 ".project-context/todos.md -text\n"
                 "*.ipynb filter=nbstripout\n"
                 ".project-context/architecture.md -text\n",

@@ -1,100 +1,137 @@
-import gc
+"""Root pytest configuration for the TorchLens suite.
+
+Session setup (output directories, thread pinning, warm-ups), collection
+ordering and the usage-stats run live here. Everything else is a plugin
+module beside this file, registered through ``pytest_plugins``:
+
+- ``_tiers_plugin``: tier markers, the smoke/heavy/slow/serial/rare partition
+  check at collection and the CI parity note;
+- ``_collection_warmup``: scan-cache and source-corpus warm-up, then ``gc.freeze``;
+- ``_state_isolation``: autouse per-test state resets;
+- ``_leak_guards``: capture-slot, thread and draw-outpath tripwires;
+- ``_input_fixtures``: plain tensor inputs.
+
+Duration budgets are a repository check over ``tests/tiers/durations.csv``
+(``scripts/tier_durations.py check``), not a runtime tripwire.
+"""
+
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
 import os
-import random
+import re
 import sys
-import weakref
-from collections.abc import Iterator
-from contextlib import contextmanager
 from os.path import join as opj
 from pathlib import Path
-from types import ModuleType
 
-import numpy as np
+import _state_isolation
+import _xdist_groups
 import pytest
 import torch
 
+# Snapshot the R1 offline-venue signature before any test module can set the flags.
+from support import r1_venue  # noqa: F401
+
 from torchlens import _state
-from torchlens._paddle_compat import install_import_guard
-
-# A lazy, extension-specific guard also handles TensorFlow imported by a pytest
-# plugin before this conftest. Do not force optional runtime imports at startup.
-install_import_guard()
 
 
-# Menagerie tests exercise the menagerie/ build subsystem, which is not importable
-# on Python < 3.11 because it uses datetime.UTC. Skip collecting them on those
-# interpreters so the core suite still runs in the documented smoke environment.
-collect_ignore_glob = []
-if sys.version_info < (3, 11):
-    collect_ignore_glob.append("test_menagerie_*.py")
-    # Ignore the directory before pytest imports its platform-specific conftest.
-    collect_ignore_glob.append("crawler")
+def _bind_tests_package() -> None:
+    """Bind the top-level name ``tests`` to this directory.
+
+    The repository's ``tests`` is a namespace package (no ``__init__.py``), which
+    keeps pytest's basename module names and this directory's ``sys.path`` entry.
+    A namespace package loses to a regular ``tests`` package anywhere on
+    ``sys.path``, and some installed peers ship one into site-packages
+    (brainscore_vision 2.4.4 does), which breaks every ``from tests.support ...``
+    import. So ``sys.modules["tests"]`` is set to a namespace module over this
+    directory before any test module is imported; a foreign ``tests`` that was
+    already imported is dropped together with its submodules.
+    """
+
+    tests_dir = os.path.realpath(os.path.dirname(os.path.abspath(__file__)))
+    current = sys.modules.get("tests")
+    current_path = getattr(current, "__path__", ())
+    if any(os.path.realpath(entry) == tests_dir for entry in current_path):
+        return
+    for name in [name for name in sys.modules if name == "tests" or name.startswith("tests.")]:
+        del sys.modules[name]
+    spec = importlib.machinery.ModuleSpec("tests", None, is_package=True)
+    spec.submodule_search_locations = [tests_dir]
+    package = importlib.util.module_from_spec(spec)
+    # A namespace package's ``__file__`` is None. ``inspect.getmodule`` (torch calls it
+    # while registering ops) skips a module whose ``__file__`` matches the path it cached
+    # for that name, but a foreign ``tests`` dropped above leaves its path cached, and
+    # then None fails ``inspect.getfile``. Without the attribute the module is skipped.
+    package.__dict__.pop("__file__", None)
+    sys.modules["tests"] = package
+
+
+_bind_tests_package()
+
+pytest_plugins = [
+    "_tiers_plugin",
+    "_collection_warmup",
+    "_state_isolation",
+    "_leak_guards",
+    "_input_fixtures",
+]
 
 # Output directories are assigned under pytest's private basetemp in
 # ``pytest_configure`` before test modules import these constants.
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Let mutation campaigns keep capture setup inside attributable test calls."""
+
+    parser.addoption(
+        "--no-capture-prewarm",
+        action="store_true",
+        default=False,
+        help="Disable the optional capture warmup for isolated mutation campaigns.",
+    )
+
+
+@pytest.fixture
+def root_edits_in_place():
+    """Opt one test into editing root traces in place.
+
+    ``InterventionOptions.confirm_mutation`` and the ``confirm_mutation=`` keyword
+    are gone (D.12): the root-mutation guard reads only the trace, so a test that
+    deliberately edits a root trace enters the session-level suppression context
+    for its own duration. Tests that assert the warning never request this fixture.
+    """
+
+    from torchlens.errors import quiet
+
+    with quiet():
+        yield
+
+
+@pytest.fixture
+def dynamo_free_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let captures defer payloads as they do in a process that never imported Dynamo.
+
+    Once ``torch._dynamo`` is loaded every capture keeps eager payload clones
+    (``torchlens._utils._compiled_write_guard``), and an earlier test on the same
+    worker may have loaded it. Tests that need deferral to happen request this.
+    """
+
+    from torchlens._utils import _compiled_write_guard
+
+    monkeypatch.setattr(_compiled_write_guard, "compiled_writes_seen", lambda: False)
+    monkeypatch.setattr(_compiled_write_guard, "compiled_writes_possible", lambda: False)
+
+
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 TEST_OUTPUTS_DIR = ""
 REPORTS_DIR = ""
 VIS_OUTPUT_DIR = ""
 
-_MISSING = object()
-_WARN_ONCE_SENTINELS: tuple[tuple[str, str, object], ...] = (
-    # NOTE: this sentinel is a weakref.WeakSet in the package (type-keyed cache
-    # eviction, F3a); resetting it to a plain set() would strong-pin model
-    # classes — the reset must preserve the weak container type.
-    ("torchlens._capture_state_helpers", "_VALIDATION_DEEPCOPY_WARNING_TYPES", weakref.WeakSet()),
-    ("torchlens._capture_state_helpers", "_COMPILED_MODEL_UNWRAP_WARNED", False),
-    ("torchlens._capture_state_helpers", "_COMPILED_FORCED_EAGER_WARNED", False),
-    ("torchlens._deprecations", "_WARNED_DEPRECATIONS", set()),
-    ("torchlens._io", "_LEGACY_THREAD_WARNING_EMITTED", {"flag": False}),
-    ("torchlens._io.bundle", "_NONPERSISTENT_DISCLOSURE_WARNED", False),
-    ("torchlens._io.bundle", "_UNATTESTABLE_ACTIVATION_DISCLOSURE_WARNED", False),
-    ("torchlens._state", "_functorch_warning_emitted", False),
-    ("torchlens._state", "_dynamo_warning_emitted", False),
-    ("torchlens.backends.tf._tf_compat", "_warned_missing_capabilities", set()),
-    ("torchlens.backends.torch.ops", "_UNSUPPORTED_OUTPUT_CONTAINER_WARNED", set()),
-    ("torchlens.data_classes.op", "_WARNED_REFERENCE_SAVE_MODE", False),
-    ("torchlens.distributed._lifecycle", "_AUTO_ARM_DEGRADATION", None),
-    ("torchlens.fastlog._storage_resolver", "_WARNED_REFERENCE_SAVE_MODE", False),
-    ("torchlens.postprocess.ast_branches", "_source_drift_warned", set()),
-    ("torchlens.utils._torch_compat", "_warned_missing_capabilities", set()),
-    # Capture-scoped CUDA RNG retry latch (grind p5, B2P3-16): re-armed per
-    # capture in the package, and reset per test here so a test that trips it
-    # via a direct log_current_rng_states() call cannot degrade later tests.
-    ("torchlens.utils.rng", "_cuda_rng_unusable", False),
-    ("torchlens.utils.introspection", "_col_offset_cache_warned", False),
-    ("torchlens.validation._stock_layer_grads", "_PASS_INDEX_PARSE_WARNED", False),
-    ("torchlens.visualization._render_common", "_SIBLING_ORDER_WARNING_EMITTED", False),
-    # The functional (global-mutated) copy moved to _render_ordering with the
-    # renderer-thinning extraction; _render_dot keeps only an inert
-    # star-import binding.
-    ("torchlens.visualization._render_ordering", "_SIBLING_ORDER_WARNING_EMITTED", False),
-    ("torchlens.visualization.auto_collapse", "_COUNT_MISMATCH_WARNING_EMITTED", False),
-    # WeakSet of Traces that already got the collapse-ceiling decline warning;
-    # a plain set() reset would strong-pin those Traces for the session.
-    ("torchlens.visualization.collapse_optimizer", "_CEILING_WARNED_TRACES", weakref.WeakSet()),
-)
 
-
-# ---------------------------------------------------------------------------
-# Coverage: auto-generate text report when pytest --cov is used
-# ---------------------------------------------------------------------------
-
-
-def pytest_addoption(parser: pytest.Parser) -> None:
-    """Register test-only controls for capture initialization.
-
-    Parameters
-    ----------
-    parser:
-        Pytest command-line option parser.
-    """
-
-    parser.addoption(
-        "--no-capture-prewarm",
-        action="store_true",
-        help="Let tests initialize capture; mutation campaigns need named failures, not setup crashes.",
-    )
+#: Size ceiling of the smoke tier in collected tests; ``tests/tiers/collection.json``
+#: records the measured count and ``tests/test_tiers_artifact.py`` compares the two.
+SMOKE_TIER_SIZE_CEILING = 400
 
 
 @pytest.hookimpl(trylast=True)
@@ -109,8 +146,8 @@ def pytest_configure(config: pytest.Config) -> None:
 
     global TEST_OUTPUTS_DIR, REPORTS_DIR, VIS_OUTPUT_DIR
 
-    # A CI run must never mutate goldens: any armed update/regen/record flag
-    # would silently rebaseline instead of verifying (b7 R53-3 / b10 R78-8).
+    # A CI run must never mutate goldens: an armed update/regen/record flag
+    # would silently rebaseline instead of verifying.
     from _oracle_env import GOLDEN_FLAG_PREFIXES, golden_mutation_flags_armed_under_ci
 
     armed = golden_mutation_flags_armed_under_ci(os.environ)
@@ -118,6 +155,13 @@ def pytest_configure(config: pytest.Config) -> None:
         raise pytest.UsageError(
             "golden update/regen flags are forbidden under CI: " + ", ".join(armed)
         )
+
+    # The first float ``torch.tanh`` of a process can compute one intra-op
+    # thread's chunk by a different kernel path (later calls never do), so a
+    # test whose capture or plain forward is its worker's first tanh can see a
+    # few 1e-5 of drift. One warm-up over every intra-op thread keeps that
+    # first call out of every test; each xdist worker runs this hook.
+    torch.tanh(torch.zeros(max(torch.get_num_threads(), 1), 32768))
 
     output_root = config._tmp_path_factory.getbasetemp() / "torchlens-generated"
     TEST_OUTPUTS_DIR = str(output_root)
@@ -132,33 +176,38 @@ def pytest_configure(config: pytest.Config) -> None:
     # TorchLens suite opts in through the torchlens-owned knob explicitly.
     config._tl_prior_collapse_strict = os.environ.get("TORCHLENS_COLLAPSE_STRICT")
     os.environ.setdefault("TORCHLENS_COLLAPSE_STRICT", "1")
-    config._tl_warn_once_sentinel_specs = _WARN_ONCE_SENTINELS
+    config._tl_warn_once_sentinel_specs = _state_isolation._WARN_ONCE_SENTINELS
+    _pin_test_threads(config)
+    # pytest 9.2 + xdist 3.8 drop ``xdist_group`` under ``--dist loadgroup``
+    # (tests/_xdist_groups.py); restamp the group on the id pytest reads.
+    _xdist_groups.register(config)
     # Pay PyTorch's one-time RNG and deterministic-mode initialization during
     # session setup, not against whichever smoke test happens to run first.
     torch.random.get_rng_state()
+    # Every test runs under ``torch.use_deterministic_algorithms(True)``
+    # (tests/_state_isolation.py); on a CUDA host, torch releases before 2.13
+    # refuse cuBLAS matmuls in that mode unless the workspace is pinned.
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     deterministic = torch.are_deterministic_algorithms_enabled()
     deterministic_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
     torch.use_deterministic_algorithms(deterministic, warn_only=deterministic_warn_only)
     # Pay TorchLens's one-time capture-machinery cost (lazy wrap_torch install,
-    # dispatcher/completeness tables) at session setup too: under randomized
-    # ordering, whichever test captured FIRST paid the initialization cost.
-    # This is equivalent to an early test capturing (wrappers stay installed
-    # until explicit unwrap),
-    # which every full-suite run already implies. Skipped for collect-only
-    # sessions, which never run a capture.
-    # ...and skipped when a golden-update flag is armed: in-process golden
-    # families guard that generation starts on UNWRAPPED torch (SF-53), and
-    # this warmup capture would trip that guard before any test ran, making
-    # the documented single-family regen recipe impossible to execute.
-    # r7 R77 (fable b2 MED): match EVERY declared golden-flag prefix, not one
-    # hardcoded spelling -- the TORCHLENS_REGEN_ families (export goldens) are
-    # SF-53 wrap-state-guarded too, and the UPDATE_-only carve-out left their
-    # documented regen recipe hard-failing at its own guard.
+    # dispatcher/completeness tables) at session setup too, so no test is
+    # charged for it; wrappers stay installed until an explicit unwrap, which
+    # every full-suite run already implies. Skipped for collect-only sessions
+    # and whenever any golden-update flag is armed: in-process golden families
+    # require generation to start on UNWRAPPED torch (SF-53).
     golden_update_armed = any(
         key.startswith(GOLDEN_FLAG_PREFIXES) and value == "1" for key, value in os.environ.items()
     )
-    # A mutated postprocess step must fail inside a named test, where the
-    # campaign can attribute its killer, rather than crash pytest_configure.
+    # The batchnorm_train_stats_mutated disclosure is once-per-process in the
+    # package but the autouse sentinel reset re-arms it per test; keep it
+    # visible-not-fatal (asserted in tests/test_capopts_truth_batchnorm_warn.py).
+    # Later filterwarnings entries win, so this overrides error::UserWarning.
+    config.addinivalue_line(
+        "filterwarnings",
+        "default:tracing runs the model's REAL forward.*:UserWarning:torchlens(\\.|$)",
+    )
     if (
         not config.option.collectonly
         and not golden_update_armed
@@ -168,9 +217,19 @@ def pytest_configure(config: pytest.Config) -> None:
 
         import torchlens as _tl
 
-        with _warnings.catch_warnings():
-            _warnings.simplefilter("ignore")
-            _tl.trace(torch.nn.Linear(2, 2), torch.zeros(1, 2)).cleanup()
+        # The warm-up is a performance convenience with no correctness
+        # contract. A raise here escapes ``pytest_configure`` and ends the
+        # session with INTERNALERROR before any test runs, so swallow and
+        # report: every suite test that captures still fails attributably.
+        try:
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore")
+                _tl.trace(torch.nn.Linear(2, 2), torch.zeros(1, 2)).cleanup()
+        except Exception as warmup_exc:  # noqa: BLE001 - see note above
+            print(
+                f"tests/conftest.py: warmup capture failed ({warmup_exc!r}); "
+                "continuing unwarmed, the first real test pays the one-time cost",
+            )
     _state._collect_usage_stats = False
     _state._function_call_counts.clear()
     _state._function_call_models.clear()
@@ -190,11 +249,59 @@ def pytest_unconfigure(config: pytest.Config) -> None:
         os.environ.pop("TORCHLENS_TEST_OUTPUTS_DIR", None)
     else:
         os.environ["TORCHLENS_TEST_OUTPUTS_DIR"] = prior
+    _restore_test_threads(config)
     prior_strict = getattr(config, "_tl_prior_collapse_strict", None)
     if prior_strict is None:
         os.environ.pop("TORCHLENS_COLLAPSE_STRICT", None)
     else:
         os.environ["TORCHLENS_COLLAPSE_STRICT"] = prior_strict
+
+
+TEST_THREADS_ENV = "TORCHLENS_TEST_THREADS"
+_THREAD_ENV_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+
+
+def _test_thread_count() -> int:
+    """Return the requested per-process torch thread count (default 1)."""
+
+    raw = os.environ.get(TEST_THREADS_ENV, "1")
+    try:
+        threads = int(raw)
+    except ValueError as exc:
+        raise pytest.UsageError(
+            f"{TEST_THREADS_ENV} must be a positive integer, got {raw!r}"
+        ) from exc
+    if threads < 1:
+        raise pytest.UsageError(f"{TEST_THREADS_ENV} must be a positive integer, got {raw!r}")
+    return threads
+
+
+def _pin_test_threads(config: pytest.Config) -> None:
+    """Set torch and the BLAS/OpenMP environment to the test thread count.
+
+    The environment covers subprocess-spawning tests; the prior values are
+    restored at unconfigure.
+    """
+
+    threads = _test_thread_count()
+    config._tl_prior_thread_env = {name: os.environ.get(name) for name in _THREAD_ENV_VARS}
+    config._tl_prior_torch_threads = torch.get_num_threads()
+    for name in _THREAD_ENV_VARS:
+        os.environ[name] = str(threads)
+    torch.set_num_threads(threads)
+
+
+def _restore_test_threads(config: pytest.Config) -> None:
+    """Undo ``_pin_test_threads``."""
+
+    for name, prior in getattr(config, "_tl_prior_thread_env", {}).items():
+        if prior is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = prior
+    prior_threads = getattr(config, "_tl_prior_torch_threads", None)
+    if prior_threads is not None:
+        torch.set_num_threads(prior_threads)
 
 
 def _is_full_usage_stats_run(config: pytest.Config) -> bool:
@@ -214,56 +321,47 @@ def _is_full_usage_stats_run(config: pytest.Config) -> bool:
     if config.option.keyword:
         return False
     mark_expression = (config.option.markexpr or "").strip().replace("(", "").replace(")", "")
-    # The coverage audit asserts called-functions ⊆ ArgSpec entries, so any
-    # broad subset is sound (a smaller run can only check less, never lie).
-    # Arm it on the nightly fast tier too: with only {"", "not rare"} accepted
-    # no CI invocation ever collected stats and the gate skipped in 100% of CI
-    # runs (b10 R79 / opus-R79-1). Clause-set comparison, not literal strings
-    # (b2 R41/B2R5-15): the docs teach `-m "not rare and not slow"` and the
-    # former string set accepted only the other word order, so both DOCUMENTED
-    # backstop spellings silently disarmed the gate.
+    # The coverage audit asserts called-functions are a subset of the ArgSpec
+    # entries, so any broad tier is sound (a smaller run checks less, never
+    # lies). Compare the clause SET, not the literal string, so either word
+    # order of the documented backstop spellings arms the gate.
     clauses = frozenset(
         clause.strip() for clause in mark_expression.split(" and ") if clause.strip()
     )
-    if not clauses <= {"not rare", "not slow", "not heavy"}:
+    # ``not serial`` too: CI runs the serial tests in a separate non-xdist step,
+    # and excluding them from the xdist session must not disarm the gate.
+    if not clauses <= {"not rare", "not slow", "not heavy", "not serial"}:
         return False
     requested_paths = [Path(str(arg).split("::", maxsplit=1)[0]).resolve() for arg in config.args]
     return requested_paths == [Path(TESTS_DIR).resolve()]
 
 
-def pytest_collection_finish(session: pytest.Session) -> None:
-    """Freeze the import-time heap so per-test gc cost is O(session-created objects).
+#: A test id embedding an object address (the default repr of a lambda or a
+#: plain object used as a parametrize value) differs between processes, so
+#: pytest-xdist workers collect "different tests" and the whole run errors.
+_UNSTABLE_NODEID_RE = re.compile(r" at 0x[0-9a-fA-F]+")
 
-    Collection imports every selected test module up front, so a full session
-    starts with millions of live tracked objects (measured 2026-08-18: 5.17M at
-    test #1 of a 1,000-test smoke slice vs 445k isolated). Every full-heap gc
-    pass -- the explicit ``gc.collect()`` calls in weakref/leak tests AND
-    CPython's automatic threshold gen-2 collections -- scans that heap at
-    O(live objects), charging 4-9s of pure CPU to whichever test happens to be
-    running. Freezing after one settling collect
-    moves the permanent import-time heap into gc's frozen generation, which
-    collections never scan, making per-test gc cost proportional to what the
-    session has created since -- ~200k objects per 1,000 tests, milliseconds.
 
-    Isolation is unchanged: freezing happens BEFORE the first test, so every
-    test-created object stays in the scanned generations and remains fully
-    collectable; frozen objects are import-time state that was never eligible
-    for collection while the session lives. Modules imported lazily mid-session
-    land post-freeze and are simply scanned as normal.
+def _reject_process_unstable_nodeids(items: list[pytest.Item]) -> None:
+    """Fail collection when any test id carries a per-process object address.
 
-    The shared package-source corpus (``tests/_source_corpus.py``) is
-    prewarmed here, before the freeze, iff a consumer test module was
-    imported during collection: built lazily mid-session its ~270 MB of AST
-    nodes would be scanned by every later gen-2 collection — exactly the
-    per-test gc drag this freeze exists to kill.
+    Parameters
+    ----------
+    items:
+        Collected test items.
+
+    Raises
+    ------
+    pytest.UsageError
+        Naming every unstable id; give the parametrization explicit ``ids=``.
     """
 
-    del session
-    corpus = sys.modules.get("_source_corpus")
-    if corpus is not None:
-        corpus.prewarm()
-    gc.collect()
-    gc.freeze()
+    unstable = [item.nodeid for item in items if _UNSTABLE_NODEID_RE.search(item.nodeid)]
+    if unstable:
+        raise pytest.UsageError(
+            "test ids embed a per-process object address (breaks pytest-xdist and "
+            "-k selection); give these parametrizations explicit ids=: " + ", ".join(unstable)
+        )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -276,13 +374,19 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     verdict-identity check on everything else.
     """
 
-    if not __debug__:
-        skip_no_assertions = pytest.mark.skip(
-            reason="requires assertions; the postprocess audit cannot run under python -O"
-        )
+    _reject_process_unstable_nodeids(items)
+
+    from known_failures import apply_xfail_marks
+
+    apply_xfail_marks(items)
+
+    # ``cuda`` capability marker: the GPU leg selects these with ``-m cuda``;
+    # without a device they skip here even if a site forgot its own skipif.
+    if not torch.cuda.is_available():
+        skip_no_cuda = pytest.mark.skip(reason="needs a CUDA device (cuda marker)")
         for item in items:
-            if item.get_closest_marker("requires_assertions") is not None:
-                item.add_marker(skip_no_assertions)
+            if item.get_closest_marker("cuda") is not None:
+                item.add_marker(skip_no_cuda)
 
     collect_usage_stats = _is_full_usage_stats_run(config)
     _state._collect_usage_stats = collect_usage_stats
@@ -294,23 +398,20 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         reason="ArgSpec usage coverage requires an unfiltered full tests/ run"
     )
     coverage_tests = []
+    lint_tests = []
     other_tests = []
     for item in items:
         if "test_arg_positions" in item.nodeid:
             if not collect_usage_stats:
                 item.add_marker(skip_partial_usage_stats)
             coverage_tests.append(item)
+        elif "test_marker_lint" in item.nodeid:
+            # The duration-budget lint reads offenders recorded during the run,
+            # so it must execute after every other test in the session.
+            lint_tests.append(item)
         else:
             other_tests.append(item)
-    items[:] = other_tests + coverage_tests
-    # Pre-fill shared scanner caches once for modules selected in this session.
-    warmed: set[int] = set()
-    for item in items:
-        module = getattr(item, "module", None)
-        warm = getattr(module, "warm_scan_caches", None)
-        if warm is not None and id(module) not in warmed:
-            warmed.add(id(module))
-            warm()
+    items[:] = other_tests + coverage_tests + lint_tests
 
 
 def _coverage_requested(config: pytest.Config) -> bool:
@@ -332,7 +433,7 @@ def _coverage_requested(config: pytest.Config) -> bool:
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Write explicitly requested coverage artifacts and reset usage statistics.
+    """Reset usage stats, then write coverage artifacts when pytest-cov ran.
 
     Parameters
     ----------
@@ -365,349 +466,3 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         cov.html_report(directory=html_dir, skip_empty=True)
     except (FileNotFoundError, NoDataError):
         return
-
-
-# Fixtures
-
-
-@pytest.fixture(autouse=True, scope="session")
-def _isolated_torchlens_cache(tmp_path_factory: pytest.TempPathFactory):
-    """Point ``TORCHLENS_CACHE_DIR`` at a fresh per-session directory.
-
-    ``tl.trace(..., cache=True)`` without an explicit ``cache_dir=`` falls back to
-    ``~/.cache/torchlens`` (read lazily from ``TORCHLENS_CACHE_DIR`` on every call).
-    A shared on-disk cache makes cache-hit assertions order- and history-dependent:
-    a stale entry left by an earlier session or another worktree turns a
-    first-capture cache-miss assertion into a phantom failure. Every test session
-    gets its own empty cache root instead; the prior environment is restored on
-    teardown so the suite never leaks state into the invoking shell.
-    """
-
-    prior = os.environ.get("TORCHLENS_CACHE_DIR")
-    os.environ["TORCHLENS_CACHE_DIR"] = str(tmp_path_factory.mktemp("torchlens_cache"))
-    yield
-    if prior is None:
-        os.environ.pop("TORCHLENS_CACHE_DIR", None)
-    else:
-        os.environ["TORCHLENS_CACHE_DIR"] = prior
-
-
-def _copy_sentinel_value(value: object) -> object:
-    """Return an independent snapshot of a supported warn-once value.
-
-    Parameters
-    ----------
-    value:
-        Boolean, set, or dictionary sentinel value.
-
-    Returns
-    -------
-    object
-        Independent mutable copy, or the original immutable value.
-    """
-
-    if isinstance(value, (set, dict, weakref.WeakSet)):
-        return value.copy()
-    return value
-
-
-def _set_sentinel_default(module: ModuleType, name: str, default: object) -> None:
-    """Reset one imported warn-once sentinel to its cold-process value.
-
-    Parameters
-    ----------
-    module:
-        Imported module that owns the sentinel.
-    name:
-        Module attribute name.
-    default:
-        Cold-process sentinel value.
-    """
-
-    _assign_sentinel(module, name, _copy_sentinel_value(default))
-
-
-def _assign_sentinel(module: ModuleType, name: str, value: object) -> None:
-    """Write a sentinel value, mutating container sentinels IN PLACE.
-
-    Rebinding a set/dict/WeakSet sentinel booby-traps every ``from module
-    import NAME`` alias in a test module: the alias keeps the OLD object, so
-    its reads and ``.clear()`` calls silently target dead state after the
-    first fixture cycle (r7 R76/R77 b2 remainder — the
-    ``_WARNED_DEPRECATIONS`` from-import in test_conditional_lifecycle was
-    exactly this). Same-type containers are cleared and refilled instead;
-    immutable sentinels (bools, None) still rebind.
-    """
-
-    current = getattr(module, name, _MISSING)
-    if type(current) is type(value) and isinstance(current, (set, dict, weakref.WeakSet)):
-        current.clear()
-        current.update(value)
-    else:
-        setattr(module, name, value)
-
-
-@pytest.fixture(autouse=True)
-def _reset_warn_once_sentinels() -> Iterator[None]:
-    """Give every test fresh warn-once state and restore its incoming state."""
-
-    snapshots: dict[tuple[str, str], object] = {}
-    for module_name, name, default in _WARN_ONCE_SENTINELS:
-        module = sys.modules.get(module_name)
-        if module is None:
-            snapshots[(module_name, name)] = _MISSING
-            continue
-        snapshots[(module_name, name)] = _copy_sentinel_value(getattr(module, name, _MISSING))
-        _set_sentinel_default(module, name, default)
-
-    try:
-        yield
-    finally:
-        for module_name, name, default in _WARN_ONCE_SENTINELS:
-            module = sys.modules.get(module_name)
-            if module is None:
-                continue
-            prior = snapshots[(module_name, name)]
-            if prior is _MISSING:
-                _set_sentinel_default(module, name, default)
-            else:
-                _assign_sentinel(module, name, prior)
-
-
-#: Public content registries that tests mutate through PUBLIC registration
-#: APIs with no unregister spelling (r7 R76, sol b2 MED): a registered
-#: container class or custom op rule was a permanent process-global, so
-#: full-suite and targeted runs saw different registry state depending on
-#: which tests had run first. Snapshot/restore per test, same lazy
-#: sys.modules discipline as the warn-once sentinels. The third column
-#: names the registry's own lock attribute (or None): the container
-#: registry has a writer/iterator race lock that the restore must honor.
-#:
-#: r7 R76/R77 adjudication (fixwave-7): two same-day parallel lanes each
-#: landed a twin of this fixture — one lazy but lockless, one locked but
-#: force-importing ``capture.flops`` suite-wide. This is the MERGED single
-#: fixture: lazy module lookup (flops stays unimported until a test needs
-#: it) AND lock-disciplined container access.
-_CONTENT_REGISTRIES: tuple[tuple[str, str, str | None], ...] = (
-    ("torchlens.ir.container", "_CONTAINER_REGISTRY", "_CONTAINER_REGISTRY_LOCK"),
-    ("torchlens.capture.flops", "_CUSTOM_OP_RULES", None),
-)
-
-
-@contextmanager
-def _registry_lock(module: object, lock_name: str | None) -> Iterator[None]:
-    """Hold the registry's own lock when it declares one."""
-
-    if lock_name is None:
-        yield
-    else:
-        with getattr(module, lock_name):
-            yield
-
-
-@pytest.fixture(autouse=True)
-def _restore_content_registries() -> Iterator[None]:
-    """Restore registered-container and custom-op-rule state after every test."""
-
-    snapshots: dict[tuple[str, str], object] = {}
-    for module_name, name, lock_name in _CONTENT_REGISTRIES:
-        module = sys.modules.get(module_name)
-        if module is None:
-            snapshots[(module_name, name)] = _MISSING
-            continue
-        with _registry_lock(module, lock_name):
-            snapshots[(module_name, name)] = dict(getattr(module, name))
-    try:
-        yield
-    finally:
-        for module_name, name, lock_name in _CONTENT_REGISTRIES:
-            module = sys.modules.get(module_name)
-            if module is None:
-                continue
-            prior = snapshots[(module_name, name)]
-            if prior is _MISSING:
-                # Module imported DURING the test: whatever it registered at
-                # import time is legitimate baseline; drop only test-added
-                # rows is impossible to distinguish, so leave as-is.
-                continue
-            with _registry_lock(module, lock_name):
-                registry = getattr(module, name)
-                registry.clear()
-                registry.update(prior)
-
-
-_CAPABILITY_DEPENDENT_CACHES: tuple[tuple[str, str], ...] = (
-    # Second-layer lru_caches whose cached value DERIVES from a lazy HAS_*
-    # capability probe (grind p5 §3.9: the b7fe953e class one layer down).
-    # Restoring the _torch_compat latches alone leaves a value computed under
-    # a stubbed runtime frozen in these caches for the whole process, so the
-    # probe restore must clear them too. The census in
-    # tests/test_marker_lint.py::test_capability_dependent_caches_are_cleared
-    # keeps this list complete.
-    ("torchlens._runnable_state_context", "_fake_tensor_mode_class"),
-    ("torchlens._runnable_state_context", "_count_bounded_fake_tensor_mode_class"),
-)
-
-
-def _clear_capability_dependent_caches() -> None:
-    """Clear every registered probe-derived lru_cache (loaded modules only)."""
-
-    for module_name, attr in _CAPABILITY_DEPENDENT_CACHES:
-        module = sys.modules.get(module_name)
-        if module is None:
-            continue
-        getattr(module, attr).cache_clear()
-
-
-@pytest.fixture(autouse=True)
-def _restore_lazy_capability_probes() -> Iterator[None]:
-    """Restore lazy ``HAS_*`` capability latches to their pre-test state.
-
-    The lazy ``_torch_compat`` probes latch on first use, so a test that stubs
-    ``sys.modules`` (or otherwise shims the runtime) while a probe fires
-    poisons the flag for the whole process -- the recorded ``b7fe953e``
-    incident class, previously patched per-test rather than systemically.
-    Snapshotting before and restoring after every test bounds any mis-latch to
-    the test that caused it; an un-latched probe simply re-probes on its next
-    use, which is cheap and hits the real runtime. Second-layer caches built
-    FROM a probed capability (``_CAPABILITY_DEPENDENT_CACHES``) are cleared in
-    the same breath -- restoring the flag while a derived cache keeps the
-    poisoned value would just move the incident one layer down.
-    """
-
-    from torchlens.utils import _torch_compat
-
-    snapshot = _torch_compat.capability_probe_snapshot()
-    try:
-        yield
-    finally:
-        _torch_compat.restore_capability_probes(snapshot)
-        _clear_capability_dependent_caches()
-
-
-@pytest.fixture(autouse=True)
-def _reset_rng_state() -> Iterator[None]:
-    """Seed each test deterministically and restore all incoming RNG settings."""
-
-    python_state = random.getstate()
-    numpy_state = np.random.get_state()
-    torch_state = torch.random.get_rng_state()
-    cuda_initialized = torch.cuda.is_initialized()
-    cuda_states = torch.cuda.get_rng_state_all() if cuda_initialized else None
-    deterministic = torch.are_deterministic_algorithms_enabled()
-    deterministic_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
-
-    random.seed(0)
-    np.random.seed(0)
-    torch.manual_seed(0)
-    if cuda_initialized:
-        torch.cuda.manual_seed_all(0)
-    torch.use_deterministic_algorithms(True)
-
-    try:
-        yield
-    finally:
-        random.setstate(python_state)
-        np.random.set_state(numpy_state)
-        torch.random.set_rng_state(torch_state)
-        if cuda_states is not None:
-            torch.cuda.set_rng_state_all(cuda_states)
-        torch.use_deterministic_algorithms(deterministic, warn_only=deterministic_warn_only)
-
-
-@pytest.fixture(autouse=True)
-def _headless_render_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Render real artifacts without launching desktop viewers during tests."""
-    monkeypatch.delenv("DISPLAY", raising=False)
-    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-    monkeypatch.setenv("SSH_CONNECTION", "torchlens-tests")
-
-
-@pytest.fixture(autouse=True)
-def _split_backend_debug_environment(
-    monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
-) -> None:
-    """Keep backend tests independent from host DEBUG settings.
-
-    tinygrad expects ``DEBUG`` to be an integer, while developer shells may set
-    it to a textual value such as ``release``.  The split adapters do not need
-    the host-level debug setting, so use tinygrad's quiet default for every test.
-    """
-
-    if request.node.nodeid.startswith("tests/split/"):
-        monkeypatch.setenv("DEBUG", "0")
-
-
-@pytest.fixture
-def default_input1():
-    return torch.rand(6, 3, 224, 224)
-
-
-@pytest.fixture
-def default_input2():
-    return torch.rand(6, 3, 224, 224)
-
-
-@pytest.fixture
-def default_input3():
-    return torch.rand(6, 3, 224, 224)
-
-
-@pytest.fixture
-def default_input4():
-    return torch.rand(6, 3, 224, 224)
-
-
-@pytest.fixture
-def zeros_input():
-    return torch.zeros(6, 3, 224, 224)
-
-
-@pytest.fixture
-def ones_input():
-    return torch.ones(6, 3, 224, 224)
-
-
-@pytest.fixture
-def vector_input():
-    return torch.rand(5)
-
-
-@pytest.fixture
-def input_2d():
-    return torch.rand(5, 5)
-
-
-@pytest.fixture
-def input_complex():
-    return (torch.complex(torch.rand(3, 3), torch.rand(3, 3)),)
-
-
-@pytest.fixture
-def small_input():
-    return torch.rand(2, 3, 32, 32)
-
-
-@pytest.fixture
-def seq_input():
-    """(seq_len, batch, embed_dim) for transformer models."""
-    return torch.rand(10, 2, 16)
-
-
-@pytest.fixture
-def token_input():
-    """Integer tokens for embedding models."""
-    return torch.randint(0, 100, (2, 10))
-
-
-@pytest.fixture
-def input_3d():
-    """Volumetric input for Conv3d models."""
-    return torch.rand(1, 1, 4, 4, 4)
-
-
-@pytest.fixture
-def input_1d_seq():
-    """1D sequence input for Conv1d models."""
-    return torch.rand(2, 3, 16)

@@ -5,7 +5,7 @@ Sources (design-of-record section 7):
 1. Static AST scan — every ``<expr>.<field>`` and ``getattr(<expr>, "<field>"
    [, default])`` site over ``torchlens/`` where ``<field>`` is an OpEvent
    field name. Over-approximates by name (conservative); records
-   ``has_default`` so getattr default-reliers are explicit (Opus v4 note N10
+   ``has_default`` so getattr default-reliers are explicit (review v4 note N10
    lineage: the strict protocol must raise an AttributeError subclass for
    these sites to keep today's semantics).
 2. Runtime read instrumentation — ``OpEvent.__getattribute__`` recording over
@@ -35,7 +35,7 @@ from typing import Any
 
 from _source_corpus import PACKAGE_ROOT as _CORPUS_PACKAGE_ROOT, package_ast, package_files
 
-from torchlens.ir.events import OpEvent
+from torchlens._ir.events import OpEvent
 
 
 def _require_corpus_root(package_root: Path) -> None:
@@ -150,10 +150,10 @@ def runtime_read_recorder() -> Iterator[dict[str, set[str]]]:
 def step0_trace_read_recorder() -> Iterator[set[str]]:
     """Record trace attribute names read during step-0 materialization."""
 
-    from torchlens.data_classes.trace import Trace
+    from torchlens._data_classes.trace import Trace
 
-    postprocess_module = importlib.import_module("torchlens.postprocess")
-    materialize_module = importlib.import_module("torchlens.postprocess._materialize")
+    postprocess_module = importlib.import_module("torchlens._postprocess")
+    materialize_module = importlib.import_module("torchlens._postprocess._materialize")
     original_public = postprocess_module.materialize_from_events
     original_direct = materialize_module.materialize_from_events
     original_getattribute = Trace.__getattribute__
@@ -166,10 +166,10 @@ def step0_trace_read_recorder() -> Iterator[set[str]]:
             observed.add(name)
         return original_getattribute(self, name)
 
-    def observing(trace: Any, events: Any) -> None:
+    def observing(trace: Any, events: Any, *rest: Any) -> None:
         recording_active[0] = True
         try:
-            original_direct(trace, events)
+            original_direct(trace, events, *rest)
         finally:
             recording_active[0] = False
 

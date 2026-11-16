@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 
+from .._comparison_tensor import _comparison_tensor
+from .._data_classes._lookup_kinds import op_at
+from .._data_classes._module_edit_sites import edited_stand_in, is_mapped_replacement
+from .._data_classes.func_call_location import display_frame
+from .._utils._multipass_access import get_multipass_attr, is_multipass_layer
+from .._utils._record_group_table import record_member
+from ..backends.registry import TORCH_BACKEND_NAME, resolve_backend_spec
+
 if TYPE_CHECKING:
-    from torchlens.data_classes.op import Op
-    from torchlens.data_classes.trace import Trace
+    from torchlens._data_classes.op import Op
+    from torchlens._data_classes.trace import Trace
 
 
 def _ordered_ops(trace: Trace) -> list[Op]:
@@ -27,7 +37,7 @@ def _ordered_ops(trace: Trace) -> list[Op]:
     """
 
     return sorted(
-        trace.layer_list,
+        trace._layer_list,
         key=lambda op: (
             int(getattr(op, "step_index", 0) or 0),
             bool(getattr(op, "is_input", False)),
@@ -38,7 +48,11 @@ def _ordered_ops(trace: Trace) -> list[Op]:
 
 
 def _source_line(op: Op) -> str | None:
-    """Return the first source location for an op.
+    """Return the source location of the line that ran an op.
+
+    The location is the innermost recorded frame outside torch's own code
+    (:func:`torchlens._data_classes.func_call_location.display_frame`), the
+    same line an op's card shows.
 
     Parameters
     ----------
@@ -51,10 +65,9 @@ def _source_line(op: Op) -> str | None:
         ``"file:line"`` or ``None`` when no source context is present.
     """
 
-    context = getattr(op, "code_context", None) or ()
-    if not context:
+    location = display_frame(record_member(op, "code_context", None))
+    if location is None:
         return None
-    location = context[0]
     file_name = getattr(location, "file", None)
     line_number = getattr(location, "line_number", None)
     if file_name is None or line_number is None:
@@ -85,7 +98,7 @@ def _op_label(op: Op) -> str:
 
     Reading the per-pass ``label`` on an aggregate recurrent ``Layer`` trips the
     deliberate ``ValueError`` multi-pass tripwire, so route through the shared
-    :func:`~torchlens.utils._multipass_access.get_multipass_attr` helper (the one
+    :func:`~torchlens._utils._multipass_access.get_multipass_attr` helper (the one
     documented pattern for the whole sprint) and fall back to the aggregate
     ``layer_label``, which is the honest identifier for a multi-pass Layer.
 
@@ -99,8 +112,6 @@ def _op_label(op: Op) -> str:
     str
         Op label, or the aggregate ``layer_label`` for a multi-pass Layer.
     """
-
-    from ..utils._multipass_access import get_multipass_attr
 
     label = get_multipass_attr(op, "label", None, multipass=None)
     if isinstance(label, str) and label:
@@ -126,6 +137,52 @@ def _compute_ops(trace: Trace) -> list[Op]:
     return [op for op in _ordered_ops(trace) if int(getattr(op, "step_index", 0) or 0) > 0]
 
 
+def _compared_site_ops(trace: Trace) -> dict[str, Any]:
+    """Return the compute ops a cross-trace comparison pairs, keyed by pass-qualified label.
+
+    A module edit records its edited value in a replacement op after the
+    module's last op (``_data_classes._module_edit_sites``); the unedited
+    trace has no such op. The edited site is therefore compared at the last
+    op's label with the replacement's value, so the row names the edited
+    module's op and the edited value, and the replacement gets no row of its
+    own. A replacement that does not record its parent keeps its own row.
+
+    Parameters
+    ----------
+    trace:
+        Completed TorchLens trace.
+
+    Returns
+    -------
+    dict[str, Any]
+        Label to the op whose value the comparison reads, in execution order.
+    """
+
+    ops = _compute_ops(trace)
+    return {
+        _op_label(op): edited_stand_in(op, trace)
+        for op in ops
+        if not is_mapped_replacement(op, trace)
+    }
+
+
+def _multipass_layer_or_none(trace: Trace, label: Any) -> Any | None:
+    """Return the aggregate Layer a bare multi-pass label names, else ``None``.
+
+    A bare multi-pass label names a Layer, not one op (every pass is a distinct
+    op); the lineage contract still owes the honest "select a pass" message,
+    which needs the aggregate record's pass count.
+    """
+
+    if not isinstance(label, str):
+        return None
+    try:
+        layer = trace.layers[label]
+    except Exception:  # noqa: BLE001 - an unresolvable label keeps the door's own message.
+        return None
+    return layer if is_multipass_layer(layer) else None
+
+
 def _resolve_op(trace: Trace, op_or_label: Any) -> tuple[Op | None, str | None]:
     """Resolve an op-like object or lookup key without raising.
 
@@ -142,14 +199,14 @@ def _resolve_op(trace: Trace, op_or_label: Any) -> tuple[Op | None, str | None]:
         Resolved op and error message.
     """
 
-    from ..utils._multipass_access import is_multipass_layer
-
     candidate = op_or_label
     if not (hasattr(candidate, "parents") and hasattr(candidate, "children")):
         try:
-            candidate = trace[op_or_label]
+            candidate = op_at(trace, op_or_label)  # a module name names its output op
         except Exception as exc:  # noqa: BLE001 - debug helpers report odd inputs instead of raising.
-            return None, f"unavailable: {exc}"
+            candidate = _multipass_layer_or_none(trace, op_or_label)
+            if candidate is None:
+                return None, f"unavailable: {exc}"
     # An aggregate recurrent Layer is per-pass ambiguous: its graph edges are
     # bare labels that re-resolve to aggregates and its per-pass fields trip the
     # multi-pass ValueError tripwire. Refuse it honestly (non-raising, per the
@@ -178,13 +235,15 @@ def _resolve_op(trace: Trace, op_or_label: Any) -> tuple[Op | None, str | None]:
     return None, f"unavailable: {op_or_label!r} did not resolve to an op"
 
 
-def _safe_out(op: Op) -> tuple[Any | None, str | None]:
+def _safe_out(op: Op, codec: Any = None) -> tuple[Any | None, str | None]:
     """Read ``op.out`` and convert known unavailable cases into a reason.
 
     Parameters
     ----------
     op:
         TorchLens op.
+    codec:
+        Optional producing backend codec for comparison on host tensors.
 
     Returns
     -------
@@ -195,7 +254,8 @@ def _safe_out(op: Op) -> tuple[Any | None, str | None]:
     if not bool(getattr(op, "has_saved_activation", False)):
         return None, "unsaved"
     try:
-        return op.out, None
+        value = op.out
+        return (value if codec is None else _comparison_tensor(value, codec)), None
     except ValueError as exc:
         return None, str(exc)
 
@@ -266,3 +326,201 @@ def _op_from_label(trace: Trace, label: str) -> Op | None:
 
     op, _ = _resolve_op(trace, label)
     return op
+
+
+def _nonfinite_kind(tensor: torch.Tensor) -> str:
+    """Classify non-finite values in a tensor.
+
+    Parameters
+    ----------
+    tensor:
+        Tensor to inspect.
+
+    Returns
+    -------
+    str
+        ``"nan"``, ``"inf"``, ``"nan+inf"``, or ``"none"``.
+    """
+
+    if not torch.is_floating_point(tensor) and not torch.is_complex(tensor):
+        return "none"
+    has_nan = bool(torch.isnan(tensor).any().item())
+    has_inf = bool(torch.isinf(tensor).any().item())
+    return _kind_from_flags(has_nan, has_inf)
+
+
+def _nonfinite_kind_of(value: Any, codec: Any) -> str:
+    """Classify non-finite values in a saved output from any capture backend.
+
+    Torch tensors use :func:`_nonfinite_kind`; arrays from the other backends are
+    copied to host NumPy through the trace backend's payload codec.
+
+    Parameters
+    ----------
+    value:
+        Saved op output.
+    codec:
+        ``get_payload_codec(trace._provenance_backend)`` for the producing backend.
+
+    Returns
+    -------
+    str
+        ``"nan"``, ``"inf"``, ``"nan+inf"``, or ``"none"`` (also for values the
+        backend codec cannot convert, such as non-array outputs).
+    """
+
+    if isinstance(value, torch.Tensor):
+        return _nonfinite_kind(value)
+    try:
+        array = codec.to_numpy(value).array
+    except (TypeError, ValueError):
+        return "none"
+    if array.dtype.kind not in "fc":
+        return "none"
+    return _kind_from_flags(bool(np.isnan(array).any()), bool(np.isinf(array).any()))
+
+
+def _runs_on_torch(model: Any, inputs: Any, trace_kwargs: dict[str, Any]) -> bool:
+    """Report whether a :func:`torchlens.trace` call would capture on the torch backend.
+
+    Only PyTorch eager capture honours ``on_nonfinite="raise"``; the other backends
+    ignore it, so NaN finders scan a full capture's saved outputs there instead.
+
+    Parameters
+    ----------
+    model:
+        Model to execute.
+    inputs:
+        Positional model input.
+    trace_kwargs:
+        Caller's :func:`torchlens.trace` keyword arguments.
+
+    Returns
+    -------
+    bool
+        ``True`` when the call resolves to the torch backend.
+    """
+
+    spec = resolve_backend_spec(
+        trace_kwargs.get("backend"), model, inputs, trace_kwargs.get("input_kwargs")
+    )
+    return spec.name == TORCH_BACKEND_NAME
+
+
+def _kind_from_flags(has_nan: bool, has_inf: bool) -> str:
+    """Name the non-finite kind from NaN and Inf presence flags.
+
+    Parameters
+    ----------
+    has_nan:
+        Whether any NaN is present.
+    has_inf:
+        Whether any Inf is present.
+
+    Returns
+    -------
+    str
+        ``"nan"``, ``"inf"``, ``"nan+inf"``, or ``"none"``.
+    """
+
+    if has_nan and has_inf:
+        return "nan+inf"
+    if has_nan:
+        return "nan"
+    if has_inf:
+        return "inf"
+    return "none"
+
+
+def _module_address(op: Op) -> str | None:
+    """Return the containing module address recorded for an op.
+
+    Parameters
+    ----------
+    op:
+        Operation whose module metadata should be read.
+
+    Returns
+    -------
+    str | None
+        Atomic module address or the innermost containing module address.
+    """
+
+    atomic_address = record_member(op, "atomic_module_address", None)
+    if isinstance(atomic_address, str):
+        return atomic_address
+    # Live (mid-capture) ops have no atomic_module_address yet; the fallback
+    # reads the innermost module CALL label ("0:1"), which carries the pass
+    # qualifier -- strip it so the field keeps its ADDRESS contract.
+    module = getattr(op, "module", None)
+    if isinstance(module, tuple) and module and isinstance(module[0], str):
+        return module[0].rsplit(":", 1)[0]
+    if isinstance(module, str):
+        return module.rsplit(":", 1)[0]
+    return None
+
+
+def _op_by_any_label(trace: Trace) -> dict[str, Op]:
+    """Build a lookup of final and raw labels to trace ops.
+
+    Parameters
+    ----------
+    trace:
+        Trace whose graph labels should be indexed.
+
+    Returns
+    -------
+    dict[str, Op]
+        Label lookup for parent traversal.
+    """
+
+    lookup: dict[str, Op] = {}
+    for op in _ordered_ops(trace):
+        for label in (
+            getattr(op, "label", None),
+            getattr(op, "layer_label", None),
+            getattr(op, "_label_raw", None),
+        ):
+            if isinstance(label, str):
+                lookup[label] = op
+    return lookup
+
+
+def _unsaved_ancestors(trace: Trace, op: Op, label_of: Callable[[Op], str]) -> tuple[str, ...]:
+    """Return unsaved computational ancestors of an op in execution order.
+
+    Parameters
+    ----------
+    trace:
+        Trace containing ``op``.
+    op:
+        First saved non-finite op.
+    label_of:
+        Renders an op's public label; ancestors are keyed and returned by it.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Labels of ancestor ops that do not retain output payloads.
+    """
+
+    by_label = _op_by_any_label(trace)
+    pending = list(getattr(op, "parents", ()) or ())
+    visited: set[str] = set()
+    unsaved: set[str] = set()
+    while pending:
+        parent_label = pending.pop()
+        if parent_label in visited:
+            continue
+        visited.add(parent_label)
+        parent = by_label.get(parent_label)
+        if parent is None:
+            continue
+        pending.extend(getattr(parent, "parents", ()) or ())
+        if not bool(getattr(parent, "is_input", False)) and not bool(
+            getattr(parent, "has_saved_activation", False)
+        ):
+            unsaved.add(label_of(parent))
+    return tuple(
+        label_of(candidate) for candidate in _ordered_ops(trace) if label_of(candidate) in unsaved
+    )

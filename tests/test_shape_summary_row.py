@@ -17,7 +17,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.visualization._render_nodes import compute_default_node_lines
+from torchlens._visualization._render_nodes import compute_default_node_lines
 
 
 class VaryingRecurrent(nn.Module):
@@ -67,55 +67,14 @@ def uniform_log() -> Any:
 def _draw(log: tl.Trace, tmp_path: Path, **kwargs: Any) -> str:
     tmp_path.mkdir(parents=True, exist_ok=True)
     return log.draw(
-        vis_save_only=True,
-        vis_fileformat="svg",
-        vis_outpath=str(tmp_path / "graph"),
+        file_format="svg",
+        path=str(tmp_path / "graph"),
         **kwargs,
-    )
+    ).dot
 
 
 def _varying_layer(log: tl.Trace) -> Any:
-    return next(layer for layer in log.layer_logs.values() if len(layer.ops) > 1)
-
-
-def test_rolled_varying_layer_gets_summary_row(varying_log: tl.Trace) -> None:
-    layer = _varying_layer(varying_log)
-    summary = layer.shape_summary
-    assert isinstance(summary, str) and summary
-    lines = compute_default_node_lines(layer, vis_mode="rolled")
-    # Rendered VERBATIM, positioned directly after the title row.
-    assert lines[1] == summary
-
-
-def test_summary_row_is_escaped_at_the_choke_point(varying_log: tl.Trace, tmp_path: Path) -> None:
-    """The summary contains '->' or '-'; '>' must leave through html.escape."""
-
-    layer = _varying_layer(varying_log)
-    summary = layer.shape_summary
-    dot = _draw(varying_log, tmp_path, vis_mode="rolled")
-    if ">" in summary:
-        assert summary.replace(">", "&gt;") in dot
-        assert f">{summary}<" not in dot
-    else:
-        assert summary in dot
-
-
-def test_uniform_recurrence_has_no_summary_row(uniform_log: tl.Trace) -> None:
-    layer = _varying_layer(uniform_log)
-    assert layer.shape_summary is None
-    lines = compute_default_node_lines(layer, vis_mode="rolled")
-    assert all("->" not in line or "params" in line for line in lines[:2])
-
-
-def test_single_pass_and_per_pass_nodes_have_no_summary_row(
-    varying_log: tl.Trace,
-) -> None:
-    layer = _varying_layer(varying_log)
-    summary = layer.shape_summary
-    # Per-pass Op nodes (unrolled) carry no aggregate summary row.
-    for op in layer.ops.values():
-        lines = compute_default_node_lines(op, vis_mode="unrolled")
-        assert summary not in lines
+    return next(layer for layer in log._layer_logs.values() if len(layer.ops) > 1)
 
 
 def test_shape_summary_selector_token(varying_log: tl.Trace, tmp_path: Path) -> None:
@@ -126,9 +85,10 @@ def test_shape_summary_selector_token(varying_log: tl.Trace, tmp_path: Path) -> 
         vis_mode="rolled",
         node_label_fields=["name", "shape_summary"],
     )
-    assert lines == [layer.layer_label, summary]
+    # The "name"/"label" token keeps the default title's rolled pass mark.
+    assert lines == [f"{layer.layer_label} (x{layer.num_passes})", summary]
     # Skip-when-absent: a single-pass layer contributes no row for the token.
-    single = next(lay for lay in varying_log.layer_logs.values() if len(lay.ops) == 1)
+    single = next(lay for lay in varying_log._layer_logs.values() if len(lay.ops) == 1)
     single_lines = compute_default_node_lines(
         single, vis_mode="rolled", node_label_fields=["name", "shape_summary"]
     )

@@ -1,8 +1,8 @@
 """Draw-option combination TOTALITY test (viz-correctness lane, 2026-08-19).
 
 The hardening campaign was category-driven and per-file, so nobody exercised
-the CROSS-PRODUCT of user-facing ``draw()`` options: ``node_mode="profiling"``
-worked, ``vis_call_depth=1`` worked, and together they crashed on any
+the CROSS-PRODUCT of user-facing ``draw()`` options: ``node_style="profiling"``
+worked, ``depth=1`` worked, and together they crashed on any
 collapsed module. This suite closes that class the same way
 ``test_marker_combination_totality.py`` closes the marker table:
 
@@ -23,10 +23,13 @@ This suite owns crash/refusal totality; warning hygiene is owned by the
 dedicated deprecation and advisory suites, so draws run with warnings
 visible-but-not-fatal.
 
-Tiering (the smoke family-aggregate budget rules the full sweep out of the
-5s tier): the signature tripwire, the pinned refusal rows, and the
-high-risk CORE pair family run at smoke on every commit; the exhaustive
-singles + all-pairs sweep is ``heavy`` and runs in the ``not slow`` tiers.
+Sampling (test-shape ruling tests.4): the parametrized cells are the
+documented combinations: every pinned refusal, every option alone, the CORE
+structural pairs whose combinations have historically crashed, and the pairs
+that alone reach a library branch (``_COVERAGE_PAIRS``). One property test
+walks the whole generator (every single and every unordered pair, about 260
+seconds of draws, so ``slow``) and names every combination that neither
+draws nor refuses with its pinned code.
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ from __future__ import annotations
 import inspect
 import itertools
 import warnings
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +57,7 @@ from torchlens._errors import InvalidArgumentError
 # ALIAS        deprecated or legacy alias sentinel for a canonical option;
 #              pairing two spellings of one canonical is incoherent, and the
 #              alias hop itself is asserted by the dedicated deprecation
-#              suites (test_api_renames / test_deprecation_inventory).
+#              suites (scripts/checks/deprecation_inventory.py).
 # DEFAULT_ONLY declared but exercised at its default: the non-default value
 #              needs an optional runtime this suite must not depend on.
 # ---------------------------------------------------------------------------
@@ -103,50 +106,47 @@ def _unit_overlay(layer_log: Any) -> float:
 #: option -> (classification, probe value or reason string)
 DECLARED: dict[str, tuple[str, Any]] = {
     # -- harness plumbing (supplied on every draw below) --------------------
-    "vis_outpath": (HARNESS, "output sink; a fresh tmp path every draw"),
-    "vis_save_only": (HARNESS, "True everywhere: no display side effects"),
-    "vis_fileformat": (HARNESS, '"dot" everywhere: no graphviz binary cost'),
-    # -- alias sentinels (dedicated deprecation suites own the hop) ---------
-    "vis_opt": (ALIAS, "vis_mode / view"),
-    "view": (ALIAS, "vis_mode"),
-    "depth": (ALIAS, "vis_call_depth"),
-    "renderer": (ALIAS, "vis_renderer"),
-    "layout": (ALIAS, "vis_node_placement"),
-    "node_style": (ALIAS, "node_mode"),
-    "vis_node_mode": (ALIAS, "node_mode (deprecated)"),
-    "vis_buffers": (ALIAS, "show_buffer_layers (deprecated)"),
-    "vis_direction": (ALIAS, "direction (deprecated)"),
+    "path": (HARNESS, "output sink; a fresh tmp path every draw"),
+    "open_viewer": (HARNESS, "False everywhere (the default): no display side effects"),
+    "file_format": (HARNESS, '"dot" everywhere: no graphviz binary cost'),
     # -- default-only ---------------------------------------------------------
-    "vis_renderer": (DEFAULT_ONLY, 'non-default "dagua" needs the optional dagua runtime'),
+    "renderer": (DEFAULT_ONLY, '"graphviz" is the only built-in renderer'),
+    "graph": (DEFAULT_ONLY, "backward and combined graphs need a captured backward pass"),
+    "bwd": (DEFAULT_ONLY, "backward and combined graphs only"),
+    "show_module_paths": (DEFAULT_ONLY, "backward graph only"),
+    "show_grad_values": (DEFAULT_ONLY, "backward graph only"),
+    "backward_node_spec_fn": (DEFAULT_ONLY, "combined graph only"),
+    "intervening_cluster": (DEFAULT_ONLY, "combined graph only"),
     # -- paired semantic options -------------------------------------------
-    "vis_mode": (PAIRED, "rolled"),
-    "vis_call_depth": (PAIRED, 1),
-    "vis_graph_overrides": (PAIRED, {"bgcolor": "white"}),
+    "rolled": (PAIRED, True),
+    "depth": (PAIRED, 1),
+    "graph_overrides": (PAIRED, {"bgcolor": "white"}),
     "module": (PAIRED, "block"),
-    "node_mode": (PAIRED, "profiling"),
+    "node_style": (PAIRED, "profiling"),
     "node_spec_fn": (PAIRED, _noop_node_spec_fn),
     "collapsed_node_spec_fn": (PAIRED, _noop_collapsed_spec_fn),
     "collapse_fn": (PAIRED, _never_collapse),
     "collapse": (PAIRED, "max"),
     "fold_repeats": (PAIRED, True),
+    # F11 pattern folding (memo D11): pattern-only view is the v1 contract;
+    # the collapse pairing refuses typed (REFUSING_COMBOS row below).
+    "fold_patterns": (PAIRED, {"LinearOnly": "linear"}),
     "skip_fn": (PAIRED, _never_skip),
-    "vis_edge_overrides": (PAIRED, {"color": "black"}),
-    "vis_grad_edge_overrides": (PAIRED, {"color": "black"}),
-    "vis_module_overrides": (PAIRED, {"penwidth": "2"}),
-    "show_buffer_layers": (PAIRED, "always"),
+    "edge_overrides": (PAIRED, {"color": "black"}),
+    "grad_edge_overrides": (PAIRED, {"color": "black"}),
+    "module_overrides": (PAIRED, {"penwidth": "2"}),
+    "show_buffers": (PAIRED, "always"),
     "direction": (PAIRED, "topdown"),
-    "vis_node_placement": (PAIRED, "rank"),
-    "vis_theme": (PAIRED, "paper"),
-    "vis_intervention_mode": (PAIRED, "as_node"),
-    "vis_show_cone": (PAIRED, False),
+    "layout": (PAIRED, "rank"),
+    "theme": (PAIRED, "paper"),
+    "intervention_mode": (PAIRED, "as_node"),
+    "show_cone": (PAIRED, True),
     "code_panel": (PAIRED, True),
     "node_overlay": (PAIRED, _unit_overlay),
     "node_label_fields": (PAIRED, ["label", "time"]),
     "show_legend": (PAIRED, True),
     "font_size": (PAIRED, 10),
     "dpi": (PAIRED, 100),
-    "for_paper": (PAIRED, True),
-    "return_graph": (PAIRED, True),
     "order_siblings": (PAIRED, False),
     "show_containers": (PAIRED, "labels"),
     "container_max_inline": (PAIRED, 2),
@@ -159,9 +159,17 @@ DECLARED: dict[str, tuple[str, Any]] = {
     "show_saved_for_backward": (PAIRED, True),
     "color_by": (PAIRED, "time"),
     "size_by": (PAIRED, "dims"),
-    "scale": (PAIRED, "linear"),
+    "size_scale": (PAIRED, "linear"),
     "stack_by": (PAIRED, True),
     "show_redundant_args": (PAIRED, True),
+    # Walk ruling names.1: the edge-shape channel prints each edge's tensor shape.
+    "show_edge_shapes": (PAIRED, True),
+    # Argument-position edge labels are on by default; the pair turns them off.
+    "show_arg_labels": (PAIRED, False),
+    # view="interventions" routes through the interventions view, which refuses
+    # typed on this un-edited sweep trace (the rule in expected_refusal); the
+    # edited-trace renders live in test_surgery_visuals_marks.py.
+    "view": (PAIRED, "interventions"),
 }
 
 PAIRED_OPTIONS: tuple[str, ...] = tuple(
@@ -169,25 +177,32 @@ PAIRED_OPTIONS: tuple[str, ...] = tuple(
 )
 
 #: The exact refusing combinations among the probes above, pinned as
-#: (frozen option set) -> expected typed code. ``"scale"`` refuses with EVERY
+#: (frozen option set) -> expected typed code. ``"size_scale"`` refuses with EVERY
 #: partner except ``size_by`` (its own documented dependency), so it is
 #: expressed as a rule in ``expected_refusal`` rather than 37 literal rows.
 REFUSING_COMBOS: dict[frozenset[str], str] = {
-    frozenset({"vis_node_placement", "color_by"}): "encoding_requires_dot_layout",
-    frozenset({"vis_node_placement", "size_by"}): "encoding_requires_dot_layout",
-    frozenset({"vis_node_placement", "stack_by"}): "encoding_requires_dot_layout",
-    frozenset({"vis_mode", "stack_by"}): "stack_by_requires_unrolled",
+    frozenset({"collapse", "fold_patterns"}): "pattern_collapse_combination_unsupported",
+    frozenset({"fold_patterns", "layout"}): "pattern_rank_layout_unsupported",
+    frozenset({"layout", "color_by"}): "encoding_requires_dot_layout",
+    frozenset({"layout", "size_by"}): "encoding_requires_dot_layout",
+    frozenset({"layout", "stack_by"}): "encoding_requires_dot_layout",
+    frozenset({"rolled", "stack_by"}): "stack_by_requires_unrolled",
 }
 
 
 def expected_refusal(combo: frozenset[str]) -> str | None:
     """Return the typed refusal code for a probe combination, else ``None``.
 
-    ``scale`` without ``size_by`` refuses first (the option is meaningless
-    alone), matching shipped precedence; the pinned pair rows cover the rest.
+    ``view`` refuses first on this un-edited trace (the view checks the
+    intervention evidence before any draw option is applied); ``size_scale``
+    without ``size_by`` refuses next (the option is meaningless alone),
+    matching shipped precedence; the pinned pair rows cover the rest.
     """
 
-    if "scale" in combo and "size_by" not in combo:
+    if "view" in combo:
+        # The view checks its headline evidence before drawing anything.
+        return "surgery_evidence_missing"
+    if "size_scale" in combo and "size_by" not in combo:
         return "scale_requires_size_by"
     return REFUSING_COMBOS.get(combo)
 
@@ -197,7 +212,6 @@ def expected_refusal(combo: frozenset[str]) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.smoke
 def test_draw_signature_is_fully_declared() -> None:
     """Every ``Trace.draw`` parameter is classified in ``DECLARED``.
 
@@ -224,7 +238,6 @@ def test_draw_signature_is_fully_declared() -> None:
     )
 
 
-@pytest.mark.smoke
 def test_refusal_table_only_names_declared_paired_options() -> None:
     """Every refusal row references PAIRED options actually being exercised."""
 
@@ -272,9 +285,8 @@ def _draw(trace: Any, tmp_path: Path, kwargs: dict[str, Any]) -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("always")
         trace.draw(
-            vis_save_only=True,
-            vis_fileformat="dot",
-            vis_outpath=str(tmp_path / "graph"),
+            file_format="dot",
+            path=str(tmp_path / "graph"),
             **kwargs,
         )
 
@@ -282,15 +294,14 @@ def _draw(trace: Any, tmp_path: Path, kwargs: dict[str, Any]) -> None:
 _SINGLES = [(name,) for name in PAIRED_OPTIONS]
 _PAIRS = list(itertools.combinations(PAIRED_OPTIONS, 2))
 
-#: Structural axes that reshape the rendered graph — the axes whose
-#: combinations have historically crashed (profiling x vis_call_depth,
-#: rolled x show_containers). Their pairs run at SMOKE on every commit;
-#: the exhaustive sweep below covers everything at the heavy tier (the
-#: smoke family-aggregate budget rules 741 draw cells out of the 5s tier).
+#: Structural axes that reshape the rendered graph: the axes whose
+#: combinations have historically crashed (node_style x depth,
+#: rolled x show_containers). Every pair among them is a documented cell; the
+#: slow property test below walks every other pair.
 CORE_OPTIONS: tuple[str, ...] = (
-    "vis_mode",
-    "vis_call_depth",
-    "node_mode",
+    "rolled",
+    "depth",
+    "node_style",
     "collapse",
     "fold_repeats",
     "show_containers",
@@ -301,33 +312,85 @@ _CORE_PAIRS = list(itertools.combinations(CORE_OPTIONS, 2))
 
 #: Every pinned-refusal combination, provoked at smoke (each raises before
 #: rendering, so the family is cheap).
-_REFUSAL_COMBOS: list[tuple[str, ...]] = [("scale",)] + [
+_REFUSAL_COMBOS: list[tuple[str, ...]] = [("size_scale",), ("view",)] + [
     tuple(sorted(combo)) for combo in sorted(REFUSING_COMBOS, key=sorted)
 ]
+
+
+#: Pairs outside the CORE family whose cells alone reached a library branch
+#: in the full sweep (per-test branch coverage, test-shape lane evidence).
+_COVERAGE_PAIRS: tuple[tuple[str, str], ...] = (
+    ("layout", "code_panel"),
+    ("rolled", "fold_patterns"),
+    ("depth", "show_legend"),
+    ("collapse_fn", "fold_repeats"),
+    ("rolled", "size_by"),
+    ("collapse_fn", "collapse"),
+    ("module", "layout"),
+    ("rolled", "node_label_fields"),
+    ("graph_overrides", "layout"),
+    ("size_by", "size_scale"),
+    ("layout", "show_orphans"),
+    ("rolled", "collapse"),
+    ("depth", "fold_patterns"),
+    ("depth", "collapsed_node_spec_fn"),
+    ("node_spec_fn", "color_by"),
+    ("layout", "show_legend"),
+    ("rolled", "layout"),
+    ("rolled", "show_saved_for_backward"),
+    ("graph_overrides", "intervention_mode"),
+    ("depth", "stack_by"),
+    ("module", "skip_fn"),
+    ("module", "fold_patterns"),
+    ("rolled", "show_buffers"),
+)
+
+
+def _require_paired_options(family: str, combos: Iterable[tuple[str, ...]]) -> None:
+    """Fail collection, naming the option, when a sampled family drifts from DECLARED.
+
+    A renamed or removed draw() option otherwise surfaces as one bare
+    ``KeyError`` per parametrized cell.
+    """
+
+    stale = sorted({name for combo in combos for name in combo} - set(PAIRED_OPTIONS))
+    if stale:
+        raise ValueError(
+            f"{family} names options that are not PAIRED in DECLARED: {stale}; "
+            "use the current draw() spelling or drop the pair if the option is gone"
+        )
+
+
+_require_paired_options("CORE_OPTIONS", [CORE_OPTIONS])
+_require_paired_options("_COVERAGE_PAIRS", _COVERAGE_PAIRS)
+
+
+def _combo_problem(combo: tuple[str, ...], trace: Any, tmp_path: Path) -> str | None:
+    """How one option combination breaks its pinned verdict, else ``None``."""
+
+    kwargs = {name: DECLARED[name][1] for name in combo}
+    code = expected_refusal(frozenset(combo))
+    try:
+        _draw(trace, tmp_path, kwargs)
+    except InvalidArgumentError as error:
+        got = error.fields.get("code")
+        if got == code:
+            return None
+        return f"refused with {got!r}, expected {code or 'a successful draw'}"
+    except Exception as error:  # noqa: BLE001 -- any other exception IS the defect
+        return f"{type(error).__name__}: {error}"
+    if code is not None:
+        return f"drew, expected the typed refusal {code!r}"
+    return None
 
 
 def _exercise_combo(combo: tuple[str, ...], trace: Any, tmp_path: Path) -> None:
     """Draw one option combination; assert its pinned verdict."""
 
-    kwargs = {name: DECLARED[name][1] for name in combo}
-    code = expected_refusal(frozenset(combo))
-    if code is None:
-        _draw(trace, tmp_path, kwargs)
-        return
-    with pytest.raises(InvalidArgumentError) as excinfo:
-        _draw(trace, tmp_path, kwargs)
-    assert excinfo.value.fields["code"] == code
+    problem = _combo_problem(combo, trace, tmp_path)
+    assert problem is None, ("+".join(combo), problem)
 
 
-@pytest.mark.smoke
-@pytest.mark.parametrize("combo", _CORE_PAIRS, ids=["+".join(c) for c in _CORE_PAIRS])
-def test_draw_core_option_pairs(combo: tuple[str, ...], sweep_trace: Any, tmp_path: Path) -> None:
-    """High-risk structural option pairs stay legal (or refuse typed) at commit time."""
-
-    _exercise_combo(combo, sweep_trace, tmp_path)
-
-
-@pytest.mark.smoke
 @pytest.mark.parametrize("combo", _REFUSAL_COMBOS, ids=["+".join(c) for c in _REFUSAL_COMBOS])
 def test_draw_pinned_refusals(combo: tuple[str, ...], sweep_trace: Any, tmp_path: Path) -> None:
     """Every pinned refusing combination raises exactly its declared code."""
@@ -336,11 +399,23 @@ def test_draw_pinned_refusals(combo: tuple[str, ...], sweep_trace: Any, tmp_path
     _exercise_combo(combo, sweep_trace, tmp_path)
 
 
-@pytest.mark.heavy
-@pytest.mark.parametrize(
-    "combo", _SINGLES + _PAIRS, ids=["+".join(combo) for combo in _SINGLES + _PAIRS]
+_CORE_PAIR_SETS = {frozenset(pair) for pair in _CORE_PAIRS}
+_SAMPLED = (
+    _SINGLES
+    + _CORE_PAIRS
+    + [pair for pair in _COVERAGE_PAIRS if frozenset(pair) not in _CORE_PAIR_SETS]
 )
-def test_draw_option_combination(combo: tuple[str, ...], sweep_trace: Any, tmp_path: Path) -> None:
-    """Exhaustive sweep: each declared combination succeeds or refuses typed."""
 
-    _exercise_combo(combo, sweep_trace, tmp_path)
+
+@pytest.mark.slow
+def test_every_declared_option_combination_draws_or_refuses_typed(
+    sweep_trace: Any, tmp_path: Path
+) -> None:
+    """Property: every single and every unordered pair draws, or refuses with its pinned code."""
+
+    broken = {
+        "+".join(combo): problem
+        for combo in _SINGLES + _PAIRS
+        if (problem := _combo_problem(combo, sweep_trace, tmp_path)) is not None
+    }
+    assert not broken, broken

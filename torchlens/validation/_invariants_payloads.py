@@ -6,14 +6,10 @@ from collections import Counter
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
+from .._utils._record_group_table import record_member
+
 if TYPE_CHECKING:
-    from ..data_classes.trace import Trace
-    from .invariants import (
-        MetadataInvariantError,
-        _dtype_values_match,
-        _resolve_trace_label,
-        op_has_genuine_replacement_evidence,
-    )
+    from .._data_classes.trace import Trace
 
 __all__ = (
     "_check_backend_neutral_graph_topology",
@@ -45,13 +41,9 @@ def _check_backend_neutral_graph_topology(ml: Trace) -> None:
 
     name = "backend_neutral_graph_topology"
     labels = {
-        getattr(layer, "label", getattr(layer, "layer_label", ""))
-        for layer in getattr(ml, "layer_list", ())
-    } | {
-        getattr(layer, "layer_label", getattr(layer, "label", ""))
-        for layer in getattr(ml, "layer_list", ())
-    }
-    for layer in getattr(ml, "layer_list", ()):
+        getattr(layer, "label", getattr(layer, "layer_label", "")) for layer in ml._layer_list
+    } | {getattr(layer, "layer_label", getattr(layer, "label", "")) for layer in ml._layer_list}
+    for layer in ml._layer_list:
         label = getattr(layer, "layer_label", getattr(layer, "label", type(layer).__name__))
         parents = list(getattr(layer, "parents", ()) or ())
         children = list(getattr(layer, "children", ()) or ())
@@ -98,7 +90,7 @@ def _check_edge_use_parent_arg_invariants(ml: Trace) -> None:
     exists, its referenced parent label must resolve. This invariant never
     asserts that every parent edge has a corresponding edge-use record.
 
-    Edge-occurrence MULTIPLICITY witness (b9-opus R75-1): on live frozen
+    Edge-occurrence MULTIPLICITY witness: on live frozen
     torch traces the canonical CSR dataflow edge-occurrence table
     (``_trace_core/relations.py``) is additionally cross-checked per
     (child, parent) against the independently stored roots -- the row's
@@ -135,7 +127,7 @@ def _check_edge_use_parent_arg_invariants(ml: Trace) -> None:
     name = "edge_use_parent_arg_consistency"
     valid_edge_uses = {"arg", "kwarg", "container", "module", "buffer", "output", "control"}
     valid_arg_kinds = {"positional", "keyword"}
-    for layer in ml.layer_list:
+    for layer in ml._layer_list:
         layer_label = getattr(layer, "layer_label", type(layer).__name__)
         for record in getattr(layer, "_edge_uses", ()) or ():
             edge_use = getattr(record, "edge_use", None)
@@ -165,7 +157,7 @@ def _check_edge_use_parent_arg_invariants(ml: Trace) -> None:
                     f"{child_label!r}",
                 )
 
-        parent_arg_positions = getattr(layer, "parent_arg_positions", {}) or {}
+        parent_arg_positions = record_member(layer, "parent_arg_positions", {}) or {}
         if not isinstance(parent_arg_positions, Mapping):
             raise MetadataInvariantError(
                 name,
@@ -211,12 +203,12 @@ def _check_edge_use_parent_arg_invariants(ml: Trace) -> None:
     # traces (caught by the validation-decision golden's TinyRecurrent).
     # Each op record carries its own row and its own pass-exact
     # parents/parent_arg_positions staging.
-    for layer in getattr(ml, "layer_list", ()) or ():
-        for op in getattr(layer, "ops", ()) or ():
+    for layer in ml._layer_list or ():
+        for op in getattr(layer, "ops", None) or (layer,):
             row = getattr(op, "_row", None)
             if row is None:
                 continue
-            parent_arg_positions = getattr(op, "parent_arg_positions", None) or {}
+            parent_arg_positions = record_member(op, "parent_arg_positions", None) or {}
             position_counts: Counter = Counter()
             if isinstance(parent_arg_positions, Mapping):
                 for arg_domain in ("args", "kwargs"):
@@ -238,13 +230,12 @@ def _check_edge_use_parent_arg_invariants(ml: Trace) -> None:
                     continue
                 positions = position_counts.get(parent_label, 0)
                 expected[source_row] += positions if positions else 1
-            # Child-direction MULTIPLICITY witness (b3-opus R05): the frozen
+            # Child-direction MULTIPLICITY witness: the frozen
             # children view is DEDUPED by construction (genuine double
             # consumption records ONE children entry; multiplicity lives in
             # the parent-side arg positions checked above), so a duplicated
             # entry in a children sequence is producer/shadow corruption the
-            # name-based symmetry checks cannot see -- the twice-fixed
-            # duplicated-child-edge producer bug had no tripwire. Unresolved
+            # name-based symmetry checks cannot see. Unresolved
             # (cross-pass) spellings are counted too: dedup is a property of
             # the label sequence itself, not of resolution.
             child_counts: Counter = Counter(
@@ -290,7 +281,7 @@ def _check_op_log_fields(ml: Trace) -> None:
     """
     name = "op_log_fields"
 
-    for lpl in ml.layer_list:
+    for lpl in ml._layer_list:
         label = lpl.layer_label
 
         # Tensor shape/dtype consistency when outs are saved
@@ -308,29 +299,29 @@ def _check_op_log_fields(ml: Trace) -> None:
                 )
 
         # Pass numbering
-        if lpl.pass_index < 1:
-            raise MetadataInvariantError(name, f"Layer {label}: pass_index={lpl.pass_index} < 1")
-        if lpl.num_passes < lpl.pass_index:
+        if lpl.pass_number < 1:
+            raise MetadataInvariantError(name, f"Layer {label}: pass_index={lpl.pass_number} < 1")
+        if lpl.num_passes < lpl.pass_number:
             raise MetadataInvariantError(
                 name,
-                f"Layer {label}: num_passes={lpl.num_passes} < pass_index={lpl.pass_index}",
+                f"Layer {label}: num_passes={lpl.num_passes} < pass_index={lpl.pass_number}",
             )
 
         # A GENUINE raw-forward-hook output replacement is legitimately
         # functionless: the user substituted an opaque tensor for a module's
         # output, so there is no torch function to validate. This exemption is
         # deliberately narrow -- it must NOT cover auto-synthesized placeholders
-        # during plain capture (a previous band-aid widened it to silence the
-        # vmap-built attention mask, disarming this tripwire). Round-26 W3-2
-        # hardening: the per-op attributes below are written by the placeholder
+        # during plain capture (widening it would silence the
+        # vmap-built attention mask and disarm this tripwire). The per-op
+        # attributes below are written by the placeholder
         # synthesizer itself, so the exemption additionally requires the
         # trace-level replacement-event ledger to corroborate the claim; a
         # placeholder stamped during PLAIN capture (no recorded replacement
-        # event) now fails this invariant, per the 2026-06-02 lesson.
+        # event) fails this invariant.
         is_functionless_replacement = (
             lpl.func_name == "intervention_replacement"
-            and getattr(lpl, "intervention_replaced", False)
-            and not getattr(lpl, "is_internal_source", False)
+            and getattr(lpl, "is_edited", False)
+            and not record_member(lpl, "is_internal_source", False)
             and op_has_genuine_replacement_evidence(lpl, ml)
         )
 
@@ -340,20 +331,20 @@ def _check_op_log_fields(ml: Trace) -> None:
         # and func_name is "none". Traced ops that merely have an internal-source
         # ancestor still carry a real callable func and are NOT exempted here.
         is_functionless_internal_source = (
-            getattr(lpl, "is_internal_source", False) and lpl.func is None
+            record_member(lpl, "is_internal_source", False) and lpl.func is None
         )
 
         # Function applied (non-input, non-buffer, non-output, non-source,
         # non-hook-replacement layers).
         if not (
             lpl.is_input
-            or lpl.is_buffer
+            or lpl.graph.is_buffer
             or lpl.is_output
             or is_functionless_internal_source
             or is_functionless_replacement
         ):
-            if bool(getattr(ml, "_loaded_from_bundle", False)):
-                # Loaded-artifact arm (R10-3): ``Op.func`` is FieldPolicy.DROP
+            if ml.__dict__.get("_loaded_from_bundle", False):  # no Trace miss path per op
+                # Loaded-artifact arm: ``Op.func`` is FieldPolicy.DROP
                 # and ``__getstate__`` hard-nulls it, so ``callable(func)``
                 # false-fired on EVERY loaded torch trace. The loaded arm
                 # asserts the known load-time shape POSITIVELY -- a non-None
@@ -372,7 +363,7 @@ def _check_op_log_fields(ml: Trace) -> None:
                 raise MetadataInvariantError(name, f"Layer {label}: func_name is empty")
             if str(lpl.func_name).lower() == "none":
                 # The functionless sentinel on an op that carries a real
-                # callable is name corruption (deephunt M2): "none" is only
+                # callable is name corruption: "none" is only
                 # minted for output bookkeeping nodes and functionless
                 # internal sources, both excluded from this block above.
                 raise MetadataInvariantError(
@@ -382,7 +373,7 @@ def _check_op_log_fields(ml: Trace) -> None:
                 )
 
         # Operation numbering (input/buffer/output bookkeeping layers have step_index=0)
-        if not (lpl.is_input or lpl.is_buffer or lpl.is_output):
+        if not (lpl.is_input or lpl.graph.is_buffer or lpl.is_output):
             if lpl.step_index is not None and lpl.step_index < 1:
                 raise MetadataInvariantError(
                     name, f"Layer {label}: step_index={lpl.step_index} < 1"
@@ -413,28 +404,28 @@ def _check_op_log_fields(ml: Trace) -> None:
                 f"derived as modules[-1], so an empty roster with a named module means "
                 f"the module attribution was DROPPED",
             )
-        # B3R7-R05-1: ``module_call_stack`` is the root-first ModuleCall
+        # ``module_call_stack`` is the root-first ModuleCall
         # labels ACTIVE for this op (the glossary sentence), i.e. exactly the
-        # containment fact ``modules`` carries -- the historical tri-fact
-        # (fed-call stack for module inputs, containment addresses for module
-        # outputs, empty otherwise) is gone. The three facts are tied here so
-        # the class cannot regress: the stack must equal ``modules`` entry for
+        # containment fact ``modules`` carries (not a mix of fed-call stack for
+        # module inputs, containment addresses for module outputs, and empty
+        # otherwise). The facts are tied here so the class cannot regress:
+        # the stack must equal ``modules`` entry for
         # entry, and ``module_call_depth`` must be its length. Membership of
         # the entries themselves is ``module_containment_logic``'s check (via
         # ``modules``); equality makes it cover this field too.
-        if tuple(lpl.module_call_stack) != tuple(lpl.modules):
+        if tuple(lpl.module_context.call_stack) != tuple(lpl.modules):
             raise MetadataInvariantError(
                 name,
-                f"Layer {label}: module_call_stack={tuple(lpl.module_call_stack)!r} "
+                f"Layer {label}: module_call_stack={tuple(lpl.module_context.call_stack)!r} "
                 f"!= modules={tuple(lpl.modules)!r}; the stack must be the "
                 f"root-first ModuleCall labels active for this op (a fed-call "
                 f"or address-form value is the retired tri-fact bug)",
             )
-        if lpl.module_call_depth != len(lpl.module_call_stack):
+        if lpl.module_context.call_depth != len(lpl.module_context.call_stack):
             raise MetadataInvariantError(
                 name,
-                f"Layer {label}: module_call_depth={lpl.module_call_depth} != "
-                f"len(module_call_stack)={len(lpl.module_call_stack)}",
+                f"Layer {label}: module_call_depth={lpl.module_context.call_depth} != "
+                f"len(module_call_stack)={len(lpl.module_context.call_stack)}",
             )
 
         # Label format: pass-qualified label has ":" iff multi-pass
@@ -474,7 +465,7 @@ def _check_payload_metadata_invariants(ml: Trace) -> None:
     """
 
     name = "payload_metadata_invariants"
-    for op in ml.layer_list:
+    for op in ml._layer_list:
         label = getattr(op, "label", getattr(op, "layer_label", type(op).__name__))
         _check_live_payload_metadata(
             name,
@@ -482,7 +473,7 @@ def _check_payload_metadata_invariants(ml: Trace) -> None:
             payload=_live_payload_value(op, "out"),
             shape=getattr(op, "shape", None),
             dtype=getattr(op, "dtype", None),
-            memory=getattr(op, "activation_memory", None),
+            memory=record_member(op, "activation_memory", None),
             presence_flag=getattr(op, "has_saved_activation", False),
             presence_flag_name="has_saved_activation",
             payload_name="out",
@@ -491,9 +482,9 @@ def _check_payload_metadata_invariants(ml: Trace) -> None:
             name,
             label,
             payload=_live_payload_value(op, "transformed_out"),
-            shape=getattr(op, "transformed_out_shape", None),
-            dtype=getattr(op, "transformed_out_dtype", None),
-            memory=getattr(op, "transformed_activation_memory", None),
+            shape=record_member(op, "transformed_out_shape", None),
+            dtype=record_member(op, "transformed_out_dtype", None),
+            memory=record_member(op, "transformed_activation_memory", None),
             presence_flag=getattr(op, "has_saved_activation", False),
             presence_flag_name="has_saved_activation",
             payload_name="transformed_out",
@@ -502,8 +493,8 @@ def _check_payload_metadata_invariants(ml: Trace) -> None:
             name,
             label,
             payload=_live_payload_value(op, "grad"),
-            shape=getattr(op, "grad_shape", None),
-            dtype=getattr(op, "grad_dtype", None),
+            shape=record_member(op, "grad_shape", None),
+            dtype=record_member(op, "grad_dtype", None),
             memory=getattr(op, "gradient_memory", None),
             presence_flag=getattr(op, "has_grad", False),
             presence_flag_name="has_grad",
@@ -513,15 +504,15 @@ def _check_payload_metadata_invariants(ml: Trace) -> None:
             name,
             label,
             payload=_live_payload_value(op, "transformed_grad"),
-            shape=getattr(op, "transformed_grad_shape", None),
-            dtype=getattr(op, "transformed_grad_dtype", None),
+            shape=record_member(op, "transformed_grad_shape", None),
+            dtype=record_member(op, "transformed_grad_dtype", None),
             memory=getattr(op, "transformed_gradient_memory", None),
             presence_flag=getattr(op, "has_grad", False),
             presence_flag_name="has_grad",
             payload_name="transformed_grad",
         )
         for record in getattr(op, "_grad_records", ()) or ():
-            record_label = f"{label}.grad_record[{getattr(record, 'backward_pass_index', '?')}]"
+            record_label = f"{label}.grad_record[{getattr(record, 'backward_pass_number', '?')}]"
             _check_live_payload_metadata(
                 name,
                 record_label,
@@ -537,8 +528,8 @@ def _check_payload_metadata_invariants(ml: Trace) -> None:
                 name,
                 record_label,
                 payload=_live_payload_value(record, "transformed_grad"),
-                shape=getattr(record, "transformed_grad_shape", None),
-                dtype=getattr(record, "transformed_grad_dtype", None),
+                shape=record_member(record, "transformed_grad_shape", None),
+                dtype=record_member(record, "transformed_grad_dtype", None),
                 memory=getattr(record, "transformed_gradient_memory", None),
                 presence_flag=getattr(record, "is_saved", False),
                 presence_flag_name="is_saved",
@@ -706,3 +697,19 @@ def _payload_memory(payload: object) -> int | None:
     if not callable(nelement) or not callable(element_size):
         return None
     return int(nelement() * element_size())
+
+
+# Late imports: the split modules of this package import one another (cycles), so each
+# imports its siblings once every definition above exists.
+from ._invariants import (  # noqa: E402
+    MetadataInvariantError,
+)
+from ._invariants_backward_flow import (  # noqa: E402
+    op_has_genuine_replacement_evidence,
+)
+from ._invariants_buffers import (  # noqa: E402
+    _resolve_trace_label,
+)
+from ._invariants_conditional_base import (  # noqa: E402
+    _dtype_values_match,
+)

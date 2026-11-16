@@ -17,7 +17,7 @@ import pytest
 
 import torchlens as tl
 
-pytestmark = [pytest.mark.backend_parity, pytest.mark.smoke]
+pytestmark = pytest.mark.backend_parity
 
 _REPO_ROOT = Path(tl.__file__).resolve().parent.parent
 _GUARD = _REPO_ROOT / "scripts" / "check_ci_executed_tests.py"
@@ -57,6 +57,70 @@ def test_guard_fails_missing_report(tmp_path: Path) -> None:
 
     result = _run_guard(tmp_path / "never-written.xml", 1)
     assert result.returncode == 1
+
+
+def test_legs_mode_checks_every_declared_leg(tmp_path: Path) -> None:
+    """``--legs DIR`` checks each floor file's legs; one hollow leg fails the run."""
+
+    def run_legs(legs_dir: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(_GUARD), "--legs", str(legs_dir)],
+            capture_output=True,
+            text=True,
+        )
+
+    healthy = tmp_path / "junit-a"
+    healthy.mkdir()
+    _write_junit(healthy / "a.xml", tests=10, skipped=0)
+    (healthy / "legs.floor").write_text("a.xml 5\n", encoding="utf-8")
+    hollow = tmp_path / "junit-b"
+    hollow.mkdir()
+    _write_junit(hollow / "b.xml", tests=10, skipped=10)
+    (hollow / "legs.floor").write_text("b.xml 5\n", encoding="utf-8")
+
+    assert run_legs(healthy).returncode == 0
+    result = run_legs(tmp_path)
+    assert result.returncode == 1
+    assert "1 leg(s) below floor" in result.stderr
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert run_legs(empty).returncode == 1
+
+
+def test_tier_floor_reads_half_the_artifact_count(tmp_path: Path) -> None:
+    """``tier:<name>`` resolves to half the collection artifact's count, red-capably."""
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("check_ci_executed_tests", _GUARD)
+    assert spec is not None and spec.loader is not None
+    guard = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = guard
+    spec.loader.exec_module(guard)
+
+    artifact = tmp_path / "collection.json"
+    artifact.write_text('{"tiers": {"smoke": {"count": 1001}}}', encoding="utf-8")
+    assert guard.resolve_floor("tier:smoke", artifact) == 500
+    assert guard.resolve_floor("710", artifact) == 710
+    with pytest.raises(SystemExit, match="cannot read tier 'mid'"):
+        guard.resolve_floor("tier:mid", artifact)
+    # The committed artifact backs the smoke legs' floor.
+    assert guard.resolve_floor("tier:smoke") > 0
+
+    legs = tmp_path / "junit"
+    legs.mkdir()
+    floor = guard.resolve_floor("tier:smoke")
+    _write_junit(legs / "smoke.xml", tests=floor, skipped=0)
+    (legs / "legs.floor").write_text("smoke.xml tier:smoke 0.15\n", encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(_GUARD), "--legs", str(legs)], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    _write_junit(legs / "smoke.xml", tests=floor - 1, skipped=0)
+    result = subprocess.run(
+        [sys.executable, str(_GUARD), "--legs", str(legs)], capture_output=True, text=True
+    )
+    assert result.returncode == 1 and f"floor {floor}" in result.stderr
 
 
 def test_guard_passes_executed_suite(tmp_path: Path) -> None:
@@ -116,4 +180,49 @@ def test_nightly_legs_declare_meaningful_executed_floors() -> None:
     assert sorted(backends) == ["jax", "mlx", "paddle", "tf", "tinygrad"]
     assert len(floors) == len(backends), "every leg must declare executed_floor"
     assert all(floor >= 10 for floor in floors), floors
-    assert '"${{ matrix.executed_floor }}"' in workflow
+    assert '.junit.xml ${{ matrix.executed_floor }}" >> ' in workflow
+
+
+def test_passed_ids_floor_accepts_path_spelled_node_ids(tmp_path: Path) -> None:
+    """The exact-passed-ID floor matches pytest path ids against junit classnames.
+
+    The RG floor file spells nodes ``tests/pkg/test_mod.py::test_x`` (what
+    ``--collect-only`` prints and the manifest lint checks); the junit report
+    spells the same node ``classname="tests.pkg.test_mod" name="test_x"``. The
+    check must join the two spellings, and a genuinely missing or failed node
+    must still be named.
+    """
+
+    junit = tmp_path / "rg.junit.xml"
+    junit.write_text(
+        '<testsuites><testsuite name="pytest" tests="2" skipped="0" failures="1" errors="0">'
+        '<testcase classname="tests.pkg.test_mod" name="test_ok" time="0.1"/>'
+        '<testcase classname="tests.pkg.test_mod" name="test_red" time="0.1">'
+        "<failure>boom</failure></testcase>"
+        "</testsuite></testsuites>"
+    )
+    ids = tmp_path / "ids.txt"
+    ids.write_text(
+        "# floor\ntests/pkg/test_mod.py::test_ok\ntests/pkg/test_mod.py::test_red\n"
+        "tests/pkg/test_mod.py::test_absent\n"
+    )
+    result = subprocess.run(
+        [sys.executable, str(_GUARD), str(junit), "0", "--passed-ids", str(ids)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    report = result.stdout + result.stderr
+    assert result.returncode == 1, report
+    assert "tests/pkg/test_mod.py::test_red" in report
+    assert "tests/pkg/test_mod.py::test_absent" in report
+    assert "test_ok" not in report.split("did not PASS", 1)[1]
+
+    ids.write_text("tests/pkg/test_mod.py::test_ok\n")
+    result = subprocess.run(
+        [sys.executable, str(_GUARD), str(junit), "0", "--passed-ids", str(ids)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

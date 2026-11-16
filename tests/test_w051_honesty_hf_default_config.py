@@ -1,0 +1,120 @@
+"""Lane W051-HONESTY: default-config HuggingFace causal LM on live ``run()`` (AUD-HONESTY H1).
+
+The only pinned HF runnable test builds GPT-2 with ``use_cache=False`` AND captures
+with ``replayable=True`` -- the configuration every user actually has (KV cache
+on, default capture) was never exercised by a ``run()`` test. The audit found that the
+default capture silently settled ``unverifiable`` + poisoned with no remedy and that
+``replayable=True`` CRASHED with a bare ``ValueError`` ("Not enough leaves
+supplied for ContainerSpec") because the spec builder admitted the tensor-holding
+``DynamicCache`` under ``past_key_values`` as a leaf the contract cannot rebuild.
+
+These rows pin the honest surface: a default-config GPT-2 ``run()`` reaches VERIFIED or a
+typed remedy naming ``use_cache=False`` / ``return_dict=False``, never a bare ValueError.
+"""
+
+from __future__ import annotations
+
+import warnings
+from typing import Any
+
+import pytest
+import torch
+
+import torchlens as tl
+from tests.support.hf_capabilities import causal_lm_returns_cache_object
+from torchlens._runnable import PathFaithfulness, RunnableErrorCode
+from torchlens._utils.collections import _path_component_key
+from torchlens.options import CaptureOptions
+
+pytest.importorskip("transformers")
+
+pytestmark = [pytest.mark.heavy, pytest.mark.real_model]
+
+
+def _tiny_gpt2(use_cache: bool) -> Any:
+    from transformers import GPT2Config, GPT2LMHeadModel
+
+    torch.manual_seed(0)
+    config = GPT2Config(
+        n_layer=2,
+        n_head=2,
+        n_embd=32,
+        vocab_size=100,
+        n_positions=32,
+        bos_token_id=0,
+        eos_token_id=0,
+        use_cache=use_cache,
+    )
+    return GPT2LMHeadModel(config).eval()
+
+
+@pytest.fixture(scope="module")
+def input_ids() -> torch.Tensor:
+    torch.manual_seed(1)
+    return torch.randint(0, 100, (1, 6))
+
+
+def _reconstruction_check(report: Any) -> Any:
+    checks = [c for c in report.contract_checks if c.name == "live_output_reconstruction"]
+    assert len(checks) == 1
+    return checks[0]
+
+
+def _capture(model: Any, x: torch.Tensor, **options: Any) -> Any:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return tl.trace(model, x, capture=CaptureOptions(**options))
+
+
+def _assert_logits_match_live(model: Any, input_ids: torch.Tensor, output: Any) -> None:
+    """Assert the run's output carries the logits a fresh live forward produces."""
+
+    with torch.no_grad():
+        live = model(input_ids)
+    # The approximation is keyed by the typed ``HFKey`` path components, not plain str.
+    logits = next(value for key, value in output.items() if _path_component_key(key) == "logits")
+    assert torch.allclose(logits, live.logits, atol=1e-5)
+
+
+# Kept: sole branch coverage of _utils/collections.py; the catch of its regression fault.
+def test_default_config_default_capture_settles_typed_opaque_leaf_remedy(input_ids) -> None:
+    """H1 row 1: KV cache on (the HF default), default capture -> UNVERIFIABLE with the
+    typed ``opaque_leaf`` reason and a remedy naming ``use_cache=False``."""
+
+    model = _tiny_gpt2(use_cache=True)
+    trace = _capture(model, input_ids)
+    result = trace.run_transaction(inputs=input_ids)
+    if not causal_lm_returns_cache_object():
+        # 4.x returns the cache as nested ``(key, value)`` tuples of tensors, which
+        # the output contract rebuilds: the same default run settles VERIFIED.
+        assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
+        assert result.report.is_poisoned is False
+        _assert_logits_match_live(model, input_ids, result.output)
+        return
+    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    check = _reconstruction_check(result.report)
+    assert not check.passed
+    assert check.diagnostic.code is RunnableErrorCode.OUTPUT_STRUCTURE_MISMATCH
+    details = dict(check.diagnostic.details)
+    assert details["reason"] == "opaque_leaf"
+    assert "DynamicCache" in details["detail"]
+    assert "use_cache=False" in details["remedy"]
+    assert "return_dict=False" in details["remedy"]
+    # The best-effort output still carries the logits the fresh forward produced.
+    _assert_logits_match_live(model, input_ids, result.output)
+
+
+# Kept: sole branch coverage of _data_classes/container.py, _ir/_container_type_probes.py, _ir/container_registry.py and more; a sole mutation kill.
+def test_use_cache_false_container_contract_capture_settles_verified(input_ids) -> None:
+    """H1 row 3 (the remedy WORKS): ``use_cache=False`` + the container-contract capture
+    option settles VERIFIED and returns the real ``ModelOutput`` type."""
+
+    model = _tiny_gpt2(use_cache=False)
+    trace = _capture(model, input_ids, capture_container_structure=True)
+    result = trace.run_transaction(inputs=input_ids)
+    assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert result.report.is_poisoned is False
+    assert type(result.output).__name__ == "CausalLMOutputWithCrossAttentions"
+    with torch.no_grad():
+        live = model(input_ids)
+    assert torch.allclose(result.output.logits, live.logits, atol=1e-5)

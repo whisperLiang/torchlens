@@ -10,28 +10,45 @@ from typing import TYPE_CHECKING, Any, cast
 
 from . import _engine
 from ._engine_forward import _ProjectiveFieldSolution
-from ._engine_geometry import _Affine, _as_tuple, _Mapped, _select_full_axes, _transpose_mapped
-from ._errors import AmbiguousTargetError, ReceptiveFieldError
-from ._path import forward_index_image
+from ._engine_geometry import (
+    _Affine,
+    _as_tuple,
+    _has_no_units,
+    _Mapped,
+    _select_full_axes,
+    _transpose_mapped,
+)
+from ._errors import ReceptiveFieldError
+from ._path import _select_target_descriptor, forward_index_image
 from ._query import (
     _AxisSets,
     _build_box,
     _call_index_callback,
-    _call_interval_callback,
     _distinct_terminals,
     _IndexSet,
     _initial_axis_sets,
     _normalize_unit,
-    _passthrough_parent_axes,
+    _query_graph,
+    _query_memo_scope,
+    _run_memoized_walk,
+    _shared_reach,
     _TerminalState,
     _validate_descriptor_for_query,
-    map_transposed_convolution_index_set,
+    _WalkKey,
+    _WalkStep,
 )
+from ._query_causal import EXTENDED_KINDS, map_extended_to_child
+from ._query_maps import (
+    _call_interval_callback,
+    map_transposed_convolution_index_set,
+    widen_channel_axis,
+)
+from ._reshape_blocks import apply_blocks
 from ._rules import _RuleResult
-from ._types import ReceptiveField, ReceptiveFieldBox, ReceptiveFieldDirection
+from ._types import ReceptiveFieldBox, ReceptiveFieldDirection
 
 if TYPE_CHECKING:
-    from ..data_classes.op import Op
+    from .._data_classes.op import Op
 
 
 _TRANSPOSE_CANDIDATE_BUDGET = 4096
@@ -74,23 +91,24 @@ def box_for_source_unit(
         raise ReceptiveFieldError(
             f"No projective-field solution is available from source {op.label!r}."
         )
-    descriptor = _select_target_descriptor(descriptors, target)
+    descriptor = _select_target_descriptor(descriptors, target, solution.target_labels)
     _validate_descriptor_for_query(descriptor)
     coordinates = _normalize_unit(op, descriptor, unit)
     initial = _initial_axis_sets(op, descriptor, coordinates, complete_unit=complete_unit)
-    trace = op.source_trace
-    operations = tuple(item for item in trace.layer_list if item.label in solution.per_op)
-    by_reference = {
-        reference: item
-        for item in operations
-        for reference in (item.label, item.layer_label, item._layer_label_raw)
-    }
+    operations, by_reference = _query_graph(op.source_trace, solution)
     target_label = descriptor.input_op_label
-    active = _labels_to_target(op.label, target_label, operations, by_reference)
+    reaching = _shared_reach(
+        "projective",
+        solution,
+        target_label,
+        lambda: _labels_reaching(target_label, operations, by_reference),
+    )
+    active = reaching if op.label in reaching else frozenset()
     # The walk enumerates paths, so it revisits each operation once per path
     # through it, re-deriving per-operation facts that are linear in that
-    # operation's parents. Memoize them for this one query.
-    with _engine._geometry_memo():
+    # operation's parents. Memoize them for this one query (or for every query
+    # of an enclosing shared scope).
+    with _query_memo_scope():
         terminals = _walk_to_target(op, initial, target_label, active, by_reference, True, {})
     if not terminals:
         raise ReceptiveFieldError(
@@ -104,32 +122,12 @@ def box_for_source_unit(
     )
 
 
-def _select_target_descriptor(
-    descriptors: Mapping[str, ReceptiveField], target: Op | str | None
-) -> ReceptiveField:
-    """Resolve one projective result descriptor without choosing silently."""
-
-    if target is None:
-        if len(descriptors) != 1:
-            roles = ", ".join(descriptors)
-            raise AmbiguousTargetError(
-                f"Select one reachable target; available target roles: {roles}."
-            )
-        return next(iter(descriptors.values()))
-    identity = target if isinstance(target, str) else target.label
-    for role, descriptor in descriptors.items():
-        if identity in {role, descriptor.input_op_label}:
-            return descriptor
-    raise ReceptiveFieldError(f"Target {identity!r} is not reachable from this source.")
-
-
-def _labels_to_target(
-    source_label: str,
+def _labels_reaching(
     target_label: str,
     operations: tuple[Op, ...],
     by_reference: Mapping[str, Op],
 ) -> frozenset[str]:
-    """Return the operation labels on a source-to-target path slice."""
+    """Return the labels of the target and every operation with a path to it."""
 
     parents: dict[str, set[str]] = {item.label: set() for item in operations}
     for item in operations:
@@ -143,7 +141,7 @@ def _labels_to_target(
         unseen = parents.get(label, set()) - reachable
         reachable.update(unseen)
         stack.extend(unseen)
-    return frozenset(reachable if source_label in reachable else ())
+    return frozenset(reachable)
 
 
 def _walk_to_target(
@@ -153,25 +151,23 @@ def _walk_to_target(
     active: frozenset[str],
     by_reference: Mapping[str, Op],
     exact: bool,
-    memo: dict[tuple[str, _AxisSets, bool], tuple[_TerminalState, ...]],
+    memo: dict[_WalkKey, tuple[_TerminalState, ...]],
 ) -> tuple[_TerminalState, ...]:
-    """Recursively transpose a joint axis-set state toward one target.
+    """Transpose a joint axis-set state toward one target.
 
     ``memo`` collapses the path enumeration to distinct
     ``(operation, axis-set state)`` states for the duration of one query. It is
     plain memoization of a pure function, so the cached tuple is exactly what
-    the recursion would rebuild; see ``_query._walk_to_input``.
+    a fresh walk would rebuild; see ``_query._walk_to_input``. The hops run on
+    ``_query._run_memoized_walk``'s explicit stack, so depth is not bounded by
+    the interpreter's recursion limit.
     """
 
-    key = (op.label, input_sets, exact)
-    cached = memo.get(key)
-    if cached is not None:
-        return cached
-    terminals_for_key = _walk_target_body(
-        op, input_sets, target_label, active, by_reference, exact, memo
-    )
-    memo[key] = terminals_for_key
-    return terminals_for_key
+    def body(item: Op, sets: _AxisSets, item_exact: bool) -> _WalkStep:
+        """Start one projective hop from ``item`` toward this query's target."""
+        return _walk_target_body(item, sets, target_label, active, by_reference, item_exact)
+
+    return _run_memoized_walk(body, op, input_sets, exact, memo)
 
 
 def _walk_target_body(
@@ -181,9 +177,12 @@ def _walk_target_body(
     active: frozenset[str],
     by_reference: Mapping[str, Op],
     exact: bool,
-    memo: dict[tuple[str, _AxisSets, bool], tuple[_TerminalState, ...]],
-) -> tuple[_TerminalState, ...]:
-    """Transpose one joint axis-set state across a single forward hop."""
+) -> _WalkStep:
+    """Transpose one joint axis-set state across a single forward hop.
+
+    Yields one request per live child branch and receives that branch's
+    terminals; see ``_query._run_memoized_walk``.
+    """
 
     if op.label == target_label:
         clipped = tuple(
@@ -196,7 +195,9 @@ def _walk_target_body(
     children = tuple(
         by_reference[label]
         for label in op.children
-        if label in by_reference and by_reference[label].label in active
+        if label in by_reference
+        and by_reference[label].label in active
+        and not _has_no_units(by_reference[label])
     )
     for child in children:
         result, rule_name = _engine._rule_result(child)
@@ -214,14 +215,12 @@ def _walk_target_body(
             )
         )
         terminals.extend(
-            _walk_to_target(
-                child,
-                bounded,
-                target_label,
-                active,
-                by_reference,
-                exact and hop_exact and all(item is None or item.exact for item in child_sets),
-                memo,
+            (
+                yield (
+                    child,
+                    bounded,
+                    exact and hop_exact and all(item is None or item.exact for item in child_sets),
+                )
             )
         )
     return _distinct_terminals(terminals)
@@ -236,20 +235,22 @@ def _map_to_child(
 ) -> tuple[_AxisSets, bool]:
     """Transpose one sealed local backward rule onto a child branch."""
 
+    if result.kind in EXTENDED_KINDS:
+        return map_extended_to_child(_map_to_child, parent, child, parent_sets, result, rule_name)
     if result.kind in {"data_dependent", "unknown", "unsupported", "dissolve", "piecewise"}:
         return _whole_child_envelope(child, parent_sets), False
     if result.unit_box is not None and not (
         result.map_index_set is not None or result.map_index_set_forward is not None
     ):
         return _rule_envelope(parent, child, parent_sets, result), False
-    mapper = {
-        "window": _map_window_forward,
-        "window_edges": _map_window_edges_forward,
-        "full": _map_full_forward,
-        "axis_map": _map_axis_forward,
-    }.get(result.kind)
-    if mapper is not None:
-        return mapper(parent, child, parent_sets, result)
+    if result.kind == "window":
+        return _map_window_forward(parent, child, parent_sets, result)
+    if result.kind == "window_edges":
+        return _map_window_edges_forward(parent, child, parent_sets, result)
+    if result.kind == "full":
+        return _map_full_forward(parent, child, parent_sets, result)
+    if result.kind == "axis_map":
+        return _map_axis_forward(parent, child, parent_sets, result)
     if result.kind == "passthrough":
         return _map_passthrough_forward(parent, child, parent_sets, result), True
     _ = rule_name
@@ -362,6 +363,10 @@ def _map_window_edges_forward(
             )
         mapped[child_start + local_axis] = image
         exact = exact and callback_exact and image.exact
+    # Mirror of the reverse walk: only a declared channel-mixing rule widens it.
+    if parent_start >= 1 and parent_sets[parent_start - 1] is not None:
+        dependency = str(result.values.get("channel_dependency", "pointwise"))
+        exact = widen_channel_axis(mapped, child.shape, child_start - 1, dependency) and exact
     return tuple(mapped), exact
 
 
@@ -474,7 +479,20 @@ def _map_passthrough_forward(
 ) -> _AxisSets:
     """Map identity, reduction, broadcast, and concatenation relations to a child."""
 
-    parent_to_child = _passthrough_parent_axes(child, parent, result_spec)
+    parent_to_child: Mapping[int, int] | None = None
+    if result_spec is not None:
+        surviving = result_spec.values.get("surviving_parent_axes")
+        if isinstance(surviving, Sequence) and not isinstance(surviving, (str, bytes)):
+            surviving_axes = tuple(int(axis) for axis in surviving)
+            if len(child.shape) == len(surviving_axes):
+                parent_to_child = {
+                    parent_axis: child_axis for child_axis, parent_axis in enumerate(surviving_axes)
+                }
+        if parent_to_child is None:
+            parent_to_child = _engine._passthrough_axis_map(child, parent, result_spec)
+    if parent_to_child is None:
+        offset = len(child.shape) - len(parent.shape)
+        parent_to_child = {axis: axis + offset for axis in range(len(parent.shape))}
     result: list[_IndexSet | None] = [None] * len(child.shape)
     for parent_axis, source_set in enumerate(parent_sets):
         if source_set is None:
@@ -516,9 +534,8 @@ def _map_axis_forward(
     (``child = (parent - start) / step``, dropping coordinates off the slice
     lattice); a scalar-selected parent axis whose constrained source set
     excludes the recorded index prunes the whole forward influence to empty.
-    Both were silently ignored before (disputed-r2 b6/R20-2/R20-3), so a
-    projective query through a rank-changing getitem served unshifted,
-    over-covering images.
+    Ignoring either would let a projective query through a rank-changing
+    getitem serve unshifted, over-covering images.
     """
 
     raw = result.values.get("out_to_parent_axis", {})
@@ -540,7 +557,18 @@ def _map_axis_forward(
         if isinstance(child_axis, int) and isinstance(parent_axis, int):
             if 0 <= child_axis < len(mapped) and 0 <= parent_axis < len(parent_sets):
                 source_set = parent_sets[parent_axis]
-                mapped[child_axis] = _inverse_slice_indices(source_set, edges.get(child_axis))
+                edge = edges.get(child_axis)
+                if source_set is not None and edge is not None:
+                    step, start = int(edge[0]), int(edge[1])
+                    source_set = _IndexSet.from_values(
+                        (
+                            (value - start) // step
+                            for value in source_set.values()
+                            if (value - start) % step == 0 and value >= start
+                        ),
+                        exact=source_set.exact,
+                    )
+                mapped[child_axis] = source_set
     for parent_axis in selected_axes:
         if not 0 <= parent_axis < len(parent_sets):
             continue
@@ -557,23 +585,7 @@ def _map_axis_forward(
             # Unknown selected index over a constrained axis: the forward
             # image may be empty, so the non-pruned claim is an upper bound.
             exact = False
-    return tuple(mapped), exact
-
-
-def _inverse_slice_indices(source_set: _IndexSet | None, edge: Any) -> _IndexSet | None:
-    """Invert a captured slice lattice while preserving unknown axis constraints."""
-
-    if source_set is None or edge is None:
-        return source_set
-    step, start = int(edge[0]), int(edge[1])
-    return _IndexSet.from_values(
-        (
-            (value - start) // step
-            for value in source_set.values()
-            if (value - start) % step == 0 and value >= start
-        ),
-        exact=source_set.exact,
-    )
+    return apply_blocks(result, parent_sets, parent, child, mapped, exact, forward=True)
 
 
 def _map_full_forward(

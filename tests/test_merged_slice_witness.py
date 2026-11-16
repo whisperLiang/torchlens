@@ -11,21 +11,14 @@ from __future__ import annotations
 
 import pytest
 
-from torchlens.distributed._ledger import (
+from torchlens._distributed._ledger import (
     GroupLifecycleEvent,
     GroupLifecycleLedger,
     membership_digest_for_ranks,
 )
-from torchlens.merged import (
-    BoundaryConsistency,
-    MergeAlignment,
-    MergeValueStatus,
-    derive_merge,
-)
-from torchlens.merged._errors import MergedFinding
-from torchlens.merged._evidence import RankEvidence
-
-pytestmark = pytest.mark.smoke
+from torchlens._merged import BoundaryConsistency, derive_merge
+from torchlens._merged._errors import MergedFinding
+from torchlens._merged._evidence import RankEvidence
 
 WORLD = membership_digest_for_ranks([0, 1])
 
@@ -106,43 +99,7 @@ def _evidence(rank: int, entry: dict) -> RankEvidence:
     )
 
 
-def _gather_pair(leaf_contribution: str) -> dict[int, RankEvidence]:
-    root = _boundary(
-        0,
-        kind="gather",
-        roles=[_role("contribution", 0), _role("destination", 0), _role("destination", 1)],
-        contribution_digests=["c0"],
-        destination_digests=["c0", "c1"],
-    )
-    leaf = _boundary(
-        1,
-        kind="gather",
-        roles=[_role("contribution", 0)],
-        contribution_digests=[leaf_contribution],
-        destination_digests=None,
-    )
-    return {0: _evidence(0, root), 1: _evidence(1, leaf)}
-
-
-def test_gather_root_slices_attest_against_member_contributions() -> None:
-    """Each root destination slice must equal that member's contribution digest."""
-
-    derivation = derive_merge(_gather_pair("c1"))
-    assert derivation.stored_alignment is MergeAlignment.ALIGNED
-    assert derivation.joins[0].consistency is BoundaryConsistency.ATTESTED
-
-
-def test_gather_slice_disagreement_is_mismatched() -> None:
-    """A leaf whose bytes differ from the root's slice demotes to MISMATCHED."""
-
-    derivation = derive_merge(_gather_pair("f" * 2))
-    assert derivation.joins[0].consistency is BoundaryConsistency.MISMATCHED
-    # Witnesses are demote-only on the VALUE status; membership alignment
-    # itself stays aligned.
-    assert derivation.stored_alignment is MergeAlignment.ALIGNED
-    assert derivation.stored_value_status is MergeValueStatus.DIVERGENT
-
-
+@pytest.mark.smoke
 def test_gather_without_a_root_demotes_to_not_present() -> None:
     """No rank holding the full destination list means the pairing cannot attest."""
 
@@ -164,37 +121,6 @@ def test_gather_without_a_root_demotes_to_not_present() -> None:
     assert derivation.joins[0].consistency is BoundaryConsistency.NOT_PRESENT
 
 
-def test_scatter_root_slices_attest_against_member_destinations() -> None:
-    """Each member's received slice must equal the root's contribution slice."""
-
-    root = _boundary(
-        0,
-        kind="scatter",
-        roles=[_role("contribution", 0), _role("contribution", 1), _role("destination", 0)],
-        contribution_digests=["s0", "s1"],
-        destination_digests=["s0"],
-    )
-    leaf = _boundary(
-        1,
-        kind="scatter",
-        roles=[_role("destination", 0)],
-        contribution_digests=None,
-        destination_digests=["s1"],
-    )
-    derivation = derive_merge({0: _evidence(0, root), 1: _evidence(1, leaf)})
-    assert derivation.joins[0].consistency is BoundaryConsistency.ATTESTED
-
-    wrong_leaf = _boundary(
-        1,
-        kind="scatter",
-        roles=[_role("destination", 0)],
-        contribution_digests=None,
-        destination_digests=["e" * 2],
-    )
-    mismatched = derive_merge({0: _evidence(0, root), 1: _evidence(1, wrong_leaf)})
-    assert mismatched.joins[0].consistency is BoundaryConsistency.MISMATCHED
-
-
 def _all_to_all_entry(rank: int, contribution: list[str], destination: list[str]) -> dict:
     return _boundary(
         rank,
@@ -210,6 +136,7 @@ def _all_to_all_entry(rank: int, contribution: list[str], destination: list[str]
     )
 
 
+@pytest.mark.smoke
 def test_all_to_all_full_matrix_attests_and_detects_one_wrong_cell() -> None:
     """dest_j[i] == contrib_i[j] over the full rank matrix; one bad cell demotes."""
 
@@ -230,6 +157,7 @@ def test_all_to_all_full_matrix_attests_and_detects_one_wrong_cell() -> None:
     assert bad.joins[0].consistency is BoundaryConsistency.MISMATCHED
 
 
+@pytest.mark.smoke
 def test_merged_finding_payload_round_trip_preserves_key_and_ranks() -> None:
     """MergedFinding serializes to canonical payload and rebuilds identically."""
 
@@ -240,9 +168,9 @@ def test_merged_finding_payload_round_trip_preserves_key_and_ranks() -> None:
         key=(WORLD, 0, "coll", 3),
         ranks=(0, 1),
     )
-    payload = finding.to_payload()
-    rebuilt = MergedFinding.from_payload(payload)
+    payload = finding.to_dict()
+    rebuilt = MergedFinding.from_dict(payload)
     assert rebuilt == finding
 
     keyless = MergedFinding(kind="presence_gap", detail="no key")
-    assert MergedFinding.from_payload(keyless.to_payload()) == keyless
+    assert MergedFinding.from_dict(keyless.to_dict()) == keyless

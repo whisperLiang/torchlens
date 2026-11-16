@@ -122,6 +122,7 @@ def test_profile_custom_loss_cannot_accumulate_into_caller_parameters() -> None:
     assert all(param.grad is None for param in model.parameters())
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_profile_cuda_phases() -> None:
     """GPU phase measurements execute a synchronized real gradient path."""
@@ -138,6 +139,7 @@ def test_profile_cuda_phases() -> None:
     assert result.prefix_backward.median_ms > 0
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_profile_parameter_free_cross_device_synchronizes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Explicit suffix placement is synchronized even with no CUDA state tensors."""

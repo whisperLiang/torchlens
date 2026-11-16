@@ -1,0 +1,295 @@
+"""Attribution graphs on tiny fixtures whose every edge has a closed form.
+
+F1: a two-layer transformer whose per-layer transcoders equal its MLPs, so
+error nodes are zero. F2: the same model with transcoders that reconstruct
+imperfectly, so error nodes carry the rest of each MLP output. F3: a
+three-layer model with a cross-layer transcoder whose layer-0 features
+write the MLP outputs of layers 0, 1 and 2.
+
+Every expected value comes from ``tests/_ag1_fixtures.py``: the forward in
+plain float64 algebra and the frozen linear map it defines. Nothing in the
+answer key calls ``build_graph`` or the one-backward read.
+
+Pre-registered bars (float64): every edge equals its key value to 1e-12;
+node counts by kind equal the counts below; for every feature and logit
+node, incoming edges plus the declared constants equal the node's value to
+1e-10, and the key's own constant terms equal the graph's to 1e-10; the
+logit nodes' totals reproduce the model's logits to 1e-10. Float32 F1:
+every edge within 1e-5 + 1e-5 * |key| of the float64 key on the same
+weights.
+"""
+
+from __future__ import annotations
+
+import pytest
+import torch
+
+import torchlens as tl
+from tests import _ag1_fixtures as fx
+from tests.support.gradient_edge_guard import requires_gradient_edge
+
+#: Pre-registered node counts: (features, errors, tokens, logits).
+F1_COUNTS = {"feature": 12, "error": 6, "token": 3, "logit": 2}
+F3_COUNTS = {"feature": 18, "error": 9, "token": 3, "logit": 2}
+EDGE_TOL = 1e-12
+TOTAL_TOL = 1e-10
+
+
+def _trace(model: torch.nn.Module) -> tl.Trace:
+    return tl.trace(model, torch.tensor([fx.TOKENS]))
+
+
+def _build(model, transcoders, n_layers, **kwargs):
+    return tl.attribution.build_graph(
+        _trace(model),
+        transcoders,
+        embedding_module="embed",
+        frozen=fx.frozen_names(n_layers),
+        **kwargs,
+    )
+
+
+def _layer(site: str) -> int:
+    return int(site.split(".")[1])
+
+
+def _source_injection(graph, node, model, frozen, transcoders):
+    """The key's vectors for one source node: ``(resid0, {layer: mlp write})``."""
+
+    zero = torch.zeros(fx.N_POS, fx.D_MODEL, dtype=torch.float64)
+    if node.kind == "token":
+        resid0 = zero.clone()
+        resid0[node.position] = frozen.resid0[node.position]
+        return resid0, {}
+    if node.kind == "error":
+        layer = _layer(node.site)
+        write = zero.clone()
+        write[node.position] = _key_errors(model, frozen, transcoders)[layer][node.position]
+        return zero, {layer: write}
+    assert node.kind == "feature"
+    reader = transcoders[node.site]
+    x = frozen.mlp_in[_layer(node.site)][node.position]
+    act = torch.relu(x @ reader.W_enc.double() + reader.b_enc.double())[node.feature_index]
+    writes = {}
+    decoders = reader.W_dec if isinstance(reader.W_dec, dict) else {node.site: reader.W_dec}
+    for site, decoder in decoders.items():
+        write = zero.clone()
+        write[node.position] = act * decoder.double()[node.feature_index]
+        writes[_layer(site)] = write
+    return zero, writes
+
+
+def _key_errors(model, frozen, transcoders):
+    """MLP output minus reconstruction, per layer, by plain algebra."""
+
+    recon = [torch.zeros(fx.N_POS, fx.D_MODEL, dtype=torch.float64) for _ in model.blocks]
+    for site, reader in transcoders.items():
+        acts = torch.relu(
+            frozen.mlp_in[_layer(site)] @ reader.W_enc.double() + reader.b_enc.double()
+        )
+        decoders = reader.W_dec if isinstance(reader.W_dec, dict) else {site: reader.W_dec}
+        biases = reader.b_dec if isinstance(reader.b_dec, dict) else {site: reader.b_dec}
+        for write, decoder in decoders.items():
+            recon[_layer(write)] = recon[_layer(write)] + acts @ decoder.double()
+            recon[_layer(write)] = recon[_layer(write)] + biases[write].double()
+    return [frozen.mlp_out[layer] - recon[layer] for layer in range(len(model.blocks))]
+
+
+def _readout(graph, node, ins, logits, transcoders):
+    """The key's linear read-out of a target node from the map's outputs."""
+
+    if node.kind == "feature":
+        reader = transcoders[node.site]
+        return ins[_layer(node.site)][node.position] @ reader.W_enc.double()[:, node.feature_index]
+    direction = torch.zeros(fx.VOCAB, dtype=torch.float64)
+    direction[node.token_id] = 1.0
+    if graph.has_demeaned_logits:
+        direction = direction - 1.0 / fx.VOCAB
+    return logits[-1] @ direction
+
+
+def _key(graph, model, transcoders):
+    """The full answer key: adjacency, node values and constant terms."""
+
+    frozen = fx.plain_forward(model)
+    n = len(graph.nodes)
+    adjacency = torch.zeros(n, n, dtype=torch.float64)
+    targets = [i for i, node in enumerate(graph.nodes) if node.kind in ("feature", "logit")]
+    for s, source in enumerate(graph.nodes):
+        if source.kind == "logit":
+            continue
+        resid0, writes = _source_injection(graph, source, model, frozen, transcoders)
+        ins, logits = fx.linear_map(model, frozen, resid0, writes, biases=False)
+        for t in targets:
+            adjacency[t, s] = _readout(graph, graph.nodes[t], ins, logits, transcoders)
+    zero = torch.zeros(fx.N_POS, fx.D_MODEL, dtype=torch.float64)
+    dec_writes: dict[int, torch.Tensor] = {}
+    for site, reader in transcoders.items():
+        biases = reader.b_dec if isinstance(reader.b_dec, dict) else {site: reader.b_dec}
+        for write, bias in biases.items():
+            layer = _layer(write)
+            dec_writes[layer] = dec_writes.get(layer, zero) + bias.double().expand_as(zero)
+    dec_ins, dec_logits = fx.linear_map(model, frozen, zero, dec_writes, biases=False)
+    other_ins, other_logits = fx.linear_map(model, frozen, zero, {}, biases=True)
+    values = torch.full((n,), float("nan"), dtype=torch.float64)
+    constants = {
+        name: torch.full((n,), float("nan"), dtype=torch.float64)
+        for name in ("encoder_bias", "decoder_bias", "other")
+    }
+    for t in targets:
+        node = graph.nodes[t]
+        constants["decoder_bias"][t] = _readout(graph, node, dec_ins, dec_logits, transcoders)
+        constants["other"][t] = _readout(graph, node, other_ins, other_logits, transcoders)
+        if node.kind == "feature":
+            reader = transcoders[node.site]
+            b_enc = reader.b_enc.double()[node.feature_index]
+            constants["encoder_bias"][t] = b_enc
+            values[t] = (
+                frozen.mlp_in[_layer(node.site)][node.position]
+                @ reader.W_enc.double()[:, node.feature_index]
+                + b_enc
+            )
+        else:
+            constants["encoder_bias"][t] = 0.0
+            values[t] = _readout(graph, node, [], frozen.logits, transcoders)
+    return adjacency, values, constants, frozen
+
+
+def _assert_against_key(graph, model, transcoders, counts):
+    adjacency, values, constants, frozen = _key(graph, model, transcoders)
+    assert graph.node_counts == counts
+    assert (graph.adjacency_matrix - adjacency).abs().max().item() <= EDGE_TOL
+    targets = list(graph.node_indices("feature")) + list(graph.node_indices("logit"))
+    assert (graph.node_values[targets] - values[targets]).abs().max().item() <= TOTAL_TOL
+    for name, term in constants.items():
+        assert (graph.constants[name][targets] - term[targets]).abs().max().item() <= TOTAL_TOL, (
+            name
+        )
+    total = graph.adjacency_matrix.sum(dim=1) + sum(graph.constants.values())
+    assert (total[targets] - values[targets]).abs().max().item() <= TOTAL_TOL
+    key_total = adjacency.sum(dim=1) + sum(constants.values())
+    assert (key_total[targets] - values[targets]).abs().max().item() <= TOTAL_TOL
+    return frozen
+
+
+class TestErrorNodeFixture:
+    """F2: transcoders that reconstruct imperfectly."""
+
+    @requires_gradient_edge
+    def test_logit_totals_need_the_error_nodes(self) -> None:
+        model = fx.build_model(2)
+        transcoders = fx.lossy_transcoders(model)
+        graph = _build(model, transcoders, 2, target=[0, 4], demeaned_logits=False)
+        rows = list(graph.node_indices("logit"))
+        errors = list(graph.node_indices("error"))
+        total = graph.adjacency_matrix.sum(dim=1) + sum(graph.constants.values())
+        expected = fx.plain_forward(model).logits[-1, [0, 4]]
+        assert (total[rows] - expected).abs().max().item() <= TOTAL_TOL
+        without = total[rows] - graph.adjacency_matrix[rows][:, errors].sum(dim=1)
+        assert (without - expected).abs().max().item() > 1e-3
+
+
+class TestRefusals:
+    """Each coded refusal fires with its code."""
+
+    def _code(self, excinfo) -> str:
+        return excinfo.value.fields["code"]
+
+    def test_frozen_is_required(self) -> None:
+        model = fx.build_model(2)
+        with pytest.raises(tl.errors.AttributionError) as excinfo:
+            tl.attribution.build_graph(
+                _trace(model), fx.exact_transcoders(model), embedding_module="embed"
+            )
+        assert self._code(excinfo) == "attribution_graph_frozen_required"
+        assert "frozen=()" in str(excinfo.value)
+
+    @requires_gradient_edge
+    def test_unknown_site(self) -> None:
+        model = fx.build_model(2)
+        with pytest.raises(tl.errors.AttributionError) as excinfo:
+            tl.attribution.build_graph(
+                _trace(model), fx.exact_transcoders(model), embedding_module="embedding", frozen=()
+            )
+        assert self._code(excinfo) == "attribution_graph_site_not_found"
+
+    def test_transcoder_without_weights(self) -> None:
+        model = fx.build_model(2)
+        with pytest.raises(tl.errors.AttributionError) as excinfo:
+            tl.attribution.build_graph(
+                _trace(model), {"blocks.0.mlp": object()}, embedding_module="embed", frozen=()
+            )
+        assert self._code(excinfo) == "attribution_graph_transcoder_invalid"
+
+    @requires_gradient_edge
+    def test_batch_of_two_is_unsupported(self) -> None:
+        model = fx.build_model(2)
+        trace = tl.trace(model, torch.tensor([fx.TOKENS, fx.TOKENS]))
+        with pytest.raises(tl.errors.AttributionError) as excinfo:
+            tl.attribution.build_graph(
+                trace, fx.exact_transcoders(model), embedding_module="embed", frozen=()
+            )
+        assert self._code(excinfo) == "attribution_graph_input_unsupported"
+
+    @requires_gradient_edge
+    def test_bad_target(self) -> None:
+        model = fx.build_model(2)
+        with pytest.raises(tl.errors.AttributionError) as excinfo:
+            _build(model, fx.exact_transcoders(model), 2, target=[99])
+        assert self._code(excinfo) == "attribution_graph_target_invalid"
+
+    @requires_gradient_edge
+    def test_op_label_is_not_a_module_name(self) -> None:
+        # trace.modules[op_label] gives the Module the op ran in; the graph's
+        # module-named sites still take module names only.
+        model = fx.build_model(2)
+        trace = _trace(model)
+        op_label = trace.modules["embed"].layer_labels[0]
+        with pytest.raises(tl.errors.AttributionError) as excinfo:
+            tl.attribution.build_graph(
+                trace,
+                fx.exact_transcoders(model),
+                embedding_module=op_label,
+                frozen=fx.frozen_names(2),
+            )
+        assert self._code(excinfo) == "attribution_graph_site_not_found"
+
+    @requires_gradient_edge
+    def test_frozen_name_of_no_site_names_both_readings(self) -> None:
+        # An op label taken from another capture (other op counts before it) is
+        # neither a module nor an op here: the refusal says so, not "missing module".
+        model = fx.build_model(2)
+        with pytest.raises(tl.errors.AttributionError) as excinfo:
+            tl.attribution.build_graph(
+                _trace(model),
+                fx.exact_transcoders(model),
+                embedding_module="embed",
+                frozen=[*fx.frozen_names(2), "softmax_99_999:1"],
+            )
+        assert self._code(excinfo) == "attribution_graph_site_not_found"
+        message = str(excinfo.value)
+        assert "The frozen= entry 'softmax_99_999:1' names neither a module nor an op" in message
+        assert "[str(op.label) for op in trace]" in message
+
+
+class TestSiteKinds:
+    """A frozen op label holds that op, not the output of the module it ran in."""
+
+    @requires_gradient_edge
+    def test_frozen_op_label_inside_a_module_holds_that_op(self) -> None:
+        model = fx.build_model(2)
+        trace = _trace(model)
+        scores = next(
+            label
+            for label in trace.modules["blocks.0.attn"].layer_labels
+            if label.startswith("matmul")
+        )
+        base = _build(model, fx.exact_transcoders(model), 2)
+        graph = tl.attribution.build_graph(
+            trace,
+            fx.exact_transcoders(model),
+            embedding_module="embed",
+            frozen=[*fx.frozen_names(2), scores],
+        )
+        added = set(graph.frozen_sites) - set(base.frozen_sites)
+        assert added == {f"{scores}:1"} or added == {scores}

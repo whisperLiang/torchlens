@@ -1,9 +1,10 @@
 """Generate the checked-in per-class StorageBinding tables.
 
-One declared schema, generated artifacts (docs/reference/trace_core_design.md
+One declared schema, generated artifacts (docs/internal/reference/trace_core_design.md
 section 3.4): this tool derives one ``StorageBinding`` per declared field for
-all 12 record classes and writes ``torchlens/data_classes/_schema_bindings.py``
-as reviewable, deterministic source. A CI test regenerates and diffs, so the
+all 12 record classes and writes ``torchlens/_data_classes/_schema_bindings.py``
+(the ``trace`` table goes to its sibling ``_schema_bindings_trace.py``) as
+reviewable, deterministic source. A CI test regenerates and diffs, so the
 bindings can never drift from the classes silently.
 
 Classification is mechanical and conservative; the storage kinds refine as
@@ -16,27 +17,49 @@ Run: python tools/generate_record_schema.py [--check]
 from __future__ import annotations
 
 import sys
+import types
+import typing
 from pathlib import Path
-from types import UnionType
-from typing import Any, Union, get_args, get_origin
+from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
-_OUT_PATH = _REPO_ROOT / "torchlens" / "data_classes" / "_schema_bindings.py"
+_OUT_PATH = _REPO_ROOT / "torchlens" / "_data_classes" / "_schema_bindings.py"
+#: The ``trace`` table (about a third of all bindings) is emitted into its own
+#: generated module, which ``_schema_bindings`` imports, so neither generated
+#: file outgrows the file-size cap.
+_SPLIT_KEY = "trace"
+_SPLIT_NAME = "TRACE_BINDINGS"
+_SPLIT_OUT_PATH = _REPO_ROOT / "torchlens" / "_data_classes" / "_schema_bindings_trace.py"
 
 _HEADER = '''"""GENERATED storage bindings for the declared record schema. DO NOT EDIT.
 
 Regenerate with ``python tools/generate_record_schema.py``; a CI test
 (`tests/test_record_schema_bindings.py`) diffs this file against a fresh
 generation, so hand edits cannot survive. The declared axes live in
-``field_policy.StorageBinding``; classification policy lives in the
-generator.
+``field_policy.StorageBinding``; classification policy lives in the generator.
 """
 
 from __future__ import annotations
 
-from .field_policy import StorageBinding, StorageKind
+from ._schema_bindings_trace import TRACE_BINDINGS
+from .._io._field_policy import StorageBinding, StorageKind
+
+'''
+
+_SPLIT_HEADER = '''"""GENERATED storage bindings for the ``trace`` record. DO NOT EDIT.
+
+The ``trace`` table of ``_schema_bindings.STORAGE_BINDINGS``, emitted as its own
+module so neither generated file outgrows the file-size cap. Regenerate with
+``python tools/generate_record_schema.py``; a CI test
+(`tests/test_record_schema_bindings.py`) diffs this file against a fresh
+generation, so hand edits cannot survive.
+"""
+
+from __future__ import annotations
+
+from .._io._field_policy import StorageBinding, StorageKind
 
 '''
 
@@ -63,7 +86,13 @@ _GROUP_FIELDS = {"equivalent_ops", "recurrent_ops"}
 #: result depends on whether the backend module is imported.
 _OVERLAY_EDGE_FIELDS = {"input_ancestors", "output_descendants"}
 
-#: Copy-on-read alias-barrier fields (JMT-FORK-1 default: fresh copies).
+#: Stored fields fronted by a property that reads the stored slot back (the
+#: ``Trace.transformed_output`` getter refuses a stale replay marker). The
+#: value is stored data, not derived, so it classifies by its policy like
+#: any stored field instead of as COMPUTED.
+_STORED_BEHIND_PROPERTY_FIELDS = {"transformed_output"}
+
+#: Copy-on-read alias-barrier fields (FORK-1 default: fresh copies).
 _COPY_ON_READ_FIELDS = {"equivalent_ops", "recurrent_ops"}
 
 #: Variable-cardinality relation fields destined for the edge-occurrence
@@ -130,16 +159,70 @@ def _annotation_for(cls: type, name: str) -> str | None:
     for mro_cls in cls.__mro__:
         annotations = mro_cls.__dict__.get("__annotations__", {})
         if name in annotations:
-            annotation = annotations[name]
-            # Without postponed annotations, Any | None evaluates to a typing
-            # Optional on 3.10 but a UnionType on 3.11. Render both through the
-            # typing alias so the committed schema does not depend on the host.
-            if get_origin(annotation) is UnionType and any(
-                arg is Any for arg in get_args(annotation)
-            ):
-                annotation = Union[get_args(annotation)]  # noqa: UP007 — canonical runtime repr
-            return annotation if isinstance(annotation, str) else repr(annotation)
+            return _render_annotation(annotations[name])
     return None
+
+
+def _render_annotation(annotation: Any) -> str:
+    """Render one annotation to a string that is identical on every Python.
+
+    String annotations (modules under ``from __future__ import annotations``)
+    pass through, and evaluated non-unions keep their ``repr``. Evaluated
+    unions are canonicalized, because ``repr`` of a union differs by
+    interpreter (``Any | None`` evaluates to
+    ``typing.Optional[typing.Any]`` on 3.10 but to a ``types.UnionType``
+    reading ``typing.Any | None`` on 3.11+), which made the generated file
+    stale on every interpreter but the one that last wrote it. Unions render
+    as their ``|``-joined members in declaration order.
+
+    Parameters
+    ----------
+    annotation:
+        Class-declared annotation object or string.
+
+    Returns
+    -------
+    str
+        Interpreter-independent annotation text.
+    """
+
+    if isinstance(annotation, str):
+        return annotation
+    if _is_union(annotation):
+        return " | ".join(_render_union_member(arg) for arg in typing.get_args(annotation))
+    return repr(annotation)
+
+
+def _is_union(annotation: Any) -> bool:
+    """Return whether ``annotation`` is a ``typing.Union`` or ``X | Y`` union."""
+
+    return typing.get_origin(annotation) is typing.Union or isinstance(annotation, types.UnionType)
+
+
+def _render_union_member(member: Any) -> str:
+    """Render one union member the way a ``types.UnionType`` repr names it.
+
+    Parameters
+    ----------
+    member:
+        One argument of a union annotation.
+
+    Returns
+    -------
+    str
+        ``None`` for ``NoneType``, a bare name for builtins, a
+        module-qualified name for other plain classes, else ``repr``.
+    """
+
+    if member is type(None):
+        return "None"
+    if _is_union(member):
+        return " | ".join(_render_union_member(arg) for arg in typing.get_args(member))
+    if isinstance(member, type) and not isinstance(member, types.GenericAlias):
+        if member.__module__ == "builtins":
+            return member.__qualname__
+        return f"{member.__module__}.{member.__qualname__}"
+    return repr(member)
 
 
 def _is_property(cls: type, name: str) -> bool:
@@ -149,6 +232,20 @@ def _is_property(cls: type, name: str) -> bool:
         if name in mro_cls.__dict__:
             return isinstance(mro_cls.__dict__[name], property)
     return False
+
+
+def _storage_attr_for(cls: type, name: str) -> str:
+    """Return the attribute that holds persisted field ``name`` on ``cls``.
+
+    A member moved into an Op or Layer concern group keeps its persisted name
+    but lives under a private storage attribute, so the descriptor and pooling
+    checks read that attribute; the persisted binding stays unchanged.
+    """
+
+    from torchlens._utils._record_group_table import LAYER_STORAGE_ATTRS, OP_STORAGE_ATTRS
+
+    mapping = {"Op": OP_STORAGE_ATTRS, "Layer": LAYER_STORAGE_ATTRS}.get(cls.__name__, {})
+    return mapping.get(name, name)
 
 
 def _classify(
@@ -172,7 +269,9 @@ def _classify(
         return "BITSET", "mutable_container"
     if name in _GROUP_FIELDS:
         return "GROUP", "mutable_container"
-    if _is_property(cls, name) and name not in _OVERLAY_EDGE_FIELDS:
+    attr = _storage_attr_for(cls, name)
+    stored = name in _OVERLAY_EDGE_FIELDS or name in _STORED_BEHIND_PROPERTY_FIELDS
+    if _is_property(cls, attr) and not stored:
         return "COMPUTED", "immutable"
     if policy.portable_policy is FieldPolicy.DROP:
         return "RUNTIME", "immutable"
@@ -184,7 +283,7 @@ def _classify(
         return "EDGE", "mutable_container" if is_container else "immutable"
     if is_container:
         return "SCALAR", "mutable_container"
-    if name in pooled_slots:
+    if attr in pooled_slots:
         return "INTERNED", "immutable"
     return "SCALAR", "immutable"
 
@@ -192,18 +291,18 @@ def _classify(
 def _collect() -> dict[str, list[tuple[str, str, str | None, str]]]:
     """Build the schema-key -> [(field, kind, annotation, mutability)] map."""
 
-    from torchlens.data_classes import op as op_module
-    from torchlens.data_classes.aten_op import AtenOp
-    from torchlens.data_classes.backward_pass import BackwardPass
-    from torchlens.data_classes.buffer import Buffer
-    from torchlens.data_classes.func_call_location import FuncCallLocation
-    from torchlens.data_classes.grad_fn import GradFn
-    from torchlens.data_classes.grad_fn_call import GradFnCall
-    from torchlens.data_classes.layer import Layer
-    from torchlens.data_classes.module import Module, ModuleCall
-    from torchlens.data_classes.op import Op
-    from torchlens.data_classes.param import Param
-    from torchlens.data_classes.trace import Trace
+    from torchlens._data_classes import op as op_module
+    from torchlens._data_classes.aten_op import AtenOp
+    from torchlens._data_classes.backward_pass import BackwardPass
+    from torchlens._data_classes.buffer import Buffer
+    from torchlens._data_classes.func_call_location import FuncCallLocation
+    from torchlens._data_classes.grad_fn import GradFn
+    from torchlens._data_classes.grad_fn_call import GradFnCall
+    from torchlens._data_classes.layer import Layer
+    from torchlens._data_classes.module import Module, ModuleCall
+    from torchlens._data_classes.op import Op
+    from torchlens._data_classes.param import Param
+    from torchlens._data_classes.trace import Trace
 
     op_container_defaults = dict(getattr(op_module, "_LAYER_PASS_LOG_CONTAINER_DEFAULTS", {}))
     op_container_defaults.update(getattr(op_module, "_LAYER_PASS_LOG_DEFAULT_FILL", {}))
@@ -227,7 +326,7 @@ def _collect() -> dict[str, list[tuple[str, str, str | None, str]]]:
     schema: dict[str, list[tuple[str, str, str | None, str]]] = {}
     for key, cls, container_defaults, pooled in classes:
         rows: list[tuple[str, str, str | None, str]] = []
-        for name, policy in cls.FIELD_POLICY.items():
+        for name, policy in cls._FIELD_POLICY.items():
             kind, mutability = _classify(key, cls, name, policy, container_defaults, pooled)
             rows.append((name, kind, _annotation_for(cls, name), mutability))
         schema[key] = rows
@@ -247,11 +346,11 @@ def collect_primitive_candidate_bindings() -> dict[str, str]:
 
     from dataclasses import replace
 
+    from torchlens._data_classes.aten_op import AtenOp
     from torchlens._io import FieldPolicy
-    from torchlens.data_classes.aten_op import AtenOp
 
     candidate: dict[str, str] = {}
-    for name, policy in AtenOp.FIELD_POLICY.items():
+    for name, policy in AtenOp._FIELD_POLICY.items():
         promoted = replace(policy, portable_policy=FieldPolicy.KEEP)
         kind, _ = _classify(
             "primitive_op",
@@ -265,38 +364,64 @@ def collect_primitive_candidate_bindings() -> dict[str, str]:
     return candidate
 
 
+def _binding_line(row: tuple[str, str, str | None, str], indent: str) -> str:
+    """Render one ``"field": StorageBinding(...),`` source line."""
+
+    name, kind, annotation, mutability = row
+    parts = [f"StorageKind.{kind}"]
+    if annotation is not None:
+        parts.append(f"annotation={annotation!r}")
+    if mutability != "immutable":
+        parts.append(f'mutability="{mutability}"')
+    return f'{indent}"{name}": StorageBinding({", ".join(parts)}),\n'
+
+
 def _render(schema: dict[str, list[tuple[str, str, str | None, str]]]) -> str:
     """Render the bindings module source deterministically."""
 
     lines = [_HEADER]
     lines.append("STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {\n")
     for key, rows in schema.items():
+        if key == _SPLIT_KEY:
+            lines.append(f'    "{key}": {_SPLIT_NAME},\n')
+            continue
         lines.append(f'    "{key}": {{\n')
-        for name, kind, annotation, mutability in rows:
-            parts = [f"StorageKind.{kind}"]
-            if annotation is not None:
-                parts.append(f"annotation={annotation!r}")
-            if mutability != "immutable":
-                parts.append(f'mutability="{mutability}"')
-            lines.append(f'        "{name}": StorageBinding({", ".join(parts)}),\n')
+        lines.extend(_binding_line(row, "        ") for row in rows)
         lines.append("    },\n")
     lines.append("}\n")
     return "".join(lines)
 
 
-def main() -> int:
-    """Generate (or with --check, verify) the bindings module."""
+def _render_split(schema: dict[str, list[tuple[str, str, str | None, str]]]) -> str:
+    """Render the split-out ``trace`` bindings module source deterministically."""
 
-    rendered = _render(_collect())
+    lines = [_SPLIT_HEADER]
+    lines.append(f"{_SPLIT_NAME}: dict[str, StorageBinding] = {{\n")
+    lines.extend(_binding_line(row, "    ") for row in schema[_SPLIT_KEY])
+    lines.append("}\n")
+    return "".join(lines)
+
+
+def main() -> int:
+    """Generate (or with --check, verify) the bindings modules."""
+
+    schema = _collect()
+    outputs = ((_OUT_PATH, _render(schema)), (_SPLIT_OUT_PATH, _render_split(schema)))
     if "--check" in sys.argv:
-        current = _OUT_PATH.read_text() if _OUT_PATH.exists() else ""
-        if current != rendered:
-            print("stale: _schema_bindings.py differs from a fresh generation")
+        stale = [
+            path.name
+            for path, rendered in outputs
+            if (path.read_text() if path.exists() else "") != rendered
+        ]
+        for name in stale:
+            print(f"stale: {name} differs from a fresh generation")
+        if stale:
             return 1
-        print("ok: _schema_bindings.py is current")
+        print("ok: _schema_bindings.py and _schema_bindings_trace.py are current")
         return 0
-    _OUT_PATH.write_text(rendered)
-    print(f"wrote {_OUT_PATH}")
+    for path, rendered in outputs:
+        path.write_text(rendered)
+        print(f"wrote {path}")
     return 0
 
 

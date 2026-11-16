@@ -17,20 +17,29 @@ tests below are no longer trustworthy.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Iterator
 
 import pytest
 import torch
+from support.fp8_guard import permit_cpu_float8_allocation
 from torch import nn
 
 import torchlens as tl
-from torchlens.data_classes._nonfinite import nonfinite_layers, uncheckable_payload_count
-from torchlens.errors import CaptureError
-from torchlens.utils._torch_compat import get_fp8_dtypes, get_torch_capability_snapshot
-from torchlens.utils.tensor_utils import (
+from torchlens._data_classes._nonfinite import nonfinite_layers, uncheckable_payload_count
+from torchlens._utils._torch_compat import get_fp8_dtypes, get_torch_capability_snapshot
+from torchlens._utils.tensor_utils import (
     fp8_safe_comparison_pair,
     fp8_widen_for_numeric_ops,
     tensor_nanequal,
 )
+from torchlens.errors import CaptureError
+
+
+@pytest.fixture(autouse=True)
+def _permit_cpu_float8_allocation_in_module() -> Iterator[None]:
+    """Every test here creates fresh Float8 CPU tensors; see ``conftest.py``."""
+    with permit_cpu_float8_allocation():
+        yield
 
 
 def _fp8_dtypes() -> tuple[torch.dtype, ...]:
@@ -221,7 +230,6 @@ def test_tensor_nanequal_rejects_adjacent_tiny_fp8_values_with_tolerance(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.smoke
 def test_fp8_capture_records_the_cast_activation() -> None:
     """Capture logs the fp8 op and reports its real dtype."""
 
@@ -276,7 +284,7 @@ def test_raise_on_nan_fires_on_a_non_finite_fp8_activation() -> None:
         tl.trace(
             Fp8NonFinite(),
             torch.ones(1, 2),
-            capture=tl.options.CaptureOptions(raise_on_nan=True),
+            capture=tl.options.CaptureOptions(on_nonfinite="raise"),
         )
     message = str(excinfo.value)
     assert "non-finite" in message
@@ -330,7 +338,12 @@ def test_unrunnable_nonfinite_check_warns_instead_of_reading_as_clean(monkeypatc
         """Model producing several bfloat16 activations."""
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Cast through bfloat16 twice.
+            """Cast through bfloat16 with a real NaN in the activation.
+
+            The two-stage check (snoop D4) screens every tensor through a
+            float32 accumulator, so a kernel-less dtype only reaches its own
+            ``isfinite`` call on a TRIPPED screen -- the NaN makes the screen
+            trip and the exact stage-2 check hit the refusing kernel.
 
             Parameters
             ----------
@@ -343,15 +356,19 @@ def test_unrunnable_nonfinite_check_warns_instead_of_reading_as_clean(monkeypatc
                 float32 output.
             """
 
-            reduced = x.to(torch.bfloat16)
-            return (reduced + 1).to(torch.float32)
+            reduced = (x.abs() + 1).to(torch.bfloat16) / 0.0
+            # clamp() maps the +inf back to a finite value so the only
+            # nonfinite activation on the forward is the bfloat16 one --
+            # every float32 op stays finite and the real raise_on_nan abort
+            # never fires.
+            return reduced.clamp(-1.0, 1.0).to(torch.float32)
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         tl.trace(
             BFloatModel(),
             torch.randn(2, 4),
-            capture=tl.options.CaptureOptions(raise_on_nan=True),
+            capture=tl.options.CaptureOptions(on_nonfinite="raise"),
         )
 
     skipped = [item for item in caught if "UNCHECKED for NaN/Inf" in str(item.message)]
@@ -368,13 +385,13 @@ def test_clean_fp8_capture_does_not_trip_raise_on_nan() -> None:
     trace = tl.trace(
         _Fp8CastModel(torch.float8_e4m3fn),
         torch.randn(2, 4),
-        capture=tl.options.CaptureOptions(raise_on_nan=True),
+        capture=tl.options.CaptureOptions(on_nonfinite="raise"),
     )
     assert trace.num_params > 0
 
 
 # ---------------------------------------------------------------------------
-# compat.report tells the user before they capture
+# report.doctor tells the user before they capture
 # ---------------------------------------------------------------------------
 
 
@@ -407,8 +424,8 @@ def test_compat_report_flags_fp8_state() -> None:
 
             return self.fc(x)
 
-    row = tl.compat.report(Fp8Buffer(), torch.randn(2, 4)).row("fp8_dtype")
-    assert row.detected is True
+    row = tl.report.doctor(Fp8Buffer(), torch.randn(2, 4)).check("fp8_dtype")
+    assert row.is_detected is True
     assert row.status == "scope"
     assert "float32" in row.details
     assert ".tlspec" in row.details
@@ -417,8 +434,8 @@ def test_compat_report_flags_fp8_state() -> None:
 def test_compat_report_fp8_row_is_quiet_and_honest_when_clean() -> None:
     """No fp8 state reports pass -- while disclosing what it could not see."""
 
-    row = tl.compat.report(nn.Linear(4, 4), torch.randn(2, 4)).row("fp8_dtype")
-    assert row.detected is False
+    row = tl.report.doctor(nn.Linear(4, 4), torch.randn(2, 4)).check("fp8_dtype")
+    assert row.is_detected is False
     assert row.status == "pass"
     assert "inside the forward" in row.details
 
@@ -427,8 +444,8 @@ def test_compat_report_flags_an_fp8_input() -> None:
     """An fp8 model input is detected too."""
 
     fp8_input = torch.randn(2, 4).to(torch.float8_e4m3fn)
-    row = tl.compat.report(nn.Linear(4, 4), fp8_input).row("fp8_dtype")
-    assert row.detected is True
+    row = tl.report.doctor(nn.Linear(4, 4), fp8_input).check("fp8_dtype")
+    assert row.is_detected is True
     assert "inputs" in row.details
 
 
@@ -447,11 +464,11 @@ def test_saving_an_fp8_activation_refuses_typed(tmp_path) -> None:
         pytest temporary directory.
     """
 
-    from torchlens.errors import TorchLensIOError
+    from torchlens.errors import ArtifactError
 
     trace = tl.trace(_Fp8CastModel(torch.float8_e4m3fn), torch.randn(2, 4))
-    with pytest.raises(TorchLensIOError) as excinfo:
-        tl.save(trace, str(tmp_path / "fp8.tlspec"))
+    with pytest.raises(ArtifactError) as excinfo:
+        trace.save(str(tmp_path / "fp8.tlspec"))
     assert "float8_e4m3fn" in str(excinfo.value)
 
 
@@ -570,8 +587,13 @@ def test_no_fp8_variant_can_be_trusted_to_its_native_finiteness_kernel() -> None
             f"the widened check must see {dtype}'s non-finite pattern"
         )
         try:
+            # torch's exact exception type for a missing fp8 kernel is not
+            # stable across versions: some builds raise NotImplementedError,
+            # others a bare RuntimeError (NotImplementedError IS a
+            # RuntimeError, but not the reverse, so catching only the
+            # subclass misses the floor's bare-RuntimeError shape).
             native_ok = bool((~torch.isfinite(payload)).all())
-        except NotImplementedError:
+        except RuntimeError:
             continue
         if native_ok:
             trustworthy.append(str(dtype))
@@ -622,7 +644,7 @@ def test_a_dtype_with_no_finiteness_kernel_is_disclosed_not_called_finite() -> N
     # ``report.explain``'s anomaly bullet publishes the same verdict standalone.
     anomaly = [
         line
-        for line in tl.report.explain(trace).splitlines()
+        for line in trace.explain().splitlines()
         if "NaN or Inf" in line or "no runnable finiteness check" in line
     ]
     assert anomaly, "the report must still carry an anomaly verdict"

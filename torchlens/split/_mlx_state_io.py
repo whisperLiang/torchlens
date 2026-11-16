@@ -74,6 +74,7 @@ def _inventory(runtime: Any) -> tuple[Any, _MlxStateInventory]:
                 split_point=runtime.request.boundary,
                 reason="named_state_unavailable",
             ),
+            code=SplitUnsupportedError.code,
         )
     return coordinator, coordinator.inventory
 
@@ -117,6 +118,7 @@ def mlx_runtime_state_dict(runtime: Any) -> dict[str, Any]:
                         split_point=runtime.request.boundary,
                         reason="divergent segment state replicas",
                     ),
+                    code=SplitUnsupportedError.code,
                 )
     values = {
         source_id: effective.get(source_id, coordinator.values.get(source_id, value))
@@ -147,7 +149,11 @@ def load_mlx_runtime_state_dict(runtime: Any, state_dict: Mapping[str, Any]) -> 
         backend="mlx", split_point=runtime.request.boundary, reason="state_dict_invalid"
     )
     if not isinstance(state_dict, Mapping):
-        raise SplitUnsupportedError("MLX split state_dict must be a mapping.", context=context)
+        raise SplitUnsupportedError(
+            "MLX split state_dict must be a mapping.",
+            context=context,
+            code=SplitUnsupportedError.code,
+        )
     supplied = dict(state_dict)
     if supplied.keys() != inventory.names.keys():
         missing = sorted(inventory.names.keys() - supplied.keys())
@@ -155,6 +161,7 @@ def load_mlx_runtime_state_dict(runtime: Any, state_dict: Mapping[str, Any]) -> 
         raise SplitUnsupportedError(
             f"MLX split state inventory mismatch: missing={missing!r}, unexpected={unexpected!r}.",
             context=context,
+            code=SplitUnsupportedError.code,
         )
     values: dict[int, Any] = {}
     for name, source_id in inventory.names.items():
@@ -167,13 +174,16 @@ def load_mlx_runtime_state_dict(runtime: Any, state_dict: Mapping[str, Any]) -> 
             raise SplitUnsupportedError(
                 f"MLX split state {name!r} must retain its captured array shape and dtype.",
                 context=context,
+                code=SplitUnsupportedError.code,
             )
         previous = values.setdefault(source_id, value)
         with mlx_execution_context(mx.cpu):
             matches = previous is value or bool(mx.array_equal(previous, value, equal_nan=True))
         if not matches:
             raise SplitUnsupportedError(
-                f"MLX split tied state {name!r} received conflicting values.", context=context
+                f"MLX split tied state {name!r} received conflicting values.",
+                context=context,
+                code=SplitUnsupportedError.code,
             )
     with mlx_execution_context(mx.cpu):
         staged = snapshot_mlx_values(values)

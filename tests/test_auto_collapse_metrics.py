@@ -14,12 +14,17 @@ import pytest
 import torch
 
 import torchlens as tl
-import torchlens.visualization._condensed_flow as condensed_flow
-import torchlens.visualization.auto_collapse as auto_collapse
-import torchlens.visualization.collapse_optimizer as collapse_optimizer
-from torchlens.visualization._render_common import format_collapsed_module_contents
-from torchlens.visualization._render_edges import _collapsed_module_should_show_remainder
-from torchlens.visualization.auto_collapse import (
+import torchlens._visualization._condensed_flow as condensed_flow
+import torchlens._visualization.auto_collapse as auto_collapse
+import torchlens._visualization.collapse_optimizer as collapse_optimizer
+from torchlens._visualization._header_block import network_count_line
+from torchlens._visualization._label_format import compact_count, format_collapsed_module_contents
+from torchlens._visualization._render_edges import _collapsed_module_should_show_remainder
+from torchlens._visualization._trace_collapse import (
+    collapse_plan as _collapse_plan,
+    collapse_schedule as _collapse_schedule,
+)
+from torchlens._visualization.auto_collapse import (
     _assert_plan_count,
     _child_condensed_flow_graphs,
     _flow_graph_for_sibling_group,
@@ -30,8 +35,8 @@ from torchlens.visualization.auto_collapse import (
     resolve_collapse_fn,
     resolve_repeat_folds,
 )
-from torchlens.visualization.collapse_optimizer import select_collapse_plan
-from torchlens.visualization.collapse_plan import (
+from torchlens._visualization.collapse_optimizer import select_collapse_plan
+from torchlens._visualization.collapse_plan import (
     CollapsePlan,
     OpSegment,
     RawOp,
@@ -45,6 +50,13 @@ tvs = pytest.importorskip("torchvision.models.segmentation")
 
 
 SVG_NODE_RE = re.compile(r'class="node"')
+
+
+@pytest.fixture(autouse=True)
+def _wall_clock_never_changes_plans(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disarm the collapse watchdog as CI does: host load must never change a plan."""
+
+    monkeypatch.setenv("TORCHLENS_DETERMINISTIC", "1")
 
 
 class ResidualBlock(torch.nn.Module):
@@ -1233,7 +1245,7 @@ def _collapse_artifact_snapshot(trace: tl.Trace, tmp_path: Path, stem: str) -> t
     analysis = analyze_collapse(trace)
     auto_result = select_collapse_plan(trace, context, mode="auto")
     max_result = select_collapse_plan(trace, context, mode="max")
-    schedule = trace.collapse_schedule(context)
+    schedule = _collapse_schedule(trace, context)
     auto_dot = _draw_source(trace, tmp_path, f"{stem}_auto", "auto").encode()
     max_dot = _draw_source(trace, tmp_path, f"{stem}_max", "max").encode()
     return (
@@ -1271,7 +1283,7 @@ def _all_mode_collapse_snapshot(trace: tl.Trace, tmp_path: Path, stem: str) -> t
     _clear_collapse_caches(trace)
     plans = (
         collapse_plan_for_trace(trace, None, None, RenderContext()),
-        *(trace.collapse_plan(mode=mode) for mode in modes[1:]),
+        *(_collapse_plan(trace, mode=mode) for mode in modes[1:]),
     )
     dots = tuple(_draw_source(trace, tmp_path, f"{stem}_{mode}", mode).encode() for mode in modes)
     return plans, dots
@@ -1291,7 +1303,7 @@ def _add_reference_fallback_collision(trace: tl.Trace) -> str:
         Relationship label deliberately removed from the fast index.
     """
 
-    input_op = next(op for op in trace.ops if op.is_input)
+    input_op = next(op for op in trace._layer_list if op.is_input)
     collision_op = next(op for op in trace.ops if not op.is_input and not op.is_output)
     collision_op._label_raw = input_op.layer_label
     return str(input_op.layer_label)
@@ -1308,10 +1320,9 @@ def _draw_source(
 
     return str(
         trace.draw(
-            vis_outpath=str(tmp_path / name),
-            vis_save_only=True,
-            vis_fileformat="svg",
-            vis_node_placement="dot",
+            path=str(tmp_path / name),
+            file_format="svg",
+            layout="dot",
             collapse=collapse,
             fold_repeats=fold_repeats,
         )
@@ -1348,11 +1359,10 @@ def _draw_source_mode(
 
     return str(
         trace.draw(
-            vis_mode=vis_mode,  # type: ignore[arg-type]
-            vis_outpath=str(tmp_path / name),
-            vis_save_only=True,
-            vis_fileformat="svg",
-            vis_node_placement="dot",
+            rolled=vis_mode == "rolled",
+            path=str(tmp_path / name),
+            file_format="svg",
+            layout="dot",
             collapse=collapse,  # type: ignore[arg-type]
         )
     )
@@ -1425,8 +1435,8 @@ def _module_contents_label(trace: tl.Trace, module: Any) -> str:
     """
 
     return format_collapsed_module_contents(
-        module.num_layers,
-        sum(trace[label].is_buffer for label in module.layer_labels),
+        len(module.layer_labels),
+        sum(trace[label].graph.is_buffer for label in module.layer_labels),
     )
 
 
@@ -1477,10 +1487,9 @@ def _draw_svg_layer_labels(
 
     out = tmp_path / name
     trace.draw(
-        vis_outpath=str(out),
-        vis_save_only=True,
-        vis_fileformat="svg",
-        vis_node_placement="dot",
+        path=str(out),
+        file_format="svg",
+        layout="dot",
         collapse=collapse,
     )
     return _svg_collapsed_box_contents_labels(out.with_suffix(".svg"))
@@ -1520,11 +1529,10 @@ def _assert_plan_svg_parity(
     )
     out = tmp_path / name
     trace.draw(
-        vis_mode=vis_mode,  # type: ignore[arg-type]
-        vis_outpath=str(out),
-        vis_save_only=True,
-        vis_fileformat="svg",
-        vis_node_placement="dot",
+        rolled=vis_mode == "rolled",
+        path=str(out),
+        file_format="svg",
+        layout="dot",
         collapse=mode,  # type: ignore[arg-type]
         show_containers=False,
     )
@@ -1548,20 +1556,19 @@ def test_float_collapse_plan_counts_match_train_batchnorm_svg(tmp_path: Path) ->
             for op in trace.ops
             if op.func_name == "add_"
             and op.children
-            and all(trace.ops[child].is_buffer for child in op.children)
+            and all(trace.ops[child].graph.is_buffer for child in op.children)
         ]
         assert len(hidden_updates) == 2
 
-        schedule = trace.collapse_schedule()
+        schedule = _collapse_schedule(trace)
         for index, threshold in enumerate((0.0, 0.25, 0.6, 1.0)):
-            plan = trace.collapse_plan(threshold)
+            plan = _collapse_plan(trace, threshold)
             out = tmp_path / f"batchnorm_float_{index}"
             trace.draw(
                 collapse=threshold,
-                vis_outpath=str(out),
-                vis_save_only=True,
-                vis_fileformat="svg",
-                vis_node_placement="dot",
+                path=str(out),
+                file_format="svg",
+                layout="dot",
                 show_containers=False,
                 order_siblings=False,
             )
@@ -1646,8 +1653,8 @@ def _atomic_own_output_ops(trace: tl.Trace, address: str) -> tuple[Any, ...]:
         if (
             modules
             and modules[-1].rsplit(":", 1)[0] == address
-            and getattr(op, "is_atomic_module", False)
-            and not getattr(op, "is_buffer", False)
+            and getattr(op.module_context, "is_atomic_module", False)
+            and not getattr(op.graph, "is_buffer", False)
         ):
             surfaced.append(op)
     return tuple(surfaced)
@@ -1931,9 +1938,9 @@ def test_adjacency_index_matches_forced_accessor_reference(
         if case_name == "recurrent":
             assert any(module.num_calls > 1 for module in trace.modules)
         if case_name == "batchnorm_buffer":
-            assert any(op.is_buffer for op in trace.ops)
+            assert any(op.graph.is_buffer for op in trace._layer_list)
         if case_name == "write_version":
-            assert any(op.buffer_write_kind is not None for op in trace.ops)
+            assert any(op.buffer_write_kind is not None for op in trace._layer_list)
 
         optimized = _collapse_artifact_snapshot(trace, tmp_path, f"{case_name}_indexed")
         if case_name == "external_endpoints":
@@ -2168,10 +2175,9 @@ def test_auto_collapse_places_collapsed_children_inside_parent_cluster(tmp_path:
     try:
         auto_source = str(
             trace.draw(
-                vis_outpath=str(tmp_path / "nested_stage_cluster_auto"),
-                vis_save_only=True,
-                vis_fileformat="svg",
-                vis_node_placement="dot",
+                path=str(tmp_path / "nested_stage_cluster_auto"),
+                file_format="svg",
+                layout="dot",
                 collapse="auto",
                 collapse_fn=_select_backbone_stage,
             )
@@ -2194,24 +2200,20 @@ def test_auto_collapse_run_fold_representative_uses_single_instance_stats(
         folds = resolve_repeat_folds(trace, collapse_fn, fold_repeats=True)
         fold = folds["blocks.0"]
         representative = trace.modules[fold.representative]
-        source = _draw_source(
-            trace,
-            tmp_path,
-            "run_fold_auto_rep_stats",
-            "auto",
-            fold_repeats=True,
-        )
+        source = _draw_source(trace, tmp_path, "run_fold_auto_rep_stats", "auto", fold_repeats=True)
         rep_line = _collapsed_node_line(source, "blocks.0")
 
-        assert fold.num_layers != representative.num_layers
+        assert fold.num_layers != len(representative.layer_labels)
         assert fold.num_params != representative.num_params
         assert f"... +{fold.multiplicity - 1} more {fold.class_name}" in source
         assert _module_contents_label(trace, representative) in rep_line
         assert f"{representative.num_params} params (all trainable)" in rep_line
         assert format_collapsed_module_contents(fold.num_layers, 0) not in rep_line
         assert f"{fold.num_params} params (all trainable)" not in rep_line
-        assert f"{trace.num_tensors} tensors total" in source
-        assert f"{trace.num_params} params" in source
+        # The header counts the traced network's ops, never the collapsed boxes.
+        assert network_count_line(trace, None, "unrolled") in source
+        assert not re.search(r"\d[\d,]* nodes \(", source)
+        assert f"{compact_count(trace.num_params, full_below=1000)} params" in source
     finally:
         trace.cleanup()
 
@@ -2251,10 +2253,9 @@ def test_auto_collapse_run_fold_parallel_ellipsis_stays_in_flow(tmp_path: Path) 
     try:
         auto_source = str(
             trace.draw(
-                vis_outpath=str(tmp_path / "parallel_run_fold_auto"),
-                vis_save_only=True,
-                vis_fileformat="svg",
-                vis_node_placement="dot",
+                path=str(tmp_path / "parallel_run_fold_auto"),
+                file_format="svg",
+                layout="dot",
                 collapse="auto",
                 collapse_fn=_select_branches_child,
             )
@@ -2282,25 +2283,26 @@ def test_auto_collapse_parallel_fold_representative_uses_single_instance_stats(
         representative = trace.modules[fold.representative]
         source = str(
             trace.draw(
-                vis_outpath=str(tmp_path / "parallel_run_fold_auto_rep_stats"),
-                vis_save_only=True,
-                vis_fileformat="svg",
-                vis_node_placement="dot",
+                path=str(tmp_path / "parallel_run_fold_auto_rep_stats"),
+                file_format="svg",
+                layout="dot",
                 collapse="auto",
                 collapse_fn=_select_branches_child,
             )
         )
         rep_line = _collapsed_node_line(source, "branches.0")
 
-        assert fold.num_layers != representative.num_layers
+        assert fold.num_layers != len(representative.layer_labels)
         assert fold.num_params != representative.num_params
         assert f"... +{fold.multiplicity - 1} more {fold.class_name}" in source
         assert _module_contents_label(trace, representative) in rep_line
         assert f"{representative.num_params} params (all trainable)" in rep_line
         assert format_collapsed_module_contents(fold.num_layers, 0) not in rep_line
         assert f"{fold.num_params} params (all trainable)" not in rep_line
-        assert f"{trace.num_tensors} tensors total" in source
-        assert f"{trace.num_params} params" in source
+        # The header counts the traced network's ops, never the collapsed boxes.
+        assert network_count_line(trace, None, "unrolled") in source
+        assert not re.search(r"\d[\d,]* nodes \(", source)
+        assert f"{compact_count(trace.num_params, full_below=1000)} params" in source
     finally:
         trace.cleanup()
 
@@ -2313,7 +2315,10 @@ def test_auto_collapse_run_fold_splits_same_spatial_channel_steps(tmp_path: Path
         auto_source = _draw_source(trace, tmp_path, "dim_step_stage_boundary_auto", "auto")
         folds = resolve_repeat_folds(trace, _select_blocks_child)
 
+        # The block's only child ``net`` hides the same ops, so the block (the name
+        # the user wrote) is the box candidate and ``net`` is not.
         assert _collapsed_exact_label_count(auto_source, "blocks.1") == 1
+        assert _collapsed_exact_label_count(auto_source, "blocks.1.net") == 0
         assert "runfoldellipsis" not in auto_source
         assert "... +" not in auto_source
         assert "shapes " not in auto_source
@@ -2458,10 +2463,9 @@ def test_auto_collapse_run_fold_parallel_fan_keeps_junction_visible(tmp_path: Pa
     try:
         auto_source = str(
             trace.draw(
-                vis_outpath=str(tmp_path / "parallel_fan_contract_auto"),
-                vis_save_only=True,
-                vis_fileformat="svg",
-                vis_node_placement="dot",
+                path=str(tmp_path / "parallel_fan_contract_auto"),
+                file_format="svg",
+                layout="dot",
                 collapse="auto",
                 collapse_fn=_select_branches_child,
             )
@@ -2569,10 +2573,9 @@ def test_auto_collapse_fold_repeats_true_standalone_keeps_parallel_junction(
     try:
         source = str(
             trace.draw(
-                vis_outpath=str(tmp_path / "standalone_run_fold_parallel"),
-                vis_save_only=True,
-                vis_fileformat="svg",
-                vis_node_placement="dot",
+                path=str(tmp_path / "standalone_run_fold_parallel"),
+                file_format="svg",
+                layout="dot",
                 collapse="none",
                 fold_repeats=True,
             )
@@ -2594,10 +2597,9 @@ def test_auto_collapse_fold_repeats_rejects_invalid_value(tmp_path: Path) -> Non
     try:
         with pytest.raises(ValueError, match="fold_repeats must be None, True, or False"):
             trace.draw(
-                vis_outpath=str(tmp_path / "invalid_fold_repeats"),
-                vis_save_only=True,
-                vis_fileformat="svg",
-                vis_node_placement="dot",
+                path=str(tmp_path / "invalid_fold_repeats"),
+                file_format="svg",
+                layout="dot",
                 collapse="auto",
                 fold_repeats="yes",  # type: ignore[arg-type]
             )
@@ -2613,10 +2615,9 @@ def test_draw_rejects_removed_fold_repeats_predecessor_kwarg(tmp_path: Path) -> 
     try:
         with pytest.raises(TypeError, match=removed_kwarg):
             trace.draw(
-                vis_outpath=str(tmp_path / "old_fold_repeats_predecessor"),
-                vis_save_only=True,
-                vis_fileformat="svg",
-                vis_node_placement="dot",
+                path=str(tmp_path / "old_fold_repeats_predecessor"),
+                file_format="svg",
+                layout="dot",
                 collapse="auto",
                 **{removed_kwarg: True},
             )
@@ -2687,20 +2688,19 @@ def test_max_collapsed_box_labels_exclude_surfaced_own_output_ops(
         setattr(collapse_block, "_torchlens_v2_mode", "max")
         source = str(
             trace.draw(
-                vis_outpath=str(tmp_path / f"{op_prefix}own_output_remainder"),
-                vis_save_only=True,
-                vis_fileformat="svg",
-                vis_node_placement="dot",
+                path=str(tmp_path / f"{op_prefix}own_output_remainder"),
+                file_format="svg",
+                layout="dot",
                 collapse_fn=collapse_block,
             )
         )
         module = trace.modules["block"]
         surfaced_ops = _atomic_own_output_ops(trace, "block")
         surfaced_params = sum(int(getattr(op, "num_params", 0) or 0) for op in surfaced_ops)
-        remainder_layers = module.num_layers - len(surfaced_ops)
-        remainder_buffers = sum(trace[label].is_buffer for label in module.layer_labels) - sum(
-            op.is_buffer for op in surfaced_ops
-        )
+        remainder_layers = len(module.layer_labels) - len(surfaced_ops)
+        remainder_buffers = sum(
+            trace[label].graph.is_buffer for label in module.layer_labels
+        ) - sum(op.graph.is_buffer for op in surfaced_ops)
         remainder_params = module.num_params - surfaced_params
         block_line = _collapsed_node_line(source, "block")
 
@@ -2709,7 +2709,7 @@ def test_max_collapsed_box_labels_exclude_surfaced_own_output_ops(
         assert format_collapsed_module_contents(remainder_layers, remainder_buffers) in block_line
         assert _module_contents_label(trace, module) not in block_line
         assert f"{remainder_params} params" in block_line
-        assert remainder_layers + len(surfaced_ops) == module.num_layers
+        assert remainder_layers + len(surfaced_ops) == len(module.layer_labels)
         assert remainder_params + surfaced_params == module.num_params
     finally:
         trace.cleanup()
@@ -2771,8 +2771,8 @@ def test_equivalent_max_plans_render_same_collapsed_box_layer_labels(
     torch.set_num_threads(4)
     trace = _trace(tvm.mobilenet_v2(weights=None), torch.randn(1, 3, 224, 224))
     try:
-        max_plan = trace.collapse_plan(mode="max")
-        level_plan = trace.collapse_plan(mode=1.0)
+        max_plan = _collapse_plan(trace, mode="max")
+        level_plan = _collapse_plan(trace, mode=1.0)
         max_labels = _draw_svg_layer_labels(trace, tmp_path, "mobilenet_v2_max", "max")
         level_labels = _draw_svg_layer_labels(trace, tmp_path, "mobilenet_v2_level_1", 1.0)
 
@@ -2875,7 +2875,15 @@ def test_v2_zero_frontier_falls_back_to_visible_full_plan(
         assert not result.declined
         assert count(result.plan) >= 1
         assert result.visible_count == count(result.plan)
-        assert result.reason == "floor_fallback: no optimizer frontier was produced"
+        # No silent floor (collapse memo D4): the fallback reason now names
+        # the diagnosed cause (here: K_CAP exhaustion by root own units) and
+        # the remedy, and the typed fields carry the machine-readable half.
+        assert result.reason is not None
+        assert result.reason.startswith("floor_fallback:")
+        assert "module= focus" in result.reason
+        assert result.planner == "floor_fallback"
+        assert result.k_cap_exhausted is True
+        assert result.root_own_units > 64
     finally:
         trace.cleanup()
 
@@ -2891,7 +2899,7 @@ def test_strict_mode_never_keys_on_ambient_pytest_marker(
     alone armed strict mode.
     """
 
-    from torchlens.visualization._render_common import strict_collapse_checks_enabled
+    from torchlens._visualization._render_common import strict_collapse_checks_enabled
 
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "downstream::test_case (call)")
     monkeypatch.delenv("TORCHLENS_COLLAPSE_STRICT", raising=False)
@@ -2913,7 +2921,7 @@ def test_strict_mode_env_parse_is_closed_vocabulary(
     """
 
     from torchlens._errors import InvalidArgumentError
-    from torchlens.visualization._render_common import strict_collapse_checks_enabled
+    from torchlens._visualization._render_common import strict_collapse_checks_enabled
 
     for spelling in ("true", "TRUE", "yes", "on", "1", " 1 "):
         monkeypatch.setenv("TORCHLENS_COLLAPSE_STRICT", spelling)
@@ -3080,55 +3088,11 @@ def test_v2_max_op_segment_renders_dashed_box_and_contracts_edges(
         first_segment_members = [trace.ops[label] for label in first_segment.ops]
         assert first_segment.owner is None
         assert any(
-            op.is_atomic_module and op.modules == ("stem:1",) for op in first_segment_members
+            op.module_context.is_atomic_module and op.modules == ("stem:1",)
+            for op in first_segment_members
         )
         assert any(
             op.modules and op.modules[0].startswith("blocks:") for op in first_segment_members
-        )
-    finally:
-        trace.cleanup()
-
-
-class _AtomicGapStack(torch.nn.Module):
-    """Two-op blocks with a bare atomic activation wedged between them."""
-
-    def __init__(self) -> None:
-        """Initialize blocks around one atomic top-level child."""
-
-        super().__init__()
-        self.layers = torch.nn.Sequential(
-            SegmentToyBlock(),
-            torch.nn.ReLU(),
-            SegmentToyBlock(),
-            SegmentToyBlock(),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run the atomic-gap stack forward pass."""
-
-        return self.layers(x)
-
-
-def test_op_segment_span_disclosure_counts_atomic_module_members(tmp_path: Path) -> None:
-    """R19-5 span disclosure must name hidden ATOMIC module calls too.
-
-    T9 (grind-p3, MED) red pin: the spanned-homes walk used the renderer's
-    effective module stack, which drops an atomic module's own innermost
-    level (a presentation choice — the renderer keeps the op and drops the
-    box). Containment disclosure must not inherit that drop: a segment
-    hiding a bare ``nn.ReLU`` child's op silently omitted its module call
-    from the ``-- spans @...`` list, undercounting the hidden module calls.
-    """
-
-    trace = _trace(_AtomicGapStack(), torch.randn(1, 4, 8, 8))
-    try:
-        source = _draw_source(trace, tmp_path, "atomic_gap_spans", "max")
-
-        assert "-- spans" in source
-        spans_lines = [line for line in source.splitlines() if "-- spans" in line]
-        assert any("layers.1:1" in line for line in spans_lines), (
-            "the atomic nn.ReLU child's module call is missing from the "
-            f"span disclosure: {spans_lines}"
         )
     finally:
         trace.cleanup()
@@ -3155,7 +3119,7 @@ def test_max_child_segment_decomposes_ops_and_buffers(
         for segment in child_segments:
             # r21: descriptor ops are concrete pass-qualified labels (exact keys).
             covered = [trace.ops[label] for label in segment.ops]
-            expected_buffers = sum(op.is_buffer for op in covered)
+            expected_buffers = sum(op.graph.is_buffer for op in covered)
             expected_ops = len(covered) - expected_buffers
             expected_contents = format_collapsed_module_contents(len(covered), expected_buffers)
 

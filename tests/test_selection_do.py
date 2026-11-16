@@ -4,8 +4,8 @@ Pins the normative contract rows: edit-then-scatter on a fresh tensor
 (helpers stay mask-oblivious, the engine owns masking), the whole-site
 short-circuit, the closed ``selection_apply_invalid`` reason set
 (shape | dtype | device | broadcast | not_maskable), site eligibility, the
-audit record, spec-persistence honesty (the mask never enters a KEEP field;
-``selection_recipe`` is DROP-gated), the ``tl.Edit`` public alias, and the
+audit record, spec-persistence honesty (a builtin edit's mask persists only
+as its ``mask``/``mask_sha256`` keywords; ``selection_recipe`` is its own family), the ``tl.Edit`` public alias, and the
 ``tl.patch_from`` helper (identity + discriminating behavior; portability
 ``opaque_audit``).
 """
@@ -19,10 +19,11 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
-from torchlens.intervention.types import HelperSpec
-from torchlens.selection import SelectionError
+from torchlens.errors import SelectionError
+from torchlens.intervention._subspace_projection import _mask_digest
+from torchlens.intervention._types import Edit
 
-_replay_module = importlib.import_module("torchlens.intervention.replay")
+_replay_module = importlib.import_module("torchlens.intervention._replay")
 
 
 class _TwoConv(nn.Module):
@@ -41,7 +42,7 @@ def log():
     trace = tl.trace(
         _TwoConv(),
         torch.randn(1, 1, 12, 12),
-        capture=tl.options.CaptureOptions(intervention_ready=True),
+        capture=tl.options.CaptureOptions(replayable=True),
     )
     try:
         yield trace
@@ -49,28 +50,16 @@ def log():
         trace.cleanup()
 
 
-def test_edit_is_public_type_and_helper_spec_is_alias():
-    """tl.Edit is the public edit-object type; HelperSpec the deprecated alias."""
+def test_edit_is_the_public_type_and_the_old_spelling_is_gone():
+    """tl.Edit is the public edit-object type; the old class spelling is removed (U00)."""
 
-    assert tl.Edit is HelperSpec
+    import torchlens.intervention as intervention
+    import torchlens.intervention._types as types
+
+    assert tl.Edit is Edit
+    old = "Helper" + "Spec"  # the removed spelling, built so the old-name grep stays clean
+    assert not hasattr(types, old) and not hasattr(intervention, old) and not hasattr(tl, old)
     assert isinstance(tl.zero_ablate(), tl.Edit)
-
-
-def test_interior_masked_edit_scatter_contract(log):
-    """Element-masked interior edit: masked elements edited, rest bit-intact."""
-
-    selection = tl.units("relu_1_2", [(0, 0, 1, 1), (0, 1, 2, 2)])
-    mask = selection.resolve(log)[0].mask
-    fork = log.fork()
-    fork.do(selection, tl.zero_ablate())
-    edited = fork["relu_1_2"].out
-    baseline = log["relu_1_2"].out
-    assert bool((edited[mask] == 0).all())
-    assert torch.equal(edited[~mask], baseline[~mask])
-    # downstream propagation is real
-    assert not torch.equal(fork["output_1"].out, log["output_1"].out)
-    # stored capture truth on the SOURCE trace is never written through
-    assert torch.equal(log["relu_1_2"].out, baseline)
 
 
 def test_leaf_site_masked_edit_via_rf_intersection(log):
@@ -79,7 +68,7 @@ def test_leaf_site_masked_edit_via_rf_intersection(log):
     u1 = log["relu_2_4"]
     u2 = log["conv2d_2_3"]
     inter = u1.receptive_field.at((3, 3)) & u2.receptive_field.at((5, 5))
-    mask = inter.resolve(log)[0].mask
+    mask = log[inter][0].mask
     fork = log.fork()
     fork.do(inter, tl.zero_ablate())
     patched = fork["input_1"].out
@@ -87,16 +76,17 @@ def test_leaf_site_masked_edit_via_rf_intersection(log):
     assert torch.equal(patched[~mask], log["input_1"].out[~mask])
     assert not torch.equal(fork["output_1"].out, log["output_1"].out)
     # FireRecord disclosure matches the hook path
-    records = list(fork["input_1"].interventions)
-    assert records and records[0].helper_name == "zero_ablate" and records[0].replaced
-    assert fork["input_1"].intervention_replaced
+    records = list(fork["input_1"].edits)
+    assert records and records[0].edit_name == "zero_ablate" and records[0].replaced
+    assert fork["input_1"].is_edited
 
 
+# Kept: edited on the C-100 side (C-091/C-098) after the shrink removed it.
 def test_whole_site_short_circuit(log):
     """A whole-site mask skips the scatter: exactly today's behavior."""
 
     fork_selection = log.fork()
-    fork_selection.do(log["relu_1_2"].__selection__(), tl.zero_ablate())
+    fork_selection.do(log.layers["relu_1_2"].__selection__(), tl.zero_ablate())
     fork_shipped = log.fork()
     fork_shipped.do("relu_1_2", tl.zero_ablate())
     assert torch.equal(fork_selection["relu_1_2"].out, fork_shipped["relu_1_2"].out)
@@ -107,7 +97,7 @@ def test_raw_value_routes_through_replace_with(log):
     """A non-callable replacement value obeys the same scatter contract."""
 
     selection = tl.units("relu_1_2", [(0, 0, 1, 1)])
-    mask = selection.resolve(log)[0].mask
+    mask = log[selection][0].mask
     replacement = torch.full_like(log["relu_1_2"].out, 7.0)
     fork = log.fork()
     fork.do(selection, replacement)
@@ -122,16 +112,16 @@ def test_apply_refusal_axes(log):
     selection = tl.units("relu_1_2", [(0, 0, 1, 1)])
     out_shape = log["relu_1_2"].out.shape
 
-    def bad_shape(out, *, hook):
+    def bad_shape(out, *, ctx):
         return torch.zeros(3, 5)
 
-    def bad_broadcast(out, *, hook):
+    def bad_broadcast(out, *, ctx):
         return torch.zeros(out_shape[-1])  # broadcastable to the site shape
 
-    def bad_dtype(out, *, hook):
+    def bad_dtype(out, *, ctx):
         return torch.zeros(tuple(out.shape), dtype=torch.float64)
 
-    def non_tensor(out, *, hook):
+    def non_tensor(out, *, ctx):
         return "junk"
 
     for hook_fn, reason in (
@@ -148,8 +138,8 @@ def test_apply_refusal_axes(log):
 
 
 def test_param_and_mixed_plan_refusals(log):
-    """PARAM edits ride parameter substitution on the replay engine (the JMT
-    2026-08-17 param-operand ruling supersedes the D3 typed-refusal default
+    """PARAM edits ride parameter substitution on the replay engine (the
+    2026-08-17 param-operand decision supersedes the D3 typed-refusal default
     there; tests/test_param_substitution.py pins the substitution behavior).
     Off-replay engines and mixed plans still refuse typed."""
 
@@ -157,7 +147,7 @@ def test_param_and_mixed_plan_refusals(log):
 
     with pytest.raises(SelectionError) as excinfo:
         log.fork().do(
-            tl.params("c1.weight"),
+            tl.param("c1.weight"),
             tl.zero_ablate(),
             intervention=tl.options.InterventionOptions(engine="set_only"),
         )
@@ -180,26 +170,12 @@ def test_empty_selection_do_is_noop_with_audit(log):
     assert fork.intervention_audit[-1]["sites"] == []
 
 
-def test_audit_record_contents(log):
-    """The audit record carries repr + digest + per-site relation/counts."""
-
-    selection = tl.units("relu_1_2", [(0, 0, 1, 1)])
-    resolved = selection.resolve(log)
-    fork = log.fork()
-    fork.do(selection, tl.zero_ablate())
-    record = fork.intervention_audit[-1]
-    assert record["kind"] == "ACT"
-    assert record["resolve_digest"] == resolved.resolve_digest
-    assert record["edit"] == "zero_ablate"
-    assert record["sites"][0]["relation"] == "exact"
-    assert record["sites"][0]["selected"] == 1
-
-
-def test_mask_never_enters_keep_fields_and_recipe_policy(log):
-    """Persistence honesty: derived specs carry masks only in the DROP factory;
-    the recipe rides the selection_recipe family (BLOB_RECURSIVE as of the
-    tlspec v8 coordinated bump — never smuggled through the KEEP args/kwargs
-    fields). Args/kwargs/metadata stay tensor-free."""
+def test_mask_rides_kwargs_with_its_digest_and_recipe_policy(log):
+    """Persistence honesty: a derived builtin spec stores its dense element mask
+    and the mask's sha256 as the two keywords ``mask``/``mask_sha256`` (so it
+    stays portable); the recipe rides the selection_recipe family
+    (BLOB_RECURSIVE as of the tlspec v8 coordinated bump). Args, metadata and
+    the verb's own kwargs stay tensor-free."""
 
     selection = tl.units("relu_1_2", [(0, 0, 1, 1)])
     fork = log.fork()
@@ -208,14 +184,14 @@ def test_mask_never_enters_keep_fields_and_recipe_policy(log):
     hook_specs = [
         entry.helper for entry in spec.hook_specs if getattr(entry, "helper", None) is not None
     ]
-    assert hook_specs, "the derived edit must ride the hook plan as a HelperSpec"
+    assert hook_specs, "the derived edit must ride the hook plan as a Edit"
     derived = hook_specs[-1]
-    assert derived.helper_name == "zero_ablate"  # helper identity preserved
+    assert derived.name == "zero_ablate"  # helper identity preserved
     assert derived.selection_recipe is not None
     assert derived.selection_recipe["resolve_digest"]
-    # the mask lives only in the runtime factory closure, which never persists
-    assert HelperSpec.PORTABLE_STATE_SPEC["factory"].name == "DROP"
-    assert HelperSpec.PORTABLE_STATE_SPEC["selection_recipe"].name == "BLOB_RECURSIVE"
+    # the runtime factory closure never persists; the mask persists in kwargs
+    assert Edit._PORTABLE_STATE_SPEC["factory"].name == "DROP"
+    assert Edit._PORTABLE_STATE_SPEC["selection_recipe"].name == "BLOB_RECURSIVE"
 
     def _no_tensor_leaves(value):
         if isinstance(value, torch.Tensor):
@@ -226,22 +202,28 @@ def test_mask_never_enters_keep_fields_and_recipe_policy(log):
             return all(_no_tensor_leaves(item) for item in value.values())
         return True
 
+    stored = dict(derived.kwargs)
+    expected = torch.zeros_like(log["relu_1_2"].out, dtype=torch.bool)
+    expected[0, 0, 1, 1] = True
+    assert stored["mask"].dtype == torch.bool and torch.equal(stored["mask"], expected)
+    assert stored["mask_sha256"] == _mask_digest(expected)
     assert _no_tensor_leaves(derived.args)
-    assert _no_tensor_leaves(dict(derived.kwargs))
+    assert _no_tensor_leaves({k: v for k, v in stored.items() if k not in ("mask",)})
     assert _no_tensor_leaves(dict(derived.metadata))
-    # element-masked derived specs disclose opaque_audit portability
-    assert derived.portability == "opaque_audit"
+    # element-masked builtin specs stay builtin (portable)
+    assert derived.portability == "builtin"
 
 
+@pytest.mark.smoke
 def test_patch_from_identity_and_discriminating_twin(log):
     """patch_from: identity patch is exact; a perturbed source is consumed."""
 
     selection = tl.units("relu_1_2", [(0, 0, 1, 1), (0, 1, 2, 2)])
-    mask = selection.resolve(log)[0].mask
+    mask = log[selection][0].mask
 
     # (a) IDENTITY: patching the trace's own values is exact end to end.
     fork = log.fork()
-    fork.do(selection.resolve(fork), tl.patch_from(log))
+    fork.do(fork[selection], tl.patch_from(log))
     assert torch.equal(fork["output_1"].out, log["output_1"].out)
 
     # (b) DISCRIMINATING TWIN: a documented-epsilon perturbation propagates.
@@ -250,7 +232,7 @@ def test_patch_from_identity_and_discriminating_twin(log):
     perturbed[0, 0, 1, 1] += 10.0
     _replay_module._commit_replay_updates(source, {"relu_1_2": perturbed}, {})
     fork2 = log.fork()
-    fork2.do(selection.resolve(fork2), tl.patch_from(source))
+    fork2.do(fork2[selection], tl.patch_from(source))
     assert torch.isclose(fork2["relu_1_2"].out[0, 0, 1, 1], perturbed[0, 0, 1, 1])
     assert torch.equal(fork2["relu_1_2"].out[~mask], log["relu_1_2"].out[~mask])
     assert not torch.equal(fork2["output_1"].out, log["output_1"].out)

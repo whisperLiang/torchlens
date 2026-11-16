@@ -8,7 +8,8 @@ import pytest
 import torch
 
 import torchlens as tl
-from torchlens._trace_state import TraceState
+from torchlens._selection.selectors import output_at
+from torchlens.errors import TraceCaptureError
 from torchlens.intervention.errors import LiveModeLabelError, SiteResolutionError
 from torchlens.options import CaptureOptions
 
@@ -64,33 +65,6 @@ class _LinearModel(torch.nn.Module):
         """
 
         return self.linear(x)
-
-
-class _TwoModuleModel(torch.nn.Module):
-    """Model with two module boundaries for selector specificity tests."""
-
-    def __init__(self) -> None:
-        """Initialize submodules."""
-
-        super().__init__()
-        self.a = torch.nn.ReLU()
-        self.b = torch.nn.Sigmoid()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run two modules in sequence.
-
-        Parameters
-        ----------
-        x:
-            Input tensor.
-
-        Returns
-        -------
-        torch.Tensor
-            Sigmoid of the relu output.
-        """
-
-        return self.b(self.a(x))
 
 
 class _ChunkModel(torch.nn.Module):
@@ -218,7 +192,7 @@ class _MultiOpModuleModel(torch.nn.Module):
         return self.tail(self.block(x))
 
 
-def _zero_hook(out: torch.Tensor, *, hook: tl.HookContext) -> torch.Tensor:
+def _zero_hook(out: torch.Tensor, *, ctx: tl.HookContext) -> torch.Tensor:
     """Return a zeroed out.
 
     Parameters
@@ -237,7 +211,7 @@ def _zero_hook(out: torch.Tensor, *, hook: tl.HookContext) -> torch.Tensor:
     return out * 0
 
 
-def _identity_hook(out: torch.Tensor, *, hook: tl.HookContext) -> torch.Tensor:
+def _identity_hook(out: torch.Tensor, *, ctx: tl.HookContext) -> torch.Tensor:
     """Return an out unchanged.
 
     Parameters
@@ -256,7 +230,6 @@ def _identity_hook(out: torch.Tensor, *, hook: tl.HookContext) -> torch.Tensor:
     return out
 
 
-@pytest.mark.smoke
 def test_live_label_error_for_finalized_style_label() -> None:
     """Finalized postprocess labels fail loudly in live capture."""
 
@@ -265,13 +238,12 @@ def test_live_label_error_for_finalized_style_label() -> None:
             _ReluReturnModel(),
             torch.randn(2, 3),
             capture=CaptureOptions(
-                intervention_ready=True,
+                replayable=True,
                 hooks={tl.label("relu_4_27:2"): _identity_hook},
             ),
         )
 
 
-@pytest.mark.smoke
 def test_module_selector_matches_capture_time_module_context() -> None:
     """Module selectors can match live capture-time module context."""
 
@@ -279,51 +251,16 @@ def test_module_selector_matches_capture_time_module_context() -> None:
         _LinearModel(),
         torch.randn(2, 3),
         capture=CaptureOptions(
-            intervention_ready=True,
+            replayable=True,
             hooks={tl.module("linear"): _zero_hook},
         ),
     )
 
-    hooked_layers = [layer for layer in log.layer_list if layer.interventions]
+    hooked_layers = [layer for layer in log._layer_list if layer.edits]
 
     assert hooked_layers
     assert hooked_layers[0].out is not None
     assert torch.count_nonzero(hooked_layers[0].out) == 0
-
-
-def test_module_selector_does_not_overmatch_other_live_modules() -> None:
-    """Live module selectors only match the requested module boundary."""
-
-    log = tl.trace(
-        _TwoModuleModel(),
-        torch.tensor([-1.0, 2.0]),
-        capture=CaptureOptions(
-            intervention_ready=True,
-            hooks={tl.module("b"): _zero_hook},
-        ),
-    )
-
-    hooked_labels = {layer.layer_label for layer in log.layer_list if layer.interventions}
-
-    assert hooked_labels == {"interventionreplacement_1_3"}
-
-
-def test_module_selector_matches_exact_multi_op_boundary() -> None:
-    """A module selector intervenes only on a multi-op module's output boundary."""
-
-    log = tl.trace(
-        _MultiOpModuleModel(),
-        torch.randn(2, 3),
-        intervene=tl.when(tl.module("block"), tl.zero_ablate()),
-    )
-
-    intervened = {op.layer_label for op in log.ops if op.interventions}
-    resolved_boundary = {
-        op.layer_label for op in log.resolve_sites(tl.module("block"), max_fanout=len(log.ops))
-    }
-
-    assert len(intervened) == 1
-    assert intervened == resolved_boundary
 
 
 def test_module_selector_namedtuple_output_rebuilds_without_crashing() -> None:
@@ -352,18 +289,13 @@ def test_module_selector_save_is_exact_for_trace_and_record() -> None:
     recording_trace = recording.to_trace()
 
     saved = {op.layer_label for op in log.ops if op.has_saved_activation}
-    resolved_boundary = {
-        op.layer_label for op in log.resolve_sites(tl.module("block"), max_fanout=len(log.ops))
-    }
+    resolved_boundary = {log[label].layer_label for label in log[tl.module("block")].labels}
     assert saved == resolved_boundary
     assert len(recording.records) == 1
     assert recording.records[0].ctx.output_of_module_calls == ("block:1",)
     recording_saved = {op.layer_label for op in recording_trace.ops if op.has_saved_activation}
     recording_boundary = {
-        op.layer_label
-        for op in recording_trace.resolve_sites(
-            tl.module("block"), max_fanout=len(recording_trace.ops)
-        )
+        recording_trace[label].layer_label for label in recording_trace[tl.module("block")].labels
     }
     assert recording_saved == recording_boundary
 
@@ -372,8 +304,8 @@ def test_module_selector_save_is_exact_for_trace_and_record() -> None:
     "selector",
     [
         tl.label("relu_1_2"),
-        tl.contains("relu_1_2"),
-        tl.regex("relu_1_2"),
+        tl.label_contains("relu_1_2"),
+        tl.label_matches("relu_1_2"),
     ],
 )
 def test_predicate_intervention_rejects_finalized_label_styles(selector: object) -> None:
@@ -402,6 +334,7 @@ def test_zero_match_capture_selectors_warn() -> None:
         tl.record(_ReluReturnModel(), torch.randn(2, 3), save=tl.func("missing"))
 
 
+@pytest.mark.smoke
 def test_unsupported_capture_selector_kind_fails_loudly() -> None:
     """Unsupported selector kinds raise instead of silently matching nothing."""
 
@@ -416,18 +349,19 @@ def test_unsupported_capture_selector_kind_fails_loudly() -> None:
 def test_hook_body_type_error_is_not_reclassified() -> None:
     """A TypeError raised by user hook code propagates unchanged."""
 
-    def broken_hook(out: torch.Tensor, *, hook: tl.HookContext) -> torch.Tensor:
+    def broken_hook(out: torch.Tensor, *, ctx: tl.HookContext) -> torch.Tensor:
         """Raise a user-authored TypeError after successful argument binding."""
 
-        del out, hook
+        del out, ctx
         raise TypeError("body bug")
 
-    with pytest.raises(TypeError, match="body bug"):
+    with pytest.raises(TraceCaptureError, match="body bug") as _tce_info:
         tl.trace(
             _ReluReturnModel(),
             torch.randn(2, 3),
             intervene=tl.when(tl.func("relu"), broken_hook),
         )
+    assert isinstance(_tce_info.value.__cause__, TypeError)
 
 
 def test_live_regex_and_output_at_selectors_execute() -> None:
@@ -437,26 +371,25 @@ def test_live_regex_and_output_at_selectors_execute() -> None:
         _ReluReturnModel(),
         torch.randn(2, 3),
         capture=CaptureOptions(
-            intervention_ready=True,
-            hooks={tl.regex("relu"): _zero_hook},
+            replayable=True,
+            hooks={tl.label_matches("relu"): _zero_hook},
         ),
     )
     chunk_log = tl.trace(
         _ChunkModel(),
         torch.randn(2, 4),
         capture=CaptureOptions(
-            intervention_ready=True,
-            hooks={tl.output_at(1): _zero_hook},
+            replayable=True,
+            hooks={output_at(1): _zero_hook},
         ),
     )
 
-    assert any(layer.interventions for layer in regex_log.layer_list if layer.func_name == "relu")
-    hooked_chunk_paths = {
-        layer.container_path for layer in chunk_log.layer_list if layer.interventions
-    }
+    assert any(layer.edits for layer in regex_log._layer_list if layer.func_name == "relu")
+    hooked_chunk_paths = {layer.container_path for layer in chunk_log._layer_list if layer.edits}
     assert len(hooked_chunk_paths) == 1
 
 
+@pytest.mark.smoke
 def test_input_at_live_hook_target_rejects_with_honest_error() -> None:
     """Input-path selectors resolve placeholders but are not live hook sites."""
 
@@ -465,84 +398,7 @@ def test_input_at_live_hook_target_rejects_with_honest_error() -> None:
             _ReluReturnModel(),
             torch.randn(2, 3),
             capture=CaptureOptions(
-                intervention_ready=True,
-                hooks={tl.input_at(0): _zero_hook},
+                replayable=True,
+                hooks={tl.model_input(0): _zero_hook},
             ),
         )
-
-
-@pytest.mark.smoke
-def test_raw_label_where_and_in_module_selectors_work_at_capture_time() -> None:
-    """Raw labels, predicates, and module containment selectors resolve live."""
-
-    raw_log = tl.trace(
-        _ReluReturnModel(),
-        torch.randn(2, 3),
-        capture=CaptureOptions(intervention_ready=True),
-    )
-    raw_label = next(
-        layer._layer_label_raw for layer in raw_log.layer_list if layer.func_name == "relu"
-    )
-
-    label_log = tl.trace(
-        _ReluReturnModel(),
-        torch.randn(2, 3),
-        capture=CaptureOptions(
-            intervention_ready=True,
-            hooks={tl.label(raw_label): _zero_hook},
-        ),
-    )
-    where_log = tl.trace(
-        _ReluReturnModel(),
-        torch.randn(2, 3),
-        capture=CaptureOptions(
-            intervention_ready=True,
-            hooks={tl.where(lambda p: p.func_name == "relu"): _zero_hook},
-        ),
-    )
-    in_module_log = tl.trace(
-        _LinearModel(),
-        torch.randn(2, 3),
-        capture=CaptureOptions(
-            intervention_ready=True,
-            hooks={tl.in_module("linear"): _zero_hook},
-        ),
-    )
-
-    assert any(layer.interventions for layer in label_log.layer_list)
-    assert any(layer.interventions for layer in where_log.layer_list)
-    assert any(layer.interventions for layer in in_module_log.layer_list)
-
-
-@pytest.mark.smoke
-def test_no_hooks_preserves_pristine_run_state() -> None:
-    """Intervention-ready capture without hooks stays pristine."""
-
-    log = tl.trace(
-        _ReluReturnModel(),
-        torch.randn(2, 3),
-        capture=CaptureOptions(intervention_ready=True),
-    )
-
-    assert log.state is TraceState.PRISTINE
-
-
-@pytest.mark.smoke
-def test_live_replacement_metadata_matches_saved_out() -> None:
-    """Hook replacement refreshes tensor metadata and saved-out flags."""
-
-    log = tl.trace(
-        _ReluReturnModel(),
-        torch.randn(2, 3),
-        capture=CaptureOptions(
-            intervention_ready=True,
-            hooks={tl.func("relu"): _zero_hook},
-        ),
-    )
-    relu_layer = next(layer for layer in log.layer_list if layer.func_name == "relu")
-
-    assert relu_layer.out is not None
-    assert relu_layer.has_saved_activation is True
-    assert relu_layer.shape == tuple(relu_layer.out.shape)
-    assert relu_layer.dtype == relu_layer.out.dtype
-    assert relu_layer.activation_memory == relu_layer.out.nelement() * relu_layer.out.element_size()

@@ -11,7 +11,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.backends.torch._tl import get_module_meta
+from torchlens._utils._tensor_label import get_module_meta
 from torchlens.backends.torch.model_prep import is_forward_call_decorated
 
 
@@ -34,26 +34,15 @@ def _new_model() -> _ReleaseModel:
     return _ReleaseModel().eval()
 
 
-@pytest.mark.smoke
-def test_whole_model_pickle_and_torch_save_require_release() -> None:
-    """Persistent child wrappers fail whole-model serialization until release."""
+def test_whole_model_pickle_and_torch_save_work_after_trace_and_release() -> None:
+    """A capture leaves no child wrapper, so serialization needs no release."""
     model = _new_model()
     inputs = torch.randn(2, 3)
     tl.trace(model, inputs)
 
-    expected = (
-        "Can't pickle <function Linear.forward at ",
-        "it's not the same object as torch.nn.modules.linear.Linear.forward",
-    )
-    for serializer in (
-        lambda: pickle.dumps(model),
-        lambda: torch.save(model, io.BytesIO()),
-    ):
-        with pytest.raises(pickle.PicklingError) as exc_info:
-            serializer()
-        message = str(exc_info.value)
-        assert message.startswith(expected[0])
-        assert message.endswith(expected[1])
+    assert "forward" not in model.linear.__dict__
+    assert pickle.loads(pickle.dumps(model))(inputs).shape == (2, 2)
+    torch.save(model, io.BytesIO())
 
     tl.release_model(model)
 
@@ -63,7 +52,6 @@ def test_whole_model_pickle_and_torch_save_require_release() -> None:
     assert buffer.tell() > 0
 
 
-@pytest.mark.smoke
 def test_release_is_idempotent_and_never_traced_model_is_a_noop() -> None:
     """Repeated release and release before tracing leave forward behavior intact."""
     model = _new_model()
@@ -74,7 +62,8 @@ def test_release_is_idempotent_and_never_traced_model_is_a_noop() -> None:
     assert torch.equal(model(inputs), expected)
 
     tl.trace(model, inputs)
-    assert is_forward_call_decorated(model.linear.forward)
+    assert not is_forward_call_decorated(model.linear.forward)
+    assert get_module_meta(model.linear) is not None
     tl.release_model(model)
     tl.release_model(model)
 
@@ -85,7 +74,6 @@ def test_release_is_idempotent_and_never_traced_model_is_a_noop() -> None:
     assert all(not name.startswith("tl_") for module in model.modules() for name in vars(module))
 
 
-@pytest.mark.smoke
 def test_retrace_after_release_matches_fresh_model() -> None:
     """A released model is fully re-prepared and captures like a fresh twin."""
     model = _new_model()
@@ -97,15 +85,14 @@ def test_retrace_after_release_matches_fresh_model() -> None:
     retraced = tl.trace(model, inputs)
     fresh = tl.trace(fresh_model, inputs)
 
-    assert len(retraced.layer_list) == len(fresh.layer_list)
-    assert [op.layer_label for op in retraced.layer_list] == [
-        op.layer_label for op in fresh.layer_list
+    assert len(retraced._layer_list) == len(fresh._layer_list)
+    assert [op.layer_label for op in retraced._layer_list] == [
+        op.layer_label for op in fresh._layer_list
     ]
 
 
-@pytest.mark.smoke
 def test_releasing_one_model_preserves_an_independent_prepared_model() -> None:
-    """Release does not disturb persistent preparation for another model tree."""
+    """Release does not disturb the preparation metadata of another model tree."""
     first = _new_model()
     second = _new_model()
     inputs = torch.randn(2, 3)
@@ -115,9 +102,10 @@ def test_releasing_one_model_preserves_an_independent_prepared_model() -> None:
     tl.release_model(first)
     repeated_second = tl.trace(second, inputs)
 
-    assert is_forward_call_decorated(second.linear.forward)
-    assert [op.layer_label for op in repeated_second.layer_list] == [
-        op.layer_label for op in initial_second.layer_list
+    assert get_module_meta(second.linear) is not None
+    assert not is_forward_call_decorated(second.linear.forward)
+    assert [op.layer_label for op in repeated_second._layer_list] == [
+        op.layer_label for op in initial_second._layer_list
     ]
 
 
@@ -138,7 +126,6 @@ class _HeldActivationModel(nn.Module):
         return self.act_table["tanh"](y)
 
 
-@pytest.mark.smoke
 def test_release_normalizes_prewrap_function_attrs_for_torch_save() -> None:
     """grind-r4 b8 R56 direction 1: a model built BEFORE wrapping holds
     pristine originals; pickled WHILE wrapped, every held ref fails pickle's
@@ -161,7 +148,6 @@ def test_release_normalizes_prewrap_function_attrs_for_torch_save() -> None:
     assert out.shape == (1, 4)
 
 
-@pytest.mark.smoke
 def test_release_normalizes_wrapper_attrs_after_unwrap() -> None:
     """R56 direction 2: a model built WHILE wrapped holds epoch wrappers;
     after unwrap_torch() those refs fail pickle. release_model normalizes
@@ -184,7 +170,6 @@ def test_release_normalizes_wrapper_attrs_after_unwrap() -> None:
         wrap_torch()
 
 
-@pytest.mark.smoke
 def test_release_leaves_foreign_and_user_callables_alone() -> None:
     """The normalization is ledger-fenced: user callables never swap."""
 
@@ -263,7 +248,6 @@ class _FrozensetModel(nn.Module):
         return torch.relu(self.lin(x))
 
 
-@pytest.mark.smoke
 def test_release_preserves_namedtuple_attribute_type() -> None:
     """grind-r5 P1 (b3/b8 x3 labs): release_model must not rebuild a namedtuple
     attribute as a plain tuple -- that breaks attribute access and the model's
@@ -279,7 +263,6 @@ def test_release_preserves_namedtuple_attribute_type() -> None:
     torch.save(model, io.BytesIO())  # and the stated goal still holds
 
 
-@pytest.mark.smoke
 def test_release_skips_non_namedtuple_tuple_subclasses() -> None:
     """A tuple subclass with instance state is left untouched (disclosed
     residual) rather than corrupted by a blind rebuild."""
@@ -294,7 +277,6 @@ def test_release_skips_non_namedtuple_tuple_subclasses() -> None:
     assert model.tagged.tag == "keep-me"
 
 
-@pytest.mark.smoke
 def test_release_normalizes_dict_keys_for_torch_save() -> None:
     """grind-r5 P1 (b3 sol / b8 sol): function-KEYED dict attrs are inside the
     documented one-level coverage; keys must normalize or torch.save still
@@ -309,7 +291,6 @@ def test_release_normalizes_dict_keys_for_torch_save() -> None:
     assert set(model.table.values()) == {0.5, 1.0}
 
 
-@pytest.mark.smoke
 def test_release_normalizes_frozenset_members() -> None:
     """frozenset attrs are one level of builtin nesting too; members must
     normalize so pickle's identity check passes."""
@@ -322,7 +303,6 @@ def test_release_normalizes_frozenset_members() -> None:
     pickle.dumps(model)
 
 
-@pytest.mark.smoke
 def test_release_set_holding_both_epochs_never_loses_a_member() -> None:
     """A set holding BOTH a pristine original and its wrap-epoch counterpart
     must keep its cardinality: the swap is skipped, never silently merged."""
@@ -339,7 +319,6 @@ def test_release_set_holding_both_epochs_never_loses_a_member() -> None:
     assert len(model.both) == 2, "release_model silently dropped a set member"
 
 
-@pytest.mark.smoke
 def test_release_then_unwrap_keeps_model_serializable() -> None:
     """grind-r5 P1 (b8 opus F1 MED-HIGH): the documented remedy must not be a
     one-way trip. release_model normalizes to the wrapped epoch's values; a
@@ -366,7 +345,6 @@ def test_release_then_unwrap_keeps_model_serializable() -> None:
     torch.save(model, io.BytesIO())
 
 
-@pytest.mark.smoke
 def test_faulted_release_evicts_preparation_bookkeeping(monkeypatch) -> None:
     """grind-r5 P1 (b3 opus R07-2): a fault mid-release must not leave a
     half-stripped tree the registry still certifies as prepared -- the next
@@ -400,15 +378,14 @@ def test_faulted_release_evicts_preparation_bookkeeping(monkeypatch) -> None:
     # ... so the next capture re-prepares from scratch with full containment.
     control = tl.trace(_new_model(), inputs)
     retraced = tl.trace(model, inputs)
-    assert [op.layer_label for op in retraced.layer_list] == [
-        op.layer_label for op in control.layer_list
+    assert [op.layer_label for op in retraced._layer_list] == [
+        op.layer_label for op in control._layer_list
     ]
     control_modules = [tuple(control[label].modules) for label in ("linear_1_1", "relu_1_2")]
     retraced_modules = [tuple(retraced[label].modules) for label in ("linear_1_1", "relu_1_2")]
     assert retraced_modules == control_modules
 
 
-@pytest.mark.smoke
 def test_release_leaves_no_instance_forward_on_plain_modules() -> None:
     """grind-r5 P1 (b4 fable): restoring forward as an INSTANCE attribute
     churns the implementation fingerprint; when the original is the plain

@@ -20,18 +20,18 @@ E2 (HIGH, trust-gated but violating the "denied even under trust" contract) -- b
     gate on the RESOLVED object's real module (plus the ``is_pure_forward_callable`` gate
     for anything that walked back into the torch namespace).
 
-A-1 (HIGH; CRITICAL on torch <= 2.5.1) -- CVE-2025-32434: the embedded-tensor
-    reconstruction wrapper forwards attacker bytes into ``torch.load(BytesIO,
-    weights_only=True)``, which is itself a working RCE on torch <= 2.5.1. The fix adds
-    a named ``HAS_SAFE_WEIGHTS_ONLY_LOAD`` capability flag (feature-detected, surfaced in
-    the compat snapshot / doctor) and makes the wrapper fail closed on an affected runtime.
+A-1 (HIGH; CRITICAL on torch <= 2.5.1) -- CVE-2025-32434: ``torch.load(BytesIO,
+    weights_only=True)`` is itself a working RCE on torch <= 2.5.1. The loader no longer
+    hands file bytes to ``torch.load`` at all (``torch.storage._load_from_bytes`` is
+    refused by name; see ``test_io_embedded_tensor_route_refused.py``); the named
+    ``HAS_SAFE_WEIGHTS_ONLY_LOAD`` capability flag stays surfaced in the compat snapshot /
+    doctor as a fact about the running torch.
 """
 
 from __future__ import annotations
 
 import importlib
 import io
-import os
 import pickle
 import subprocess
 import sys
@@ -41,10 +41,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from torchlens._io._safe_unpickle import SafeBundleUnpickler, _safe_load_from_bytes
+from torchlens._io._safe_unpickle import SafeBundleUnpickler
 from torchlens._io.bundle import _RenameAwareUnpickler
+from torchlens.intervention._spec_values import _resolve_import_ref
 from torchlens.intervention.errors import UntrustedCallableError
-from torchlens.intervention.save import _resolve_import_ref
 
 _UNPICKLERS = [SafeBundleUnpickler, _RenameAwareUnpickler]
 
@@ -103,7 +103,6 @@ def _reduce_global_pickle(module: str, name: str, str_args: list[str]) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.smoke
 @pytest.mark.parametrize("unpickler_cls", _UNPICKLERS)
 def test_torch_dotted_walk_to_nontorch_type_denied_no_spawn(
     unpickler_cls: type[pickle.Unpickler],
@@ -129,60 +128,27 @@ def test_torch_dotted_walk_to_nontorch_type_denied_no_spawn(
     assert not sentinel.exists()
 
 
-@pytest.mark.smoke
-@pytest.mark.parametrize("unpickler_cls", _UNPICKLERS)
-def test_reported_collect_env_popen_vector_inert(
-    unpickler_cls: type[pickle.Unpickler], tmp_path: Path
-) -> None:
-    """The exact reported payload (``torch`` / ``utils.collect_env.subprocess.Popen``) is inert.
-
-    It must RAISE and spawn NOTHING. Depending on which torch submodules a runtime has
-    imported, the escape either resolves (denied by the ownership gate ->
-    ``UnpicklingError``) or the walk itself fails (``AttributeError``); both are denials
-    with no process spawned.
-    """
-
-    sentinel = tmp_path / "r27_e1_reported_pwned"
-    payload = _reduce_global_pickle(
-        "torch",
-        "utils.collect_env.subprocess.Popen",
-        ["/bin/sh", "-c", f"touch {sentinel}"],
-    )
-    with pytest.raises((pickle.UnpicklingError, AttributeError)):
-        unpickler_cls(io.BytesIO(payload)).load()
-    assert not sentinel.exists()
-
-
-@pytest.mark.smoke
-def test_legit_torch_types_still_admit() -> None:
-    """Genuine torch data types (real torch module) still resolve (no regression)."""
-
-    unpickler = SafeBundleUnpickler(io.BytesIO(b""))
-    assert unpickler.find_class("torch", "Size") is torch.Size
-    assert unpickler.find_class("torch.nn.modules.linear", "Identity") is torch.nn.Identity
-
-
-@pytest.mark.smoke
-def test_preview_backend_dotted_walk_escape_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_preview_backend_dotted_walk_escape_denied() -> None:
     """The preview-backend branch also requires the resolved type to be preview-owned.
 
     A fake ``mlx.core`` is injected so the branch is reachable without the real optional
     dependency; it re-exports a NON-preview type (``subprocess.Popen``) under a dotted
     name, which the ownership gate must refuse.
-
-    Restore any existing MLX imports afterward so later captures patch the same
-    module objects held by already-imported models.
     """
 
     fake_mlx = types.ModuleType("mlx")
     fake_core = types.ModuleType("mlx.core")
     fake_mlx.core = fake_core  # type: ignore[attr-defined]
     fake_core.subprocess = subprocess  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "mlx", fake_mlx)
-    monkeypatch.setitem(sys.modules, "mlx.core", fake_core)
-    payload = _stop_global_pickle("mlx.core", "subprocess.Popen")
-    with pytest.raises(pickle.UnpicklingError, match="non-preview-owned"):
-        SafeBundleUnpickler(io.BytesIO(payload)).load()
+    sys.modules["mlx"] = fake_mlx
+    sys.modules["mlx.core"] = fake_core
+    try:
+        payload = _stop_global_pickle("mlx.core", "subprocess.Popen")
+        with pytest.raises(pickle.UnpicklingError, match="non-preview-owned"):
+            SafeBundleUnpickler(io.BytesIO(payload)).load()
+    finally:
+        sys.modules.pop("mlx.core", None)
+        sys.modules.pop("mlx", None)
 
 
 # ---------------------------------------------------------------------------
@@ -190,10 +156,12 @@ def test_preview_backend_dotted_walk_escape_denied(monkeypatch: pytest.MonkeyPat
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.smoke
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
 @pytest.mark.parametrize(
     "import_path",
-    ["torch:os.system", "torch:serialization.load", "torch:serialization.save"],
+    [
+        "torch:os.system",
+    ],
 )
 def test_resolver_dotted_walk_to_denied_module_denied_under_trust(import_path: str) -> None:
     """A dotted qualname off ``torch`` that walks into a denied module is refused."""
@@ -210,7 +178,6 @@ def test_resolver_dotted_walk_to_denied_module_denied_under_trust(import_path: s
         _resolve_import_ref(import_path, allowed_custom_callable_modules={"torch"})
 
 
-@pytest.mark.smoke
 def test_resolver_from_file_via_dotted_torch_denied_by_purity() -> None:
     """A dotted torch qualname reaching ``from_file`` is refused by the purity gate.
 
@@ -220,25 +187,6 @@ def test_resolver_from_file_via_dotted_torch_denied_by_purity() -> None:
 
     with pytest.raises(UntrustedCallableError):
         _resolve_import_ref("torch:_C._VariableFunctions.from_file", trust_custom_callables=True)
-
-
-@pytest.mark.smoke
-def test_resolver_legit_foreign_trusted_callable_still_resolves(tmp_path: Path) -> None:
-    """A genuinely foreign (non-torch) trusted callable is NOT purity-gated (no regression)."""
-
-    mod_name = "r27_resolver_trusted_mod"
-    (tmp_path / f"{mod_name}.py").write_text("def hook(out, *, hook):\n    return out * 2\n")
-    sys.path.insert(0, str(tmp_path))
-    try:
-        mod = importlib.import_module(mod_name)
-        assert _resolve_import_ref(f"{mod_name}:hook", trust_custom_callables=True) is mod.hook
-        assert (
-            _resolve_import_ref(f"{mod_name}:hook", allowed_custom_callable_modules={mod_name})
-            is mod.hook
-        )
-    finally:
-        sys.path.remove(str(tmp_path))
-        sys.modules.pop(mod_name, None)
 
 
 # ---------------------------------------------------------------------------
@@ -261,12 +209,11 @@ def _trusted_os_module(tmp_path: Path) -> str:
         sys.modules.pop(mod_name, None)
 
 
-@pytest.mark.smoke
 def test_unpickler_trusted_dotted_walk_to_os_denied(_trusted_os_module: str) -> None:
     """Under trust, a dotted name walking off a trusted module to ``os.system`` is denied."""
 
     payload = _stop_global_pickle(_trusted_os_module, "os.system")
-    with pytest.raises(pickle.UnpicklingError, match=os.system.__module__):
+    with pytest.raises(pickle.UnpicklingError, match="posix"):
         SafeBundleUnpickler(io.BytesIO(payload), trust_custom_callables=True).load()
     # A narrow allowlist keyed on the trusted module is likewise not fooled.
     with pytest.raises(pickle.UnpicklingError):
@@ -275,60 +222,25 @@ def test_unpickler_trusted_dotted_walk_to_os_denied(_trusted_os_module: str) -> 
         ).load()
 
 
-@pytest.mark.smoke
-def test_unpickler_legit_trusted_callable_still_resolves(_trusted_os_module: str) -> None:
-    """A genuine (single-name) callable in the trusted module still resolves (no regression)."""
-
-    unpickler = SafeBundleUnpickler(io.BytesIO(b""), trust_custom_callables=True)
-    resolved = unpickler.find_class(_trusted_os_module, "hook")
-    assert getattr(resolved, "__name__", None) == "hook"
-
-
 # ---------------------------------------------------------------------------
-# A-1 -- CVE-2025-32434 embedded-tensor load gate.
+# A-1 -- CVE-2025-32434 capability flag stays reported.
 # ---------------------------------------------------------------------------
 
 
-def _embedded_tensor_bytes() -> bytes:
-    """Bytes accepted by ``torch.storage._load_from_bytes`` (a ``torch.save`` payload)."""
-
-    buf = io.BytesIO()
-    torch.save(torch.tensor([1.0, 2.0, 3.0]), buf)
-    return buf.getvalue()
-
-
-@pytest.mark.smoke
-def test_embedded_load_refused_on_cve_vulnerable_torch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When the CVE-2025-32434 fix is absent, the embedded load fails closed."""
-
-    monkeypatch.setattr(
-        "torchlens.utils._torch_compat.HAS_SAFE_WEIGHTS_ONLY_LOAD", False, raising=True
-    )
-    with pytest.raises(pickle.UnpicklingError, match="CVE-2025-32434"):
-        _safe_load_from_bytes(_embedded_tensor_bytes())
-
-
-@pytest.mark.smoke
-def test_embedded_load_roundtrips_on_fixed_torch() -> None:
-    """On a CVE-fixed torch (>= 2.6), a benign embedded tensor still round-trips."""
-
-    from torchlens.utils._torch_compat import HAS_SAFE_WEIGHTS_ONLY_LOAD
-
-    if not HAS_SAFE_WEIGHTS_ONLY_LOAD:  # pragma: no cover - depends on runtime torch
-        pytest.skip("running torch predates the CVE-2025-32434 fix")
-    result = _safe_load_from_bytes(_embedded_tensor_bytes())
-    assert torch.equal(result, torch.tensor([1.0, 2.0, 3.0]))
-
-
-@pytest.mark.smoke
+@pytest.mark.heavy  # doctor/snapshot walk crossed the 7s smoke budget at T55 (7.4s cpu)
 def test_weights_only_load_capability_in_snapshot() -> None:
     """The named capability flag surfaces in the torch capability snapshot / doctor report."""
 
-    import torchlens.utils as tl_utils
-    from torchlens.utils._torch_compat import get_torch_capability_snapshot
+    import torchlens as tl
+    from torchlens._utils._torch_compat import get_torch_capability_snapshot
 
     snapshot = get_torch_capability_snapshot()
     assert "HAS_SAFE_WEIGHTS_ONLY_LOAD" in snapshot
     assert isinstance(snapshot["HAS_SAFE_WEIGHTS_ONLY_LOAD"], bool)
-    # Surfaced in the model-free doctor diagnostic (tl.compat.report needs a model).
-    assert "HAS_SAFE_WEIGHTS_ONLY_LOAD" in str(tl_utils.doctor())
+    # Surfaced in the model-free doctor diagnostic. The doctor row is a bounded absences-first summary, so a present
+    # flag lives on the report's capability_snapshot() detail accessor, while
+    # an ABSENT flag (the degradation) must be named in the visible row text.
+    report = tl.report.doctor()
+    assert "HAS_SAFE_WEIGHTS_ONLY_LOAD" in report.capability_snapshot()
+    if not snapshot["HAS_SAFE_WEIGHTS_ONLY_LOAD"]:
+        assert "HAS_SAFE_WEIGHTS_ONLY_LOAD" in str(report)

@@ -1,10 +1,13 @@
-"""Phase 5a tests for sequential hook composition and handles."""
+"""Phase 5a tests for sequential hook composition and clearing staged hooks."""
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 import torchlens as tl
+
+pytestmark = pytest.mark.usefixtures("root_edits_in_place")  # D.12: no per-call mutation keyword
 
 
 class ReluModel(torch.nn.Module):
@@ -32,7 +35,7 @@ def test_sequential_hooks_run_in_order_during_rerun() -> None:
 
     order: list[str] = []
 
-    def add_one(out: torch.Tensor, *, hook: object) -> torch.Tensor:
+    def add_one(out: torch.Tensor, *, ctx: object) -> torch.Tensor:
         """Add one to the out.
 
         Parameters
@@ -48,11 +51,11 @@ def test_sequential_hooks_run_in_order_during_rerun() -> None:
             Shifted out.
         """
 
-        del hook
+        del ctx
         order.append("add")
         return out + 1
 
-    def times_two(out: torch.Tensor, *, hook: object) -> torch.Tensor:
+    def times_two(out: torch.Tensor, *, ctx: object) -> torch.Tensor:
         """Double the out.
 
         Parameters
@@ -68,14 +71,14 @@ def test_sequential_hooks_run_in_order_during_rerun() -> None:
             Scaled out.
         """
 
-        del hook
+        del ctx
         order.append("mul")
         return out * 2
 
     model = ReluModel()
     x = torch.tensor([[-1.0, 2.0]])
-    log = tl.trace(model, x, intervention_ready=True)
-    log.attach_hooks(tl.func("relu"), add_one, times_two, confirm_mutation=True)
+    log = tl.trace(model, x, capture=tl.options.CaptureOptions(replayable=True))
+    log._attach_hooks(tl.func("relu"), add_one, times_two)
 
     rerun_log = log.run(model, x)
 
@@ -83,12 +86,16 @@ def test_sequential_hooks_run_in_order_during_rerun() -> None:
     assert torch.equal(rerun_log[rerun_log.output_layers[0]].out, (torch.relu(x) + 1) * 2)
 
 
-def test_hook_handle_remove_and_context_manager_cleanup() -> None:
-    """Hook handles should remove specs explicitly and on context exit."""
+def test_clear_edits_removes_the_staged_hook_specs() -> None:
+    """``clear_edits(site)`` removes the sticky hook specs a staged ``do`` added."""
 
-    log = tl.trace(ReluModel(), torch.randn(1, 2), intervention_ready=True)
+    log = tl.trace(
+        ReluModel(),
+        torch.randn(1, 2),
+        capture=tl.options.CaptureOptions(replayable=True),
+    )
 
-    def identity(out: torch.Tensor, *, hook: object) -> torch.Tensor:
+    def identity(out: torch.Tensor, *, ctx: object) -> torch.Tensor:
         """Return out unchanged.
 
         Parameters
@@ -104,14 +111,15 @@ def test_hook_handle_remove_and_context_manager_cleanup() -> None:
             Original out.
         """
 
-        del hook
+        del ctx
         return out
 
-    handle = log.attach_hooks(tl.func("relu"), identity, confirm_mutation=True)
+    handle = log._attach_hooks(tl.func("relu"), identity)
     assert len(log._intervention_spec.hook_specs) == 1
-    handle.remove()
+    log.clear_edits(handle=handle)
     assert log._intervention_spec.hook_specs == []
 
-    with log.attach_hooks(tl.func("relu"), identity, confirm_mutation=True):
-        assert len(log._intervention_spec.hook_specs) == 1
+    handle = log._attach_hooks(tl.func("relu"), identity)
+    assert len(log._intervention_spec.hook_specs) == 1
+    log.clear_edits(handle=handle[0])
     assert log._intervention_spec.hook_specs == []

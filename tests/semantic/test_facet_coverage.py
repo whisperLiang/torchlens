@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
 import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.semantic import facet_coverage
-
-pytestmark = pytest.mark.smoke
+from torchlens.facets import coverage
 
 
 class Block(nn.Module):
@@ -60,10 +57,8 @@ def test_facet_coverage_classifies_and_inventories_unclassified() -> None:
 
     torch.manual_seed(0)
     model = Model().eval()
-    log = tl.trace(
-        model, torch.randn(2, 3, 8), capture=tl.options.CaptureOptions(layers_to_save="all")
-    )
-    report = facet_coverage(log)
+    log = tl.trace(model, torch.randn(2, 3, 8), save="all")
+    report = coverage(log)
 
     by_address = {row.address: row for row in report.rows}
     assert "transformer_residuals" in by_address["block"].recipes
@@ -81,7 +76,14 @@ def test_facet_coverage_reports_typed_absences() -> None:
     torch.manual_seed(0)
 
     class NoPreBlock(nn.Module):
-        """Block whose input op cannot anchor, leaving resid_pre absent."""
+        """Block with no residual-stream input: its output shape matches no input.
+
+        ``resid_pre`` is anchored by dataflow + shape (the residual stream is
+        shape-preserved through a block), so a block that narrows its hidden
+        dimension on output has NO input op that can earn the anchor -- a
+        genuine structural absence, not a capture gap: no ``save=`` setting
+        could ever produce the facet here.
+        """
 
         def __init__(self, d: int = 8) -> None:
             """Initialize attention and MLP children."""
@@ -91,10 +93,10 @@ def test_facet_coverage_reports_typed_absences() -> None:
             self.mlp = nn.Linear(d, d)
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """Run attention then a residual MLP update."""
+            """Run attention then a residual MLP update, narrowing the output."""
 
             y = self.attn(x)
-            return y + self.mlp(y)
+            return (y + self.mlp(y))[:, :, : y.shape[-1] // 2]
 
     class TwoBlocks(nn.Module):
         """Chain a full block into the pre-less block."""
@@ -112,17 +114,15 @@ def test_facet_coverage_reports_typed_absences() -> None:
             return self.nopre(self.block(x))
 
     model = TwoBlocks().eval()
-    log = tl.trace(
-        model, torch.randn(2, 3, 8), capture=tl.options.CaptureOptions(layers_to_save="all")
-    )
-    report = facet_coverage(log)
+    log = tl.trace(model, torch.randn(2, 3, 8), save="all")
+    report = coverage(log)
 
     nopre_row = next(row for row in report.rows if row.address == "nopre")
     missing = {facet: status for facet, status, _detail in nopre_row.missing}
-    assert missing.get("resid_pre") == "needs_capture"
+    assert missing.get("resid_pre") == "structurally_absent"
     statuses = {status for _facet, status, _detail in nopre_row.missing}
     assert statuses <= {"needs_capture", "structurally_absent", "declared_not_produced"}
-    assert ("resid_pre", "needs_capture") in report.missing_counts()
+    assert ("resid_pre", "structurally_absent") in report.missing_counts()
 
 
 def test_facet_coverage_discloses_multi_call_modules() -> None:
@@ -145,10 +145,8 @@ def test_facet_coverage_discloses_multi_call_modules() -> None:
             return self.norm(self.norm(x))
 
     model = Reuser().eval()
-    log = tl.trace(
-        model, torch.randn(2, 3, 8), capture=tl.options.CaptureOptions(layers_to_save="all")
-    )
-    report = facet_coverage(log)
+    log = tl.trace(model, torch.randn(2, 3, 8), save="all")
+    report = coverage(log)
 
     norm_row = next(row for row in report.rows if row.address == "norm")
     assert norm_row.note != ""
@@ -162,10 +160,8 @@ def test_facet_coverage_markdown_lists_candidates() -> None:
 
     torch.manual_seed(0)
     model = Model().eval()
-    log = tl.trace(
-        model, torch.randn(2, 3, 8), capture=tl.options.CaptureOptions(layers_to_save="all")
-    )
-    text = facet_coverage(log).to_markdown()
+    log = tl.trace(model, torch.randn(2, 3, 8), save="all")
+    text = coverage(log).to_markdown()
 
     assert "classified:" in text
     assert "| block | Block | transformer_residuals |" in text

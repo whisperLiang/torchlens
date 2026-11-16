@@ -5,7 +5,6 @@ Integration coverage for the Step 5 conditional 5a-5f pipeline.
 
 from __future__ import annotations
 
-from collections import defaultdict
 from itertools import chain
 
 import pytest
@@ -13,8 +12,8 @@ import torch
 import torch.nn as nn
 
 from torchlens import trace as trace_fn
-from torchlens.data_classes.op import Op
-from torchlens.data_classes.trace import ConditionalEvent, Trace
+from torchlens._data_classes.trace import Trace
+from torchlens._utils._record_group_table import record_member
 from torchlens.options import CaptureOptions
 
 
@@ -118,7 +117,7 @@ class AssertNotBranchModel(nn.Module):
 
 
 class SaveSourceContextFalseModel(nn.Module):
-    """``if``/``else`` model used with ``save_code_context=False``."""
+    """``if``/``else`` model used with ``save_source_context=False``."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run the model forward pass.
@@ -144,7 +143,7 @@ class SaveSourceContextFalseModel(nn.Module):
 def _log_model(
     model: nn.Module,
     x: torch.Tensor,
-    save_code_context: bool = True,
+    save_source_context: bool = True,
 ) -> Trace:
     """Log a forward pass for a small inline test model.
 
@@ -154,7 +153,7 @@ def _log_model(
         Model to execute.
     x:
         Input tensor.
-    save_code_context:
+    save_source_context:
         Whether rich source loading is enabled during capture.
 
     Returns
@@ -166,349 +165,22 @@ def _log_model(
     return trace_fn(
         model,
         x,
-        capture=CaptureOptions(save_code_context=save_code_context),
+        capture=CaptureOptions(save_source_context=save_source_context),
     )
 
 
-def _get_only_event(trace: Trace) -> ConditionalEvent:
-    """Return the lone conditional event from a model log.
-
-    Parameters
-    ----------
-    trace:
-        Postprocessed model log.
-
-    Returns
-    -------
-    ConditionalEvent
-        The only materialized conditional event.
-    """
-
-    assert len(trace.conditional_records) == 1
-    return trace.conditional_records[0]
-
-
-def _get_terminal_bool_layers(trace: Trace) -> list[Op]:
-    """Return terminal scalar bool layers from a model log.
-
-    Parameters
-    ----------
-    trace:
-        Postprocessed model log.
-
-    Returns
-    -------
-    List[Op]
-        Terminal scalar bool layers in execution order.
-    """
-
-    return [layer for layer in trace.layer_list if layer.is_terminal_bool and layer.is_scalar_bool]
-
-
-def _find_single_layer(trace: Trace, func_name: str) -> Op:
-    """Find the unique layer with the given function name.
-
-    Parameters
-    ----------
-    trace:
-        Postprocessed model log.
-    func_name:
-        Function name to match.
-
-    Returns
-    -------
-    Op
-        Matching layer.
-    """
-
-    matching_layers = [layer for layer in trace.layer_list if layer.func_name == func_name]
-    assert len(matching_layers) == 1, (
-        f"Expected one {func_name!r} layer, found {len(matching_layers)}"
-    )
-    return matching_layers[0]
-
-
-def _assert_derived_views_consistent(trace: Trace) -> None:
-    """Assert derived conditional views match the primary data structures.
-
-    Parameters
-    ----------
-    trace:
-        Postprocessed model log.
-    """
-
-    expected_then_edges = [
-        (parent_label, child_label)
-        for (conditional_id, branch_kind), edge_list in trace.conditional_arm_entry_edges.items()
-        if branch_kind == "then"
-        for parent_label, child_label in edge_list
-    ]
-    expected_elif_edges = [
-        (conditional_id, int(branch_kind.split("_")[1]), parent_label, child_label)
-        for (conditional_id, branch_kind), edge_list in trace.conditional_arm_entry_edges.items()
-        if branch_kind.startswith("elif_")
-        for parent_label, child_label in edge_list
-    ]
-    expected_else_edges = [
-        (conditional_id, parent_label, child_label)
-        for (conditional_id, branch_kind), edge_list in trace.conditional_arm_entry_edges.items()
-        if branch_kind == "else"
-        for parent_label, child_label in edge_list
-    ]
-
-    assert trace.conditional_then_entry_edges == expected_then_edges
-    assert trace.conditional_elif_entry_edges == expected_elif_edges
-    assert trace.conditional_else_entry_edges == expected_else_edges
-
-    for call_indexs in trace.conditional_edge_call_indices.values():
-        assert call_indexs == sorted(call_indexs)
-
-    for layer in trace.layer_list:
-        expected_then_children = sorted(
-            set(
-                chain.from_iterable(
-                    branch_children.get("then", [])
-                    for branch_children in layer.conditional_arm_children.values()
-                )
-            )
-        )
-        expected_else_children = sorted(
-            set(
-                chain.from_iterable(
-                    branch_children.get("else", [])
-                    for branch_children in layer.conditional_arm_children.values()
-                )
-            )
-        )
-        expected_elif_children: dict[int, list[str]] = {}
-        grouped_elif_children: dict[int, set[str]] = defaultdict(set)
-        for branch_children in layer.conditional_arm_children.values():
-            for branch_kind, child_labels in branch_children.items():
-                if not branch_kind.startswith("elif_"):
-                    continue
-                elif_index = int(branch_kind.split("_", 1)[1])
-                grouped_elif_children[elif_index].update(child_labels)
-        for elif_index, child_labels in sorted(grouped_elif_children.items()):
-            expected_elif_children[elif_index] = sorted(child_labels)
-
-        assert list(layer.conditional_then_children) == expected_then_children
-        assert layer.conditional_elif_children == expected_elif_children
-        assert list(layer.conditional_else_children) == expected_else_children
-
-
-def _has_upstream_path(trace: Trace, source_label: str, target_label: str) -> bool:
-    """Return whether ``source_label`` is an upstream ancestor of ``target_label``.
-
-    Parameters
-    ----------
-    trace:
-        Trace whose layer graph should be searched.
-    source_label:
-        Candidate upstream ancestor label.
-    target_label:
-        Candidate downstream label.
-
-    Returns
-    -------
-    bool
-        Whether the source can be reached by walking from target to parents.
-    """
-
-    visited_labels: set[str] = set()
-    parent_stack = list(trace[target_label].parents)
-    while parent_stack:
-        parent_label = parent_stack.pop()
-        if parent_label == source_label:
-            return True
-        if parent_label in visited_labels:
-            continue
-        visited_labels.add(parent_label)
-        parent_stack.extend(trace[parent_label].parents)
-    return False
-
-
-def _assert_evaluation_entry_edges_are_upstream(trace: Trace) -> None:
-    """Assert conditional evaluation entry edges point from upstream graph parents.
-
-    Parameters
-    ----------
-    trace:
-        Trace whose public conditional records should be checked.
-    """
-
-    assert len(trace.conditionals) > 0
-    for conditional in trace.conditionals:
-        for arm in conditional.arms:
-            if arm.kind == "else":
-                assert arm.evaluation_entry_edge is None
-                continue
-            if not arm.condition_evaluated:
-                # A short-circuited then/elif test never ran, so claiming an
-                # evaluation entry edge for it would be a false runtime claim.
-                assert arm.evaluation_entry_edge is None
-                continue
-            source_label, target_label = arm.evaluation_entry_edge or (None, None)
-            assert source_label is not None
-            assert target_label is not None
-            assert source_label != target_label
-            assert source_label in trace.layer_labels
-            assert target_label in trace.layer_labels
-            assert _has_upstream_path(trace, source_label, target_label)
-
-
-@pytest.mark.smoke
-def test_simple_if_else_model_step5_pipeline() -> None:
-    """Simple ``if``/``else`` logs events plus THEN and ELSE arm attribution."""
-
-    positive_log = _log_model(SimpleIfElseModel(), torch.ones(2, 2))
-    negative_log = _log_model(SimpleIfElseModel(), -torch.ones(2, 2))
-
-    positive_event = _get_only_event(positive_log)
-    negative_event = _get_only_event(negative_log)
-
-    assert positive_event.kind == "if_chain"
-    assert negative_event.kind == "if_chain"
-    assert set(positive_event.branch_ranges) == {"then", "else"}
-    assert set(negative_event.branch_ranges) == {"then", "else"}
-
-    positive_bool = _get_terminal_bool_layers(positive_log)
-    negative_bool = _get_terminal_bool_layers(negative_log)
-    assert len(positive_bool) == 1
-    assert len(negative_bool) == 1
-    assert positive_bool[0].conditional_context_kind == "if_test"
-    assert positive_bool[0].is_terminal_conditional_bool is True
-    assert positive_bool[0].terminal_conditional_id == 0
-    assert negative_bool[0].conditional_context_kind == "if_test"
-    assert negative_bool[0].is_terminal_conditional_bool is True
-    assert negative_bool[0].terminal_conditional_id == 0
-
-    assert positive_log.conditional_branch_edges
-    assert negative_log.conditional_branch_edges
-    assert (0, "then") in positive_log.conditional_arm_entry_edges
-    assert (0, "else") in negative_log.conditional_arm_entry_edges
-
-    relu_layer = _find_single_layer(positive_log, "relu")
-    sigmoid_layer = _find_single_layer(negative_log, "sigmoid")
-    assert relu_layer.conditional_branch_stack == ((0, "then"),)
-    assert sigmoid_layer.conditional_branch_stack == ((0, "else"),)
-
-    assert all(
-        call_indexs == [1] for call_indexs in positive_log.conditional_edge_call_indices.values()
-    )
-    assert all(
-        call_indexs == [1] for call_indexs in negative_log.conditional_edge_call_indices.values()
-    )
-    _assert_derived_views_consistent(positive_log)
-    _assert_derived_views_consistent(negative_log)
-
-
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _postprocess/control_flow.py.
 def test_returned_predicate_remains_a_conditional_consumer() -> None:
     """An output child must not hide a proven tensor-to-host predicate consumer."""
 
     trace = _log_model(ReturnedPredicateIfElseModel(), torch.ones(2, 2))
     predicate = next(op for op in trace.ops if op.func_name == "__gt__")
 
-    assert len(trace.conditionals) == 1
-    assert trace.conditional_branch_edges
-    assert predicate.is_terminal_bool is True
-    assert predicate.is_terminal_conditional_bool is True
+    assert len(trace.graph.conditionals) == 1
+    assert trace.graph.conditional_branch_edges
+    assert predicate.control_flow.is_terminal_bool is True
+    assert predicate.control_flow.is_terminal_conditional_bool is True
     assert predicate.label in trace.internally_terminated_bool_ops
-
-
-@pytest.mark.smoke
-@pytest.mark.parametrize(
-    ("model", "input_tensor"),
-    [
-        (SimpleIfElseModel(), torch.ones(2, 2)),
-        (SimpleIfElseModel(), -torch.ones(2, 2)),
-        (ElifLadderModel(), torch.full((2, 2), -1.0)),
-        (ElifLadderModel(), torch.full((2, 2), -0.25)),
-        (ElifLadderModel(), torch.full((2, 2), 0.25)),
-        (ElifLadderModel(), torch.full((2, 2), 1.0)),
-    ],
-)
-def test_conditional_evaluation_entry_edges_are_distinct_upstream_layers(
-    model: nn.Module,
-    input_tensor: torch.Tensor,
-) -> None:
-    """Evaluation entry edges use an upstream graph source, not a self-loop."""
-
-    trace = _log_model(model, input_tensor)
-
-    _assert_evaluation_entry_edges_are_upstream(trace)
-
-
-@pytest.mark.smoke
-def test_elif_ladder_model_step5_pipeline() -> None:
-    """Elif ladder materializes one event with all four arm ranges."""
-
-    branch_cases: list[tuple[torch.Tensor, str, str]] = [
-        (torch.full((2, 2), -1.0), "relu", "then"),
-        (torch.full((2, 2), -0.25), "sigmoid", "elif_1"),
-        (torch.full((2, 2), 0.25), "tanh", "elif_2"),
-        (torch.full((2, 2), 1.0), "square", "else"),
-    ]
-
-    observed_branch_kinds = set()
-    for x, func_name, branch_kind in branch_cases:
-        trace = _log_model(ElifLadderModel(), x)
-        event = _get_only_event(trace)
-
-        assert event.kind == "if_chain"
-        assert set(event.branch_ranges) == {"then", "elif_1", "elif_2", "else"}
-        assert (0, branch_kind) in trace.conditional_arm_entry_edges
-        assert all(
-            call_indexs == [1] for call_indexs in trace.conditional_edge_call_indices.values()
-        )
-
-        target_layer = _find_single_layer(trace, func_name)
-        assert target_layer.conditional_branch_stack == ((0, branch_kind),)
-        observed_branch_kinds.add(branch_kind)
-
-        _assert_derived_views_consistent(trace)
-
-    assert observed_branch_kinds == {"then", "elif_1", "elif_2", "else"}
-
-
-def test_assert_not_branch_model_step5_pipeline() -> None:
-    """Assert consumers are classified but do not materialize branch metadata."""
-
-    trace = _log_model(AssertNotBranchModel(), torch.ones(2, 2))
-    bool_layers = _get_terminal_bool_layers(trace)
-
-    assert len(bool_layers) == 1
-    assert bool_layers[0].conditional_context_kind == "assert"
-    assert bool_layers[0].is_terminal_conditional_bool is False
-    assert bool_layers[0].terminal_conditional_id is None
-    assert trace.conditional_records == []
-    assert trace.conditional_arm_entry_edges == {}
-    assert trace.conditional_branch_edges == []
-
-    _assert_derived_views_consistent(trace)
-
-
-def test_save_code_context_false_still_attributes_branches() -> None:
-    """Conditional classification and attribution still run without source loading."""
-
-    trace = _log_model(
-        SaveSourceContextFalseModel(),
-        torch.ones(2, 2),
-        save_code_context=False,
-    )
-    event = _get_only_event(trace)
-    bool_layers = _get_terminal_bool_layers(trace)
-    relu_layer = _find_single_layer(trace, "relu")
-
-    assert event.kind == "if_chain"
-    assert set(event.branch_ranges) == {"then", "else"}
-    assert len(bool_layers) == 1
-    assert bool_layers[0].conditional_context_kind == "if_test"
-    assert bool_layers[0].is_terminal_conditional_bool is True
-    assert bool_layers[0].terminal_conditional_id == 0
-    assert (0, "then") in trace.conditional_arm_entry_edges
-    assert relu_layer.conditional_branch_stack == ((0, "then"),)
-
-    _assert_derived_views_consistent(trace)
 
 
 # ---------------------------------------------------------------------------
@@ -534,6 +206,7 @@ class WrittenBufferBranchModel(nn.Module):
         return y * 2
 
 
+@pytest.mark.smoke
 def test_buffer_merge_repoints_step5_conditional_edges(monkeypatch) -> None:
     """A merged-away buffer's conditional edges repoint to the survivor.
 
@@ -550,10 +223,10 @@ def test_buffer_merge_repoints_step5_conditional_edges(monkeypatch) -> None:
     node being merged away, exactly as the dedup does for value-identical
     duplicates.
     """
-    import torchlens.postprocess as pp
-    import torchlens.postprocess.control_flow as cf
+    import torchlens._postprocess as pp
+    import torchlens._postprocess.control_flow as cf
 
-    real_fix = pp._fix_buffer_layers
+    real_fix = pp.control_flow._fix_buffer_layers
     merged: dict[str, str] = {}
 
     def fix_and_merge(trace: Trace) -> None:
@@ -563,36 +236,38 @@ def test_buffer_merge_repoints_step5_conditional_edges(monkeypatch) -> None:
         removed = raw_dict["buffer_2_raw"]
         # Precondition: the step-5 conditional-parent role lives on the node
         # about to be merged away.
-        assert removed.conditional_entry_children
-        assert any(parent == removed._label_raw for parent, _ in trace.conditional_branch_edges)
+        assert removed.control_flow.entry_children
+        assert any(
+            parent == removed._label_raw for parent, _ in trace.graph.conditional_branch_edges
+        )
         merged["survivor"] = survivor._label_raw
-        merged["bool_child"] = removed.conditional_entry_children[0]
+        merged["bool_child"] = removed.control_flow.entry_children[0]
         deferred: dict = {}
         cf._merge_buffer_entries(trace, survivor, removed, deferred_removals=deferred)
         cf._finish_deferred_buffer_removals(trace, deferred)
 
-    monkeypatch.setattr(pp, "_fix_buffer_layers", fix_and_merge)
+    monkeypatch.setattr(pp.control_flow, "_fix_buffer_layers", fix_and_merge)
 
     traced = trace_fn(WrittenBufferBranchModel(), torch.ones(2))
 
     assert merged, "the merge wrapper never ran"
     buffer_branch_edges = [
         (parent, child)
-        for parent, child in traced.conditional_branch_edges
+        for parent, child in traced.graph.conditional_branch_edges
         if parent.startswith("buffer")
     ]
     assert buffer_branch_edges, (
         "the surviving buffer lost its step-5 conditional branch edge: "
-        f"{traced.conditional_branch_edges}"
+        f"{traced.graph.conditional_branch_edges}"
     )
     surviving_buffer_labels = {
-        op.layer_label for op in traced.layer_list if getattr(op, "is_buffer", False)
+        op.layer_label for op in traced._layer_list if record_member(op, "is_buffer", False)
     }
     for parent, _child in buffer_branch_edges:
         assert parent in surviving_buffer_labels
     entry_children = list(
         chain.from_iterable(
-            traced[label].conditional_entry_children for label in surviving_buffer_labels
+            traced[label].control_flow.entry_children for label in surviving_buffer_labels
         )
     )
     assert entry_children, "conditional_entry_children did not transfer to the survivor"

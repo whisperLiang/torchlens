@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+from importlib import import_module
+
 from ...backends import BackendSpec
 from ..errors import SplitErrorContext, SplitUnsupportedError
 from .base import SegmentBundle, SplitBackendAdapter
-from .jax import JaxSplitAdapter
-from .mlx import MlxSplitAdapter
-from .paddle import PaddleSplitAdapter
-from .tinygrad import TinygradSplitAdapter
-from .torch import TorchSplitAdapter
+
+_ADAPTER_CLASSES = {
+    "torch": "TorchSplitAdapter",
+    "jax": "JaxSplitAdapter",
+    "tinygrad": "TinygradSplitAdapter",
+    "mlx": "MlxSplitAdapter",
+    "paddle": "PaddleSplitAdapter",
+    "tf": "TfSplitAdapter",
+}
 
 
 def resolve_split_adapter(backend: BackendSpec | str) -> SplitBackendAdapter:
@@ -27,23 +33,10 @@ def resolve_split_adapter(backend: BackendSpec | str) -> SplitBackendAdapter:
     """
 
     name = str(backend.name if isinstance(backend, BackendSpec) else backend)
-    if name == "torch":
-        return TorchSplitAdapter()
-    if name == "jax":
-        return JaxSplitAdapter()
-    if name == "tinygrad":
-        return TinygradSplitAdapter()
-    if name == "mlx":
-        return MlxSplitAdapter()
-    if name == "paddle":
-        return PaddleSplitAdapter()
-    if name in {"tf", "tensorflow"}:
-        # Importing the TF adapter probes TensorFlow's private op-callback
-        # module. Keep that optional native runtime out of tinygrad/JAX/Paddle
-        # split subprocesses until a TensorFlow adapter is actually selected.
-        from .tf import TfSplitAdapter
-
-        return TfSplitAdapter()
+    if name == "tensorflow":
+        name = "tf"
+    if name in _ADAPTER_CLASSES:
+        return getattr(import_module(f"{__name__}.{name}"), _ADAPTER_CLASSES[name])()
     raise SplitUnsupportedError(
         f"backend={name!r} does not have a split adapter.",
         context=SplitErrorContext(
@@ -51,21 +44,22 @@ def resolve_split_adapter(backend: BackendSpec | str) -> SplitBackendAdapter:
             split_point="",
             reason="unknown split backend adapter",
         ),
+        code=SplitUnsupportedError.code,
     )
 
 
 def __getattr__(name: str) -> object:
-    """Lazily expose the TensorFlow adapter without importing TensorFlow.
+    """Expose native adapters only when their backend is requested.
 
     Parameters
     ----------
     name:
-        Public adapter name requested by an import consumer.
+        Adapter class name requested by an import consumer.
 
     Returns
     -------
     object
-        The requested TensorFlow adapter class.
+        The requested native adapter class.
 
     Raises
     ------
@@ -73,14 +67,13 @@ def __getattr__(name: str) -> object:
         If ``name`` is not a supported lazy adapter attribute.
     """
 
-    if name == "TfSplitAdapter":
-        from .tf import TfSplitAdapter
-
-        return TfSplitAdapter
+    for backend, class_name in _ADAPTER_CLASSES.items():
+        if name == class_name:
+            return getattr(import_module(f"{__name__}.{backend}"), class_name)
     raise AttributeError(name)
 
 
-__all__ = [
+__all__ = (
     "JaxSplitAdapter",
     "MlxSplitAdapter",
     "PaddleSplitAdapter",
@@ -90,4 +83,4 @@ __all__ = [
     "TinygradSplitAdapter",
     "TorchSplitAdapter",
     "resolve_split_adapter",
-]
+)

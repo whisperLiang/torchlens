@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 import sys
+from dataclasses import dataclass
 from types import ModuleType
 from typing import Any
 
@@ -86,7 +87,7 @@ def _bridge_log() -> tuple[_TinyBridgeModel, torch.Tensor, Any]:
     torch.manual_seed(120)
     model = _TinyBridgeModel().eval()
     x = torch.randn(2, 1, 8, 8)
-    log = tl.trace(model, x, layers_to_save="all")
+    log = tl.trace(model, x, save="all")
     return model, x, log
 
 
@@ -135,7 +136,7 @@ def test_gradcam_bridge_contract(monkeypatch: pytest.MonkeyPatch) -> None:
         sys.modules, "pytorch_grad_cam", _module("pytorch_grad_cam", GradCAM=FakeGradCAM)
     )
 
-    payload = tl.bridge.gradcam.cam(log, "conv", inputs=x, targets=["class-0"])
+    payload = tl.bridge.pytorch_grad_cam.cam(log, "conv", inputs=x, targets=["class-0"])
 
     assert payload["schema"] == "torchlens.gradcam.v1"
     assert payload["model"] is model
@@ -158,155 +159,139 @@ def test_shap_bridge_contract(monkeypatch: pytest.MonkeyPatch) -> None:
         def shap_values(self, inputs: torch.Tensor) -> torch.Tensor:
             """Return deterministic SHAP values."""
 
-            assert inputs is self.background
+            self.explained = inputs
             return torch.zeros_like(inputs)
 
     model, x, log = _bridge_log()
     monkeypatch.setitem(sys.modules, "shap", _module("shap", DeepExplainer=FakeDeepExplainer))
+    background = torch.zeros_like(x)
 
-    payload = tl.bridge.shap.explain(log, background=x)
+    payload = tl.bridge.shap.explain(log, background=background)
+
+    # The background goes to the constructor; the traced input is explained.
+    assert payload["explainer"].background is background
+    assert torch.equal(payload["explainer"].explained, x)
 
     assert payload["schema"] == "torchlens.shap.v1"
     assert payload["model"] is model
     assert payload["values"].shape == x.shape
 
 
-def test_inseq_bridge_contract(monkeypatch: pytest.MonkeyPatch) -> None:
-    """inseq bridge loads an attribution model and forwards attribution args."""
+def _contrastive_logs() -> tuple[Any, Any]:
+    """Trace the tiny model on a positive and a negative batch of two inputs.
 
-    class FakeAttributionModel:
-        """inseq attribution fixture."""
+    Returns
+    -------
+    tuple[Any, Any]
+        Positive and negative logs; ``"linear"`` outs are ``[2, 2]`` rows.
+    """
 
-        def attribute(
-            self,
-            inputs: str,
-            *,
-            target_texts: str | None = None,
-            step_scores: list[str] | None = None,
-        ) -> dict[str, Any]:
-            """Return a deterministic attribution payload."""
-
-            return {"inputs": inputs, "target_texts": target_texts, "step_scores": step_scores}
-
-    def load_model(model_or_id: str, method: str) -> FakeAttributionModel:
-        """Return a fake attribution model."""
-
-        assert model_or_id == "tiny"
-        assert method == "saliency"
-        return FakeAttributionModel()
-
-    monkeypatch.setitem(sys.modules, "inseq", _module("inseq", load_model=load_model))
-
-    payload = tl.bridge.inseq.attribute(
-        "tiny",
-        "hello",
-        method="saliency",
-        target_texts="world",
-        step_scores=["probability"],
-    )
-
-    assert payload["schema"] == "torchlens.inseq.v1"
-    assert payload["method"] == "saliency"
-    assert payload["attributions"]["target_texts"] == "world"
+    torch.manual_seed(121)
+    model = _TinyBridgeModel().eval()
+    options = tl.options.CaptureOptions()
+    log_pos = tl.trace(model, torch.randn(2, 1, 8, 8) + 1.0, capture=options, save="all")
+    log_neg = tl.trace(model, torch.randn(2, 1, 8, 8), capture=options, save="all")
+    return log_pos, log_neg
 
 
 def test_steering_vectors_bridge_contract(monkeypatch: pytest.MonkeyPatch) -> None:
-    """steering-vectors bridge trains from saved out tensors."""
+    """The steering-vectors converter wraps a native direction from two traces."""
 
-    def train_steering_vector(
-        positive: torch.Tensor, negative: torch.Tensor | None, *, normalize: bool
-    ) -> dict[str, Any]:
-        """Return a deterministic steering-vector payload."""
+    @dataclass
+    class SteeringVector:
+        """steering_vectors.SteeringVector fixture."""
 
-        return {
-            "shape": tuple(positive.shape),
-            "has_negative": negative is not None,
-            "normalize": normalize,
-        }
+        layer_activations: dict[int, torch.Tensor]
+        layer_type: str = "decoder_block"
 
-    _model, _x, log = _bridge_log()
+    log_pos, log_neg = _contrastive_logs()
     monkeypatch.setitem(
-        sys.modules,
-        "steering_vectors",
-        _module("steering_vectors", train_steering_vector=train_steering_vector),
+        sys.modules, "steering_vectors", _module("steering_vectors", SteeringVector=SteeringVector)
     )
 
-    payload = tl.bridge.steering_vectors.vector(log, "conv2d", "linear", normalize=True)
+    direction = tl.intervention.fit_direction(log_pos, log_neg, "linear", read_token_index=None)
+    converted = tl.bridge.steering_vectors.from_direction(direction, layer=3)
 
-    assert payload["schema"] == "torchlens.steering_vectors.v1"
-    assert payload["vector"]["has_negative"] is True
-    assert payload["vector"]["normalize"] is True
+    expected = (log_pos["linear"].out - log_neg["linear"].out).mean(dim=0)
+    assert direction.vector.shape == (2,)
+    assert torch.equal(direction.vector, expected)
+    assert torch.equal(converted.layer_activations[3], expected)
+    assert converted.layer_type == "decoder_block"
+
+
+def _assert_signed_direction(
+    direction: Any, positive: torch.Tensor, negative: torch.Tensor
+) -> None:
+    """Assert a unit direction that projects positives above negatives."""
+
+    import numpy as np
+
+    assert direction.dtype == np.float32
+    assert np.isclose(np.linalg.norm(direction), 1.0, atol=1e-5)
+    projected_pos = positive.numpy() @ direction
+    projected_neg = negative.numpy() @ direction
+    assert (projected_pos > projected_neg).mean() >= 0.5
 
 
 def test_repeng_bridge_contract(monkeypatch: pytest.MonkeyPatch) -> None:
-    """repeng bridge builds a control vector from saved outs."""
+    """The repeng converter wraps a native PCA direction in a ControlVector."""
 
-    class FakeControlVector:
-        """repeng ControlVector fixture."""
+    @dataclass
+    class ControlVector:
+        """repeng.ControlVector fixture."""
 
-        @staticmethod
-        def train(
-            positive: torch.Tensor, negative: torch.Tensor | None, *, rank: int
-        ) -> dict[str, Any]:
-            """Return a deterministic control-vector payload."""
+        model_type: str
+        directions: dict[int, Any]
 
-            return {
-                "rank": rank,
-                "positive_shape": tuple(positive.shape),
-                "negative": negative is not None,
-            }
+    log_pos, log_neg = _contrastive_logs()
+    monkeypatch.setitem(sys.modules, "repeng", _module("repeng", ControlVector=ControlVector))
 
-    _model, _x, log = _bridge_log()
-    monkeypatch.setitem(
-        sys.modules,
-        "repeng",
-        _module("repeng", ControlVector=FakeControlVector),
+    direction = tl.intervention.fit_direction(
+        log_pos, log_neg, "linear", "pca", read_token_index=None
     )
+    vector = tl.bridge.repeng.from_direction(direction, layer=2, model_type="tiny")
 
-    payload = tl.bridge.repeng.control_vector(log, "conv2d", "linear", rank=1)
-
-    assert payload["schema"] == "torchlens.repeng.v1"
-    assert payload["control_vector"]["rank"] == 1
-    assert payload["control_vector"]["negative"] is True
+    assert vector.model_type == "tiny"
+    assert list(vector.directions) == [2]
+    positive, negative = log_pos["linear"].out.detach(), log_neg["linear"].out.detach()
+    _assert_signed_direction(vector.directions[2], positive, negative)
+    with pytest.raises(ValueError, match="model_type="):
+        tl.bridge.repeng.from_direction(direction, layer=2)
 
 
 def test_dialz_bridge_contract(monkeypatch: pytest.MonkeyPatch) -> None:
-    """dialz bridge sends labels and out lists to the downstream analyzer."""
+    """The dialz converter wraps a native PCA direction in a SteeringVector."""
 
-    def analyze(outs: list[torch.Tensor], *, labels: list[str]) -> dict[str, Any]:
-        """Return a deterministic dialz analysis payload."""
+    @dataclass
+    class SteeringVector:
+        """dialz.SteeringVector fixture."""
 
-        return {"labels": labels, "count": len(outs)}
+        model_type: str
+        directions: dict[int, Any]
 
-    _model, _x, log = _bridge_log()
-    monkeypatch.setitem(sys.modules, "dialz", _module("dialz", analyze=analyze))
+    log_pos, log_neg = _contrastive_logs()
+    monkeypatch.setitem(sys.modules, "dialz", _module("dialz", SteeringVector=SteeringVector))
 
-    payload = tl.bridge.dialz.analyze(log, sites=["conv2d", "linear"])
+    direction = tl.intervention.fit_direction(
+        log_pos, log_neg, "linear", "pca", read_token_index=None
+    )
+    vector = direction.to_dialz(layer=1, model_type="tiny")
 
-    assert payload["schema"] == "torchlens.dialz.v1"
-    assert payload["labels"] == payload["result"]["labels"]
-    assert payload["result"]["count"] == 2
+    assert isinstance(vector, SteeringVector)
+    assert vector.model_type == "tiny"
+    assert list(vector.directions) == [1]
+    positive, negative = log_pos["linear"].out.detach(), log_neg["linear"].out.detach()
+    _assert_signed_direction(vector.directions[1], positive, negative)
+    assert torch.equal(torch.from_numpy(vector.directions[1]), direction.vector.float())
+    with pytest.raises(ValueError, match="model_type="):
+        tl.bridge.dialz.from_direction(direction, layer=1)
 
 
-def test_lit_bridge_contract(monkeypatch: pytest.MonkeyPatch) -> None:
-    """LIT bridge returns a model wrapper with LIT-shaped custom_methods."""
-
-    class FakeLitModel:
-        """LIT base model fixture."""
-
-    _model, _x, log = _bridge_log()
-    lit_model_module = _module("lit_nlp.api.model", Model=FakeLitModel)
-    lit_api_module = _module("lit_nlp.api", model=lit_model_module)
-    monkeypatch.setitem(sys.modules, "lit_nlp", _module("lit_nlp", api=lit_api_module))
-    monkeypatch.setitem(sys.modules, "lit_nlp.api", lit_api_module)
-    monkeypatch.setitem(sys.modules, "lit_nlp.api.model", lit_model_module)
-
-    payload = tl.bridge.lit.model(log, name="fixture")
-
-    assert payload["schema"] == "torchlens.lit_model.v1"
-    assert payload["model"].input_spec()
-    assert payload["model"].output_spec()
-    assert payload["model"].predict([{}])[0]["num_layers"] == len(log.layer_list)
+# The former mock-based LIT contract test is deliberately GONE (lane F31,
+# M(lit) item 2 "stop lying"): it mocked the entire lit_nlp module tree, so it
+# passed green while real LIT 1.3.1 rejected the shipped wrapper at LitApp
+# construction (round-2 card VQ1). The replacement contract tests live in
+# tests/test_lit_bridge_*.py and run against REAL lit_nlp types.
 
 
 def test_compat_shims_contract(monkeypatch: pytest.MonkeyPatch) -> None:

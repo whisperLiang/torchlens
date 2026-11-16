@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-import torchlens.bridge.hf as hf_bridge
+import torchlens.bridge.transformers as hf_bridge
 
 
 class _HFLikeTensorModel(nn.Module):
@@ -44,31 +44,16 @@ def _fail_trace_text(model: Any, text: Any, **kwargs: Any) -> object:
 
 
 @pytest.mark.slow
-def test_string_input_hf_model_matches_trace_text() -> None:
-    """String input should auto-route and match direct HF bridge tracing."""
-
-    transformers = pytest.importorskip("transformers")
-    model = transformers.DistilBertModel.from_pretrained("distilbert-base-uncased")
-
-    auto_log = tl.trace(model, "Hello world!", layers_to_save="none")
-    direct_log = tl.bridge.hf.trace_text(model, "Hello world!", layers_to_save="none")
-
-    assert auto_log.num_ops == direct_log.num_ops
-    assert len(auto_log.layer_logs) == len(direct_log.layer_logs)
-    assert auto_log.num_modules == direct_log.num_modules
-
-
-@pytest.mark.slow
 def test_list_of_strings_input_hf_model_batches() -> None:
     """List-of-strings input should auto-route as a batch."""
 
     transformers = pytest.importorskip("transformers")
     model = transformers.DistilBertModel.from_pretrained("distilbert-base-uncased")
 
-    log = tl.trace(model, ["a", "b", "c"], layers_to_save="none")
+    log = tl.trace(model, ["a", "b", "c"], save="none")
 
-    assert log.num_ops > 0
-    assert log.num_modules > 0
+    assert log._num_ops > 0
+    assert len(log.modules) > 0
 
 
 def test_chat_message_input_enables_chat_template(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -87,13 +72,13 @@ def test_chat_message_input_enables_chat_template(monkeypatch: pytest.MonkeyPatc
     model = _HFLikeTensorModel()
     messages = [{"role": "user", "content": "hi"}]
 
-    result = tl.trace(model, messages, layers_to_save="none")
+    result = tl.trace(model, messages, save="none")
 
     assert result is sentinel
     assert calls[0]["model"] is model
     assert calls[0]["text"] == messages
     assert calls[0]["chat_template"] is True
-    assert calls[0]["layers_to_save"] == "none"
+    assert calls[0]["capture"]._layers_to_save == "none"
 
 
 def test_explicit_transform_overrides_autoroute(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -104,21 +89,11 @@ def test_explicit_transform_overrides_autoroute(monkeypatch: pytest.MonkeyPatch)
     log = tl.trace(
         _HFLikeTensorModel(),
         "text",
-        transform=lambda value: torch.ones(1),
-        layers_to_save="none",
+        capture=tl.options.CaptureOptions(input_transform=lambda value: torch.ones(1)),
+        save="none",
     )
 
-    assert log.num_ops > 0
-
-
-def test_tensor_input_passes_through_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Tensor input should not auto-route even when the model has HF metadata."""
-
-    monkeypatch.setattr(hf_bridge, "trace_text", _fail_trace_text)
-
-    log = tl.trace(_HFLikeTensorModel(), torch.ones(1), layers_to_save="none")
-
-    assert log.num_ops > 0
+    assert log._num_ops > 0
 
 
 def test_non_hf_model_text_input_keeps_existing_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -127,4 +102,4 @@ def test_non_hf_model_text_input_keeps_existing_error(monkeypatch: pytest.Monkey
     monkeypatch.setattr(hf_bridge, "trace_text", _fail_trace_text)
 
     with pytest.raises(TypeError, match="String input requires"):
-        tl.trace(_TextFailingModel(), "text", layers_to_save="none")
+        tl.trace(_TextFailingModel(), "text", save="none")

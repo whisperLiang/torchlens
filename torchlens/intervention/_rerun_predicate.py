@@ -1,0 +1,538 @@
+"""Rerun support for interventions staged through the capture predicate door.
+
+A capture-time ``intervene=`` predicate that is not lowered to module hooks
+fires at individual ops, and each fire is staged on the trace as a hook on that
+op's FINAL label (the persisted addressing, ``spec_derived=True`` on save).
+Final labels exist only after postprocessing, so the live rerun matcher refuses
+them. A rerun therefore re-arms the trace's own retained predicate through the
+same capture door, hands the capture a copy of the staged spec without those
+entries, and then checks that the door re-staged exactly the entries the trace
+carries. The staged spec itself is never mutated. Entries a user staged on a
+final label (``do(label, value)``, ``do(tl.label(...), hook)``) are translated to
+the raw capture labels of the ops they name (:func:`translate_staged_final_labels`),
+the same translation a mixed gradient plan's activation half uses. A rerun of a
+capture that saved a static raw-index subset re-selects it through
+:func:`_make_raw_index_save_predicate`.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
+from typing import Any, TypeGuard
+
+from .._io.format3.recipe import (
+    PLACEHOLDER_PORTABILITY,
+    CallablePlaceholder,
+    NestedEdit,
+    recipe_placeholders,
+)
+from .._io.format_errors import ArtifactError
+from .._ir.selector_eval import looks_like_finalized_label, normalize_selector_like
+from ._helpers import rebuild_builtin_helper
+from ._spec import Recipe, Rule
+from ._types import Edit, HookSpec, InterventionSpec, TargetSpec, TargetValueSpec, TensorSliceSpec
+from .errors import ControlFlowDivergenceError
+
+
+@dataclass(frozen=True)
+class RerunSpecPlan:
+    """How one rerun capture applies a trace's staged spec.
+
+    Attributes
+    ----------
+    capture_spec:
+        Spec handed to the capture: the staged spec itself, or a copy without
+        the predicate-door entries when the predicate is re-armed.
+    intervene_predicate:
+        The trace's retained capture predicate to re-arm, or ``None``.
+    staged_keys:
+        Identity keys of the staged predicate-door entries, or ``None``.
+    staged_record_count:
+        Number of fire records the staged spec held when the plan was built.
+    """
+
+    capture_spec: Any
+    intervene_predicate: Any | None = None
+    staged_keys: Counter[tuple[Any, ...]] | None = None
+    staged_record_count: int = 0
+
+
+def is_predicate_door_hook(hook_spec: Any) -> bool:
+    """Return whether a staged hook was recorded by a capture predicate fire.
+
+    Parameters
+    ----------
+    hook_spec:
+        Staged ``HookSpec``.
+
+    Returns
+    -------
+    bool
+        True for the per-op label entries the predicate door records. Module
+        selectors lowered to hooks at capture keep their module target and are
+        live-matchable, so they are not predicate-door entries.
+    """
+
+    metadata = getattr(hook_spec, "metadata", None) or {}
+    target = getattr(hook_spec, "site_target", None)
+    return (
+        metadata.get("created_by") == "intervene_predicate"
+        and getattr(target, "selector_kind", None) == "label"
+    )
+
+
+def _hook_key(hook_spec: Any) -> tuple[Any, ...]:
+    """Return the identity a re-armed predicate must reproduce for one entry.
+
+    Parameters
+    ----------
+    hook_spec:
+        Predicate-door ``HookSpec``.
+
+    Returns
+    -------
+    tuple[Any, ...]
+        Target, originating rule, direction, timing and helper identity.
+    """
+
+    metadata = getattr(hook_spec, "metadata", None) or {}
+    helper = getattr(hook_spec, "helper", None)
+    hook = getattr(hook_spec, "hook", None)
+    hook_identity = (
+        getattr(helper, "name", None)
+        if helper is not None
+        else getattr(hook, "__qualname__", type(hook).__name__)
+    )
+    return (
+        hook_spec.site_target.selector_value,
+        metadata.get("spec_rule_id"),
+        metadata.get("signal"),
+        metadata.get("timing"),
+        hook_identity,
+    )
+
+
+def _without_rule_id(keys: Counter[tuple[Any, ...]]) -> Counter[tuple[Any, ...]]:
+    """Return ``keys`` with the originating rule identity dropped from each entry."""
+
+    stripped: Counter[tuple[Any, ...]] = Counter()
+    for key, count in keys.items():
+        stripped[key[:1] + key[2:]] += count
+    return stripped
+
+
+def plan_rerun_spec(log: Any, spec: Any) -> RerunSpecPlan:
+    """Decide how a rerun capture applies the staged spec.
+
+    Parameters
+    ----------
+    log:
+        Trace being rerun.
+    spec:
+        The trace's staged intervention spec, or ``None``.
+
+    Returns
+    -------
+    RerunSpecPlan
+        A plan that re-arms the retained predicate when the staged spec holds
+        predicate-door entries and the trace still carries that predicate;
+        otherwise a plan that hands the staged spec through unchanged.
+    """
+
+    hook_specs = list(getattr(spec, "hook_specs", None) or ())
+    door_hooks = [hook_spec for hook_spec in hook_specs if is_predicate_door_hook(hook_spec)]
+    # Session-only field, absent on traces that never armed a predicate.
+    options = log.__dict__.get("_predicate_save_options")
+    predicate = getattr(options, "intervene", None)
+    saved_rules = getattr(spec, "metadata", {}).get("_capture_rules", ())
+    if predicate is None and saved_rules:
+        predicate = Recipe(
+            tuple(
+                Rule(normalize_selector_like(target, lifecycle="live"), edit)
+                for target, edit in saved_rules
+            )
+        )
+    if not door_hooks or predicate is None:
+        return RerunSpecPlan(capture_spec=spec)
+    door_targets = {hook_spec.site_target.freeze() for hook_spec in door_hooks}
+    kept_hooks = [hook_spec for hook_spec in hook_specs if not is_predicate_door_hook(hook_spec)]
+    kept_targets = {hook_spec.site_target.freeze() for hook_spec in kept_hooks}
+    capture_spec = replace(
+        spec,
+        # The door re-stages its own targets; keeping the staged final-label
+        # copies would only duplicate them in the discarded rerun spec.
+        targets=[
+            target
+            for target in spec.targets
+            if target.freeze() not in door_targets or target.freeze() in kept_targets
+        ],
+        target_value_specs=list(spec.target_value_specs),
+        hook_specs=kept_hooks,
+        records=list(spec.records),
+        metadata=dict(spec.metadata),
+    )
+    return RerunSpecPlan(
+        capture_spec=capture_spec,
+        intervene_predicate=predicate,
+        staged_keys=Counter(_hook_key(hook_spec) for hook_spec in door_hooks),
+        staged_record_count=len(spec.records),
+    )
+
+
+def settle_predicate_rerun(plan: RerunSpecPlan, staged_spec: Any, new_log: Any) -> None:
+    """Check a re-armed predicate re-staged exactly the staged entries.
+
+    Parameters
+    ----------
+    plan:
+        Plan the rerun capture ran under.
+    staged_spec:
+        The trace's staged spec (receives the run's fire records on success).
+    new_log:
+        Fresh rerun capture, not yet swapped into the trace.
+
+    Raises
+    ------
+    ControlFlowDivergenceError
+        If the re-armed predicate fired at a different set of ops than the
+        staged entries name (the input changed what the predicate matches, or
+        some staged entries were detached). The trace is left untouched.
+    """
+
+    if plan.intervene_predicate is None:
+        return
+    rerun_spec = new_log._intervention_spec
+    rerun_keys = Counter(
+        _hook_key(hook_spec)
+        for hook_spec in getattr(rerun_spec, "hook_specs", None) or ()
+        if is_predicate_door_hook(hook_spec)
+    )
+    if rerun_keys != plan.staged_keys:
+        staged_labels = sorted({str(key[0]) for key in plan.staged_keys or ()})
+        rerun_labels = sorted({str(key[0]) for key in rerun_keys})
+        if _without_rule_id(rerun_keys) == _without_rule_id(plan.staged_keys or Counter()):
+            # Same ops, same helpers: only the rule identity moved. Rule ids
+            # hash the rule's content, so the staged steer content (for
+            # example a steer tensor edited in place) changed since capture.
+            cause = (
+                "The re-armed intervene= predicate fired at the staged ops "
+                f"{staged_labels}, but its rule content no longer matches the "
+                "staged entries: the staged steer (for example a steer tensor "
+                "edited in place) changed since capture"
+            )
+        else:
+            cause = (
+                "This rerun re-armed the trace's capture-time intervene= predicate, "
+                f"which fired at {rerun_labels} while the trace stages it at "
+                f"{staged_labels}"
+            )
+        raise ControlFlowDivergenceError(
+            f"{cause}; applying either set would not reproduce the staged "
+            "intervention exactly, so the rerun is refused and the trace is unchanged. "
+            "Remedy: capture fresh with tl.trace(model, x, intervene=...) for this "
+            "input, or re-stage the intervention with a module or function selector "
+            "through do()",
+            code="rerun_predicate_restage_mismatch",
+            staged_sites=tuple(staged_labels),
+            rerun_sites=tuple(rerun_labels),
+        )
+    staged_spec.records.extend(plan.capture_spec.records[plan.staged_record_count :])
+
+
+def raw_live_labels(trace: Any, label_value: str) -> tuple[str, ...] | None:
+    """Return the capture-time raw labels of the ops a finalized label names.
+
+    A live forward matches selectors before postprocess labels exist, so a
+    finalized label (``linear_1_1``, ``linear_1_1:2``) is translated to the
+    raw labels the same ops carried while they were captured (``linear_1_3_raw``),
+    which a live forward matches again. Each pass of a multi-pass op keeps its
+    own raw label, so a pass-qualified label lowers to that pass alone.
+
+    Parameters
+    ----------
+    trace:
+        Trace that still holds the source graph the label was read from.
+    label_value:
+        A finalized label literal.
+
+    Returns
+    -------
+    tuple[str, ...] | None
+        The raw labels in resolution order, or ``None`` when the label names
+        no op or an op without a raw label (the caller leaves the entry as
+        staged, and the live matcher refuses it with its own remedy).
+    """
+
+    fanout = len(trace._layer_list) + 1
+    ops = trace._resolve_sites(label_value, max_fanout=fanout)
+    raw = [getattr(op, "_label_raw", None) or getattr(op, "_layer_label_raw", None) for op in ops]
+    names = [name for name in raw if isinstance(name, str)]
+    if not names or len(names) != len(raw):
+        return None
+    return tuple(dict.fromkeys(names))
+
+
+def translate_staged_final_labels(trace: Any, capture_spec: Any) -> Any:
+    """Return ``capture_spec`` with its finalized exact labels readdressed for a live rerun.
+
+    Staged entries addressed by a finalized label (``do(label, ...)`` on the
+    ``set_only`` engine, ``do(tl.label(...), ...)``, and each pass label of the
+    ``|`` a multi-pass Layer door stages) are translated to the raw capture
+    labels of the ops they name, the same translation a mixed gradient plan's
+    activation half already uses, so the edit fires on the rerun instead of
+    being refused. An exact label that names several ops, a substring or regex
+    selector, or a label that resolves to nothing stays as staged, and the live
+    matcher refuses it mid-capture with its authoring remedy.
+
+    Parameters
+    ----------
+    trace:
+        Trace about to rerun (it still holds the source graph).
+    capture_spec:
+        Spec the rerun capture would apply.
+
+    Returns
+    -------
+    Any
+        A new spec when any entry was translated, else ``capture_spec`` itself.
+    """
+
+    def lower(entry: Any) -> Any:
+        """Return ``entry`` with its finalized label leaves lowered to raw live labels."""
+        target = _lower_final_label_target(trace, entry.site_target)
+        return entry if target is entry.site_target else replace(entry, site_target=target)
+
+    values = [lower(entry) for entry in getattr(capture_spec, "target_value_specs", None) or ()]
+    hooks = [lower(entry) for entry in getattr(capture_spec, "hook_specs", None) or ()]
+    if all(a is b for a, b in zip(values, capture_spec.target_value_specs, strict=True)) and all(
+        a is b for a, b in zip(hooks, capture_spec.hook_specs, strict=True)
+    ):
+        return capture_spec
+    return replace(capture_spec, target_value_specs=values, hook_specs=hooks)
+
+
+def _lower_final_label_target(trace: Any, target: Any) -> Any:
+    """Return ``target`` with each finalized exact-label leaf lowered to its one raw live label.
+
+    A stored composite target (kind ``"and"``, ``"or"`` or ``"not"``, operands in
+    ``selector_value``) is lowered leaf by leaf: a Layer door on a multi-pass layer
+    stages the ``|`` of its pass-qualified labels, and each pass lowers exactly as it
+    would staged alone through ``trace.do``. A leaf that names several ops or none
+    stays as staged.
+
+    Parameters
+    ----------
+    trace:
+        Trace about to rerun (it still holds the source graph).
+    target:
+        Stored site target of one staged entry.
+
+    Returns
+    -------
+    Any
+        A new target when any leaf was lowered, else ``target`` itself.
+    """
+
+    operands = _stored_operands(target)
+    if operands is None:
+        return _lower_final_label_leaf(trace, target)
+    lowered = tuple(_lower_final_label_target(trace, child) for child in operands)
+    if all(new is old for new, old in zip(lowered, operands, strict=True)):
+        return target
+    is_not = target.selector_kind == "not"
+    return replace(target, selector_value=lowered[0] if is_not else lowered)
+
+
+def _stored_operands(target: Any) -> tuple[Any, ...] | None:
+    """Return the operands of a stored ``and``/``or``/``not`` target, else ``None``."""
+
+    if not isinstance(target, TargetSpec):
+        return None
+    value = target.selector_value
+    if target.selector_kind == "not" and value is not None:
+        return (value,)
+    if target.selector_kind in ("and", "or") and isinstance(value, (tuple, list)):
+        return tuple(value)
+    return None
+
+
+def _lower_final_label_leaf(trace: Any, target: Any) -> Any:
+    """Return one ``label`` leaf readdressed to its single raw live label, else ``target``."""
+
+    value = getattr(target, "selector_value", None)
+    if (
+        getattr(target, "selector_kind", None) != "label"
+        or not isinstance(value, str)
+        or not looks_like_finalized_label(value)
+    ):
+        return target
+    names = raw_live_labels(trace, value)
+    if names is None or len(names) != 1:
+        return target
+    return TargetSpec(
+        selector_kind="label",
+        selector_value=names[0],
+        strict=target.strict,
+        slice_spec=target.slice_spec,
+        metadata=dict(target.metadata),
+    )
+
+
+def _make_raw_index_save_predicate(selected_indices: set[int]) -> Callable[[Any], bool]:
+    """Build a predicate that mirrors a static raw-index save subset.
+
+    Parameters
+    ----------
+    selected_indices:
+        Raw operation indices selected by the original capture.
+
+    Returns
+    -------
+    Callable[[Any], bool]
+        Predicate returning ``True`` for matching capture contexts.
+    """
+
+    def keep_selected_raw_index(ctx: Any) -> bool:
+        """Return whether a predicate context matches the selected raw indices."""
+
+        raw_index = getattr(ctx, "raw_index", None)
+        if raw_index is None:
+            raw_index = getattr(ctx, "event_index", None)
+        return raw_index in selected_indices
+
+    return keep_selected_raw_index
+
+
+#: Keys of a nested selector object (a target spec inside a selector value).
+_SELECTOR_KEYS = frozenset({"selector_kind", "selector_value", "strict", "slice_spec", "metadata"})
+
+
+def _is_selector_object(value: Any) -> TypeGuard[Mapping[str, Any]]:
+    """Return whether a decoded value is a nested selector object."""
+
+    return isinstance(value, Mapping) and set(value) == _SELECTOR_KEYS
+
+
+def _target(selector: Mapping[str, Any]) -> TargetSpec:
+    """Rebuild a target spec from a rule ``selector`` object."""
+
+    value = selector.get("selector_value")
+    if _is_selector_object(value):
+        value = _target(value)
+    elif isinstance(value, (list, tuple)) and value and all(map(_is_selector_object, value)):
+        # An ``and`` / ``or`` composite saves its members as nested selector objects.
+        value = tuple(_target(member) for member in value)
+    slice_data = selector.get("slice_spec")
+    return TargetSpec(
+        selector_kind=selector["selector_kind"],
+        selector_value=value,
+        strict=bool(selector.get("strict", False)),
+        slice_spec=TensorSliceSpec(**slice_data) if isinstance(slice_data, Mapping) else None,
+        metadata=dict(selector.get("metadata") or {}),
+    )
+
+
+def _audit_only_edit(edit: Mapping[str, Any], placeholder: CallablePlaceholder) -> Edit:
+    """Return the non-executable edit that stands in for a placeholder rule."""
+
+    return Edit(
+        name=str(edit.get("name", "custom")),
+        portability="opaque_audit",
+        metadata=(
+            ("callable_placeholder", placeholder.position),
+            ("qualname", placeholder.qualname),
+            ("executable", False),
+        ),
+        is_batch_independent=bool(edit.get("is_batch_independent", False)),
+        is_compatible_with_append=bool(edit.get("is_compatible_with_append", False)),
+    )
+
+
+def _edit(edit: Mapping[str, Any]) -> Edit:
+    """Rebuild one rule's edit (built-in through the registry, else audit-only)."""
+
+    if edit.get("portability") == PLACEHOLDER_PORTABILITY:
+        placeholder = edit.get("callable")
+        if not isinstance(placeholder, CallablePlaceholder):
+            placeholder = CallablePlaceholder(-1, "<unknown>", 0)
+        return _audit_only_edit(edit, placeholder)
+    inner = recipe_placeholders({"rules": [{"args": edit["args"], "kwargs": edit["kwargs"]}]})
+    if inner:
+        return _audit_only_edit(edit, inner[0])
+    args = tuple(_rebuilt_value(arg) for arg in edit["args"])
+    kwargs = {key: _rebuilt_value(item) for key, item in dict(edit["kwargs"]).items()}
+    return rebuild_builtin_helper(str(edit["name"]), args, kwargs)
+
+
+def _rebuilt_value(value: Any) -> Any:
+    """Return a decoded recipe value with every nested edit rebuilt as an ``Edit``."""
+
+    if isinstance(value, NestedEdit):
+        return _edit(value.edit)
+    if isinstance(value, list):
+        return [_rebuilt_value(item) for item in value]
+    if isinstance(value, tuple) and type(value) is tuple:
+        return tuple(_rebuilt_value(item) for item in value)
+    if isinstance(value, dict) and type(value) is dict:
+        return {key: _rebuilt_value(item) for key, item in value.items()}
+    return value
+
+
+def spec_from_recipe(recipe: Mapping[str, Any]) -> InterventionSpec:
+    """Return the runtime spec a decoded recipe describes.
+
+    Parameters
+    ----------
+    recipe:
+        Recipe from ``torchlens._io.format3.recipe.read_recipe``.
+
+    Returns
+    -------
+    InterventionSpec
+        Hooks in rule order and value replacements in value order; fire
+        records are not part of a recipe (a saved trace carries them per op).
+    """
+
+    spec = InterventionSpec(
+        metadata={
+            "_capture_rules": [
+                _capture_rule_from_recipe(rule) for rule in recipe.get("capture_rules", ())
+            ]
+        }
+    )
+    for rule in recipe.get("rules", ()):
+        target = _target(rule["selector"])
+        if target not in spec.targets:
+            spec.targets.append(target)
+        metadata = dict(rule.get("metadata") or {})
+        handle = metadata.pop("handle", None)
+        edit = _edit(rule["edit"])
+        spec.hook_specs.append(
+            HookSpec(site_target=target, hook=edit, helper=edit, handle=handle, metadata=metadata)
+        )
+    for entry in recipe.get("values", ()):
+        spec.target_value_specs.append(
+            TargetValueSpec(
+                site_target=_target(entry["selector"]),
+                value=_rebuilt_value(entry.get("value")),
+                metadata=dict(entry.get("metadata") or {}),
+            )
+        )
+    return spec
+
+
+def _capture_rule_from_recipe(rule: Mapping[str, Any]) -> tuple[TargetSpec, Edit]:
+    """Build one original predicate through closed registries, refusing malformed payloads."""
+
+    try:
+        target = normalize_selector_like(_target(rule["selector"]), lifecycle="live")
+        edit = _edit(rule["edit"])
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise ArtifactError(
+            "An original capture rule has malformed selector or edit fields.",
+            code="manifest_schema_invalid",
+            remedy="save the trace again; do not hand-edit its intervention recipe",
+        ) from exc
+    return target.to_target_spec(), edit

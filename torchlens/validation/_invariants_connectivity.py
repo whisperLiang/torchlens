@@ -4,21 +4,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
+from ._invariants_distance_messages import _distance_order_message
+from ._invariants_parentless import (
+    _consumed_unattributed_data_operand,
+    _op_follows_recorded_backward_trigger,
+)
+
 if TYPE_CHECKING:
-    from ..data_classes.module import Module
+    from .._data_classes.module import Module
 
 
 if TYPE_CHECKING:
+    from .._data_classes.trace import Trace
     from ..backends import BackendSpec
-    from ..data_classes.op import Op
-    from ..data_classes.trace import Trace
-    from .invariants import (
-        METADATA_INVARIANT_CONTRACTS,
-        MetadataInvariantContract,
-        MetadataInvariantError,
-        _retained_orphan_layer_labels,
-        _retained_orphan_op_labels,
-    )
 
 __all__ = (
     "_check_ancestry_closure",
@@ -48,67 +46,59 @@ def _check_distance_invariants(ml: Trace) -> None:
     - input_ancestors subset of input_layers; output_descendants subset of
       output_layers.
     """
-    if not ml.mark_layer_depths:
+    if not ml._options_mark_layer_depths:
         return
 
     name = "distance_invariants"
     input_set = set(ml.input_layers)
     output_set = set(ml.output_layers)
 
-    for lpl in ml.layer_list:
+    for lpl in ml._layer_list:
         label = lpl.layer_label
 
         # min <= max for input distances
-        if lpl.min_distance_from_input is not None and lpl.max_distance_from_input is not None:
-            if lpl.min_distance_from_input > lpl.max_distance_from_input:
-                raise MetadataInvariantError(
-                    name,
-                    f"Layer '{label}': min_distance_from_input="
-                    f"{lpl.min_distance_from_input} > max={lpl.max_distance_from_input}",
-                )
+        message = _distance_order_message(label, lpl.graph, toward_output=False)
+        if message is not None:
+            raise MetadataInvariantError(name, message)
 
         # min <= max for output distances
-        if lpl.min_distance_to_output is not None and lpl.max_distance_to_output is not None:
-            if lpl.min_distance_to_output > lpl.max_distance_to_output:
-                raise MetadataInvariantError(
-                    name,
-                    f"Layer '{label}': min_distance_to_output="
-                    f"{lpl.min_distance_to_output} > max={lpl.max_distance_to_output}",
-                )
+        message = _distance_order_message(label, lpl.graph, toward_output=True)
+        if message is not None:
+            raise MetadataInvariantError(name, message)
 
         # Input layers: distance from input == 0
         if label in input_set:
-            if lpl.min_distance_from_input != 0 or lpl.max_distance_from_input != 0:
+            if lpl.graph.min_distance_from_input != 0 or lpl.graph.max_distance_from_input != 0:
                 raise MetadataInvariantError(
                     name,
                     f"Input layer '{label}': distance_from_input should be 0, got "
-                    f"min={lpl.min_distance_from_input}, max={lpl.max_distance_from_input}",
+                    f"min={lpl.graph.min_distance_from_input}, max={lpl.graph.max_distance_from_input}",
                 )
 
         # Output layers: distance from output == 0
         if label in output_set:
-            if lpl.min_distance_to_output != 0 or lpl.max_distance_to_output != 0:
+            if lpl.graph.min_distance_to_output != 0 or lpl.graph.max_distance_to_output != 0:
                 raise MetadataInvariantError(
                     name,
                     f"Output layer '{label}': distance_from_output should be 0, got "
-                    f"min={lpl.min_distance_to_output}, max={lpl.max_distance_to_output}",
+                    f"min={lpl.graph.min_distance_to_output}, max={lpl.graph.max_distance_to_output}",
                 )
 
         # has_input_ancestor ↔ input_ancestors non-empty
         has_ancestors = len(lpl.input_ancestors) > 0
-        if lpl.has_input_ancestor != has_ancestors:
+        if lpl.graph.has_input_ancestor != has_ancestors:
             raise MetadataInvariantError(
                 name,
-                f"Layer '{label}': has_input_ancestor={lpl.has_input_ancestor} but "
+                f"Layer '{label}': has_input_ancestor={lpl.graph.has_input_ancestor} but "
                 f"len(input_ancestors)={len(lpl.input_ancestors)}",
             )
 
         # has_output_descendant ↔ output_descendants non-empty
         has_descendents = len(lpl.output_descendants) > 0
-        if lpl.has_output_descendant != has_descendents:
+        if lpl.graph.has_output_descendant != has_descendents:
             raise MetadataInvariantError(
                 name,
-                f"Layer '{label}': has_output_descendant={lpl.has_output_descendant} but "
+                f"Layer '{label}': has_output_descendant={lpl.graph.has_output_descendant} but "
                 f"len(output_descendants)={len(lpl.output_descendants)}",
             )
 
@@ -129,67 +119,6 @@ def _check_distance_invariants(ml: Trace) -> None:
                 f"Layer '{label}': output_descendants contains labels not in "
                 f"output_layers: {extra_desc}",
             )
-
-
-def _op_follows_recorded_backward_trigger(ml: Trace, layer: Op) -> bool:
-    """Return whether an op ran after a RECORDED mid-forward backward trigger.
-
-    ``torch.autograd.grad`` / ``loss.backward()`` fired mid-forward produce
-    gradient tensors whose construction is legitimately untraceable, and a
-    downstream op consuming one is a genuine parentless consumer of an
-    unattributed tensor (e.g. MAML-style ``weight_grad.mean()``) -- NOT a
-    silent capture drop. The trigger itself is positively recorded in the
-    capture's backward events, so the exemption is anchored to trace-level
-    evidence, not the op's self-claims: a plain capture with no recorded
-    backward trigger can never use it.
-
-    Parameters
-    ----------
-    ml:
-        Trace being validated.
-    layer:
-        Parentless op under the connectivity check.
-
-    Returns
-    -------
-    bool
-        True when a backward trigger was recorded at a forward-op position
-        before this op ran.
-    """
-
-    capture_events = getattr(ml, "_capture_events", None) or getattr(ml, "capture_events", None)
-    backward_events = getattr(capture_events, "backward_events", None) or ()
-    trigger_positions = [
-        event.forward_op_count_at_trigger
-        for event in backward_events
-        if type(event).__name__ == "BackwardPassStart"
-        and getattr(event, "forward_op_count_at_trigger", None) is not None
-    ]
-    if not trigger_positions:
-        return False
-    step_index = getattr(layer, "step_index", None)
-    return step_index is not None and step_index > min(trigger_positions)
-
-
-def _consumed_unattributed_data_operand(layer: Op) -> bool:
-    """Return whether the capture witness flagged a DATA-operand consumption.
-
-    Parameters
-    ----------
-    layer:
-        Layer pass whose ``unattributed_tensor_args`` witness is inspected.
-
-    Returns
-    -------
-    bool
-        True when the capture-side witness recorded any unattributed tensor
-        argument. A runtime tensor at ANY input slot is a data dependency
-        (round-31 H2) -- including schema-typed ``int``/``Scalar`` control
-        slots -- so every witness position counts; the former ATen-schema
-        metadata-slot exclusion is gone.
-    """
-
-    return bool(tuple(getattr(layer, "unattributed_tensor_args", ()) or ()))
 
 
 def _check_ancestry_closure(ml: Trace) -> None:
@@ -244,7 +173,7 @@ def _check_ancestry_closure(ml: Trace) -> None:
     input_set = set(ml.input_layers)
     orphan_labels = _retained_orphan_layer_labels(ml) | _retained_orphan_op_labels(ml)
 
-    entries = [lpl for lpl in ml.layer_list if lpl.layer_label not in orphan_labels]
+    entries = [lpl for lpl in ml._layer_list if lpl.layer_label not in orphan_labels]
     by_label: dict[str, Any] = {}
     for lpl in entries:
         by_label.setdefault(lpl.layer_label, lpl)
@@ -295,7 +224,7 @@ def _check_ancestry_closure(ml: Trace) -> None:
         )
         internal_source_ancestors[key(lpl)] = (
             own
-            if lpl.is_internal_source
+            if lpl.graph.is_internal_source
             else set().union(
                 *(internal_source_ancestors.get(key(parent), set()) for parent in parents), set()
             )
@@ -330,7 +259,7 @@ def _pass_qualified_label(lpl: Any) -> str | None:
     """Return ``layer_label:pass_index`` when both stored fields are present."""
 
     layer_label = getattr(lpl, "layer_label", None)
-    pass_index = getattr(lpl, "pass_index", None)
+    pass_index = getattr(lpl, "pass_number", None)
     if isinstance(layer_label, str) and isinstance(pass_index, int):
         return f"{layer_label}:{pass_index}"
     return None
@@ -362,19 +291,19 @@ def _check_one_ancestry_record(
             f"Layer '{label}': output_descendants={sorted(lpl.output_descendants)} != the "
             f"closure of the recorded child edges {sorted(expected_output)}",
         )
-    if normalize(lpl.internal_source_ancestors) != expected_internal:
+    if normalize(lpl.graph.internal_source_ancestors) != expected_internal:
         raise MetadataInvariantError(
             name,
             f"Layer '{label}': internal_source_ancestors="
-            f"{sorted(lpl.internal_source_ancestors)} != the closure of the recorded "
+            f"{sorted(lpl.graph.internal_source_ancestors)} != the closure of the recorded "
             f"parent edges {sorted(expected_internal)}",
         )
-    if not lpl.is_internal_source:
+    if not lpl.graph.is_internal_source:
         expected_root = expected_input | expected_internal
-        if normalize(lpl.root_ancestors) != expected_root:
+        if normalize(lpl.graph.root_ancestors) != expected_root:
             raise MetadataInvariantError(
                 name,
-                f"Layer '{label}': root_ancestors={sorted(lpl.root_ancestors)} != "
+                f"Layer '{label}': root_ancestors={sorted(lpl.graph.root_ancestors)} != "
                 f"input_ancestors | internal_source_ancestors {sorted(expected_root)}",
             )
 
@@ -385,7 +314,7 @@ def _check_one_ancestry_record(
         record.layer_label for record in map(resolve, lpl.parents) if record is not None
     }
     parent_names |= set(lpl.parents)
-    stored_internal_parents = tuple(lpl.internal_source_parents)
+    stored_internal_parents = tuple(lpl.graph.internal_source_parents)
     not_a_parent = [item for item in stored_internal_parents if item not in parent_names]
     if not_a_parent:
         raise MetadataInvariantError(
@@ -395,17 +324,17 @@ def _check_one_ancestry_record(
         )
     for item in stored_internal_parents:
         record = resolve(item)
-        if record is not None and not record.has_internal_source_ancestor:
+        if record is not None and not record.graph.has_internal_source_ancestor:
             raise MetadataInvariantError(
                 name,
                 f"Layer '{label}': internal_source_parents names {item!r}, which carries "
                 f"no internal-source ancestry",
             )
-    if not lpl.is_internal_source:
+    if not lpl.graph.is_internal_source:
         expected_names = {
             record.layer_label
             for record in map(resolve, lpl.parents)
-            if record is not None and record.has_internal_source_ancestor
+            if record is not None and record.graph.has_internal_source_ancestor
         }
         stored_names = {
             record.layer_label
@@ -423,12 +352,12 @@ def _check_one_ancestry_record(
     for flag_name, stored_set in (
         ("has_input_ancestor", lpl.input_ancestors),
         ("has_output_descendant", lpl.output_descendants),
-        ("has_internal_source_ancestor", lpl.internal_source_ancestors),
+        ("has_internal_source_ancestor", lpl.graph.internal_source_ancestors),
     ):
-        if bool(getattr(lpl, flag_name)) != bool(stored_set):
+        if bool(record_member(lpl, flag_name)) != bool(stored_set):
             raise MetadataInvariantError(
                 name,
-                f"Layer '{label}': {flag_name}={getattr(lpl, flag_name)} but its set has "
+                f"Layer '{label}': {flag_name}={record_member(lpl, flag_name)} but its set has "
                 f"{len(stored_set)} members",
             )
     extra_ancestors = normalize(lpl.input_ancestors) - normalize(input_set)
@@ -460,8 +389,8 @@ def _check_distance_closure(name: str, entries: list[Any], resolve: Any, key: An
         ("output", "children", "is_output", "min_distance_to_output", "max_distance_to_output"),
     ):
         for lpl in entries:
-            stored_min = getattr(lpl, min_field)
-            stored_max = getattr(lpl, max_field)
+            stored_min = record_member(lpl, min_field)
+            stored_max = record_member(lpl, max_field)
             if stored_min is None or stored_max is None:
                 continue
             if getattr(lpl, boundary_flag):
@@ -476,23 +405,23 @@ def _check_distance_closure(name: str, entries: list[Any], resolve: Any, key: An
                 record
                 for record in map(resolve, getattr(lpl, edge_field))
                 if record is not None
-                and getattr(record, min_field) is not None
-                and getattr(record, max_field) is not None
+                and record_member(record, min_field) is not None
+                and record_member(record, max_field) is not None
             ]
             if not neighbours:
                 # The flood seeds ONLY at boundary nodes and propagates along
                 # recorded edges, so a populated non-boundary distance with
-                # zero distance-populated neighbours is FABRICATED (R73
-                # generative-sweep find: the former skip here accepted any
-                # stored distance on a flood-unreached record).
+                # zero distance-populated neighbours is FABRICATED (skipping the
+                # check here would accept any stored distance on a flood-unreached
+                # record).
                 raise MetadataInvariantError(
                     name,
                     f"Layer '{key(lpl)}': {min_field}/{max_field}=({stored_min}, "
                     f"{stored_max}) but no recorded {edge_field} carries populated "
                     f"distances -- the flood cannot have reached this record",
                 )
-            expected_min = min(getattr(record, min_field) for record in neighbours) + 1
-            expected_max = max(getattr(record, max_field) for record in neighbours) + 1
+            expected_min = min(record_member(record, min_field) for record in neighbours) + 1
+            expected_max = max(record_member(record, max_field) for record in neighbours) + 1
             if stored_min != expected_min or stored_max != expected_max:
                 raise MetadataInvariantError(
                     name,
@@ -519,14 +448,14 @@ def _check_graph_connectivity(ml: Trace) -> None:
     input_set = set(ml.input_layers)
     buffer_set = set(ml.buffer_layers)
 
-    for lpl in ml.layer_list:
+    for lpl in ml._layer_list:
         label = lpl.layer_label
 
         # Non-input, non-buffer, non-internally-initialized layers must have parents
         if (
             label not in input_set
             and label not in buffer_set
-            and not lpl.is_internal_source
+            and not lpl.graph.is_internal_source
             and not lpl.is_output
             and len(lpl.parents) == 0
         ):
@@ -536,14 +465,14 @@ def _check_graph_connectivity(ml: Trace) -> None:
                 f"internally initialized, or output",
             )
 
-        # Round-26 W3-4c: the ``is_internal_source`` exemption above is only
+        # The ``is_internal_source`` exemption above is only
         # legitimate for GENUINE graph sources (factories such as
         # ``torch.ones``, vmap-built masks, buffers). Capture stamps
         # ``is_internal_source = (len(parents) == 0)``, so a parentless op
         # that in fact CONSUMED an unaccounted tensor at a data-operand slot
         # (the capture-side witness recorded it in ``unattributed_tensor_args``,
         # e.g. the consumer of a silently-dropped ``torch.ops.aten.*`` call)
-        # was blessed as a "source" and dodged the dangling-node check
+        # would be blessed as a "source" and dodge the dangling-node check
         # entirely -- letting a silent op drop validate as ``passed``. A
         # demonstrated tensor CONSUMER is not a source; fail it. Genuine
         # sources have no tensor-data args and keep the exemption, and an op
@@ -552,7 +481,7 @@ def _check_graph_connectivity(ml: Trace) -> None:
         # place. Non-data (size/shape/metadata) positions are excluded via the
         # same ATen-schema classifier the capture witness uses.
         if (
-            lpl.is_internal_source
+            lpl.graph.is_internal_source
             and len(lpl.parents) == 0
             and callable(getattr(lpl, "func", None))
             and label not in input_set
@@ -572,7 +501,7 @@ def _check_graph_connectivity(ml: Trace) -> None:
                 f"Layer '{label}' is marked is_internal_source but consumed "
                 f"unattributed tensor data "
                 f"(unattributed_tensor_args="
-                f"{tuple(getattr(lpl, 'unattributed_tensor_args', ()) or ())}); "
+                f"{tuple(record_member(lpl, 'unattributed_tensor_args', ()) or ())}); "
                 f"a tensor consumer with no recorded parents is a dangling "
                 f"computational node (silent capture drop), not a graph source",
             )
@@ -692,7 +621,7 @@ def _check_module_containment_logic(ml: Trace) -> None:
     # Per-layer: modules path validity
     # Format after postprocessing: list of "addr:pass" strings, ordered from
     # outermost enclosing submodule to innermost. Does NOT include "self".
-    for lpl in ml.layer_list:
+    for lpl in ml._layer_list:
         nested = lpl.modules
         if not nested:
             continue
@@ -831,9 +760,9 @@ def _metadata_invariant_contracts_for_trace(
         requirements.
     """
 
-    from ..backends import get_backend_spec
+    from ..backends.registry import get_backend_spec
 
-    spec = get_backend_spec(getattr(trace, "backend", "torch"))
+    spec = get_backend_spec(trace._provenance_backend)
     torch_spec = get_backend_spec("torch")
     backend_family: Literal["torch", "non_torch"] = "torch" if spec is torch_spec else "non_torch"
     return _metadata_invariant_contracts_for_backend(backend_family, spec=spec)
@@ -861,7 +790,7 @@ def _metadata_invariant_contracts_for_backend(
 
     return tuple(
         contract
-        for contract in METADATA_INVARIANT_CONTRACTS
+        for contract in _invariants_hub.METADATA_INVARIANT_CONTRACTS
         if _metadata_invariant_applies(contract, backend_family, spec)
     )
 
@@ -895,3 +824,18 @@ def _metadata_invariant_applies(
     if spec is None:
         return False
     return bool(getattr(spec.capabilities, contract.requires_capability, False))
+
+
+# Late imports: the split modules of this package import one another (cycles), so each
+# imports its siblings once every definition above exists. The contracts tuple is read
+# through the hub module at call time: it is built after the hub imports this module.
+from .._utils._record_group_table import record_member  # noqa: E402
+from . import _invariants as _invariants_hub  # noqa: E402
+from ._invariants import (  # noqa: E402
+    MetadataInvariantContract,
+    MetadataInvariantError,
+)
+from ._invariants_topology import (  # noqa: E402
+    _retained_orphan_layer_labels,
+    _retained_orphan_op_labels,
+)

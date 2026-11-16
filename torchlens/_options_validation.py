@@ -1,0 +1,484 @@
+"""Value validators for the grouped option dataclasses in ``options.py``.
+
+Split out of ``torchlens/options.py`` (2026-08-26 P03 fix cycle) along the
+validation seam: every function here checks or normalizes ONE resolved option
+value and raises a typed, teaching refusal on violation. The construction
+plumbing (explicitness tracking, frozen-field assembly, grouped/flat merging)
+stays with the dataclasses in ``options.py``; this module never imports it.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, cast
+
+from ._errors import ArgumentTypeError, InvalidArgumentError
+from ._literals import (
+    BufferVisibilityLiteral,
+    CollapseLiteral,
+    FoldRepeatsLiteral,
+    VisInterventionModeLiteral,
+    VisNodeModeLiteral,
+    VisNodePlacementLiteral,
+)
+
+if TYPE_CHECKING:
+    from .options import VisualizationOptions
+
+
+def _validate_node_style(node_style: VisNodeModeLiteral) -> None:
+    """Validate a visualization node-style preset name.
+
+    Parameters
+    ----------
+    node_style:
+        Candidate node-style preset name.
+
+    Raises
+    ------
+    ValueError
+        If ``node_style`` is not a registered public preset.
+    """
+
+    if node_style not in {"default", "profiling"}:
+        raise InvalidArgumentError(
+            f"Visualization node_style={node_style!r} is not a supported preset",
+            code="visualization_node_style_invalid",
+            remedy=(
+                "set node_style to 'default' or 'profiling'; domain styles moved to "
+                "torchlens.experimental.node_styles.<style>_node_mode via node_spec_fn"
+            ),
+            argument="node_style",
+        )
+
+
+def _normalize_layout(layout: VisNodePlacementLiteral) -> VisNodePlacementLiteral:
+    """Normalize visualization layout names and warn on removed backends.
+
+    Parameters
+    ----------
+    layout:
+        Candidate layout engine name.
+
+    Returns
+    -------
+    VisNodePlacementLiteral
+        Normalized layout engine name.
+
+    Raises
+    ------
+    ValueError
+        If ``layout`` is not supported.
+    """
+
+    if layout not in {"auto", "dot", "rank"}:
+        raise InvalidArgumentError(
+            f"Visualization layout={layout!r} is not supported",
+            code="visualization_layout_invalid",
+            remedy="set layout to 'auto', 'dot', or 'rank'",
+            argument="layout",
+        )
+    return layout
+
+
+def _validate_intervention_mode(intervention_mode: VisInterventionModeLiteral) -> None:
+    """Validate an intervention visualization mode name.
+
+    Parameters
+    ----------
+    intervention_mode:
+        Candidate intervention visualization mode.
+
+    Raises
+    ------
+    ValueError
+        If ``intervention_mode`` is not a supported mode.
+    """
+
+    if intervention_mode not in {"node_mark", "as_node"}:
+        raise InvalidArgumentError(
+            f"Visualization intervention_mode={intervention_mode!r} is not supported",
+            code="visualization_intervention_mode_invalid",
+            remedy="set intervention_mode to 'node_mark' or 'as_node'",
+            argument="intervention_mode",
+        )
+
+
+def _validate_buffer_visibility(value: BufferVisibilityLiteral) -> None:
+    """Validate buffer visibility options.
+
+    Parameters
+    ----------
+    value:
+        Tri-state buffer visibility mode.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not a supported tri-state mode. The former legacy
+        bools refuse here too: pass ``'always'`` / ``'never'``.
+    """
+
+    if value in {"never", "meaningful", "always"}:
+        return
+    raise InvalidArgumentError(
+        f"Visualization show_buffers={value!r} is not a supported visibility policy",
+        code="buffer_visibility_invalid",
+        remedy="set show_buffers to 'never', 'meaningful', or 'always'",
+        argument="show_buffers",
+    )
+
+
+def _validate_collapse(value: CollapseLiteral) -> None:
+    """Validate smart module-collapse mode.
+
+    Parameters
+    ----------
+    value:
+        Candidate collapse mode.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not a supported collapse mode.
+    """
+
+    if isinstance(value, float):
+        if 0.0 <= value <= 1.0:
+            return
+        raise InvalidArgumentError(
+            f"Visualization collapse={value!r} is outside the supported float range",
+            code="collapse_level_invalid",
+            remedy="set collapse to a float from 0.0 through 1.0 inclusive",
+            argument="collapse",
+        )
+    if value not in {"none", "auto", "max"}:
+        raise InvalidArgumentError(
+            f"Visualization collapse={value!r} is not a supported collapse mode",
+            code="collapse_mode_invalid",
+            remedy="set collapse to 'none', 'auto', 'max', or a float in [0.0, 1.0]",
+            argument="collapse",
+        )
+
+
+def _validate_fold_repeats(value: FoldRepeatsLiteral) -> None:
+    """Validate explicit repeat-fold rendering policy.
+
+    Parameters
+    ----------
+    value:
+        Candidate repeat-fold policy.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not ``None``, ``True``, or ``False``.
+    """
+
+    if value not in {None, True, False}:
+        raise InvalidArgumentError(
+            f"Visualization fold_repeats={value!r} is not a supported policy",
+            code="fold_repeats_invalid",
+            remedy="set fold_repeats to None, True, or False",
+            argument="fold_repeats",
+        )
+
+
+# Visualization option fields that accept ONLY real bools. Strings such as
+# ``'yes'`` or ``'no'`` used to be accepted silently, and ``'no'``/``'false'``
+# truthily meant ON.
+_VISUALIZATION_BOOL_FIELDS = (
+    "show_edge_shapes",
+    "show_arg_labels",
+    "rolled",
+    "open_viewer",
+    "show_cone",
+    "order_siblings",
+)
+
+# Tri-state (bool | None) flags: show_legend=None = AUTO (L5 channel core).
+_VISUALIZATION_TRI_STATE_BOOL_FIELDS = ("show_legend",)
+
+
+def _validate_visualization_flag_fields(values: Mapping[str, Any]) -> None:
+    """Validate the bool-only and tri-state visualization flag fields."""
+
+    for bool_field in _VISUALIZATION_BOOL_FIELDS:
+        _validate_bool_option(bool_field, values[bool_field])
+    for tri_state_field in _VISUALIZATION_TRI_STATE_BOOL_FIELDS:
+        value = values[tri_state_field]
+        if value is None or isinstance(value, bool):
+            continue
+        raise InvalidArgumentError(
+            f"{tri_state_field} must be True, False, or None (auto); received {value!r}",
+            code="visualization_bool_option_invalid",
+            remedy=f"pass {tri_state_field}=True, False, or None",
+            argument=tri_state_field,
+        )
+
+
+def _validate_bool_option(name: str, value: Any) -> None:
+    """Validate a bool-only visualization option value.
+
+    Parameters
+    ----------
+    name:
+        Public option field name for the diagnostic.
+    value:
+        Candidate option value.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not a real ``bool``.
+    """
+
+    if not isinstance(value, bool):
+        raise InvalidArgumentError(
+            f"Visualization {name}={value!r} is not a bool",
+            code="visualization_bool_option_invalid",
+            remedy=f"set {name} to True or False",
+            argument=name,
+        )
+
+
+def _validate_output_device(output_device: Any) -> None:
+    """Validate an ``output_device`` save option value.
+
+    Shared by the capture entry (``tl.trace``) and ``tl.validate`` so both
+    refuse the same values with the same typed error.
+
+    Parameters
+    ----------
+    output_device:
+        Candidate ``output_device`` value.
+
+    Raises
+    ------
+    InvalidArgumentError
+        (``code="output_device_invalid"``) if the value is not ``"same"``,
+        ``"cpu"``, or ``"cuda"``.
+    """
+
+    if output_device not in ["same", "cpu", "cuda"]:
+        raise InvalidArgumentError(
+            f"output_device={output_device!r} is not supported",
+            code="output_device_invalid",
+            remedy="set output_device to 'same', 'cpu', or 'cuda'",
+            argument="output_device",
+        )
+
+
+#: The closed ``on_nonfinite`` vocabulary (``"ignore"`` is the default).
+ON_NONFINITE_MODES: tuple[str, ...] = ("ignore", "track", "warn", "raise")
+
+
+def _validate_capture_values(values: Mapping[str, Any]) -> None:
+    """Validate resolved capture field values.
+
+    Single source of truth for the invariants enforced on
+    :class:`CaptureOptions`, shared by ``__init__`` and ``_from_values`` so the
+    flat-kwarg / ``_from_values`` construction path can never accept values the
+    grouped constructor rejects (the asymmetry that let bad ``jax_control_flow``
+    and non-positive ``jax_max_control_flow_unroll`` slip through).
+
+    Parameters
+    ----------
+    values:
+        Resolved capture field values keyed by canonical field name.
+
+    Raises
+    ------
+    ValueError
+        If ``jax_control_flow`` or ``jax_max_control_flow_unroll`` holds an unsupported value.
+    TypeError
+        If ``jax_max_control_flow_unroll`` is not an integer.
+    """
+
+    if values["jax_control_flow"] not in {"reject", "unroll", "region"}:
+        raise InvalidArgumentError(
+            f"Capture option jax_control_flow={values['jax_control_flow']!r} is unsupported",
+            code="jax_control_flow_invalid",
+            remedy="set jax_control_flow to 'reject', 'unroll', or 'region'",
+            argument="jax_control_flow",
+        )
+    if not isinstance(values["jax_max_control_flow_unroll"], int):
+        raise ArgumentTypeError(
+            "Capture option jax_max_control_flow_unroll is not an integer",
+            code="jax_unroll_type_invalid",
+            remedy="pass an integer greater than or equal to 1",
+            argument="jax_max_control_flow_unroll",
+            received_type=type(values["jax_max_control_flow_unroll"]).__name__,
+        )
+    if values["jax_max_control_flow_unroll"] < 1:
+        raise InvalidArgumentError(
+            "Capture option jax_max_control_flow_unroll is less than 1",
+            code="jax_unroll_range_invalid",
+            remedy="set jax_max_control_flow_unroll to an integer greater than or equal to 1",
+            argument="jax_max_control_flow_unroll",
+        )
+    if values["distributed_witness"] not in {"none", "digest", "payload"}:
+        raise InvalidArgumentError(
+            f"Capture option distributed_witness={values['distributed_witness']!r} is unsupported",
+            code="distributed_witness_invalid",
+            remedy="set distributed_witness to 'none' or 'digest'",
+            argument="distributed_witness",
+        )
+    if values["distributed_witness"] == "payload":
+        raise InvalidArgumentError(
+            "Capture option distributed_witness='payload' is reserved because payload "
+            "witness blobs are not implemented",
+            code="distributed_payload_witness_unsupported",
+            remedy="set distributed_witness to 'digest' for byte-exact witness digests",
+            argument="distributed_witness",
+        )
+    if values["on_nonfinite"] not in ON_NONFINITE_MODES:
+        # One closed vocabulary selects the NaN/Inf policy; a bool or a
+        # misspelling never silently falls back to "ignore".
+        raise InvalidArgumentError(
+            f"Capture option on_nonfinite must be one of "
+            f"{', '.join(repr(mode) for mode in ON_NONFINITE_MODES)}, got "
+            f"{values['on_nonfinite']!r}",
+            code="on_nonfinite_invalid",
+            remedy="pass on_nonfinite='ignore', 'track', 'warn' or 'raise'",
+            argument="on_nonfinite",
+        )
+    _validate_capture_flag_values(values)
+
+
+def _validate_capture_flag_values(values: Mapping[str, Any]) -> None:
+    """Validate the ``aten_ops`` and ``structure_only`` capture flags.
+
+    The last checks of :func:`_validate_capture_values`, run in the same order.
+
+    Parameters
+    ----------
+    values:
+        Resolved capture field values keyed by canonical field name.
+
+    Raises
+    ------
+    InvalidArgumentError
+        If ``aten_ops`` is not ``True``, ``False`` or ``"values"``.
+    ArgumentTypeError
+        If ``structure_only`` is not a bool.
+    """
+
+    aten_ops = values["aten_ops"]  # identity checks: 1 == True would admit an int
+    if aten_ops is not True and aten_ops is not False and aten_ops != "values":
+        raise InvalidArgumentError(
+            f"Capture option aten_ops={aten_ops!r} is unsupported",
+            code="aten_ops_invalid",
+            remedy="pass aten_ops=False, aten_ops=True (value-free rows) or "
+            "aten_ops='values' (rows with their output tensors)",
+            argument="aten_ops",
+        )
+    if not isinstance(values["structure_only"], bool):
+        raise ArgumentTypeError(
+            "Capture option structure_only is not a bool",
+            code="structure_only_type_invalid",
+            remedy="pass structure_only=True or structure_only=False",
+            argument="structure_only",
+            received_type=type(values["structure_only"]).__name__,
+        )
+    _validate_transformed_output_request(values)
+
+
+def _validate_transformed_output_request(values: Mapping[str, Any]) -> None:
+    """Refuse ``save_transformed_output=True`` with no ``output_transform``.
+
+    The flag asks to keep the transformed output, yet nothing transforms it:
+    refuse before the capture instead of silently saving nothing.
+    """
+
+    if values["save_transformed_output"] is True and values["output_transform"] is None:
+        raise InvalidArgumentError(
+            "Capture option save_transformed_output=True needs an output_transform; "
+            "without one there is no transformed output to save",
+            code="save_transformed_output_without_output_transform",
+            remedy="pass output_transform=<callable> alongside save_transformed_output=True, "
+            "or drop save_transformed_output",
+            argument="save_transformed_output",
+        )
+
+
+# The VisualizationOptions fields ``visualization_to_render_kwargs`` passes to
+# ``Trace.draw`` under their own name, in keyword order (``file_format`` only when explicit).
+_DRAW_PASSTHROUGH_FIELDS: tuple[str, ...] = (
+    "graph",
+    "rolled",
+    "depth",
+    "graph_overrides",
+    "node_style",
+    "node_spec_fn",
+    "collapsed_node_spec_fn",
+    "collapse_fn",
+    "collapse",
+    "skip_fn",
+    "edge_overrides",
+    "grad_edge_overrides",
+    "module_overrides",
+    "open_viewer",
+    "file_format",
+    "show_buffers",
+    "show_edge_shapes",
+    "show_arg_labels",
+    "direction",
+    "layout",
+    "renderer",
+    "theme",
+    "intervention_mode",
+    "show_cone",
+)
+
+
+def visualization_to_render_kwargs(visualization: VisualizationOptions) -> dict[str, Any]:
+    """Translate grouped visualization options into ``Trace.draw`` kwargs.
+
+    Parameters
+    ----------
+    visualization:
+        Resolved grouped visualization options.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``Trace.draw`` field names, renaming ``container_path`` to ``path``;
+        include ``file_format`` only when explicit and ``fold_repeats`` when set or explicit.
+    """
+    explicit = visualization.is_field_explicit
+    kwargs: dict[str, Any] = {
+        "path": visualization.container_path,
+        **{name: getattr(visualization, name) for name in _DRAW_PASSTHROUGH_FIELDS},
+    }
+    if not explicit("file_format"):
+        kwargs["file_format"] = None
+    if visualization.fold_repeats is not None or explicit("fold_repeats"):
+        kwargs["fold_repeats"] = visualization.fold_repeats
+    optional_kwargs = {
+        "node_overlay": visualization.node_overlay,
+        "node_label_fields": visualization.node_label_fields,
+        "show_legend": visualization.show_legend,
+        "color_by": visualization.color_by,
+        "size_by": visualization.size_by,
+        "size_scale": visualization.size_scale,
+        "stack_by": visualization.stack_by,
+        "show_redundant_args": visualization.show_redundant_args,
+        "font_size": visualization.font_size,
+        "dpi": visualization.dpi,
+        "order_siblings": visualization.order_siblings,
+    }
+    for field_name, value in optional_kwargs.items():
+        if value is not None and value is not False or explicit(field_name):
+            kwargs[field_name] = value
+    return kwargs
+
+
+def _validate_visualization_values(values: Mapping[str, Any]) -> None:
+    """Validate resolved visualization values shared by both constructors."""
+    _validate_buffer_visibility(values["show_buffers"])
+    _validate_node_style(cast(VisNodeModeLiteral, values["node_style"]))
+    _validate_intervention_mode(cast(VisInterventionModeLiteral, values["intervention_mode"]))
+    _validate_collapse(cast(CollapseLiteral, values["collapse"]))
+    _validate_fold_repeats(cast(FoldRepeatsLiteral, values["fold_repeats"]))
+    _validate_visualization_flag_fields(values)

@@ -10,6 +10,7 @@ from typing import Any
 from .._finalize import (
     join_module_address as _join_module_address,
     module_source_metadata as _module_source_metadata,
+    nearest_metadata_parent,
 )
 
 
@@ -114,24 +115,10 @@ def discover_mlx_module_tree(model: object) -> MLXModuleTree | None:
         all_addresses = sorted(set(addresses), key=_address_sort_key)
         for alias in all_addresses:
             alias_to_primary[alias] = primary
-        metadata[primary] = {
-            **_module_source_metadata(module),
-            "cls": type(module),
-            "class_name": type(module).__name__,
-            "class_qualname": f"{type(module).__module__}.{type(module).__qualname__}",
-            "address_children": [],
-            "all_addresses": all_addresses,
-            "training": bool(getattr(module, "training", False)),
-            "forward_pre_hooks": [],
-            "forward_hooks": [],
-            "backward_pre_hooks": [],
-            "backward_hooks": [],
-            "full_backward_pre_hooks": [],
-            "full_backward_hooks": [],
-            "custom_attributes": {},
-            "custom_methods": [],
-            "_module_object": module,
-        }
+        metadata[primary] = _module_record(module, all_addresses)
+
+    for address, container in _list_containers(model, alias_to_primary).items():
+        metadata[address] = _module_record(container, [address])
 
     for primary, item in metadata.items():
         item["address_children"] = _direct_children(primary, metadata)
@@ -153,6 +140,107 @@ def discover_mlx_module_tree(model: object) -> MLXModuleTree | None:
         param_owner_by_address=param_owner_by_address,
         param_address_by_id=param_address_by_id,
     )
+
+
+def _module_record(module: object, all_addresses: list[str]) -> dict[str, Any]:
+    """Return the TorchLens module metadata for one module or container object.
+
+    Parameters
+    ----------
+    module
+        MLX module, or the list/tuple/dict container holding sub-modules.
+    all_addresses
+        Every address of ``module``, primary first.
+
+    Returns
+    -------
+    dict[str, Any]
+        Module metadata keyed the way the shared module finalization reads it.
+    """
+
+    return {
+        **_module_source_metadata(module),
+        "cls": type(module),
+        "class_name": type(module).__name__,
+        "class_qualname": f"{type(module).__module__}.{type(module).__qualname__}",
+        "address_children": [],
+        "all_addresses": all_addresses,
+        "training": bool(getattr(module, "training", False)),
+        "forward_pre_hooks": [],
+        "forward_hooks": [],
+        "backward_pre_hooks": [],
+        "backward_hooks": [],
+        "full_backward_pre_hooks": [],
+        "full_backward_hooks": [],
+        "custom_attributes": {},
+        "custom_methods": [],
+        "_module_object": module,
+    }
+
+
+def _list_containers(model: object, module_addresses: dict[str, str]) -> dict[str, object]:
+    """Return the non-module containers that hold sub-modules, keyed by address.
+
+    MLX keeps sub-modules in plain Python lists (``nn.Sequential.layers``) and
+    dicts, so a child's address (``block.layers.0``) runs through a container
+    that is not itself a module. The container gets its own module record, as
+    a torch ``ModuleList`` does, so every address's parent is a recorded module
+    and addresses stay unchanged.
+
+    Parameters
+    ----------
+    model
+        Root MLX module.
+    module_addresses
+        Every discovered module address (aliases included).
+
+    Returns
+    -------
+    dict[str, object]
+        Container object keyed by its dotted address.
+    """
+
+    containers: dict[str, object] = {}
+    for address in sorted(module_addresses, key=_address_sort_key):
+        if address == "self":
+            continue
+        node: object | None = model
+        parts = address.split(".")
+        for depth, part in enumerate(parts[:-1], start=1):
+            node = _child_value(node, part)
+            if node is None:
+                break
+            prefix = ".".join(parts[:depth])
+            if prefix in module_addresses or _is_mlx_module(node):
+                continue
+            if isinstance(node, (list, tuple, dict)):
+                containers.setdefault(prefix, node)
+    return containers
+
+
+def _child_value(node: object, part: str) -> object | None:
+    """Return ``node``'s child named by one address segment, or ``None``.
+
+    Parameters
+    ----------
+    node
+        MLX module (a ``dict`` subclass) or a list/tuple/dict container.
+    part
+        One dotted-address segment.
+
+    Returns
+    -------
+    object | None
+        The child value, or ``None`` when the segment does not resolve.
+    """
+
+    if isinstance(node, dict):
+        return node.get(part)
+    if isinstance(node, (list, tuple)):
+        if not part.isdigit() or int(part) >= len(node):
+            return None
+        return node[int(part)]
+    return getattr(node, part, None)
 
 
 def prepare_model_once(model: object) -> object:
@@ -305,37 +393,10 @@ def _direct_children(parent: str, metadata: dict[str, dict[str, Any]]) -> list[s
     for address in sorted(metadata, key=_address_sort_key):
         if address == parent:
             continue
-        nearest = _nearest_existing_parent(address, metadata)
+        nearest = nearest_metadata_parent(address, metadata)
         if nearest == parent:
             children.append(address)
     return children
-
-
-def _nearest_existing_parent(address: str, metadata: dict[str, dict[str, Any]]) -> str | None:
-    """Return the closest existing parent address for ``address``.
-
-    Parameters
-    ----------
-    address
-        Child address.
-    metadata
-        Module metadata keyed by primary address.
-
-    Returns
-    -------
-    str | None
-        Parent address, or ``None`` for root.
-    """
-
-    if address == "self":
-        return None
-    parts = address.split(".")
-    while len(parts) > 1:
-        parts.pop()
-        candidate = ".".join(parts)
-        if candidate in metadata:
-            return candidate
-    return "self" if "self" in metadata else None
 
 
 def _iter_mlx_parameter_tree(model: object) -> Iterator[tuple[str, object]]:

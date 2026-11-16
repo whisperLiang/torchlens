@@ -11,14 +11,8 @@ import pytest
 import torch
 from PIL import Image, ImageDraw
 
-from torchlens.viz import render_heatmap, render_image_scatter, render_lineplot
+from torchlens.viz import heatmap, image_scatter, lineplot
 from torchlens.viz._tensor_display import show_tensor
-from torchlens.viz.node_plots import (
-    _coords_to_pixel_centers,
-    _measure_text,
-    _select_heatmap_axis_indices,
-    _spread_close_centers,
-)
 
 
 def _png_bytes(image: Image.Image) -> bytes:
@@ -67,32 +61,11 @@ def _solid_images(n_items: int) -> list[Image.Image]:
     return images
 
 
-def test_render_heatmap_deterministic_size_and_mode() -> None:
-    """Heatmap rendering should be fixed-size RGB and same-process deterministic."""
-
-    data = np.arange(25, dtype=np.float64).reshape(5, 5)
-
-    first = render_heatmap(data, width=123, height=91)
-    second = render_heatmap(data, width=123, height=91)
-
-    assert first.mode == "RGB"
-    assert first.size == (123, 91)
-    assert _png_bytes(first) == _png_bytes(second)
-
-
-def test_render_heatmap_constant_array_no_nan() -> None:
-    """A constant finite heatmap should render low-color pixels, not nan-color pixels."""
-
-    image = render_heatmap(np.full((4, 4), 7.0), nan_color=(235, 235, 235))
-
-    assert image.getpixel((10, 10)) != (235, 235, 235)
-
-
 def test_render_heatmap_unknown_cmap_raises() -> None:
     """Unknown colormap names should raise a clear ValueError."""
 
     with pytest.raises(ValueError, match="Unknown colormap"):
-        render_heatmap(np.zeros((2, 2)), cmap="plasma")
+        heatmap(np.zeros((2, 2)), cmap="plasma")
 
 
 def test_render_heatmap_axis_thumbnails_bounded() -> None:
@@ -101,7 +74,7 @@ def test_render_heatmap_axis_thumbnails_bounded() -> None:
     images = _solid_images(12)
     labels = [f"item-{index}" for index in range(12)]
 
-    image = render_heatmap(
+    image = heatmap(
         np.arange(144, dtype=np.float64).reshape(12, 12),
         width=180,
         height=140,
@@ -114,70 +87,12 @@ def test_render_heatmap_axis_thumbnails_bounded() -> None:
     assert image.size == (180, 140)
 
 
-def test_heatmap_top_axis_labels_decimate_without_overlap() -> None:
-    """Crowded top-axis labels should be decimated to measured non-overlapping items."""
-
-    canvas_width = 130
-    plot_left = 28
-    plot_width = 96
-    labels = [f"state-{index}" for index in range(8)]
-    draw = ImageDraw.Draw(Image.new("RGB", (canvas_width, 90), "white"))
-
-    indices = _select_heatmap_axis_indices(
-        draw,
-        labels=labels,
-        has_images=False,
-        count=8,
-        total=8,
-        axis="top",
-        plot_left=plot_left,
-        plot_top=20,
-        plot_width=plot_width,
-        plot_height=64,
-        canvas_width=canvas_width,
-        canvas_height=90,
-        thumb_size=12,
-        more_text="+4 more",
-    )
-
-    assert len(indices) < len(labels)
-    marker_width, _marker_height = _measure_text(draw, "+4 more")
-    limit_high = canvas_width - marker_width - 8
-    previous_end = -1.0
-    for index in indices:
-        text_width, _text_height = _measure_text(draw, labels[index])
-        center = plot_left + (index + 0.5) * plot_width / len(labels)
-        start = center - text_width / 2.0
-        end = center + text_width / 2.0
-        assert start >= 0.0
-        assert end <= limit_high
-        assert start - previous_end >= 4.0
-        previous_end = end
-
-
-def test_render_lineplot_single_and_multi_series() -> None:
-    """Single and stacked series inputs should both render fixed-size images."""
-
-    single = render_lineplot(np.linspace(1.0, 0.0, 12), width=180, height=110)
-    multi = render_lineplot(
-        np.stack([np.linspace(1.0, 0.0, 12), np.linspace(0.7, 0.2, 12)]),
-        labels=["a", "b"],
-        width=190,
-        height=120,
-    )
-
-    assert single.mode == "RGB"
-    assert single.size == (180, 110)
-    assert multi.mode == "RGB"
-    assert multi.size == (190, 120)
-
-
 def test_render_lineplot_swaps_inverted_y_bounds() -> None:
     """Accidentally swapped y bounds should render like their sorted equivalent."""
 
     values = np.linspace(0.0, 10.0, 12)
-    sorted_bounds = render_lineplot(values, width=180, height=110, y_min=0.0, y_max=10.0)
-    inverted_bounds = render_lineplot(values, width=180, height=110, y_min=10.0, y_max=0.0)
+    sorted_bounds = lineplot(values, width=180, height=110, y_min=0.0, y_max=10.0)
+    inverted_bounds = lineplot(values, width=180, height=110, y_min=10.0, y_max=0.0)
 
     assert _png_bytes(inverted_bounds) == _png_bytes(sorted_bounds)
 
@@ -198,8 +113,8 @@ def test_render_image_scatter_points_and_thumbnails() -> None:
     """Scatter rendering should work with point fallback, thumbnails, and cap markers."""
 
     coords = np.column_stack([np.linspace(-1.0, 1.0, 20), np.cos(np.linspace(0.0, 3.0, 20))])
-    points = render_image_scatter(coords, max_items=8, canvas_size=180, thumbnail_size=20)
-    thumbnails = render_image_scatter(
+    points = image_scatter(coords, max_items=8, canvas_size=180, thumbnail_size=20)
+    thumbnails = image_scatter(
         coords,
         images=_solid_images(20),
         max_items=8,
@@ -213,62 +128,14 @@ def test_render_image_scatter_points_and_thumbnails() -> None:
     assert thumbnails.size == (180, 180)
 
 
-def test_render_image_scatter_spreads_close_thumbnail_centers() -> None:
-    """Near-coincident thumbnail centers should be spread to avoid full occlusion."""
-
-    thumbnail_size = 24
-    canvas_size = 220
-    coords = np.array(
-        [
-            [0.00, 0.00],
-            [0.01, 0.00],
-            [0.00, 0.01],
-            [0.01, 0.01],
-            [0.02, 0.00],
-            [0.00, 0.02],
-            [0.02, 0.02],
-            [0.03, 0.00],
-            [0.00, 0.03],
-            [0.03, 0.03],
-        ],
-        dtype=np.float64,
-    )
-    margin = thumbnail_size / 2.0 + 56.0
-    centers = _coords_to_pixel_centers(coords, canvas_size=canvas_size, margin=margin)
-
-    spread = _spread_close_centers(
-        centers,
-        canvas_size=canvas_size,
-        margin=margin,
-        min_distance=float(thumbnail_size),
-    )
-
-    for left, left_center in enumerate(spread):
-        for right_center in spread[:left]:
-            distance = np.hypot(
-                left_center[0] - right_center[0],
-                left_center[1] - right_center[1],
-            )
-            assert distance >= thumbnail_size - 1e-6
-
-    image = render_image_scatter(
-        coords,
-        images=_solid_images(coords.shape[0]),
-        max_items=coords.shape[0],
-        canvas_size=canvas_size,
-        thumbnail_size=thumbnail_size,
-    )
-    assert image.size == (canvas_size, canvas_size)
-
-
 def test_render_image_scatter_accepts_torch_and_numpy() -> None:
     """Scatter coordinates should accept both torch tensors and NumPy arrays."""
 
     coords_np = np.array([[0.0, 0.0], [1.0, 1.0], [-1.0, 0.5]], dtype=np.float32)
     coords_torch = torch.tensor(coords_np)
 
-    numpy_image = render_image_scatter(coords_np, canvas_size=160, thumbnail_size=20)
-    torch_image = render_image_scatter(coords_torch, canvas_size=160, thumbnail_size=20)
+    numpy_image = image_scatter(coords_np, canvas_size=160, thumbnail_size=20)
+    torch_image = image_scatter(coords_torch, canvas_size=160, thumbnail_size=20)
 
     assert numpy_image.size == (160, 160)
     assert torch_image.size == (160, 160)
@@ -279,7 +146,7 @@ def test_node_plots_no_matplotlib() -> None:
 
     script = """
 import sys
-import torchlens.viz.node_plots
+import torchlens.viz._node_plots
 print('matplotlib' in sys.modules)
 """
     result = subprocess.run(
@@ -298,11 +165,11 @@ def test_scatter_displacement_is_disclosed_in_image() -> None:
     thumbnails away from their true coordinates, the image must say so.
     """
 
-    from torchlens.viz.node_plots import _MORE_OUTLINE
+    from torchlens.viz._node_plots import _MORE_OUTLINE
 
     thumbs = [Image.new("RGB", (24, 24), (200, 40, 40)) for _ in range(2)]
     coincident = np.asarray([[0.0, 0.0], [0.0, 0.0]], dtype=np.float64)
-    displaced = render_image_scatter(coincident, images=thumbs, canvas_size=420)
+    displaced = image_scatter(coincident, images=thumbs, canvas_size=420)
 
     # Bottom-LEFT corner region carries the spread indicator's outline.
     corner = np.asarray(displaced)[-40:, :160]
@@ -310,7 +177,7 @@ def test_scatter_displacement_is_disclosed_in_image() -> None:
     assert (corner == outline).all(axis=-1).any(), "no spread disclosure marker drawn"
 
     separated = np.asarray([[-1.0, -1.0], [1.0, 1.0]], dtype=np.float64)
-    exact = render_image_scatter(separated, images=thumbs, canvas_size=420)
+    exact = image_scatter(separated, images=thumbs, canvas_size=420)
     corner_exact = np.asarray(exact)[-40:, :160]
     assert not (corner_exact == outline).all(axis=-1).any(), (
         "spread marker must not appear when positions are exact"

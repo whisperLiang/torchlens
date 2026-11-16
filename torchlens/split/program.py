@@ -22,7 +22,14 @@ ReplaySegment = Literal["prefix", "suffix"]
 
 @dataclass(frozen=True)
 class CapabilityStatus:
-    """One split capability gate result."""
+    """One split capability gate result.
+
+    Examples
+    --------
+    >>> status = tl.split.CapabilityStatus(supported=False, reason='unsupported operation')
+    >>> status.supported, status.reason
+    (False, 'unsupported operation')
+    """
 
     supported: bool
     reason: str | None = None
@@ -44,6 +51,12 @@ class CapabilityEvidence:
     ``None`` means unexamined or unknown, never success. Device evidence checks
     requested device availability only, not free memory or kernel coverage.
     Numerical evidence applies exclusively to the named ``evidence_scope``.
+
+    Examples
+    --------
+    >>> evidence = tl.split.CapabilityEvidence(backend_supported=True)
+    >>> evidence.backend_supported, evidence.numerically_verified is None
+    (True, True)
     """
 
     backend_supported: bool | None
@@ -56,7 +69,17 @@ class CapabilityEvidence:
 
 @dataclass(frozen=True)
 class ReplayOp:
-    """Backend-neutral replay instruction for one trace node."""
+    """Backend-neutral replay instruction for one trace node.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> partition = graph.compute_dag().to_partition(())
+    >>> analysis = graph.analyze(partition)
+    >>> operation = analysis.suffix_program.ops[-1]
+    >>> operation.backend, bool(operation.node_id)
+    ('torch', True)
+    """
 
     node_id: str
     label: str
@@ -80,7 +103,16 @@ class ReplayOp:
 
 @dataclass(frozen=True)
 class ReplayProgram:
-    """Lowered replay program for one split segment."""
+    """Lowered replay program for one split segment.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> partition = graph.compute_dag().to_partition(())
+    >>> analysis = graph.analyze(partition)
+    >>> analysis.suffix_program.segment, bool(analysis.suffix_program.node_ids)
+    ('suffix', True)
+    """
 
     backend: str
     segment: ReplaySegment
@@ -109,7 +141,17 @@ class ReplayProgram:
 
 @dataclass(frozen=True)
 class SplitCapabilityReport:
-    """Prepared split capability and preflight report."""
+    """Prepared split capability and preflight report.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> partition = graph.compute_dag().to_partition(())
+    >>> analysis = graph.analyze(partition)
+    >>> report = analysis.capability_report
+    >>> report.backend, report.preflight_ok
+    ('torch', True)
+    """
 
     backend: str
     split_id: str
@@ -618,10 +660,11 @@ def ensure_capability_report_supported(
             split_point=spec.boundary,
             reason="split preflight rejected",
         ),
+        code=SplitUnsupportedError.code,
     )
 
 
-__all__ = [
+__all__ = (
     "CapabilityEvidence",
     "CapabilityStatus",
     "ReplayOp",
@@ -631,4 +674,4 @@ __all__ = [
     "build_capability_report",
     "ensure_capability_report_supported",
     "lower_replay_program",
-]
+)

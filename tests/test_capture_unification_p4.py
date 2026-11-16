@@ -11,11 +11,10 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens import _state
-from torchlens.backends.torch._tl import get_tensor_label, set_tensor_label
-from torchlens.backends.torch.ops import _get_parent_output_version_snapshot
-from torchlens.utils.arg_handling import copy_arg_tree
-from torchlens.utils.tensor_utils import _clone_tensor_payload, copy_tensor_payload
+from torchlens._utils._tensor_label import get_tensor_label, set_tensor_label
+from torchlens._utils.arg_handling import copy_arg_tree
+from torchlens._utils.tensor_utils import _clone_tensor_payload, copy_tensor_payload
+from torchlens.backends.torch._ops_shared_fields import _get_parent_output_version_snapshot
 
 
 class PartialConvRelu(nn.Module):
@@ -149,13 +148,13 @@ class CustomTensorBox:
 class VersionSnapshotTraceStub:
     """Minimal trace stub for version-snapshot helper tests."""
 
-    save_arg_values = True
+    _options_save_args = True
 
 
 def _conv_ops(log: tl.Trace) -> list[tl.Op]:
     """Return conv ops in execution order."""
 
-    return [op for op in log.layer_list if op.layer_type == "conv2d"]
+    return [op for op in log._layer_list if op.type == "conv2d"]
 
 
 def _saved_conv_ops(log: tl.Trace) -> list[tl.Op]:
@@ -170,10 +169,10 @@ def _retro_trace(model: nn.Module, x: torch.Tensor, successor: object) -> tl.Tra
     return tl.trace(
         model,
         x,
-        save=tl.func("conv2d") & tl.followed_by(successor),  # type: ignore[arg-type]
-        lookback=4,
-        lookback_payload_policy="detached_raw",
-        random_seed=123,
+        save=tl.func("conv2d") & tl.followed_by(successor),
+        capture=tl.options.CaptureOptions(
+            seed=123, lookback=4, lookback_payload_policy="detached_raw"
+        ),
     )
 
 
@@ -199,27 +198,18 @@ def _assert_tensor_payload_matches(source: torch.Tensor, copied: torch.Tensor) -
 def _tensor_zoo() -> list[tuple[str, torch.Tensor]]:
     """Return representative tensors for copy policy coverage."""
 
-    with _state.pause_logging():
-        sparse = torch.sparse_coo_tensor(
-            torch.tensor([[0, 1], [1, 0]]),
-            torch.tensor([1.0, 2.0]),
-            (2, 2),
-            check_invariants=True,
-        )
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="torch.quantize_per_tensor.*",
-                category=UserWarning,
-            )
-            quantized = torch.quantize_per_tensor(torch.tensor([1.0, 2.0]), 0.1, 10, torch.quint8)
-        return [
-            ("dense", torch.randn(2, 3)),
-            ("sparse", sparse),
-            ("meta", torch.empty(2, 3, device="meta")),
-            ("quantized", quantized),
-            ("complex", torch.tensor([1 + 2j, 3 - 4j])),
-        ]
+    sparse = torch.sparse_coo_tensor(
+        torch.tensor([[0, 1], [1, 0]]),
+        torch.tensor([1.0, 2.0]),
+        (2, 2),
+    )
+    return [
+        ("dense", torch.randn(2, 3)),
+        ("sparse", sparse),
+        ("meta", torch.empty(2, 3, device="meta")),
+        ("quantized", torch.quantize_per_tensor(torch.tensor([1.0, 2.0]), 0.1, 10, torch.quint8)),
+        ("complex", torch.tensor([1 + 2j, 3 - 4j])),
+    ]
 
 
 def test_copy_policies_pause_logging_for_internal_tensor_ops() -> None:
@@ -228,12 +218,11 @@ def test_copy_policies_pause_logging_for_internal_tensor_ops() -> None:
     log = tl.trace(
         CopyDuringLoggingModel(),
         torch.ones(2),
-        layers_to_save="all",
-        save_arg_values=True,
-        random_seed=123,
+        capture=tl.options.CaptureOptions(save_args=True, seed=123),
+        save="all",
     )
 
-    layer_types = [op.layer_type for op in log.layer_list]
+    layer_types = [op.type for op in log._layer_list]
     assert layer_types == ["input", "add", "mul", "output"]
 
 
@@ -313,13 +302,12 @@ def test_nested_container_inplace_arg_snapshot_preserves_pre_call_value() -> Non
     log = tl.trace(
         ForeachNestedMutationModel(),
         torch.ones(2),
-        layers_to_save="all",
-        save_arg_values=True,
-        random_seed=123,
+        capture=tl.options.CaptureOptions(save_args=True, seed=123),
+        save="all",
     )
 
     foreach = log["foreachadd_1_2"]
-    assert torch.equal(foreach.saved_args[0][0], torch.full((2,), 2.0))
+    assert torch.equal(foreach.call.saved_args[0][0], torch.full((2,), 2.0))
     assert torch.equal(foreach.out, torch.full((2,), 5.0))
 
 
@@ -368,7 +356,12 @@ def test_followed_by_saves_only_conv_feeding_relu_with_matching_payload() -> Non
 
     model = PartialConvRelu()
     x = torch.randn(1, 1, 4, 4)
-    full = tl.trace(model, x.clone(), layers_to_save="all", random_seed=123)
+    full = tl.trace(
+        model,
+        x.clone(),
+        capture=tl.options.CaptureOptions(seed=123),
+        save="all",
+    )
     log = _retro_trace(model, x.clone(), tl.func("relu"))
     saved = _saved_conv_ops(log)
     assert [op.label for op in saved] == [_conv_ops(log)[0].label]
@@ -403,9 +396,9 @@ def test_followed_by_out_of_window_parent_warns() -> None:
             EvictedParentRelu(),
             torch.randn(1, 1, 4, 4),
             save=tl.func("conv2d") & tl.followed_by(tl.func("relu")),
-            lookback=1,
-            lookback_payload_policy="detached_raw",
-            random_seed=123,
+            capture=tl.options.CaptureOptions(
+                seed=123, lookback=1, lookback_payload_policy="detached_raw"
+            ),
         )
     assert _saved_conv_ops(log) == []
 
@@ -430,9 +423,9 @@ def test_lookback_payload_window_is_bounded_and_evicts_candidates() -> None:
                 CandidateEvictionModel(),
                 torch.randn(1, 1, 4, 4),
                 save=tl.func("conv2d") & tl.followed_by(tl.func("relu")),
-                lookback=1,
-                lookback_payload_policy="detached_raw",
-                random_seed=123,
+                capture=tl.options.CaptureOptions(
+                    seed=123, lookback=1, lookback_payload_policy="detached_raw"
+                ),
             )
     candidates = getattr(log, "_predicate_lookback_candidates")
     assert len(candidates) <= 1

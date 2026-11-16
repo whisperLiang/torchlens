@@ -1,0 +1,468 @@
+"""Destination-overwrite coverage proofs for indexed writes.
+
+Pure facts about whether an index-based write (``__setitem__``, ``index_put``,
+``scatter``) overwrites every element of its destination exactly once, so the
+original destination values cannot reach the output. ``exemptions.py`` combines
+these facts with the perturbed-parent slot checks in its custom exemption checks
+and posthoc overwrite decision; the checks themselves stay there. The pure ``out=``
+destination predicate (registry 2 of ``core._check_perturbation_exemptions``) lives here
+too: a write-only ``out=`` target is the same overwrite-destination contract. So do the
+destination-identity comparison and the parentless uninitialized-allocation fact the
+uninitialized-destination decision reads.
+
+Split from ``validation/_exemptions.py`` along this seam (R43 file-size ratchet);
+the proofs are unchanged.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+import torch
+
+from .._utils._record_group_table import record_member
+
+if TYPE_CHECKING:
+    from .._data_classes.op import Op
+
+
+# Parentless allocation factories whose result is uninitialized memory. They take no
+# tensor input, so they are never validated as children and are absent from the
+# skip-validation registry; as the DESTINATION parent of an in-place write they carry
+# no meaningful value to perturb, exactly like ``empty_like``.
+UNINITIALIZED_ALLOCATION_FACTORIES = frozenset(
+    {"empty", "empty_strided", "emptystrided", "empty_permuted", "emptypermuted"}
+)
+
+
+def is_uninitialized_allocation_factory(op: Any) -> bool:
+    """Return whether ``op`` is a parentless uninitialized-memory allocation.
+
+    Parameters
+    ----------
+    op:
+        Candidate operation record.
+
+    Returns
+    -------
+    bool
+        True when the op is ``torch.empty``/``empty_strided``/``empty_permuted``
+        and recorded no tensor parent, so its saved bytes are allocation garbage.
+    """
+
+    if getattr(op, "func_name", None) not in UNINITIALIZED_ALLOCATION_FACTORIES:
+        return False
+    return not (getattr(op, "parents", ()) or ())
+
+
+def same_saved_values(perturbed_tensor: torch.Tensor, destination: torch.Tensor) -> bool:
+    """Return whether a perturbed parent's saved value IS the write's saved destination.
+
+    ``torch.equal`` treats every NaN as unequal to itself, so a destination born
+    uninitialized (``torch.empty`` garbage often holds NaN bit patterns) never
+    matched its own producer and every overwrite proof failed closed on it. This
+    comparison is still exact: same shape and dtype, every element bit-equal
+    except that NaN matches NaN at the same position.
+
+    Parameters
+    ----------
+    perturbed_tensor:
+        Saved output of the parent selected for perturbation.
+    destination:
+        Saved destination argument (``args[0]``) of the write.
+
+    Returns
+    -------
+    bool
+        True when the two tensors hold the same values, NaN positions included.
+    """
+
+    candidate = perturbed_tensor.to(destination.device)
+    if torch.equal(candidate, destination):
+        return True
+    if candidate.shape != destination.shape or candidate.dtype != destination.dtype:
+        return False
+    if not (destination.is_floating_point() or destination.is_complex()):
+        return False
+    return bool(torch.isclose(candidate, destination, rtol=0.0, atol=0.0, equal_nan=True).all())
+
+
+def _setitem_index_targets_are_unique(index: Any) -> bool:
+    """Return whether a ``__setitem__`` index cannot duplicate write targets.
+
+    Parameters
+    ----------
+    index:
+        Index argument supplied to ``Tensor.__setitem__``.
+
+    Returns
+    -------
+    bool
+        True for basic indexing and for verified unique tensor/list advanced
+        indices. Duplicate advanced indices can make ``selected.numel()`` equal
+        the destination size while leaving some destination elements live.
+    """
+
+    components = index if isinstance(index, tuple) else (index,)
+    integer_components: list[torch.Tensor] = []
+    for component in components:
+        if isinstance(component, (list, np.ndarray)):
+            try:
+                component = torch.as_tensor(component)
+            except (TypeError, ValueError, RuntimeError):
+                return False
+        if isinstance(component, torch.Tensor):
+            if component.dtype == torch.bool:
+                continue
+            if not _tensor_is_integer_index(component):
+                return False
+            integer_components.append(component)
+            continue
+        if component is None or component is Ellipsis or isinstance(component, (slice, int)):
+            continue
+        return False
+    return _advanced_index_tuples_are_unique(integer_components)
+
+
+def _advanced_index_tuples_are_unique(components: list[torch.Tensor]) -> bool:
+    """Return whether integer advanced-index components never repeat a target.
+
+    Advanced-index components broadcast together and address one element per
+    broadcast position, so a target repeats only when the whole TUPLE of
+    component values repeats. ``x[rows, cols] = v`` with every ``(row, col)``
+    pair distinct writes each element once even though ``rows`` and ``cols``
+    each repeat values.
+
+    Parameters
+    ----------
+    components:
+        Integer index tensors from one index expression, in order.
+
+    Returns
+    -------
+    bool
+        True when no broadcast position repeats another's value tuple; False
+        when the components do not broadcast.
+    """
+
+    if not components:
+        return True
+    try:
+        broadcast = torch.broadcast_tensors(*[component.cpu() for component in components])
+    except RuntimeError:
+        return False
+    stacked = torch.stack([component.reshape(-1) for component in broadcast], dim=-1)
+    if stacked.shape[0] == 0:
+        return True
+    return int(stacked.shape[0]) == int(torch.unique(stacked, dim=0).shape[0])
+
+
+def _index_positions_cover_destination_exactly(
+    destination: torch.Tensor,
+    index: Any,
+) -> bool:
+    """Return whether ``destination[index]`` addresses every element exactly once.
+
+    Value-based uniqueness (``torch.unique`` on raw index values) is blind to
+    negative-index aliasing: ``0`` and ``-2`` are distinct VALUES that address
+    the SAME position on a length-2 dim, so a "fully overwritten" proof counted
+    a full overwrite while an element survived with its prior value. Indexing
+    an identity-POSITION tensor with the saved index makes torch's own indexing
+    semantics normalize negatives, slices, ellipsis, and boolean masks exactly;
+    requiring the selected positions to be unique and to number the whole
+    destination is the exact single-coverage proof.
+
+    Parameters
+    ----------
+    destination:
+        Destination tensor of the write.
+    index:
+        Saved index argument (``__setitem__`` index or ``index_put`` indices
+        tuple).
+
+    Returns
+    -------
+    bool
+        True only when the index selects each destination position exactly
+        once and selects all of them. Any indexing failure returns False so
+        callers fail closed.
+    """
+
+    try:
+        positions = torch.arange(destination.numel(), device=destination.device).reshape(
+            destination.shape
+        )
+        covered = positions[index]
+    except (IndexError, TypeError, RuntimeError):
+        return False
+    flattened = covered.reshape(-1)
+    if int(flattened.numel()) != int(destination.numel()):
+        return False
+    return int(torch.unique(flattened).numel()) == int(destination.numel())
+
+
+def _tensor_is_integer_index(tensor: torch.Tensor) -> bool:
+    """Return whether ``tensor`` has an integer dtype accepted for indexing.
+
+    Parameters
+    ----------
+    tensor:
+        Tensor index component.
+
+    Returns
+    -------
+    bool
+        True when the tensor dtype is an integer indexing dtype.
+    """
+
+    return not tensor.dtype.is_floating_point and not tensor.dtype.is_complex
+
+
+def _index_put_destination_is_fully_overwritten(
+    perturbed_tensor: torch.Tensor | None,
+    layer: Op,
+) -> bool:
+    """Return whether an ``index_put`` call overwrites the perturbed destination.
+
+    Parameters
+    ----------
+    perturbed_tensor:
+        Tensor selected for perturbation.
+    layer:
+        Captured ``index_put``/``index_put_`` op.
+
+    Returns
+    -------
+    bool
+        True only when the perturbed tensor is the destination (``args[0]``), the
+        call is non-accumulating, and the indexed positions cover the ENTIRE
+        destination and are exactly written by the broadcast ``values`` (so the
+        destination's prior value is wholly irrelevant). Returns False for any
+        perturbed VALUE/INDEX parent, for the accumulating case, and for a
+        partial overwrite (where un-indexed destination elements still flow
+        through).
+    """
+
+    args = layer.call.saved_args
+    if not isinstance(perturbed_tensor, torch.Tensor):
+        return False
+    if args is None or len(args) < 3:
+        return False
+    destination, indices, values = args[0], args[1], args[2]
+    if not isinstance(destination, torch.Tensor) or not isinstance(values, torch.Tensor):
+        return False
+    # Narrow: the perturbed parent must be the DESTINATION, never the values/index.
+    if not same_saved_values(perturbed_tensor, destination):
+        return False
+    # accumulate=True adds the value to the prior destination, so the prior value
+    # is NOT irrelevant -- never exempt that case. accumulate may arrive as a
+    # positional arg (index 3) or as a keyword.
+    accumulate = False
+    if len(args) > 3:
+        accumulate = bool(args[3])
+    elif "accumulate" in (layer.call.saved_kwargs or {}):
+        accumulate = bool(layer.call.saved_kwargs["accumulate"])
+    if accumulate:
+        return False
+    # index_put indices are an advanced-indexing tuple/list of LongTensors.
+    if isinstance(indices, list):
+        index = tuple(indices)
+    elif isinstance(indices, tuple):
+        index = indices
+    else:
+        index = (indices,)
+    try:
+        selected = destination[index]
+    except (IndexError, TypeError, RuntimeError):
+        return False
+    # The written slice must broadcast the replacement exactly (every selected
+    # element is overwritten, none left at its prior value).
+    try:
+        broadcast_shape = torch.broadcast_shapes(tuple(selected.shape), tuple(values.shape))
+    except RuntimeError:
+        return False
+    if tuple(broadcast_shape) != tuple(selected.shape):
+        return False
+    # The exemption is only sound when the WHOLE destination is overwritten: any
+    # un-indexed element keeps its prior value and so still influences the output
+    # (the partial-overwrite false-exemption guard). Require the indexed region to
+    # cover every destination element, with no duplicate indices inflating the
+    # count -- duplicates would match the numel without covering everything.
+    if not _index_put_indices_are_unique(index):
+        return False
+    if int(selected.numel()) != int(destination.numel()):
+        return False
+    return _index_positions_cover_destination_exactly(destination, index)
+
+
+def _index_put_indices_are_unique(index: tuple[Any, ...]) -> bool:
+    """Return whether advanced ``index_put`` indices address distinct positions.
+
+    Duplicate indices would let ``selected.numel()`` reach ``destination.numel()``
+    without actually covering every destination element, so the full-overwrite
+    coverage check would be fooled. This conservatively requires each integer
+    index tensor to hold unique values; a non-integer (e.g. boolean mask) or any
+    structure it cannot verify returns False so the exemption is withheld.
+    """
+
+    for component in index:
+        if not isinstance(component, torch.Tensor):
+            return False
+        if component.dtype == torch.bool:
+            # A bool mask selects each True position once -> inherently unique.
+            continue
+        flattened = component.reshape(-1)
+        if int(flattened.numel()) != int(torch.unique(flattened).numel()):
+            return False
+    return True
+
+
+#: Overwriting scatters, the only ops the full-overwrite proof below holds for.
+#: Accumulating writes (scatter_add, index_add) add once per index entry, so a
+#: duplicate index changes the output even when every slot is covered.
+_OVERWRITE_SCATTER_FUNC_NAMES = frozenset({"scatter", "scatter_"})
+
+
+def _get_scatter_destination_dim_index(
+    layer: Op,
+) -> tuple[torch.Tensor, int, torch.Tensor] | None:
+    """Return scatter destination, dim, and index tensors when they are replayable.
+
+    Parameters
+    ----------
+    layer:
+        Scatter operation being validated.
+
+    Returns
+    -------
+    tuple[torch.Tensor, int, torch.Tensor] | None
+        Destination tensor, scatter dimension, and index tensor, or ``None``
+        when the op is not an overwriting scatter (matched by name, never by
+        argument layout alone), the call shape is unsupported, or it uses
+        reduce semantics.
+    """
+
+    if getattr(layer, "func_name", None) not in _OVERWRITE_SCATTER_FUNC_NAMES:
+        return None
+    args = layer.call.saved_args
+    kwargs = layer.call.saved_kwargs
+    if len(args) < 1 or not isinstance(args[0], torch.Tensor):
+        return None
+    if kwargs.get("reduce") is not None or (len(args) > 4 and args[4] is not None):
+        return None
+
+    dest = args[0]
+    dim = kwargs.get("dim", args[1] if len(args) > 1 else None)
+    index = kwargs.get("index", args[2] if len(args) > 2 else None)
+    if not isinstance(dim, int) or not isinstance(index, torch.Tensor):
+        return None
+    if dim < 0:
+        dim = dest.ndim + dim
+    if dim < 0 or dim >= dest.ndim:
+        return None
+    return dest, dim, index
+
+
+def _scatter_index_fully_overwrites_dim(dest: torch.Tensor, dim: int, index: torch.Tensor) -> bool:
+    """Return whether scatter index covers every destination slot along ``dim``.
+
+    Parameters
+    ----------
+    dest:
+        Scatter destination tensor.
+    dim:
+        Normalized scatter dimension.
+    index:
+        Scatter index tensor.
+
+    Returns
+    -------
+    bool
+        True when every slice orthogonal to ``dim`` contains each valid
+        destination index, making the destination's prior values irrelevant.
+    """
+
+    if index.ndim != dest.ndim or index.shape[dim] < dest.shape[dim]:
+        return False
+    if any(index.shape[axis] < dest.shape[axis] for axis in range(dest.ndim) if axis != dim):
+        return False
+    n_positions = dest.shape[dim]
+    if n_positions == 0:
+        return False
+    moved = index.detach().cpu().movedim(dim, -1).reshape(-1, index.shape[dim])
+    required = set(range(n_positions))
+    for row in moved:
+        row_values = {int(value) for value in row.tolist() if 0 <= int(value) < n_positions}
+        if not required.issubset(row_values):
+            return False
+    return True
+
+
+def _perturbed_parents_only_occupy_out_kwarg(layer: Op, layers_to_perturb: list[str]) -> bool:
+    """Return whether every perturbed parent is purely an ``out=`` destination.
+
+    Parameters
+    ----------
+    layer:
+        Operation whose parents are being perturbed.
+    layers_to_perturb:
+        Parent labels selected for perturbation.
+
+    Returns
+    -------
+    bool
+        True when each perturbed parent's only recorded position on ``layer``
+        is the ``out`` keyword argument (a write-only storage target under the
+        torch ``out=`` convention). A parent that also occupies a positional or
+        non-``out`` keyword slot feeds real values and is NOT exempt. TUPLE
+        ``out=`` destinations (``torch.sort(x, out=(values, indices))``) record
+        each member at a nested ``("out", index)`` key; those slots are the
+        same write-only destination contract and are accepted identically.
+    """
+
+    def _is_out_destination_key(key: Any) -> bool:
+        """Return whether an arg-map key addresses the ``out=`` destination."""
+
+        if key == "out":
+            return True
+        return isinstance(key, tuple) and len(key) == 2 and key[0] == "out"
+
+    if not layers_to_perturb:
+        return False
+    positions = record_member(layer, "parent_arg_positions", None) or {}
+    arg_positions = positions.get("args", {}) or {}
+    kwarg_positions = positions.get("kwargs", {}) or {}
+    for perturbed_label in layers_to_perturb:
+        if perturbed_label in arg_positions.values():
+            return False
+        occupied_kwargs = {
+            key for key, label in kwarg_positions.items() if label == perturbed_label
+        }
+        if not occupied_kwargs:
+            return False
+        if not all(_is_out_destination_key(key) for key in occupied_kwargs):
+            return False
+    return True
+
+
+def _replacement_fits_selection(
+    replacement: Any, selected: torch.Tensor, broadcast_replacement: bool
+) -> bool:
+    """Return whether assigning ``replacement`` writes every element of ``selected``.
+
+    A non-tensor replacement fills the selection. A tensor must match the
+    selected shape exactly, or, with ``broadcast_replacement``, broadcast onto it
+    unchanged: ``__setitem__`` broadcasts its value, so a ``[256]`` value written
+    to a ``[1, 256]`` slice still writes all 256 slots.
+    """
+
+    if not isinstance(replacement, torch.Tensor):
+        return True
+    if not broadcast_replacement:
+        return tuple(selected.shape) == tuple(replacement.shape)
+    try:
+        broadcast = torch.broadcast_shapes(tuple(replacement.shape), tuple(selected.shape))
+    except RuntimeError:
+        return False
+    return tuple(broadcast) == tuple(selected.shape)

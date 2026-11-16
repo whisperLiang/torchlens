@@ -55,6 +55,17 @@ def load(name: str, *, cache_dir: str | Path | None = None) -> Any:
     ------
     KeyError
         If ``name`` is unknown.
+
+    Examples
+    --------
+    >>> trace = tl.examples.load("tiny_linear")
+    >>> type(trace).__name__
+    'Trace'
+    >>> try:
+    ...     tl.examples.load("no_such_example")
+    ... except KeyError as error:
+    ...     print(type(error).__name__)
+    KeyError
     """
 
     del cache_dir
@@ -62,7 +73,7 @@ def load(name: str, *, cache_dir: str | Path | None = None) -> Any:
     if normalized not in {"name", "tiny_linear", "linear"}:
         raise KeyError(f"Unknown TorchLens example {name!r}.")
 
-    from torchlens import trace
+    from .._user_public_impls import trace
 
     torch.manual_seed(0)
     model = _TinyLinear()

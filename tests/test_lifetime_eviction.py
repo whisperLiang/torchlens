@@ -24,8 +24,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
-
-pytestmark = pytest.mark.smoke
+from torchlens._errors import RecordBindingError
+from torchlens._utils._record_group_table import record_member
 
 
 class _StackNet(nn.Module):
@@ -49,7 +49,7 @@ def _nested_arg_tensor_refs(trace) -> list[weakref.ref]:
 
     for op in trace.ops.values():
         for field_name in ("saved_args", "input_activations"):
-            _collect(getattr(op, field_name, None))
+            _collect(record_member(op, field_name, None))
     return refs
 
 
@@ -59,7 +59,7 @@ def test_nested_container_payloads_evict_with_last_owner() -> None:
     log = tl.trace(
         _StackNet(),
         torch.randn(2, 3),
-        capture=tl.options.CaptureOptions(save_arg_values=True),
+        capture=tl.options.CaptureOptions(save_args=True),
     )
     refs = _nested_arg_tensor_refs(log)
     assert refs, "expected retained arg containers holding tensors"
@@ -72,7 +72,7 @@ def test_nested_container_payloads_evict_with_last_owner() -> None:
         "through the retained Op facade"
     )
     # Metadata stays readable on the retained facade; evicted slots read None.
-    saved = retained_op.saved_args
+    saved = retained_op.call.saved_args
     assert saved is not None
     assert not any(
         isinstance(item, torch.Tensor)
@@ -88,3 +88,40 @@ def test_cleanup_husks_the_save_budget_accountant() -> None:
     log.cleanup()
     assert "_save_budget_accountant" not in log.__dict__
     assert "_predicate_lookback_candidates" not in log.__dict__
+
+
+class _ConvReluNet(nn.Module):
+    """Small conv net with one relu op to hold past its Trace."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = nn.Conv2d(1, 4, 3)
+        self.head = nn.Linear(64, 2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.head(torch.relu(self.conv(x)).flatten(1))
+
+
+def _relu_op(trace):
+    return next(trace[label] for label in trace.op_labels if trace[label].func_name == "relu")
+
+
+@pytest.mark.parametrize("save", [None, "relu"], ids=["save-all", "save-selected"])
+def test_op_out_after_trace_collection_refuses_typed(save) -> None:
+    """A held Op's ``.out`` never reads a silent ``None`` once its Trace is collected.
+
+    The Op holds its Trace weakly and the last owner's death evicts the saved
+    payload, so the read refuses with the documented ``trace_reference_collected``
+    code instead of returning ``None`` (backend-table defect 9).
+    """
+
+    kwargs = {} if save is None else {"save": tl.func(save)}
+    trace = tl.trace(_ConvReluNet(), torch.randn(1, 1, 6, 6), **kwargs)
+    op = _relu_op(trace)
+    assert isinstance(op.out, torch.Tensor)
+    del trace
+    gc.collect()
+    with pytest.raises(RecordBindingError) as exc_info:
+        _ = op.out
+    assert exc_info.value.fields["code"] == "trace_reference_collected"
+    assert op.func_name == "relu"  # metadata stays readable

@@ -2,19 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
+from .._ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
+from .._ir.distribution_container import DISTRIBUTION_CONTAINER_KIND
 
 if TYPE_CHECKING:
-    from ..data_classes.trace import Trace
-    from .invariants import (
-        MetadataInvariantError,
-        _param_address_index,
-        _param_log_list_contains_param,
-        _resolve_trace_label,
-        _strip_pass_suffix,
-    )
+    from .._data_classes.trace import Trace
 
 __all__ = (
     "_check_module_call_boundary_and_tree",
@@ -26,6 +20,7 @@ __all__ = (
     "_check_param_usage_reciprocal_links",
     "_check_param_co_parent_links",
     "_check_layers_with_params_matches_param_usage",
+    "_deduped_layers_with_params",
     "_check_layer_param_aggregate_dedup",
 )
 
@@ -53,8 +48,8 @@ def _check_module_call_boundary_and_tree(
         output structure references are inconsistent.
     """
 
-    call_label = getattr(module_call, "call_label", None)
-    address = getattr(module_call, "address", None)
+    call_label = getattr(module_call, "label", None)
+    address = record_member(module_call, "address", None)
     call_index = getattr(module_call, "call_index", None)
     expected_call_label = f"{address}:{call_index}"
     if call_label != expected_call_label:
@@ -92,6 +87,16 @@ def _check_module_call_boundary_and_tree(
     _check_module_call_output_structure_paths(ml, module_call, name)
 
 
+def _is_root_call(module_call: Any, call_label: str) -> bool:
+    """True for the root's own calls (``self:N``), which no module_call_stack lists.
+
+    A plain root is never pushed on the stack; a bound-method root's owner calls
+    are dropped from every op's stack at postprocess (``_drop_root_call_frames``).
+    """
+
+    return str(record_member(module_call, "address", call_label.rsplit(":", 1)[0])) == "self"
+
+
 def _check_module_call_tree_links(ml: Trace, module_call: object, name: str) -> None:
     """Check ModuleCall parent/child links and stack prefixes.
 
@@ -111,7 +116,7 @@ def _check_module_call_tree_links(ml: Trace, module_call: object, name: str) -> 
         inconsistent child stack prefix.
     """
 
-    call_label = getattr(module_call, "call_label", "")
+    call_label = getattr(module_call, "label", "")
     call_accessor = getattr(ml, "module_calls", {})
     call_parent = getattr(module_call, "call_parent", None)
     if call_parent is not None:
@@ -142,10 +147,10 @@ def _check_module_call_tree_links(ml: Trace, module_call: object, name: str) -> 
                 f"ModuleCall '{call_label}' child {child_label!r} has call_parent="
                 f"{getattr(child_call, 'call_parent', None)!r}",
             )
-        expected_prefix = list(getattr(module_call, "module_call_stack", ()) or ())
-        if call_label != "self:1":
+        expected_prefix = list(record_member(module_call, "module_call_stack", ()) or ())
+        if not _is_root_call(module_call, call_label):
             expected_prefix.append(call_label)
-        child_stack = list(getattr(child_call, "module_call_stack", ()) or ())
+        child_stack = list(record_member(child_call, "module_call_stack", ()) or ())
         if child_stack[: len(expected_prefix)] != expected_prefix:
             raise MetadataInvariantError(
                 name,
@@ -208,7 +213,7 @@ def _check_module_call_output_structure_paths(
     if mismatched_paths:
         raise MetadataInvariantError(
             name,
-            f"ModuleCall '{getattr(module_call, 'call_label', '')}' output_structure "
+            f"ModuleCall '{getattr(module_call, 'label', '')}' output_structure "
             f"paths disagree with retained output paths {mismatched_paths!r}",
         )
 
@@ -270,7 +275,7 @@ def _container_tensor_components(spec: object) -> tuple[object, ...]:
         return tuple(DictKey(key) for key in getattr(spec, "keys", ()) or ())
     if kind == "hf_model_output":
         return tuple(HFKey(key) for key in getattr(spec, "keys", ()) or ())
-    if kind == "namedtuple":
+    if kind in {"namedtuple", DISTRIBUTION_CONTAINER_KIND}:
         return tuple(NamedField(field) for field in getattr(spec, "fields", ()) or ())
     if kind == "dataclass":
         return tuple(DataclassField(field) for field in getattr(spec, "fields", ()) or ())
@@ -283,7 +288,7 @@ def _check_param_xrefs(ml: Trace) -> None:
     Precondition contract: this torch-native check asserts deep reciprocal
     references only for parameters that are actually used by at least one
     operation in the captured graph. Unused or skipped-module parameters may
-    legitimately have no usage lists. ``Param.num_uses_by_ops`` is the
+    legitimately have no usage lists. ``len(Param.used_by_ops)`` is the
     pass-qualified usage source of truth for reciprocal usage checks; the
     stored ``num_calls`` field is compatibility metadata and is not used as the
     invariant oracle. Layer-level aggregate checks deduplicate by no-pass
@@ -296,7 +301,7 @@ def _check_param_xrefs(ml: Trace) -> None:
     - Used Param usage lists reciprocate through Op/Layer ``_param_logs``.
     - ``layers_with_params`` layer membership matches Param.used_by_layers.
     - Co-parent params are symmetric and resolve.
-    - uses_params == True implies _param_logs is non-empty.
+    - has_params == True implies _param_logs is non-empty.
     - layers_with_params values are valid layer labels.
     """
     name = "param_xrefs"
@@ -308,7 +313,7 @@ def _check_param_xrefs(ml: Trace) -> None:
     # and those pay nothing.
     param_address_index: dict[object, object] | None = None
 
-    for param in ml.param_logs:
+    for param in ml._param_logs:
         for lbl in param.used_by_ops:
             if lbl not in op_label_set:
                 raise MetadataInvariantError(
@@ -344,7 +349,7 @@ def _check_param_xrefs(ml: Trace) -> None:
                 f"{param.all_addresses!r}",
             )
 
-        if param.num_uses_by_ops == 0 and not param.used_by_layers:
+        if len(param.used_by_ops) == 0 and not param.used_by_layers:
             continue
         _check_param_usage_reciprocal_links(ml, param, name)
         # Guarding on a non-empty co-parent list is behavior-neutral: with no
@@ -354,13 +359,13 @@ def _check_param_xrefs(ml: Trace) -> None:
                 param_address_index = _param_address_index(ml)
             _check_param_co_parent_links(param_address_index, param, name)
 
-    # uses_params forward check
-    for lpl in ml.layer_list:
-        if lpl.uses_params:
+    # has_params forward check
+    for lpl in ml._layer_list:
+        if lpl.has_params:
             if not lpl._param_logs:
                 raise MetadataInvariantError(
                     name,
-                    f"Layer '{lpl.layer_label}' has uses_params=True but _param_logs is empty",
+                    f"Layer '{lpl.layer_label}' has has_params=True but _param_logs is empty",
                 )
 
     # layers_with_params labels exist
@@ -394,18 +399,18 @@ def _check_param_usage_reciprocal_links(ml: Trace, param: object, name: str) -> 
         If a used operation or layer does not point back to ``param``.
     """
 
-    address = getattr(param, "address", "<unknown>")
+    address = record_member(param, "address", "<unknown>")
     for op_label in getattr(param, "used_by_ops", ()):
         op = ml[op_label]
-        if not _param_log_list_contains_param(getattr(op, "_param_logs", ()), param):
+        if not _param_log_list_contains_param(op._param_logs, param):
             raise MetadataInvariantError(
                 name,
                 f"Param '{address}' used_by_ops contains '{op_label}' but that Op does "
                 "not list the Param in _param_logs",
             )
     for layer_label in getattr(param, "used_by_layers", ()):
-        layer = ml.layer_logs[layer_label]
-        if not _param_log_list_contains_param(getattr(layer, "_param_logs", ()), param):
+        layer = ml._layer_logs[layer_label]
+        if not _param_log_list_contains_param(layer._param_logs, param):
             raise MetadataInvariantError(
                 name,
                 f"Param '{address}' used_by_layers contains '{layer_label}' but that "
@@ -433,7 +438,7 @@ def _check_param_co_parent_links(
         If a co-parent address is unresolved or not reciprocal.
     """
 
-    address = getattr(param, "address", "<unknown>")
+    address = record_member(param, "address", "<unknown>")
     for co_parent_address in getattr(param, "co_parent_params", ()) or ():
         co_parent = param_address_index.get(co_parent_address)
         if co_parent is None:
@@ -466,16 +471,18 @@ def _check_layers_with_params_matches_param_usage(ml: Trace, name: str) -> None:
     """
 
     expected_layer_union: set[str] = set()
-    for param in ml.param_logs:
-        if getattr(param, "num_uses_by_ops", 0) == 0 and not getattr(param, "used_by_layers", ()):
+    for param in ml._param_logs:
+        if len(getattr(param, "used_by_ops", ()) or ()) == 0 and not getattr(
+            param, "used_by_layers", ()
+        ):
             continue
         expected_layer_union.update(getattr(param, "used_by_layers", ()) or ())
     actual_layer_union: set[str] = set()
     for group_key, layer_labels in getattr(ml, "layers_with_params", {}).items():
         for layer_label in layer_labels:
             actual_layer_union.add(layer_label)
-            layer = ml.layer_logs[layer_label]
-            if not getattr(layer, "_param_logs", ()):
+            layer = ml._layer_logs[layer_label]
+            if not layer._param_logs:
                 raise MetadataInvariantError(
                     name,
                     f"layers_with_params[{group_key!r}] contains '{layer_label}' but the "
@@ -487,6 +494,26 @@ def _check_layers_with_params_matches_param_usage(ml: Trace, name: str) -> None:
             f"layers_with_params layer union {actual_layer_union!r} does not match "
             f"Param.used_by_layers union {expected_layer_union!r}",
         )
+
+
+def _deduped_layers_with_params(ml: Trace) -> int:
+    """Count distinct layer labels whose Layer carries any _param_logs.
+
+    Parameters
+    ----------
+    ml:
+        Trace containing layer metadata.
+    """
+
+    seen_layer_labels: set[str] = set()
+    layers_with_params = 0
+    for layer in ml._layer_list:
+        if layer.layer_label in seen_layer_labels:
+            continue
+        seen_layer_labels.add(layer.layer_label)
+        if layer._param_logs:
+            layers_with_params += 1
+    return layers_with_params
 
 
 def _check_layer_param_aggregate_dedup(ml: Trace, name: str) -> None:
@@ -505,42 +532,70 @@ def _check_layer_param_aggregate_dedup(ml: Trace, name: str) -> None:
         If deduplicated layer parameter aggregates drift from trace totals.
     """
 
-    seen_layer_labels: set[str] = set()
-    total_params = 0
-    trainable_params = 0
-    frozen_params = 0
-    layers_with_params = 0
-    for layer in ml.layer_list:
-        if layer.layer_label in seen_layer_labels:
-            continue
-        seen_layer_labels.add(layer.layer_label)
-        if not getattr(layer, "_param_logs", ()):
-            continue
-        layers_with_params += 1
-        total_params += getattr(layer, "num_params", 0)
-        trainable_params += getattr(layer, "num_params_trainable", 0)
-        frozen_params += getattr(layer, "num_params_frozen", 0)
+    # A07 numbers truth: trace parameter totals follow PARAMETER OBJECT
+    # IDENTITY (param_logs, object-deduplicated at the pre-forward scan) --
+    # never a per-layer sum, which double-counts a parameter consumed by more
+    # than one layer (tied embeddings, weight-reused layers) and drops
+    # declared-but-never-executed parameters. The tripwire recomputes the
+    # identity sums independently from param_logs.
+    layers_with_params = _deduped_layers_with_params(ml)
+
+    param_logs = list(ml._param_logs or [])
+    total_params = sum(int(pl.num_params) for pl in param_logs)
+    trainable_params = sum(int(pl.num_params) for pl in param_logs if pl.is_trainable)
+    frozen_params = sum(int(pl.num_params) for pl in param_logs if not pl.is_trainable)
+
+    # Cross-path tripwire: the DISTINCT parameter identities consumed by
+    # layers must sum to no more than the declared identity inventory (layers
+    # can never consume a parameter the inventory does not declare).
+    consumed_by_identity: dict[int, int] = {}
+    for layer in ml._layer_list:
+        for pl in layer._param_logs or ():
+            consumed_by_identity[id(pl)] = int(pl.num_params)
+    consumed_total = sum(consumed_by_identity.values())
+    if consumed_total > total_params:
+        raise MetadataInvariantError(
+            name,
+            f"layer-consumed distinct-identity param total {consumed_total} exceeds "
+            f"the declared identity inventory {total_params}",
+        )
 
     if total_params != getattr(ml, "num_params", 0):
         raise MetadataInvariantError(
             name,
-            f"deduped layer param total {total_params} != trace.num_params={ml.num_params}",
+            f"identity param total {total_params} != trace.num_params={ml.num_params}",
         )
     if trainable_params != getattr(ml, "num_params_trainable", 0):
         raise MetadataInvariantError(
             name,
-            "deduped trainable param total "
+            "identity trainable param total "
             f"{trainable_params} != trace.num_params_trainable={ml.num_params_trainable}",
         )
     if frozen_params != getattr(ml, "num_params_frozen", 0):
         raise MetadataInvariantError(
             name,
-            f"deduped frozen param total {frozen_params} != "
+            f"identity frozen param total {frozen_params} != "
             f"trace.num_params_frozen={ml.num_params_frozen}",
         )
-    if layers_with_params != getattr(ml, "num_layers_with_params", 0):
+    if layers_with_params != ml._num_layers_with_params:
         raise MetadataInvariantError(
             name,
             f"deduped layers_with_params count {layers_with_params} != "
-            f"trace.num_layers_with_params={ml.num_layers_with_params}",
+            f"trace.num_layers_with_params={ml._num_layers_with_params}",
         )
+
+
+# Late imports: the split modules of this package import one another (cycles), so each
+# imports its siblings once every definition above exists.
+from .._utils._record_group_table import record_member  # noqa: E402
+from ._invariants import (  # noqa: E402
+    MetadataInvariantError,
+)
+from ._invariants_buffers import (  # noqa: E402
+    _param_address_index,
+    _param_log_list_contains_param,
+    _resolve_trace_label,
+)
+from ._invariants_conditional_base import (  # noqa: E402
+    _strip_pass_suffix,
+)

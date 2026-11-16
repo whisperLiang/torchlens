@@ -1,6 +1,6 @@
 """Rescue re-run: recover escaped ops with a TorchFunctionMode net.
 
-Stage-2 safety net (tri-lab verdict, 2026-08-12). The primary capture is
+Stage-2 safety net (design-review verdict, 2026-08-12). The primary capture is
 ALWAYS mode-free: an armed ``TorchFunctionMode`` flips torch's fused fast
 paths (eval MultiheadAttention 3 ops -> 27 ops, output no longer
 byte-identical), so arming during a normal capture would change what
@@ -40,13 +40,15 @@ import torch
 from torch.overrides import TorchFunctionMode
 
 from ... import _state
-from ..._errors import OutputAttributionError, TorchLensCaptureGapWarning
+from ..._errors import CaptureGapWarning, OutputAttributionError
+from ..._utils._deferred_warnings import defer_warning_category, flush_deferred_warnings
+from ..._utils.display import user_stacklevel
+from ..._utils.rng import log_current_rng_states, set_rng_from_saved_states
 from ...errors._base import TorchLensWarning
-from ...utils.display import user_stacklevel
-from ...utils.rng import log_current_rng_states, set_rng_from_saved_states
+from ._state_bytes import _state_bytes_equal
 
 if TYPE_CHECKING:
-    from ...data_classes.trace import Trace
+    from ..._data_classes.trace import Trace
 
 __all__ = [
     "CaptureAttemptFailedWarning",
@@ -60,12 +62,27 @@ class CaptureAttemptFailedWarning(RuntimeWarning, TorchLensWarning):
 
     A dedicated category (still a ``RuntimeWarning``, so user filters keep
     matching; also a ``TorchLensWarning`` so the documented root category
-    covers it -- R64-1) lets the rescue driver DEFER the advisory while a rescue re-run
-    is still possible: the warning tells the user diagnostics ride the
-    exception (``exc.partial_log``), which is only truthful when that
+    covers it) lets the rescue driver DEFER the advisory while a rescue
+    re-run is still possible: the warning tells the user diagnostics ride the
+    exception (``exc.partial_trace``), which is only truthful when that
     exception actually propagates. A successful rescue swallows the failure,
     so the deferred advisory is dropped; every path that re-raises flushes it
     first.
+
+    Examples
+    --------
+    >>> import warnings
+    >>> class Boom(nn.Module):
+    ...     def forward(self, t):
+    ...         raise RuntimeError("mid-forward failure")
+    >>> with warnings.catch_warnings(record=True) as caught:
+    ...     warnings.simplefilter("always")
+    ...     try:
+    ...         _ = tl.trace(Boom(), x)
+    ...     except tl.errors.TraceCaptureError:
+    ...         pass
+    >>> any(w.category is CaptureAttemptFailedWarning for w in caught)
+    True
     """
 
 
@@ -181,28 +198,14 @@ def _defer_capture_failed_warnings(
 ) -> Iterator[None]:
     """Hold back capture-attempt-failed advisories; forward everything else.
 
-    The advisory points the user at ``exc.partial_log`` — truthful only when
+    The advisory points the user at ``exc.partial_trace`` — truthful only when
     the exception propagates. While a rescue re-run may still swallow the
     failure, the advisory is parked in ``deferred``; the driver flushes it on
     every re-raising path and drops it when the rescue succeeds.
     """
 
-    forward = warnings.showwarning
-
-    def hold(message: Any, category: Any, *args: Any, **kwargs: Any) -> None:
-        """Park capture-failed advisories in ``deferred``; forward the rest."""
-
-        if isinstance(category, type) and issubclass(category, CaptureAttemptFailedWarning):
-            deferred.append((message, category, args, kwargs))
-            return
-        forward(message, category, *args, **kwargs)
-
-    warnings.showwarning = hold
-    try:
+    with defer_warning_category(CaptureAttemptFailedWarning, deferred):
         yield
-    finally:
-        if warnings.showwarning is hold:
-            warnings.showwarning = forward
 
 
 def _flush_deferred_warnings(
@@ -210,9 +213,7 @@ def _flush_deferred_warnings(
 ) -> None:
     """Re-emit parked advisories through the current warning handler."""
 
-    for message, category, args, kwargs in deferred:
-        warnings.showwarning(message, category, *args, **kwargs)
-    deferred.clear()
+    flush_deferred_warnings(deferred)
 
 
 def _escape_signal(trace: Trace) -> str | None:
@@ -224,7 +225,7 @@ def _escape_signal(trace: Trace) -> str | None:
     no-provenance source), the flag is a false alarm and no rescue runs.
     """
 
-    if getattr(trace, "capture_verified", None) is True:
+    if trace._provenance_verified is True:
         return None
     if getattr(trace, "escape_diagnostics", None):
         return "escape_detector_diagnostic"
@@ -233,13 +234,83 @@ def _escape_signal(trace: Trace) -> str | None:
     return None
 
 
+#: Tensor operator dunders that ``TorchFunctionMode`` presence RESPELLS.
+#:
+#: These dunders are C-level aliases of a named ``TensorBase`` method, so with
+#: a mode active (the rescue re-run) torch dispatches them as that method and
+#: the rescued trace logs it, while the mode-free primary logs the dunder:
+#: ``1 + x`` is ``__radd__`` in the primary and ``add`` in the rescue. Keys are
+#: the primary spelling; values are the spelling torch hands a mode (probed on
+#: torch 2.13; ``tests/test_rescue_dunder_respelling.py`` re-derives every row
+#: from torch itself). Python-level dunders (``__rsub__``, ``__rpow__``,
+#: ``__rmatmul__``, ``__rfloordiv__``, ``__rlshift__``, ``__iand__``, ...)
+#: reach the mode under their own name and need no row. In-place rows map to
+#: the in-place method (``__iadd__`` -> ``add_``), never to the out-of-place op,
+#: and ``_canonical_op_name`` keeps that trailing underscore, so a rescue that
+#: logs ``z += 1`` as out-of-place ``add`` reads as losing ``add_``.
+#: Non-commutative reflected dunders keep their own op: ``__rsub__`` is not
+#: ``sub``. ``capture/arg_positions._COMMUTATIVE_REFLECTED_DUNDERS`` cannot be
+#: reused: it labels ``__rand__`` as ``and``, but the mode spelling is
+#: ``bitwise_and``. ``__long__`` and ``__nonzero__`` are Python 2 aliases that
+#: torch binds to ``__int__`` and ``__bool__``.
+_MODE_RESPELLED_DUNDERS = {
+    "__radd__": "add",
+    "__rmul__": "mul",
+    "__truediv__": "div",
+    "__div__": "div",
+    "__rtruediv__": "__rdiv__",
+    "__mod__": "remainder",
+    "__pos__": "positive",
+    "__rand__": "bitwise_and",
+    "__ror__": "bitwise_or",
+    "__rxor__": "bitwise_xor",
+    "__iadd__": "add_",
+    "__isub__": "sub_",
+    "__imul__": "mul_",
+    "__itruediv__": "div_",
+    "__idiv__": "div_",
+    "__ifloordiv__": "floor_divide_",
+    "__imod__": "remainder_",
+    "__ipow__": "pow_",
+    "__long__": "__int__",
+    "__nonzero__": "__bool__",
+}
+
+
+def _canonical_op_name(name: str) -> str:
+    """Return the mode-independent spelling of a logged op func name.
+
+    Parameters
+    ----------
+    name:
+        A logged ``func_name`` from either the primary or the rescued trace.
+
+    Returns
+    -------
+    str
+        The name with any ``TorchFunctionMode`` respelling undone (see
+        ``_MODE_RESPELLED_DUNDERS``), the dunder wrapper dropped and leading
+        underscores stripped. A trailing underscore survives, so the in-place
+        ``add_`` (and ``__iadd__``) never merges with the out-of-place
+        ``add``. Idempotent on the mode spellings, so both sides land on one
+        name whether or not the running torch respells a given dunder.
+    """
+
+    spelled = _MODE_RESPELLED_DUNDERS.get(name, name)
+    if len(spelled) > 4 and spelled.startswith("__") and spelled.endswith("__"):
+        spelled = spelled[2:-2]
+    return spelled.lstrip("_")
+
+
 def _op_name_counts(trace: Trace) -> Counter[str]:
     """Multiset of canonicalized op func names for recovery comparison.
 
     Mode presence respells tensor dunders through the override protocol
-    (``__add__`` -> ``add``, the pinned stage-0 delta), so spellings are
-    canonicalized by stripping underscores before diffing — otherwise every
-    operator-using model would read as a false "recovery".
+    (``__add__`` -> ``add``, the pinned stage-0 delta; ``__radd__`` -> ``add``,
+    ``__truediv__`` -> ``div``), so spellings are canonicalized through
+    ``_canonical_op_name`` before diffing — otherwise every operator-using
+    model would read as a false "recovery", and every reflected or in-place
+    operator as a false "loss" that refused a correct rescue.
 
     Bookkeeping SOURCE nodes (``func_name == "none"``: minted
     ``internalsource`` adoptions, other functionless placeholders) are
@@ -247,12 +318,12 @@ def _op_name_counts(trace: Trace) -> Counter[str]:
     rescue replaces the primary's minted orphan-source with the real op, so
     counting them made the rescued trace read one ``none`` short —
     ``lost_ops=('none',)`` — and the two-sided oracle refused the recovery
-    (the R16-1 false negative).
+    (the false negative).
     """
 
     return Counter(
-        name.strip("_")
-        for op in getattr(trace, "ops", ())
+        _canonical_op_name(name)
+        for op in trace._layer_list
         if (name := getattr(op, "func_name", None)) and name != "none"
     )
 
@@ -298,17 +369,16 @@ def _buffer_write_labels(trace: Trace) -> tuple[str, ...]:
     registered buffer) still mutates twice on rescued captures -- the
     documented residual (see docs/migration/scoped_detached_patching.md).
 
-    The refusal keys on an ACTUAL write, not on journal presence: fused norm
-    mutators (``batch_norm``, ``instance_norm``, ``native_group_norm``) are
-    journaled unconditionally, so every EVAL-mode BN/IN/GN capture carries
-    ``buffer_write_kind`` records whose ``buffer_value_changed`` is ``False``
-    (bytes provably unchanged; re-running is state-neutral). Only a record
-    whose value changed -- or whose change status is unknown (fail closed) --
-    refuses the re-run.
+    The refusal keys on an ACTUAL write, not on journal presence: a fused norm
+    mutator (``batch_norm``, ``instance_norm``) whose update flag is on is
+    journaled on its declaration, so a capture may carry ``buffer_write_kind``
+    records whose ``buffer_value_changed`` is ``False`` (bytes provably
+    unchanged; re-running is state-neutral). Only a record whose value changed
+    -- or whose change status is unknown (fail closed) -- refuses the re-run.
     """
 
     labels: list[str] = []
-    for op in getattr(trace, "ops", ()) or ():
+    for op in trace._layer_list or ():  # buffer rows included
         if getattr(op, "buffer_write_kind", None) is None:
             continue
         if getattr(op, "buffer_value_changed", None) is False:
@@ -340,11 +410,11 @@ def _partial_buffer_write_labels(exc: BaseException) -> tuple[str, ...] | None:
     stamped = getattr(exc, "_torchlens_actual_buffer_writes", None)
     if stamped is not None:
         return tuple(str(address) for address in stamped)
-    partial = getattr(exc, "partial_log", None)
+    partial = getattr(exc, "partial_trace", None)
     trace = getattr(partial, "trace", None)
     if trace is None:
         return None
-    if getattr(trace, "capture_mode", None) != "exhaustive":
+    if trace._options_mode != "exhaustive":
         # The buffer-write tracker only arms exhaustive sessions; an empty
         # journal on any other mode proves nothing.
         return None
@@ -367,7 +437,7 @@ def _snapshot_declared_state(model: Any) -> dict[str, Any] | None:
     BY the escaped op itself (an escaped call leaves no journal record), so
     journal emptiness is not proof of state-neutrality. The transient
     O(model-state) copy is confined to the rare escape path — the plain
-    capture path pays nothing (the W6 arming contract).
+    capture path pays nothing (the arming contract).
 
     Returns
     -------
@@ -389,32 +459,6 @@ def _snapshot_declared_state(model: Any) -> dict[str, Any] | None:
             if buffer is not None:
                 snapshot[f"buffer:{name}"] = buffer.detach().clone()
     return snapshot
-
-
-def _state_bytes_equal(current: torch.Tensor, baseline: torch.Tensor) -> bool:
-    """NaN-safe bitwise equality over two same-shape/dtype state tensors.
-
-    This audit detects WRITES, so the compare must be byte-exact (a tolerant
-    compare would hide a genuine small state write) and NaN-safe (IEEE
-    ``torch.equal`` returns False for NaN==NaN, so a model legitimately
-    holding a NaN parameter/buffer was falsely accused of a double-applied
-    write and lost the rescue path). Element-extent uint8 reinterpret over
-    resolved contiguous copies; exotic layouts fall back to the historical
-    ``torch.equal`` verdict.
-    """
-
-    # detach-ok: read-only byte comparison of state snapshots; never a
-    # training-path payload, nothing retains the detached views.
-    try:
-        current_bytes = (
-            current.detach().resolve_conj().resolve_neg().contiguous().reshape(-1)
-        ).view(torch.uint8)
-        baseline_bytes = (
-            baseline.detach().resolve_conj().resolve_neg().contiguous().reshape(-1)
-        ).view(torch.uint8)
-        return bool(torch.equal(current_bytes, baseline_bytes))
-    except (RuntimeError, TypeError, NotImplementedError):
-        return bool(torch.equal(current, baseline))
 
 
 def _restore_changed_state(model: Any, snapshot: dict[str, Any]) -> tuple[str, ...]:
@@ -446,7 +490,15 @@ def _restore_changed_state(model: Any, snapshot: dict[str, Any]) -> tuple[str, .
                 changed.append(key)
                 continue
             try:
-                # NaN-aware oracle (r8 R16): ``torch.equal`` answers False for
+                # On a storage-less substrate the byte comparison is not an
+                # observation: reading an exception as "changed" would claim the
+                # forward wrote parameters it never touched, discard every valid
+                # meta rescue, and keep the degraded primary
+                # (substrate-asymmetric). Weights-free the verdict is
+                # UNKNOWN: no state-change claim, no restore copy.
+                if current.is_meta or baseline.is_meta:
+                    continue
+                # NaN-aware oracle: ``torch.equal`` answers False for
                 # bitwise-identical NaNs, so a state slot legitimately holding
                 # NaN (a running stat poisoned upstream, a sentinel buffer)
                 # read as "changed by the rescue" every run -- a false
@@ -468,9 +520,9 @@ def _restore_changed_state(model: Any, snapshot: dict[str, Any]) -> tuple[str, .
 
 # Verification reasons carrying MORE-SPECIFIC diagnostic content than the
 # generic rescue stamps: a recovered rescue must not demote any of these to
-# ``mode_rescue_rerun`` (b6-fable/b3-fable: only dynamo was protected, so an
-# armed detector/witness verdict on the rescued run -- or a teardown failure
-# -- was clobbered into the generic reason).
+# ``mode_rescue_rerun`` (otherwise an armed detector/witness verdict on the
+# rescued run -- or a teardown failure -- would be clobbered into the generic
+# reason).
 _SPECIFIC_VERIFICATION_REASONS = frozenset(
     {
         "dynamo_region_not_logged",
@@ -502,13 +554,13 @@ def _warn_rescue_success(trigger: str) -> None:
     warnings.warn(
         "TorchLens re-ran the forward pass once to recover ops hidden by a "
         f"stale pre-wrap torch reference (trigger: {trigger}). The returned "
-        "trace is the rescue capture (capture_verified=False, reason "
-        "'mode_rescue_rerun', details on trace.rescue_rerun) and the model's "
+        "trace is the rescue capture (trace.provenance.verified=False, reason "
+        "'mode_rescue_rerun', details on trace._rescue_rerun) and the model's "
         "forward executed TWICE -- undeclared Python side effects inside "
         "forward() double-applied. Remedy: fix the stale torch reference "
         "(bind/import torch functions after TorchLens has wrapped torch) to "
         "avoid the second forward.",
-        TorchLensCaptureGapWarning,
+        CaptureGapWarning,
         stacklevel=user_stacklevel(),
     )
 
@@ -525,19 +577,19 @@ def _mark(trace: Trace, reason: str, info: dict[str, Any]) -> None:
     all; ``mode_rescue_rerun`` replaces only a generic or absent reason.
     """
 
-    trace.capture_verified = False
-    existing_reason = getattr(trace, "capture_verification_reason", None)
+    trace._provenance_verified = False
+    existing_reason = trace._provenance_verification_reason
     if getattr(trace, "_raw_dynamo_region_detected", False) or (
         existing_reason in _SPECIFIC_VERIFICATION_REASONS
     ):
-        # R16-3 generalized: a specific verdict (dynamo top precedence, an
+        # A specific verdict (dynamo top precedence, an
         # armed detector/witness report, the thread tripwire) outranks both
         # generic rescue stamps. The rescue attempt stays disclosed through
         # ``rescue_rerun`` below.
         pass
     elif reason == "mode_rescue_rerun" or not existing_reason:
-        trace.capture_verification_reason = reason
-    trace.rescue_rerun = info
+        trace._provenance_verification_reason = reason
+    trace._rescue_rerun = info
 
 
 def capture_with_rescue(
@@ -577,7 +629,7 @@ def capture_with_rescue(
     if _rescue_is_active():
         return run_capture()
     if not eligible:
-        # R16-1: ineligibility skips the RE-RUN, never the DISCLOSURE. This
+        # ineligibility skips the RE-RUN, never the DISCLOSURE. This
         # path formerly returned the primary with clean-capture fields
         # (verified=None / reason=None) even when an escape signal fired --
         # bit-indistinguishable from a genuinely clean capture across all
@@ -598,8 +650,8 @@ def capture_with_rescue(
                 # honesty category like the sibling escape-detection
                 # disclosures, never bare UserWarning -- users filtering or
                 # promoting torchlens advisories via TorchLensWarning must
-                # see it (R66 / grind-r5 b8 fixwave-4 drift instance).
-                TorchLensCaptureGapWarning,
+                # see it.
+                CaptureGapWarning,
                 stacklevel=user_stacklevel(),
             )
             _mark(
@@ -638,7 +690,7 @@ def capture_with_rescue(
 
     if primary_error is not None:
         trigger = "output_attribution_failed"
-        # R16-2 applies to EVERY trigger: an attribution-failed rescue also
+        # This applies to EVERY trigger: an attribution-failed rescue also
         # runs the forward a second time, so a primary that WROTE buffer
         # state (train-mode BatchNorm counters and running stats) refuses the
         # re-run here too — the failed capture's journal is the write record.
@@ -657,10 +709,10 @@ def capture_with_rescue(
                 UserWarning,
                 stacklevel=3,
             )
-            partial_trace = getattr(getattr(primary_error, "partial_log", None), "trace", None)
+            partial_trace = getattr(getattr(primary_error, "partial_trace", None), "trace", None)
             if partial_trace is not None:
                 try:
-                    partial_trace.rescue_rerun = _disclosure(
+                    partial_trace._rescue_rerun = _disclosure(
                         trigger=trigger,
                         recovered=False,
                         primary_error=str(primary_error),
@@ -676,7 +728,7 @@ def capture_with_rescue(
         if signal is None:
             return primary
         trigger = signal
-        # R16-2: a rescue re-run executes the user's forward a SECOND time.
+        # a rescue re-run executes the user's forward a SECOND time.
         # When the primary forward WROTE buffer state (train-mode BatchNorm
         # counters and running stats, in-forward buffer counters), the re-run
         # double-applies those writes (RNG is restored, module state is not),
@@ -708,7 +760,7 @@ def capture_with_rescue(
             )
             return primary
 
-    # R02-1/R02-2: the journal-based refusals above prove nothing about
+    # the journal-based refusals above prove nothing about
     # PARAMETER writes (the write index covers registered buffers only) or
     # about writes performed BY the escaped op (which leaves no journal
     # record). Snapshot the declared state now — post-primary, escape path
@@ -725,9 +777,12 @@ def capture_with_rescue(
         # disabling every later rescue on it.
         _thread_local.rescue_active = True
         set_rng_from_saved_states(rng_snapshot)
-        # The rescue run's own capture-failed advisory is deferred too: its
-        # exception never propagates (the primary's error or trace does), so
-        # an advisory pointing at ITS exc.partial_log would always be untrue.
+        # The re-run starts from the plain-attribute state the first forward
+        # started from (the capture observer's snapshot), never from what the
+        # first forward left; buffers keep the refusal above.
+        _state.rewind_capture_attributes()
+        # The rescue run's own capture-failed advisory is deferred too: its exception
+        # never propagates, so an advisory pointing at ITS exc.partial_trace would be untrue.
         with (
             _suppress_repeated_warnings(emitted_warnings),
             _defer_capture_failed_warnings(rescue_deferred),
@@ -786,10 +841,11 @@ def capture_with_rescue(
             )
             if primary_error is not None:
                 _flush_deferred_warnings(primary_deferred)
-                partial_trace = getattr(getattr(primary_error, "partial_log", None), "trace", None)
+                partial = getattr(primary_error, "partial_trace", None)
+                partial_trace = getattr(partial, "trace", None)
                 if partial_trace is not None:
                     try:
-                        partial_trace.rescue_rerun = _disclosure(
+                        partial_trace._rescue_rerun = _disclosure(
                             trigger=trigger,
                             recovered=False,
                             primary_error=str(primary_error),
@@ -832,7 +888,7 @@ def capture_with_rescue(
         return rescued
 
     assert primary is not None
-    # R16-1: the recovery oracle is TWO-SIDED. ``Counter.__sub__`` alone drops
+    # the recovery oracle is TWO-SIDED. ``Counter.__sub__`` alone drops
     # losses, so mode-induced de-fusion (eval MHA: 3 fused ops -> 27 small
     # ops) read as pure gains and a benign false alarm silently swapped the
     # user's canonical fused trace for a structurally different

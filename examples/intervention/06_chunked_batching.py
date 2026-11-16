@@ -3,7 +3,7 @@
 What this demonstrates
 ----------------------
 Capture one small batch, then append another compatible batch with
-``rerun(..., append=True)``. Append requires the same graph shape and
+``trace.append(batch, model=model)``. Append requires the same graph shape and
 batch-independent helpers.
 
 How to run
@@ -45,16 +45,21 @@ def main() -> None:
     first = torch.randn(2, 8)
     second = torch.randn(3, 8)
 
-    log = tl.trace(model, first, intervention_ready=True)
-    log.attach_hooks(tl.func("relu"), tl.scale(1.0), confirm_mutation=True)
-    log.rerun(model, first)
-    log.rerun(model, second, append=True)
+    log = tl.trace(model, first)
+    log.do(
+        tl.func("relu"),
+        tl.scale(1.0),
+        model=model,
+        inputs=first,
+        intervention=tl.options.InterventionOptions(),
+    )
+    log.append(second, model=model)
 
-    output = log.layer_list[-1].out
+    output = log.output_ops[-1].out
     assert output.shape[0] == first.shape[0] + second.shape[0]
     assert log.state_history[-1]["op"] == "append"
     assert log.last_run["engine"] == "append"
-    assert log.is_appended is True
+    assert log.provenance.is_appended is True
 
 
 if __name__ == "__main__":

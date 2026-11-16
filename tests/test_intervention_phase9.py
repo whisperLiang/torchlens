@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 import torch
 from example_models import TinyReluAdd as _ReluModel
 from torch import nn
 
 import torchlens as tl
-from torchlens._trace_state import TraceState
 from torchlens.intervention.errors import (
     BaselineUndeterminedError,
-    BundleRelationshipError,
+    BundleComparisonError,
 )
-from torchlens.intervention.types import Relationship
+from torchlens.types import Relationship
+
+pytestmark = pytest.mark.usefixtures("root_edits_in_place")  # D.12: no per-call mutation keyword
+#: Stage a sticky hook on the trace without propagating it.
+_STAGE = tl.options.InterventionOptions(engine="set_only")
 
 
 class _TanhModel(nn.Module):
@@ -54,7 +59,7 @@ def _log(model: nn.Module | None = None, x: torch.Tensor | None = None) -> tl.Tr
 
     model = model or _ReluModel()
     x = x if x is not None else torch.randn(2, 3)
-    return tl.trace(model, x, intervention_ready=True)
+    return tl.trace(model, x, capture=tl.options.CaptureOptions(replayable=True))
 
 
 def test_bundle_construction_shapes_and_member_indexing() -> None:
@@ -62,28 +67,28 @@ def test_bundle_construction_shapes_and_member_indexing() -> None:
 
     log_a = _log()
     log_b = _log()
-    log_a.trace_label = "auto_a"
-    log_b.trace_label = "auto_b"
+    log_a.name = "auto_a"
+    log_b.name = "auto_b"
 
-    from_dict = tl.bundle({"a": log_a, "b": log_b})
+    from_dict = tl.Bundle({"a": log_a, "b": log_b})
     assert len(from_dict) == 2
     assert from_dict["a"] is log_a
     assert list(from_dict.names) == ["a", "b"]
     assert repr(from_dict) == (
-        "Bundle(n_members=2, names=['a', 'b'], baseline='None', structurally_consistent=True)"
+        "Bundle(n_members=2, names=['a', 'b'], baseline=None, structurally_consistent=True)"
     )
 
-    from_names = tl.bundle([log_a, log_b], names=["a", "b"])
+    from_names = tl.Bundle([log_a, log_b], names=["a", "b"])
     assert from_names["b"] is log_b
 
-    from_tuples = tl.bundle([("a", log_a), ("b", log_b)])
+    from_tuples = tl.Bundle([("a", log_a), ("b", log_b)])
     assert from_tuples["a"] is log_a
 
-    from_auto = tl.bundle([log_a, log_b])
+    from_auto = tl.Bundle([log_a, log_b])
     assert list(from_auto.names) == ["auto_a", "auto_b"]
 
     with pytest.raises(ValueError, match="unique"):
-        tl.bundle([("dup", log_a), ("dup", log_b)])
+        tl.Bundle([("dup", log_a), ("dup", log_b)])
 
 
 def test_bundle_getitem_returns_modellog_and_nodeview_accessor() -> None:
@@ -91,66 +96,81 @@ def test_bundle_getitem_returns_modellog_and_nodeview_accessor() -> None:
 
     log_a = _log()
     log_b = _log()
-    bundle = tl.bundle({"a": log_a, "b": log_b})
+    bundle = tl.Bundle({"a": log_a, "b": log_b})
 
     assert isinstance(bundle["a"], type(log_a))
     assert bundle._supergraph is None
 
-    node = bundle.node(tl.func("relu"))
+    node = bundle.at(tl.func("relu"))
     assert set(node.members) == {"a", "b"}
-    assert set(node.traces) == {"a", "b"}
-    assert node.absent_traces == set()
+    assert set(node.names) == {"a", "b"}
+    assert node.absent_names == set()
     assert node.label
     assert bundle._supergraph is not None
 
 
-def test_metric_and_joint_metric_contracts() -> None:
-    """metric is per-member and joint_metric receives the bundle."""
+def test_map_passes_the_member_name_only_where_fn_takes_it() -> None:
+    """A defaulted second parameter keeps its default; ``name`` arrives by keyword or slot."""
 
-    bundle = tl.bundle({"a": _log(), "b": _log()})
+    bundle = tl.Bundle({"a": _log(), "b": _log()})
+    sizes = {key: len(bundle[key]._layer_list) for key in ("a", "b")}
 
-    assert bundle.apply(lambda member: len(member.layer_list)) == {
-        "a": len(bundle["a"].layer_list),
-        "b": len(bundle["b"].layer_list),
+    # The README's one-argument function with a keyword default after it.
+    assert bundle.map(lambda t, k=3: len(t._layer_list) * k) == {
+        key: size * 3 for key, size in sizes.items()
     }
-    assert bundle.joint_metric(lambda b: b.names) == ["a", "b"]
+    # The documented two-argument form, any spelling of the second parameter.
+    assert bundle.map(lambda log, name: name) == {"a": "a", "b": "b"}
+    assert bundle.map(lambda log, member_name: member_name) == {"a": "a", "b": "b"}
+    # A parameter called ``name`` receives it by keyword, wherever it sits.
+    assert bundle.map(lambda log, name=None: name) == {"a": "a", "b": "b"}
+    assert bundle.map(lambda log, k=3, name=None: (k, name)) == {"a": (3, "a"), "b": (3, "b")}
+
+    def keyword_only(log: Any, *, name: str) -> str:
+        return name
+
+    assert bundle.map(keyword_only) == {"a": "a", "b": "b"}
+    # ``*args`` keeps the historical positional (member, name) call.
+    assert bundle.map(lambda *args: args[1]) == {"a": "a", "b": "b"}
+    # Builtins (no inspectable signature) get the member only.
+    assert bundle.map(type) == {"a": type(bundle["a"]), "b": type(bundle["b"])}
 
 
-def test_set_capacity_preserves_baseline() -> None:
+def test_capacity_eviction_preserves_baseline() -> None:
     """Capacity eviction never removes the configured baseline."""
 
     clean = _log()
     a = _log()
     b = _log()
-    bundle = tl.bundle({"clean": clean, "a": a, "b": b}, baseline="clean")
+    bundle = tl.Bundle({"clean": clean, "a": a, "b": b}, baseline="clean")
 
-    bundle.set_capacity(2)
+    bundle.capacity = 2
 
     assert "clean" in bundle
     assert len(bundle) == 2
 
 
-def test_relationship_matrix_gates_node_operations() -> None:
+def test_relationship_matrix_gates_at_operations() -> None:
     """Insufficient relationships fail lazily at operation time."""
 
     good = _log(_ReluModel())
     different = _log(_TanhModel())
     for member in (good, different):
-        member.model_object_id = None
-        member.model_class_qualname = None
-        member.param_hash_quick = None
-        member.param_hash_full = None
-        member.graph_shape_hash = None
-        member.input_signature_hash = None
-    bundle = tl.bundle({"good": good, "different": different})
+        member._provenance_model_object_id = None
+        member._source_class_qualname = None
+        member._provenance_param_hash_quick = None
+        member._provenance_param_hash_full = None
+        member._provenance_fingerprint = None
+        member._provenance_input_signature_hash = None
+    bundle = tl.Bundle({"good": good, "different": different})
 
-    assert bundle.relationship("good", "different") is Relationship.UNKNOWN
-    with pytest.raises(BundleRelationshipError, match="node"):
-        bundle.node(tl.func("relu"))
+    assert bundle.comparability("good", "different") is Relationship.UNKNOWN
+    with pytest.raises(BundleComparisonError, match="'at'"):
+        bundle.at(tl.func("relu"))
 
-    assert bundle.apply(lambda member: member.trace_label) == {
-        "good": good.trace_label,
-        "different": different.trace_label,
+    assert bundle.map(lambda member: member.name) == {
+        "good": good.name,
+        "different": different.name,
     }
 
 
@@ -160,14 +180,14 @@ def test_relationship_derivation_shared_graph_same_input() -> None:
     x = torch.randn(2, 3)
     left = _log(_ReluModel(), x)
     right = _log(_ReluModel(), x)
-    bundle = tl.bundle({"left": left, "right": right})
+    bundle = tl.Bundle({"left": left, "right": right})
 
-    assert bundle.relationship("left", "right") in {
+    assert bundle.comparability("left", "right") in {
         Relationship.SAME_OBJECT,
         Relationship.SAME_MODEL_OBJECT_AT_CAPTURE,
         Relationship.SHARED_GRAPH_SAME_INPUT,
     }
-    matrix = bundle.compare_at(tl.func("relu"))
+    matrix = bundle.at(tl.func("relu")).compare()
     assert matrix.shape == (2, 2)
 
 
@@ -176,40 +196,21 @@ def test_baseline_auto_detect_and_ambiguity() -> None:
 
     clean = _log()
     dirty = _log()
-    dirty._spec_revision = 1
-    dirty.state = TraceState.SPEC_STALE
+    dirty._attach_hooks(tl.func("relu"), tl.zero_ablate())
 
-    bundle = tl.bundle({"clean": clean, "dirty": dirty})
+    bundle = tl.Bundle({"clean": clean, "dirty": dirty})
     assert bundle.baseline_name == "clean"
 
-    ambiguous = tl.bundle({"a": _log(), "b": _log()})
+    ambiguous = tl.Bundle({"a": _log(), "b": _log()})
     with pytest.raises(BaselineUndeterminedError):
-        ambiguous.most_changed()
+        ambiguous.rank_changes()
 
 
-def test_cluster_deferred_and_tracebundle_not_top_level() -> None:
-    """cluster is explicitly deferred and TraceBundle is not publicly exported."""
+def test_cluster_removed_and_tracebundle_not_top_level() -> None:
+    """Bundle has no cluster placeholder and TraceBundle is not publicly exported."""
 
-    bundle = tl.bundle({"a": _log(), "b": _log()})
+    bundle = tl.Bundle({"a": _log(), "b": _log()})
 
-    with pytest.raises(NotImplementedError, match="v1"):
-        bundle.cluster()
+    assert not hasattr(bundle, "cluster")
     with pytest.raises(AttributeError):
         getattr(tl, "TraceBundle")
-
-
-def test_bundle_help_lists_readiness() -> None:
-    """help includes per-member run-state and baseline status."""
-
-    clean = _log()
-    dirty = _log()
-    dirty._spec_revision = 1
-    dirty.state = TraceState.SPEC_STALE
-    bundle = tl.bundle({"clean": clean, "dirty": dirty}, baseline="clean")
-
-    text = bundle.help()
-
-    assert "Bundle (2 members):" in text
-    assert "clean: baseline" in text
-    assert "dirty:" in text
-    assert "SPEC_STALE" in text

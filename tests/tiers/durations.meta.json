@@ -1,0 +1,15 @@
+{
+  "carried_files": 1937,
+  "files": 1938,
+  "inputs": [
+    "final-public-module-path-durations.xml"
+  ],
+  "instrumented": false,
+  "measured_on": "2026-11-16",
+  "note": "Integration working tree: remeasure all 89 public-module-path cases after retaining 27 Split import paths; other 1937 rows carried from the prior full-suite measurement.",
+  "pruned_missing_files": 0,
+  "regenerate": "python scripts/tier_durations.py regenerate --source-commit SHA --junit <pytest --junitxml output> [--workers N] [--instrumented]",
+  "source_commit": "e5cb1e17100ab4b3e3052545f29ef345355e610e",
+  "tests": 23674,
+  "workers": 4
+}

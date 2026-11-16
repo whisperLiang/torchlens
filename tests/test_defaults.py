@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -9,8 +10,11 @@ import torch
 from torch import nn
 
 import torchlens as tl
-import torchlens.user_funcs as user_funcs
-from torchlens.options import VisualizationOptions
+import torchlens._capture.prepare.door as door
+import torchlens._capture.run_entry as run_entry
+import torchlens._user_funcs as user_funcs
+from torchlens import _visualization
+from torchlens._quantities import Bytes
 
 
 class _DummyLog:
@@ -19,14 +23,23 @@ class _DummyLog:
     def __init__(self) -> None:
         """Initialize a capture object with the attributes the wrappers expect."""
         self.cleanup_calls = 0
-        self.layer_logs: dict[str, Any] = {}
-        self.num_saved_ops = 0
+        self._layer_logs: dict[str, Any] = {}
+        self._layer_list: list[Any] = []
+        self._num_saved_ops = 0
+        self.saved_ops: list[Any] = []
         self.render_calls: list[dict[str, Any]] = []
         self.summary_calls: list[dict[str, Any]] = []
         self.summary_result = "summary output"
-        self.total_activation_memory = "0 B"
+        self._cost_total_activation_memory = "0 B"
+        # Read by the door epilogue's once-per-session saved-activation memory guard.
+        self._cost_saved_activation_memory = Bytes(0)
+        self._provenance_verified: Any = None
         self.validate_calls: list[dict[str, Any]] = []
-        self.verbose = False
+        self._options_verbose = False
+        self._options_structure_only = False
+        # Save options a real ``Trace`` records from its capture call.
+        self._options_output_device = "same"
+        self.save_budget: Any = "auto"
 
     def cleanup(self) -> None:
         """Record cleanup requests from wrapper helpers."""
@@ -126,7 +139,7 @@ def stubbed_runner(
     captured_calls: list[dict[str, Any]] = []
     dummy_logs: list[_DummyLog] = []
 
-    def _fake_runner(**kwargs: Any) -> _DummyLog:
+    def _fake_runner(*args: Any, **kwargs: Any) -> _DummyLog:
         """Capture runner kwargs and return a fresh dummy log.
 
         Parameters
@@ -140,12 +153,24 @@ def stubbed_runner(
             Stand-in log instance for the wrapper under test.
         """
 
+        del args
         captured_calls.append(kwargs)
         dummy_log = _DummyLog()
+        dummy_log._options_output_device = kwargs.get("output_device", "same")
+        dummy_log.save_budget = kwargs.get("save_budget", "auto")
         dummy_logs.append(dummy_log)
         return dummy_log
 
+    def _fake_run_capture(request: Any) -> Any:
+        """Stand in for the RUN stage: record the request's run keywords."""
+
+        plan = run_entry._with_plan_defaults(request).plan
+        trace = _fake_runner(request.model, request.input_args, request.input_kwargs, **plan)
+        return SimpleNamespace(trace=trace)
+
+    monkeypatch.setattr(run_entry, "_run_model_and_save_specified_outs", _fake_runner)
     monkeypatch.setattr(user_funcs, "_run_model_and_save_specified_outs", _fake_runner)
+    monkeypatch.setattr(door, "run_capture", _fake_run_capture)
     return captured_calls, dummy_logs
 
 
@@ -156,7 +181,7 @@ def test_trace_defaults_are_stable(
 
     captured_calls, dummy_logs = stubbed_runner
 
-    result = tl.trace(_TinyModel(), _tiny_input(), layers_to_save=None)
+    result = tl.trace(_TinyModel(), _tiny_input(), save=None)
 
     assert result is dummy_logs[-1]
     assert captured_calls[-1]["layers_to_save"] is None
@@ -164,39 +189,16 @@ def test_trace_defaults_are_stable(
     assert captured_calls[-1]["activation_transform"] is None
     assert captured_calls[-1]["mark_layer_depths"] is True
     assert captured_calls[-1]["detach_saved_activations"] is False
-    assert captured_calls[-1]["save_arg_values"] is False
+    assert captured_calls[-1]["save_args"] is False
     assert captured_calls[-1]["save_grads"] is False
     assert captured_calls[-1]["num_context_lines"] == 7
-    assert captured_calls[-1]["save_code_context"] is False
-    assert captured_calls[-1]["save_rng_states"] is False
+    assert captured_calls[-1]["save_source_context"] is False
+    assert captured_calls[-1]["save_rng"] is False
     assert captured_calls[-1]["recurrence_detection"] is True
     assert captured_calls[-1]["save_outs_to"] is None
     assert captured_calls[-1]["keep_outs_in_memory"] is True
     assert captured_calls[-1]["out_sink"] is None
     assert captured_calls[-1]["verbose"] is False
-    assert dummy_logs[-1].render_calls == []
-
-
-def test_trace_accepts_explicit_opt_in_overrides(
-    stubbed_runner: tuple[list[dict[str, Any]], list[_DummyLog]],
-) -> None:
-    """Callers should still be able to opt into capture-only non-default behaviors."""
-
-    captured_calls, dummy_logs = stubbed_runner
-
-    result = tl.trace(
-        _TinyModel(),
-        _tiny_input(),
-        layers_to_save=None,
-        compute_input_output_distances=True,
-        save_code_context=True,
-        recurrence_detection=False,
-    )
-
-    assert result is dummy_logs[-1]
-    assert captured_calls[-1]["mark_layer_depths"] is True
-    assert captured_calls[-1]["save_code_context"] is True
-    assert captured_calls[-1]["recurrence_detection"] is False
     assert dummy_logs[-1].render_calls == []
 
 
@@ -207,8 +209,7 @@ def test_show_model_graph_defaults_are_stable(
 
     captured_calls, dummy_logs = stubbed_runner
 
-    with pytest.warns(DeprecationWarning, match="show_model_graph"):
-        tl.show_model_graph(_TinyModel(), _tiny_input())
+    _visualization.show_model_graph(_TinyModel(), _tiny_input())
 
     assert captured_calls[-1]["layers_to_save"] is None
     assert captured_calls[-1]["mark_layer_depths"] is False
@@ -216,69 +217,8 @@ def test_show_model_graph_defaults_are_stable(
     assert captured_calls[-1]["save_grads"] is False
     assert captured_calls[-1]["recurrence_detection"] is True
     assert captured_calls[-1]["verbose"] is False
-    assert dummy_logs[-1].render_calls[-1]["vis_mode"] == "unrolled"
+    assert dummy_logs[-1].render_calls[-1]["rolled"] is False
     assert dummy_logs[-1].cleanup_calls == 1
-
-
-def test_show_model_graph_accepts_explicit_opt_in_overrides(
-    stubbed_runner: tuple[list[dict[str, Any]], list[_DummyLog]],
-) -> None:
-    """``show_model_graph`` should still honor explicit non-default choices."""
-
-    captured_calls, dummy_logs = stubbed_runner
-
-    with pytest.warns(DeprecationWarning, match="show_model_graph"):
-        tl.show_model_graph(
-            _TinyModel(),
-            _tiny_input(),
-            recurrence_detection=False,
-            visualization=VisualizationOptions(mode="rolled"),
-        )
-
-    assert captured_calls[-1]["recurrence_detection"] is False
-    assert dummy_logs[-1].render_calls[-1]["vis_mode"] == "rolled"
-    assert dummy_logs[-1].cleanup_calls == 1
-
-
-def test_log_model_metadata_forces_metadata_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``log_model_metadata`` should keep its metadata-only wrapper behavior."""
-
-    saved_kwargs: dict[str, Any] = {}
-    dummy_log = _DummyLog()
-
-    def _fake_trace(*args: Any, **kwargs: Any) -> _DummyLog:
-        """Capture wrapper kwargs and return a dummy log.
-
-        Parameters
-        ----------
-        *args:
-            Positional arguments passed through the wrapper.
-        **kwargs:
-            Keyword arguments passed through the wrapper.
-
-        Returns
-        -------
-        _DummyLog
-            Stand-in log instance for the wrapper under test.
-        """
-
-        del args
-        saved_kwargs.update(kwargs)
-        return dummy_log
-
-    monkeypatch.setattr(user_funcs, "trace", _fake_trace)
-
-    result = tl.log_model_metadata(_TinyModel(), _tiny_input())
-
-    assert result is dummy_log
-    # The metadata wrapper migrated from the deprecated flat kwargs to the
-    # canonical nested capture spelling (grind b4 R48-3 fix); assert the same
-    # metadata-only contract through the nested options object.
-    capture_options = saved_kwargs["capture"]
-    assert capture_options.layers_to_save is None
-    assert capture_options.compute_input_output_distances is True
-    assert "layers_to_save" not in saved_kwargs
-    assert "compute_input_output_distances" not in saved_kwargs
 
 
 def test_summary_uses_metadata_only_defaults(
@@ -293,35 +233,5 @@ def test_summary_uses_metadata_only_defaults(
     assert result == "summary output"
     assert captured_calls[-1]["layers_to_save"] is None
     assert captured_calls[-1]["recurrence_detection"] is True
-    assert dummy_logs[-1].summary_calls[-1] == {"depth": 2}
+    assert dummy_logs[-1].summary_calls[-1]["depth"] == 2
     assert dummy_logs[-1].cleanup_calls == 1
-
-
-def test_validate_forward_pass_uses_validation_overrides(
-    stubbed_runner: tuple[list[dict[str, Any]], list[_DummyLog]],
-) -> None:
-    """``validate_forward_pass`` should keep its replay-specific overrides."""
-
-    captured_calls, dummy_logs = stubbed_runner
-
-    with pytest.warns(DeprecationWarning, match="validate_forward_pass"):
-        result = tl.validate_forward_pass(
-            _TinyModel(),
-            _tiny_input(),
-            random_seed=123,
-            validate_metadata=False,
-        )
-
-    assert result is True
-    replay_call, reproducibility_call = captured_calls[-2:]
-    assert replay_call["layers_to_save"] == "all"
-    assert replay_call["activation_transform"] is None
-    assert replay_call["mark_layer_depths"] is False
-    assert replay_call["detach_saved_activations"] is False
-    assert replay_call["save_grads"] is False
-    assert replay_call["save_arg_values"] is True
-    assert replay_call["save_rng_states"] is True
-    assert reproducibility_call["save_arg_values"] is False
-    assert reproducibility_call["save_rng_states"] is False
-    assert dummy_logs[-2].validate_calls[-1]["validate_metadata"] is False
-    assert dummy_logs[-2].cleanup_calls == 1

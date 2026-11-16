@@ -13,7 +13,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.errors import MultiOutputModuleError, TorchLensError
-from torchlens.intervention.types import (
+from torchlens.intervention._types import (
     ContainerSpec,
     DataclassField,
     DictKey,
@@ -215,7 +215,6 @@ def _lstm_trace() -> Any:
     return tl.trace(LSTMModel(), torch.randn(7, 4, 5))
 
 
-@pytest.mark.smoke
 def test_lstm_three_outputs_distinct_layers() -> None:
     """LSTM outputs are distinct layers, not recurrent calls."""
 
@@ -231,7 +230,8 @@ def test_lstm_three_outputs_distinct_layers() -> None:
 def test_lstm_module_call_outputs_and_structure() -> None:
     """ModuleCall exposes output OpLogs and a container spec."""
 
-    call = _lstm_trace().module_calls["lstm:1"]
+    trace = _lstm_trace()
+    call = trace.module_calls["lstm:1"]
     assert len(call.output_ops) == 3
     assert call.output_structure is not None
     assert call.output_structure.kind == "tuple"
@@ -241,7 +241,8 @@ def test_lstm_module_call_outputs_and_structure() -> None:
 def test_lstm_module_out_raises_specific_error() -> None:
     """Ambiguous single-output access raises the new specific error."""
 
-    lstm = _lstm_trace().modules["lstm"]
+    trace = _lstm_trace()
+    lstm = trace.modules["lstm"]
     with pytest.raises(MultiOutputModuleError):
         _ = lstm.out
     with pytest.raises(TorchLensError):
@@ -255,7 +256,7 @@ def test_gru_two_outputs_distinct_equivalence_classes() -> None:
     trace = tl.trace(GRUModel(), torch.randn(7, 4, 5))
     outputs = [trace.ops[label] for label in trace.modules["gru"].ops[0].output_ops]
     assert len(outputs) == 2
-    assert len({output.equivalence_class for output in outputs}) == 2
+    assert len({output.graph.equivalence_class for output in outputs}) == 2
     assert [output.multi_output_name for output in outputs] == ["output", "h_n"]
 
 
@@ -270,7 +271,6 @@ def test_bilstm_outputs_preserve_single_call_structure() -> None:
     assert outputs[1].shape == (2, 4, 4)
 
 
-@pytest.mark.smoke
 def test_mha_attention_outputs_are_selectable() -> None:
     """MultiheadAttention output roles distinguish weights from activations."""
 
@@ -281,7 +281,7 @@ def test_mha_attention_outputs_are_selectable() -> None:
         "attn_output",
         "attn_output_weights",
     ]
-    sites = trace.find_sites(tl.module("mha") & tl.output("attn_output_weights"))
+    sites = trace.find_sites(tl.module("mha") & tl.model_output("attn_output_weights"))
     assert [site.layer_label for site in sites] == [outputs[1].layer_label]
 
 
@@ -302,9 +302,9 @@ def test_output_selectors_match_index_and_role() -> None:
 
     trace = _lstm_trace()
     h_n = trace.ops[trace.modules["lstm"].ops[0].output_ops[1]]
-    assert [site.layer_label for site in trace.find_sites(tl.module("lstm") & tl.output(1))] == [
-        h_n.layer_label
-    ]
+    assert [
+        site.layer_label for site in trace.find_sites(tl.module("lstm") & tl.model_output(1))
+    ] == [h_n.layer_label]
     assert [site.layer_label for site in trace.find_sites(tl.func("lstm", output="h_n"))] == [
         h_n.layer_label
     ]
@@ -440,7 +440,11 @@ def test_traced_container_specs_preserve_literal_return_leaves() -> None:
 
             return {"x": x.relu(), "n": 3, "y": x.sigmoid()}
 
-    tuple_trace = tl.trace(TupleLiteralModel(), torch.tensor([-1.0, 2.0]), intervention_ready=True)
+    tuple_trace = tl.trace(
+        TupleLiteralModel(),
+        torch.tensor([-1.0, 2.0]),
+        capture=tl.options.CaptureOptions(replayable=True),
+    )
     tuple_outputs = [tuple_trace.ops[label] for label in tuple_trace.output_layers]
     tuple_spec = next(
         output.container_spec for output in tuple_outputs if output.container_spec is not None
@@ -451,7 +455,11 @@ def test_traced_container_specs_preserve_literal_return_leaves() -> None:
     assert torch.equal(tuple_rebuilt[0], torch.tensor([0.0, 2.0]))
     assert tuple_rebuilt[1] == 5
 
-    dict_trace = tl.trace(DictLiteralModel(), torch.tensor([-1.0, 2.0]), intervention_ready=True)
+    dict_trace = tl.trace(
+        DictLiteralModel(),
+        torch.tensor([-1.0, 2.0]),
+        capture=tl.options.CaptureOptions(replayable=True),
+    )
     dict_outputs = [dict_trace.ops[label] for label in dict_trace.output_layers]
     dict_spec = next(
         output.container_spec for output in dict_outputs if output.container_spec is not None
@@ -582,24 +590,28 @@ def test_opaque_in_list_module_output_structure_matches_output_paths() -> None:
     container depth, and the invariant holds legitimately.
     """
 
-    from torchlens.validation.invariants import (
-        _container_tensor_leaf_paths,
-        check_metadata_invariants,
-    )
+    from torchlens.validation._invariants import check_metadata_invariants
+    from torchlens.validation._invariants_modules_params import _container_tensor_leaf_paths
 
     trace = tl.trace(_OpaqueInListModel(), torch.tensor([-1.0, 2.0]))
 
     call = trace.module_calls["sub:1"]
     assert call.output_structure is not None
-    # Outer container is the real (list, dict) tuple, not a back-filled stand-in.
-    assert call.output_structure.kind == "tuple"
-    assert call.output_structure.length == 2
+    # The outer container is the REAL (list, dict) tuple's spec, not a back-filled
+    # stand-in from an unrelated output layer. Since W051-HONESTY H1 a
+    # tensor-holding opaque object is never admitted as a reconstructable leaf,
+    # so the enclosing list and tuple record honestly as ``opaque`` (the runnable
+    # save refuses at preflight instead of advertising a contract the codec
+    # cannot fill); the type identity of the real root is still recorded.
+    assert call.output_structure.kind == "opaque"
+    assert call.output_structure.type_qualname == "tuple"
 
     structure_paths = set(_container_tensor_leaf_paths(call.output_structure))
     output_paths = {tuple(path) for path in (call.output_paths or ()) if tuple(path)}
     # The opaque holder lives at list slot 0 inside tuple slot 0.
     holder_prefix = (TupleIndex(index=0), TupleIndex(index=0))
-    assert structure_paths == {holder_prefix}
+    # An opaque structure declares no reconstructable leaf paths.
+    assert structure_paths == set()
     # cert10 (b68b6de5) extends each BFS-fallback leaf path with typed
     # components inside the opaque object so distinct tensors keep DISTINCT
     # replay-meaningful paths (identical paths formerly caused all but the

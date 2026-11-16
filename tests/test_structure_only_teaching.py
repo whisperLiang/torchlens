@@ -21,13 +21,13 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.capture.structure_only import (
+from torchlens._capture.structure_only import (
     MetaKernelUnavailableError,
     ValueDependentBranchError,
 )
+from torchlens._utils._torch_compat import get_meta_item_guard_support
+from torchlens.errors import TraceCaptureError
 from torchlens.options import CaptureOptions
-
-smoke = pytest.mark.smoke
 
 STRUCTURE = CaptureOptions(structure_only=True)
 
@@ -121,8 +121,11 @@ _CONSUMER_CASES = [
 ]
 
 
-@pytest.mark.parametrize(("model_cls", "expected_kind"), _CONSUMER_CASES)
-@smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
+# Rows sampled by shrink-r4 (per-id subset rule; the rows kept hold every per-id campaign kill).
+@pytest.mark.parametrize(
+    ("model_cls", "expected_kind"), [c for c in _CONSUMER_CASES if c[1] == "bool_cast"]
+)
 def test_value_branch_refuses_with_consumer_kind_and_user_line(
     model_cls: type, expected_kind: str
 ) -> None:
@@ -147,7 +150,7 @@ def test_value_branch_refuses_with_consumer_kind_and_user_line(
     } or offense["escape_method"].startswith("torch.")
 
 
-@smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
 def test_device_neutral_real_tensor_refusal_carries_substrate_real() -> None:
     """sol r2 B1: a REAL tensor driving a value branch refuses identically —
     a value-selected graph must never launder as structure-only."""
@@ -171,28 +174,7 @@ class MetaContextBranch(nn.Module):
         return h
 
 
-@smoke
-def test_meta_tensor_refusal_carries_substrate_meta() -> None:
-    with pytest.raises(ValueDependentBranchError) as excinfo:
-        _structure_trace(MetaContextBranch(), torch.randn(2, 4))
-    assert excinfo.value.fields["offenses"][0]["substrate"] == "meta"
-
-
-@smoke
-def test_float_truthiness_gate_is_lifted_in_mode_only() -> None:
-    """The dtype-is-bool gate stays a documented false negative on the
-    DEFAULT path (its own pinning test governs); in-mode the escalated belt
-    refuses float truthiness with the same teaching quality."""
-
-    with pytest.raises(ValueDependentBranchError) as excinfo:
-        _structure_trace(FloatTruthiness(), torch.randn(2, 4))
-    assert excinfo.value.fields["consumer_kind"] == "if_test"
-    # Companion: the default path still captures this model without raising.
-    log = tl.trace(FloatTruthiness(), torch.randn(2, 4))
-    assert log.structure_only is False
-
-
-@smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _data_classes/_trace_groups_capture.py.
 def test_internal_frame_reads_do_not_trip_the_belt() -> None:
     """PROVENANCE carve: torchlens internals touch real-tensor storage during
     an E-1 capture (aliasing/dedup/hashing) with the belt armed — a
@@ -207,8 +189,8 @@ def test_internal_frame_reads_do_not_trip_the_belt() -> None:
             return torch.relu(self.fc(x))
 
     log = _structure_trace(Clean(), torch.randn(2, 4))
-    assert log.structure_only is True
-    assert len(log.layer_list) >= 3
+    assert log.options.structure_only is True
+    assert len(log._layer_list) >= 3
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +216,7 @@ _HELPER_LINE = next(
 )
 
 
-@smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/structure_only_belt.py, campaign mutant kills.
 def test_missing_meta_kernel_refuses_typed_at_the_helper_line() -> None:
     """sol r2 M2: the traceback walk takes the INNERMOST external frame — the
     helper's failing line, never the outer forward callsite."""
@@ -254,15 +236,17 @@ class UserRaisesNIE(nn.Module):
         raise NotImplementedError("user's own refusal")
 
 
-@smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/structure_only_belt.py, campaign mutant kills.
 def test_user_raised_notimplementederror_propagates_unchanged() -> None:
-    """C-HONESTY: user exceptions stay user exceptions — annotated (3.11+)
-    or warned (3.10), never wrapped."""
+    """C-HONESTY: the user's exception is chained unchanged under the door's
+    TraceCaptureError, never reclassified; the structure-only note rides the
+    raised error (3.11+) or a warning (3.10)."""
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        with pytest.raises(NotImplementedError, match="user's own refusal") as excinfo:
+        with pytest.raises(TraceCaptureError, match="user's own refusal") as excinfo:
             _structure_trace(UserRaisesNIE(), torch.randn(2))
+        assert isinstance(excinfo.value.__cause__, NotImplementedError)
     if sys.version_info >= (3, 11):
         notes = getattr(excinfo.value, "__notes__", [])
         assert any("structure-only" in note for note in notes)
@@ -277,16 +261,6 @@ class UnenumeratedMetaDeath(nn.Module):
         return torch.tensor(m.tolist()), x
 
 
-@smoke
-def test_backstop_types_meta_deaths_the_belt_enumerates_or_not() -> None:
-    """An unenumerated meta-mechanism death is typed via the backstop; the
-    enumerated tolist spelling is caught by Layer 1 first (belt precedence).
-    Either way the failure is TYPED, never torch's bare error."""
-
-    with pytest.raises((ValueDependentBranchError, MetaKernelUnavailableError)):
-        _structure_trace(UnenumeratedMetaDeath(), torch.randn(2))
-
-
 # ---------------------------------------------------------------------------
 # Per-belt immunizer liveness (memo 2.5; opus B3d)
 # ---------------------------------------------------------------------------
@@ -298,18 +272,14 @@ def _neutralize_layer1(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(backend_module, "structure_only_escape_belt", lambda trace: nullcontext())
 
 
-def _neutralize_layer2(monkeypatch: pytest.MonkeyPatch) -> None:
-    from torchlens import capture as capture_pkg  # noqa: F401
-    from torchlens.capture import trace as capture_trace_module
-
-    monkeypatch.setattr(
-        capture_trace_module,
-        "_structure_only_forward_boundary",
-        lambda trace: nullcontext(),
-    )
-
-
-@smoke
+@pytest.mark.smoke
+@pytest.mark.skipif(
+    not get_meta_item_guard_support(),
+    reason="torch 2.1-2.2 have no Tensor.item()-cannot-be-called-on-meta-tensors guard: "
+    "the same MetaContextBranch forward instead dies in the aten dispatcher with a "
+    "NotImplementedError, which layer 2 classifies as the sibling "
+    "MetaKernelUnavailableError (meta_kernel_unavailable), not ValueDependentBranchError",
+)
 def test_layer2_backstop_catches_when_layer1_is_dead(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -319,36 +289,12 @@ def test_layer2_backstop_catches_when_layer1_is_dead(
     assert excinfo.value.fields["consumer_kind"] == "unclassified_escape"
 
 
-@smoke
-def test_layer1_belt_catches_when_layer2_is_dead(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _neutralize_layer2(monkeypatch)
-    with pytest.raises(ValueDependentBranchError) as excinfo:
-        _structure_trace(MetaContextBranch(), torch.randn(2, 4))
-    assert excinfo.value.fields["consumer_kind"] == "if_test"
-
-
-@smoke
-def test_both_layers_dead_returns_the_bare_torch_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Proves the liveness tests measure the belts, not incidental behavior."""
-
-    _neutralize_layer1(monkeypatch)
-    _neutralize_layer2(monkeypatch)
-    with pytest.raises(RuntimeError) as excinfo:
-        _structure_trace(MetaContextBranch(), torch.randn(2, 4))
-    assert not isinstance(excinfo.value, ValueDependentBranchError)
-
-
 # ---------------------------------------------------------------------------
 # Belt census (memo 2.5): the surface IS the five-set union, and every
 # member is actually escalated in-mode (install census, not set equality).
 # ---------------------------------------------------------------------------
 
 
-@smoke
 def test_escape_surface_is_the_union_of_all_five_constituents() -> None:
     from torchlens.backends.torch.completeness_witness import (
         HOST_VALUE_ESCAPE_METHODS,
@@ -374,14 +320,14 @@ def test_escape_surface_is_the_union_of_all_five_constituents() -> None:
     )
 
 
-@smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
 def test_install_census_every_surface_member_is_escalated_in_mode() -> None:
     import inspect as inspect_module
 
     from torchlens.backends.torch import structure_only_belt as belt
 
     class _FakeTrace:
-        structure_only = True
+        _options_structure_only = True
 
     tensor_originals = {
         name: getattr(torch.Tensor, name, None) for name in belt._TENSOR_METHOD_SURFACE
@@ -408,7 +354,7 @@ def test_install_census_every_surface_member_is_escalated_in_mode() -> None:
         assert getattr(torch, name, None) is original, f"torch.{name}"
 
 
-@smoke
+# Kept by shrink-r4 (per-id subset rule): sole coverage of _capture/_structure_only_entry.py.
 def test_teaching_refusals_fire_identically_under_predicate_composition() -> None:
     """Memo 2.5 combination row: composing the mode with a (value-free)
     predicate surface must not soften the belts."""
@@ -418,7 +364,7 @@ def test_teaching_refusals_fire_identically_under_predicate_composition() -> Non
             IfBranch(),
             torch.randn(2, 4),
             capture=CaptureOptions(structure_only=True),
-            halt=tl.func("nonexistent_op_name"),
+            stop_after=tl.func("nonexistent_op_name"),
         )
     assert excinfo.value.fields["consumer_kind"] == "if_test"
     assert excinfo.value.fields["code"] == "value_dependent_branch_unsupported"

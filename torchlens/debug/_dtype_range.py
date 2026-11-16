@@ -7,31 +7,69 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from .._debug_report import Report, at_source, rows_of
 from ._audit import AuditFinding, AuditSeverity
-from ._common import _compute_ops, _op_label, _safe_out
-from ._nan import _module_address, _nonfinite_kind
+from ._common import (
+    _compute_ops,
+    _module_address,
+    _nonfinite_kind,
+    _op_label,
+    _safe_out,
+    _source_line,
+)
 
 if TYPE_CHECKING:
-    from torchlens.data_classes.trace import Trace
+    from torchlens._data_classes.trace import Trace
 
 
 @dataclass(frozen=True)
-class DTypeRangeAudit:
+class DTypeRangeReport(Report):
     """Coverage-bounded dtype range audit result.
 
     Attributes
     ----------
     findings:
         Evidence-backed findings following the :class:`AuditFinding` shape.
-    n_ops_audited:
+    num_audited_ops:
         Operations with one saved native tensor payload that was inspected.
-    n_ops_total:
+    num_ops:
         Compute and output operations present in the trace.
+
+    Examples
+    --------
+    >>> report = tl.debug.dtype_range(tl.trace(model, x))
+    >>> isinstance(report, DTypeRangeReport), report.num_audited_ops > 0
+    (True, True)
+    >>> 0.0 < report.coverage <= 1.0
+    True
     """
 
     findings: tuple[AuditFinding, ...]
-    n_ops_audited: int
-    n_ops_total: int
+    num_audited_ops: int
+    num_ops: int
+
+    def _report_status(self) -> str:
+        """The verdict token on the card's lead line."""
+
+        return f"{len(self.findings)} findings" if self.findings else "clean"
+
+    def _report_coverage(self) -> str | None:
+        """What this report did and did not examine."""
+
+        return f"{self.num_audited_ops} of {self.num_ops} ops audited"
+
+    def _report_findings(self) -> list[str]:
+        """One-line findings for the card, most severe first."""
+
+        return [
+            f"[{item.severity}] {item.check}: {item.message}{at_source(item.source_line)}"
+            for item in self.findings
+        ]
+
+    def _report_rows(self) -> list[dict[str, Any]] | None:
+        """The natural table rows behind ``to_pandas()``."""
+
+        return rows_of(self.findings)
 
     @property
     def coverage(self) -> float:
@@ -43,12 +81,14 @@ class DTypeRangeAudit:
             ``n_ops_audited / n_ops_total``, or ``0.0`` for an empty trace.
         """
 
-        if self.n_ops_total == 0:
+        if self.num_ops == 0:
             return 0.0
-        return self.n_ops_audited / self.n_ops_total
+        return self.num_audited_ops / self.num_ops
 
     def __repr__(self) -> str:
         """Return a compact coverage-honest summary.
+
+        ``print(report)`` shows the card: each finding with its op's line.
 
         Returns
         -------
@@ -57,8 +97,8 @@ class DTypeRangeAudit:
         """
 
         return (
-            f"DTypeRangeAudit(findings={len(self.findings)}, "
-            f"coverage={self.n_ops_audited}/{self.n_ops_total})"
+            f"DTypeRangeReport(findings={len(self.findings)}, "
+            f"coverage={self.num_audited_ops}/{self.num_ops})"
         )
 
 
@@ -68,7 +108,7 @@ def _finding(
     severity: AuditSeverity,
     check: str,
     message: str,
-    follow_up: str = "tl.debug.dtype_range_audit(trace)",
+    follow_up: str = "tl.debug.dtype_range(trace)",
 ) -> AuditFinding:
     """Build one dtype finding with recorded operation provenance.
 
@@ -99,6 +139,7 @@ def _finding(
         ops=(_op_label(op),),
         modules=(module,) if module is not None else (),
         follow_up=follow_up,
+        source_line=_source_line(op),
     )
 
 
@@ -229,12 +270,12 @@ def _wider_input_dtypes(op: Any, output_dtype: torch.dtype) -> tuple[torch.dtype
     return tuple(wider)
 
 
-def dtype_range_audit(
+def dtype_range(
     trace: Trace,
     *,
     max_fraction: float = 0.9,
     subnormal_fraction_threshold: float = 0.1,
-) -> DTypeRangeAudit:
+) -> DTypeRangeReport:
     """Audit saved activations for numeric-range and precision hazards.
 
     Non-finite classification reuses the same classifier as
@@ -256,13 +297,24 @@ def dtype_range_audit(
 
     Returns
     -------
-    DTypeRangeAudit
+    DTypeRangeReport
         Structured findings and audited/total operation coverage.
 
     Raises
     ------
     ValueError
         If either threshold is outside ``[0, 1]``.
+
+    Examples
+    --------
+    >>> report = dtype_range(tl.trace(model, x))
+    >>> report.num_audited_ops > 0, 0.0 < report.coverage <= 1.0
+    (True, True)
+    >>> try:
+    ...     dtype_range(tl.trace(model, x), max_fraction=2.0)
+    ... except ValueError:
+    ...     print("refused")
+    refused
     """
 
     if not 0.0 <= max_fraction <= 1.0:
@@ -346,7 +398,7 @@ def dtype_range_audit(
                 )
             )
 
-    return DTypeRangeAudit(tuple(findings), n_ops_audited, len(ops))
+    return DTypeRangeReport(tuple(findings), n_ops_audited, len(ops))
 
 
-__all__ = ["DTypeRangeAudit", "dtype_range_audit"]
+__all__ = ["DTypeRangeReport", "dtype_range"]

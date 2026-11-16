@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 import types
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
@@ -15,36 +15,6 @@ from .escape_detection import (
     expected_original_call,
     mark_expected_original_accounted,
 )
-
-if TYPE_CHECKING:
-    from .completeness_witness import (
-        _ALIAS_MUTATION_CANDIDATE_LABELS,
-        _AUTHORIZED_INTERNAL_CALLER_CODE,
-        _AUTHORIZED_INTERNAL_CALLER_CODE_IDS,
-        _DATA_ALIAS_MUTATION_TRACES,
-        _HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS,
-        _HOST_ESCAPE_BOOL_SOURCE_LABELS,
-        _HOST_ESCAPE_CROSS_THREAD_CAPTURED,
-        _HOST_ESCAPE_LABEL_LEAF_ORIGINS,
-        _HOST_ESCAPE_MUTABLE_WRITEBACK,
-        _HOST_ESCAPE_RAW_POINTER,
-        _HOST_ESCAPE_SOURCE_LABELS,
-        _HOST_ESCAPE_STATE_SOURCE_LABELS,
-        _HOST_ESCAPE_STATE_SOURCE_NAMES,
-        _HOST_ESCAPE_UNATTRIBUTABLE_BOOL,
-        _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE,
-        _INPUT_METADATA_VIEW_READ,
-        _ORIG_TENSORBASE_UNTYPED_STORAGE,
-        _ORIG_UNTYPED_STORAGE_DATA_PTR,
-        _ORIGIN_LABEL_PREFIX,
-        _ORIGIN_RNG,
-        _ORIGIN_STATE_PREFIX,
-        _ORIGIN_UNKNOWN,
-        _PRUNED_ALIAS_MUTATION_LABELS,
-        _PRUNED_RNG_CONTROL_LABELS,
-        _operand_leaf_origins,
-        internal_scalar_read,
-    )
 
 __all__ = (
     "input_metadata_view_read",
@@ -75,7 +45,7 @@ __all__ = (
 
 
 def input_metadata_view_read(trace: Any) -> bool:
-    """Return whether a metadata predicate was read on an input-derived view (r29-C1, F5)."""
+    """Return whether a metadata predicate was read on an input-derived view."""
 
     return trace in _INPUT_METADATA_VIEW_READ
 
@@ -266,13 +236,13 @@ def host_escape_has_mutable_writeback(trace: Any) -> bool:
 
 
 def host_escape_has_raw_pointer(trace: Any) -> bool:
-    """Return whether a raw ``Tensor.data_ptr()`` pointer escaped to the host (r15-H1)."""
+    """Return whether a raw ``Tensor.data_ptr()`` pointer escaped to the host."""
 
     return trace in _HOST_ESCAPE_RAW_POINTER
 
 
 def host_escape_has_cross_thread_captured_tensor(trace: Any) -> bool:
-    """Return whether a non-owner thread touched a captured tensor during the window (r43)."""
+    """Return whether a non-owner thread touched a captured tensor during the window."""
 
     return trace in _HOST_ESCAPE_CROSS_THREAD_CAPTURED
 
@@ -287,6 +257,14 @@ def _register_authorized_caller_namespace(namespace: Mapping[str, Any], module_f
     and ``__wrapped__`` chains are followed so a decorated or nested internal
     caller still authenticates.
     """
+
+    # Imported here, not from this module's bottom block: this runs during the
+    # completeness_witness module's import (its roster collection), which can happen
+    # while this module is still executing its bottom imports.
+    from .completeness_witness import (
+        _AUTHORIZED_INTERNAL_CALLER_CODE,
+        _AUTHORIZED_INTERNAL_CALLER_CODE_IDS,
+    )
 
     def _collect(code: types.CodeType) -> None:
         """Register one module-local code object and its nested code constants."""
@@ -356,7 +334,7 @@ def _caller_frame_is_torchlens_internal(depth: int = 2) -> bool:
 
 
 def _raw_storage_ptr_no_observe(tensor: Any) -> int | None:
-    """Return a tensor's untyped-storage data pointer via the true originals, ptr 0 -> None (r43).
+    """Return a tensor's untyped-storage data pointer via the true originals, ptr 0 -> None.
 
     GIL-atomic, wrapper-free, side-effect-free: it never fires an escape observer, a dispatch,
     or a logging toggle, so it is safe to call from ANY thread. ``0`` (a meta / storageless
@@ -403,3 +381,36 @@ def _raw_storage_ptr_no_observe(tensor: Any) -> int | None:
     except (RuntimeError, TypeError, NotImplementedError, AttributeError):
         return None
     return int(ptr) if ptr else None
+
+
+# Late imports: the split modules of this package import one another (cycles), so each
+# imports its siblings once every definition above exists.
+from ._completeness_origins import (  # noqa: E402
+    _operand_leaf_origins,
+    internal_scalar_read,
+)
+from .completeness_witness import (  # noqa: E402
+    _ALIAS_MUTATION_CANDIDATE_LABELS,
+    _AUTHORIZED_INTERNAL_CALLER_CODE_IDS,
+    _DATA_ALIAS_MUTATION_TRACES,
+    _HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS,
+    _HOST_ESCAPE_BOOL_SOURCE_LABELS,
+    _HOST_ESCAPE_CROSS_THREAD_CAPTURED,
+    _HOST_ESCAPE_LABEL_LEAF_ORIGINS,
+    _HOST_ESCAPE_MUTABLE_WRITEBACK,
+    _HOST_ESCAPE_RAW_POINTER,
+    _HOST_ESCAPE_SOURCE_LABELS,
+    _HOST_ESCAPE_STATE_SOURCE_LABELS,
+    _HOST_ESCAPE_STATE_SOURCE_NAMES,
+    _HOST_ESCAPE_UNATTRIBUTABLE_BOOL,
+    _HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE,
+    _INPUT_METADATA_VIEW_READ,
+    _ORIG_TENSORBASE_UNTYPED_STORAGE,
+    _ORIG_UNTYPED_STORAGE_DATA_PTR,
+    _ORIGIN_LABEL_PREFIX,
+    _ORIGIN_RNG,
+    _ORIGIN_STATE_PREFIX,
+    _ORIGIN_UNKNOWN,
+    _PRUNED_ALIAS_MUTATION_LABELS,
+    _PRUNED_RNG_CONTROL_LABELS,
+)

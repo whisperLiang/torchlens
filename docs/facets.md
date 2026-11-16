@@ -15,6 +15,10 @@ q = log.modules["blocks.0.attn"].facets["q"]
 h_n = log.modules["lstm"].facets["h_n"]
 ```
 
+Facets live on a `Trace`. `tl.record` takes no facet keyword and a `Recording` has no
+`modules[...].facets`; cook it first with `recording.to_trace()` and read the facets there
+(a facet whose inputs the `save=` predicate did not keep fails explicitly).
+
 Attribute access is convenience sugar for valid Python identifiers that do not
 collide with `FacetView` methods:
 
@@ -38,11 +42,17 @@ nested positional    -> out1.0
 `module.outs` remains a thin alias for raw structural outputs. `module.facets` is
 the unified named access layer. If a module was called more than once,
 `module.facets` raises; choose an explicit pass with `module.calls[n].facets`.
+A call's view runs the module's recipes for that call alone, and child modules
+resolve to their call inside it: for an attention layer shared across depth
+(ALBERT), `module.calls[n].facets.q` is the query projection of pass `n`.
+`trace.modules_with_facet(name)` and `trace.attention_blocks()` still yield such a
+reused Module when its recipe declares the facet and at least one of its calls has
+it available now; loop over `module.calls.values()` to read each pass.
 
 `keys()`, iteration, `in`, `has(name)`, and item/attribute access are
 available-now surfaces: recipes run once and only facets readable in the current
 capture appear. `.get(name, default)` returns `default` for any facet that is not
-available now. Use the provisional `menu()` accessor for declaration-level
+available now. Use the provisional `declared()` accessor for declaration-level
 discovery; it reports every structural and declared recipe facet with status
 `available_now`, `structurally_absent`, `needs_capture`, or
 `declared_not_produced`, including any enabled aliases.
@@ -93,7 +103,7 @@ gradient. It is available only for grad-capable op-anchored structural facets an
 only when the home op has a saved gradient.
 
 Default traces do not save gradients. When a gradient is unavailable,
-`facet.grad` returns a `MissingGradient` sentinel with an exact recapture
+`facet.grad` returns a `MissingGrad` sentinel with an exact recapture
 instruction. The sentinel does not raise merely because it was returned; tensor
 use raises:
 
@@ -107,13 +117,13 @@ log = tl.trace(
     x,
     capture=tl.options.CaptureOptions(backward_ready=True, save_grads=True),
 )
-log.log_backward(log[log.output_layers[0]].out.sum())
+log.backward(log[log.output_layers[0]].out.sum())
 q_grad = log.modules["attn"].facets["q"].grad
 ```
 
 Parameter facets, such as LayerNorm `gamma` and Embedding `weight`, read the
 parameter value. Their parameter gradients are not exposed through `facet.grad`
-in P1; this path is intentionally read-only.
+in this release; this path is intentionally read-only.
 
 ## Registration
 
@@ -132,14 +142,19 @@ the global registry changes later.
 Per-trace and context additions are also capture-time only:
 
 ```python
-log = tl.trace(model, x, recipes=[my_attention])
+log = tl.trace(model, x, facets=[my_attention])
 
-with tl.facets.using(my_attention):
+with tl.facets.adding(my_attention):
     log = tl.trace(model, x)
 ```
 
-`tl.facets.reset()` restores the process registry to built-ins. `tl.facets.list()`
-and `tl.facets.info(class_name)` expose registry metadata.
+The guide [Adding conveniences for your model](guides/model_conveniences.md)
+builds a custom facet next to a custom input detector (`tl.preprocessing.register`)
+and output decoder (`tl.postprocessing.register`); [Semantic input and output](semantic_io.md)
+covers the built-in routes those registries already hold.
+
+`tl.facets.reset()` restores the process registry to built-ins. `tl.facets.functions()`
+and `tl.facets.describe(class_name)` expose registry metadata.
 
 Conflict resolution is deterministic: `class_qualname` is more specific than
 `class_name`, which is more specific than a predicate; user recipes beat built-ins
@@ -149,18 +164,25 @@ only within the same specificity tier. True same-tier facet collisions warn.
 
 A recipe receives the TorchLens **`Module` record**, not the live `nn.Module`. The
 record does not proxy arbitrary live attributes as direct attributes -- they are
-snapshotted into `module.custom_attributes`. Use `config_value(module, *names)`
-(from `torchlens.semantic.recipes._helpers`), which checks record attributes **and**
-the `custom_attributes` snapshot, instead of `module.num_heads` directly:
+snapshotted into `module.custom_attributes`. Use `tl.facets.config_value(module, *names)`,
+which checks record attributes **and** the `custom_attributes` snapshot, instead of
+`module.num_heads` directly. The recipe-authoring helpers are public under `tl.facets`:
+`config_value`, `child_output_spec(module, child_name, recipe_id)` (a child module's
+output as a spec) and `parameter_spec(module, name, recipe_id)` (a parameter as a spec);
+no private import is needed:
 
 ```python
-from torchlens.semantic.recipes._helpers import config_value, child_output_spec
-
+@tl.facets.register(class_name="MyAttention", target_scope="module")
 def my_attention(module):
-    n_heads = config_value(module, "num_heads", "n_heads", "num_attention_heads", "n_head")
-    qkv = child_output_spec(module, "qkv", "my_attention")
-    return {"q": qkv.split(3, dim=-1)[0].heads(n_heads, None)}  # d_head inferred from shape
+    n_heads = tl.facets.config_value(module, "num_heads", "n_heads", "num_attention_heads", "n_head")
+    qkv = tl.facets.child_output_spec(module, "qkv", "my_attention")
+    return {"q": qkv.split(3, dim=-1)[0].heads(n_heads)}  # d_head inferred from shape
 ```
+
+`FacetSpec.heads(num_heads, d_head=None)` infers the head dimension from the
+projection's last axis when the facet is read (`last_dim // num_heads`); a last
+axis the head count does not divide refuses at read time. Pass `d_head` explicitly
+when the projection carries extra columns.
 
 Head counts are inferred automatically for any module that stores a conventionally
 named count -- HF configs, `torch.nn.MultiheadAttention` (`.num_heads`), or a custom
@@ -204,11 +226,10 @@ Use `tl.facet(name)` for a named facet and `tl.head(index, name)` or
 log = tl.trace(
     model,
     x,
-    capture=tl.options.CaptureOptions(layers_to_save="all", save_arg_values=True),
+    capture=tl.options.CaptureOptions(save_args=True), save="all",
 )
 edited = log.fork("ablated")
-edited.attach_hooks(tl.head(3, "q"), tl.zero_ablate())
-edited.rerun(model, x)
+edited.do(tl.head(3, "q"), tl.zero_ablate(), model=model, inputs=x)
 ```
 
 Static patching uses the same scatter-back path:
@@ -216,15 +237,15 @@ Static patching uses the same scatter-back path:
 ```python
 patch = torch.zeros_like(log.modules["blocks.0.attn"].facets.head(3).q)
 edited = log.fork("patched")
-edited.set(tl.facet("q").head(3), patch)
-edited.rerun(model, x)
+edited.do(tl.facet("q").head(3), patch, intervention=tl.options.InterventionOptions(engine="set_only"))
+edited = edited.run(model, x)
 ```
 
 `tl.head(index)` without a facet name targets the default attention projection
 facets `q`, `k`, and `v` wherever they are present:
 
 ```python
-edited.attach_hooks(tl.head(3), tl.zero_ablate())
+edited.do(tl.head(3), tl.zero_ablate(), model=model, inputs=x)
 ```
 
 Scatter-back preserves the home tensor dtype, device, shape, and memory format.
@@ -255,7 +276,7 @@ is backed by a real op.
 
 Patching helpers live at `tl.facets.patching`. They run a clean trace and a
 corrupted trace, then reuse the facet intervention path (`fork`,
-`attach_hooks`, `rerun`, and `tl.facet`/`tl.head` selectors) to patch clean
+`do` with `model=`/`inputs=` (a rerun), and `tl.facet`/`tl.head` selectors) to patch clean
 facet activations into the corrupted run.
 
 The metric callable receives the patched `Trace` and must return a scalar
@@ -280,7 +301,7 @@ activation_patch_mlp_output       -> [layer]
 ```
 
 Residual patching defaults to `resid_pre` and patches each position along axis
-1. Attention-head patching defaults to the P3 `result` facet, whose shape is
+1. Attention-head patching defaults to the `result` facet, whose shape is
 `[batch, pos, head, d_model]`; `tl.head(i, "result")` selects one head's
 contribution. MLP patching defaults to the `output` facet on modules that expose
 the built-in MLP facet family.
@@ -303,24 +324,42 @@ approx = tl.facets.patching.attribution_patch_attention_heads(
 
 Attribution patching requires gradient capture. By default the helper traces
 with `save_grads=True`. If gradients are not saved, it raises a clear
-error that includes the `MissingGradient` recapture instruction.
+error that includes the `MissingGrad` recapture instruction.
 
 ## Reconstruction
 
 Fused `torch.nn.functional.scaled_dot_product_attention` hides `scores`,
 `pattern`, and `z`. TorchLens reconstructs these as read-only computed facets
-when the SDPA op saved its actual inputs and options:
+from the exact inputs and options the fused kernel received. A default capture
+already records them: the SDPA call's replay argument template holds `scale`,
+`is_causal`, `dropout_p` and `enable_gqa`, and the Q, K, V and mask tensors are
+the saved outputs of the ops that produced them. So a plain trace serves the
+facets, and the forward itself is untouched: the fused kernel PyTorch chose runs as is, and the
+traced output equals a plain forward bit for bit (the FAQ entry
+[Does tracing change fused attention?](faq.md#does-tracing-change-fused-attention-sdpa-flashattention)
+and `notebooks/sdpa_fused_attention_check.ipynb` show the measurement per backend):
 
 ```python
-log = tl.trace(model, x, reconstruction_ready=True)
+log = tl.trace(model, x)
 pattern = log.modules["blocks.0.attn"].facets.pattern
 z = log.modules["blocks.0.attn"].facets.z
 ```
 
-`reconstruction_ready=True` enables `save_arg_values=True` and
-`save_rng_states=True`. The reconstruction uses the SDPA op's saved Q/K/V args,
-so RoPE models use the post-RoPE tensors that actually fed the fused kernel, not
-the q_proj/k_proj outputs.
+When the default capture did not keep an input (a selective `save=` that does not save
+the op producing Q, K, V or the mask, or a structure-only capture), the facet
+fails closed: `facets.declared()` marks it `needs_capture` and access raises
+`MissingFacetError` naming the missing input. Saving the SDPA call's arguments
+verbatim lifts that requirement:
+
+```python
+log = tl.trace(model, x, save=tl.in_module("blocks.0.attn"),
+               capture=CaptureOptions(reconstruction_ready=True))
+```
+
+`CaptureOptions(reconstruction_ready=True)` enables `save_args=True` and
+`save_rng=True`. Either way the reconstruction uses the tensors that actually fed
+the fused kernel, so RoPE models use the post-RoPE Q and K, not the
+q_proj/k_proj outputs.
 
 Validation is per facet and non-vacuous:
 
@@ -332,7 +371,7 @@ result            sum per-head W_O contributions and compare to output projectio
 
 GQA/MQA uses PyTorch SDPA's `enable_gqa` repeat-interleave convention. Causal
 masks and boolean/additive tensor masks are supported. Nonzero SDPA dropout is
-fail-closed for now; the facet is marked `needs_capture` in `facets.menu()` and
+fail-closed for now; the facet is marked `needs_capture` in `facets.declared()` and
 item or attribute access raises `MissingFacetError` naming dropout/RNG as the
 missing prerequisite rather than serving an unvalidated value.
 
@@ -347,7 +386,7 @@ resid_post  block output op
 ```
 
 These are op-structural facets when the anchors exist, so `.grad` works under
-the normal gradient contract. If a block structure does not expose a real
+the normal [gradient contract](gradient_contract.md). If a block structure does not expose a real
 post-attention add, `resid_mid` is absent instead of guessed.
 
 Attention modules also expose read-only per-head `result` when the recipe can
@@ -357,8 +396,8 @@ the captured output-projection tensor.
 
 ## Unembedding Head and Logit Lens
 
-Every spelling in this section is DOCUMENTED-UNSTABLE pending the naming
-session.
+Every name in this section is experimental and may change in any
+release.
 
 The `language_model_head` recipe matches a module with a conventional
 unembedding child (`lm_head`, `embed_out`, or `output_projection`) and anchors
@@ -379,11 +418,11 @@ The final norm is derived structurally from the traced dataflow (the innermost
 classified norm module containing the head's input op), never by a name search
 over the module tree.
 
-`torchlens.semantic.logit_lens` projects each block's residual-stream facet
+`torchlens._semantic.logit_lens` projects each block's residual-stream facet
 through the model's own final norm + unembedding:
 
 ```python
-from torchlens.semantic import logit_lens
+from torchlens._semantic import logit_lens
 
 result = logit_lens(log)                      # resid_post through the model's head
 print(result.summary(tokenizer=tokenizer))    # per-layer top-1 table
@@ -397,11 +436,108 @@ block's captured `resid_post` must reproduce the model's captured logits, so a
 head the reconstruction cannot represent (nonstandard norm scaling such as a
 `(1 + weight)` RMSNorm, an extra projection, dropout before the head) refuses
 with `LogitLensError` instead of silently mislabeling layers. Pass
-`validate=False` to trust the reconstruction explicitly, `lens=` to supply
-your own callable (or per-address mapping, e.g. a tuned lens), and `layers=` /
+`verify=False` to trust the reconstruction explicitly, `lens=` to supply
+your own callable (or per-address mapping, e.g. a tuned lens), and `modules=` /
 `facet=` to control what is projected. Architecture coverage extends through
 facet recipes producing the same facet names -- the appliance never special
 cases architectures.
+
+Validation proves only that the reconstruction reproduces the LAST layer; it says nothing about
+how faithful the projection is at depth. The final norm and unembedding were trained on the last
+layer's residual stream, and earlier layers do not use that basis, so early-layer top tokens are
+weak evidence and often look like noise even when the layer carries the information
+(Belrose et al., 2023, introduced the tuned lens for this reason). Read the lens as a trend
+across depth, compare it with a probe or a tuned lens passed as `lens=`, and do not read one early
+layer's top token as what that layer "thinks". A Jacobian lens (the corpus-average Jacobian
+of the final residual with respect to a block's, passed as `lens=`) is fitted from public
+primitives in [the Jacobian lens recipe](field-guide/jacobian_lens.md).
+
+`torchlens._semantic.logit_lens_predictions` is the streaming reduction of the
+same sweep: it projects ONE layer at a time, keeps only per-position top-k
+values, the full-vocabulary `logsumexp`, and requested-token logits /
+probabilities / one-based ranks, then discards that layer's full projection --
+so long sequences never materialize every `[batch, positions, vocab]` tensor
+at once:
+
+```python
+from torchlens._semantic import logit_lens_predictions
+
+preds = logit_lens_predictions(log, k=5, positions=[-1], tokens=[the_id])
+preds.rows[3].top_ids                         # one layer's top-k token ids
+preds.rows[-1].provenance                     # "native output" for captured logits
+```
+
+`mask_input=True` bans the model input's own token ids from every row (each
+batch row's input tokens get `-inf` logits before the top-k, the `logsumexp`
+denominator, probabilities and ranks are taken), the one masking that cannot be
+redone on the retained rows afterwards; the trace's first input must be a saved
+integer token-id tensor (`logit_lens_mask_input_unavailable` otherwise). For
+entropy, KL to the final output, cross-entropy and rank along the trajectory in
+one call, see `tl.mechinterp.measure_trajectory` in
+[docs/reference/stats.md](reference/stats.md).
+
+It shares `facet=` / `modules=` / `lens=` / `verify=` semantics (and the
+fail-closed lens validation) with `logit_lens`. Probabilities always use the
+full-vocabulary softmax denominator. `include_native=True` (the default)
+appends a row served directly from the model's CAPTURED output logits,
+labelled `"native output"`; every reconstructed row is labelled `"projected
+through final norm/head"`. On a `logits_to_keep`-sliced capture the native
+row covers only the positions the capture kept, and requested positions
+outside a row's covered range are dropped from that row rather than invented.
+
+### Vision heads (experimental)
+
+A vision model has no language-model head. When a trace has none, the
+default lens falls back to a vision head recipe, and it is validated the same
+way (the last block's captured `resid_post` must reproduce the captured
+logits):
+
+- `classification_head` matches a module with a linear `classifier` child,
+  such as `ViTForImageClassification`: the final norm plus the classifier
+  applied to the one token the head reads (`[CLS]`). `result.lens_source` is
+  `"classifier_head"` and each layer's logits are `[batch, num_labels]`, so
+  `result.top_tokens()` answers "what does this layer already classify the
+  image as?".
+- `contrastive_image_head` matches `CLIPModel`. Capture the model on images
+  AND the label prompts you want to score (`input_ids` of "a photo of a
+  cat", "a photo of a dog", ...): each vision-tower block's `[CLS]` state goes
+  through `post_layernorm`, `visual_projection` and L2 normalization, and is
+  scored against the captured text features with CLIP's own `logit_scale`.
+  `result.lens_source` is `"contrastive_head"`, each layer's logits are
+  `[n_images, n_prompts]`, and the last layer equals CLIP's
+  `logits_per_image`. Only vision-tower blocks are projected; passing a
+  text-tower block in `modules=` refuses `logit_lens_layer_outside_head`.
+
+```text
+classification_head facets          contrastive_image_head facets
+logits                              logits_per_image
+classifier_weight / classifier_bias image_projection_weight
+pooled_position (token read)        text_features (text_projection output)
+tower_address (blocks feeding it)   logit_scale
+final_norm_* (as above)             pooled_position, tower_address, final_norm_*
+```
+
+Only a single-token read is reconstructed. A head that mean-pools, uses an
+attention pooler, or runs a pooler MLP leaves the final norm unanchored, and
+the lens refuses `logit_lens_head_unavailable` instead of guessing.
+
+### User lens identity (experimental)
+
+A user lens may record which model it was built for: set `model_identity` on
+the callable (or on the mapping, or on each per-layer callable) to the
+model-identity record an extraction artifact carries
+(`manifest["signature"]["model_identity"]`). With the default
+`validate=True`:
+
+- a measured identity that differs from the traced model (compared against
+  the trace's live source model) refuses with `logit_lens_identity_mismatch`;
+  `verify=False` runs the lens anyway;
+- a matching identity runs silently;
+- a lens with no identity, or one that cannot be compared (an asserted
+  record, or the source model is gone), gets a last-layer agreement check:
+  when the lens applied to the last block's `resid_post` does not reproduce
+  the captured logits, the coded warning `logit_lens_identity_unrecorded`
+  reports the largest difference and the top-1 agreement.
 
 ## Fallback
 
@@ -421,13 +557,13 @@ TransformerLens hook-name aliases are off by default. Enable them once per
 process:
 
 ```python
-tl.facets.enable_transformerlens_aliases()
+tl.facets.enable_transformer_lens_aliases()
 ```
 
 When enabled, aliases such as `hook_pattern`, `hook_z`, `hook_result`,
 `hook_resid_pre`, `hook_resid_mid`, and `hook_resid_post` resolve to native
 TorchLens facets when those native facets exist.
-`torchlens.semantic.transformer_lens_aliases_enabled()` reports the current
+`torchlens.facets.transformer_lens_aliases_enabled()` reports the current
 process-wide state.
 
 ## Migration Cheat Sheet
@@ -447,7 +583,7 @@ nnsight module.path.output       -> log.modules["module.path"].facets["out"]
 
 ## Coverage and Recipe Maintenance
 
-`torchlens.semantic.facet_coverage(log)` (DOCUMENTED-UNSTABLE spelling) reports
+`torchlens.facets.coverage(log)` (experimental) reports
 per-module recipe coverage for a completed trace: which recipes matched, which
 declared facets are readable, typed absence reasons, an inventory of
 structural-only module classes (recipe candidates), and disclosed rows for
@@ -461,8 +597,8 @@ wrong facet label is a confidently mislabelled part of someone's model.
 ## Recipe Plugins
 
 On FIRST USE of the facet-recipe subsystem (not at `import torchlens` --
-the loader is module-level in `torchlens/semantic/recipes/__init__.py`, and
-`torchlens.semantic` is lazy), TorchLens loads installed setuptools entry
+the loader is module-level in the facet-recipes package initializer, and
+the facet subsystem is lazy), TorchLens loads installed setuptools entry
 points in the `torchlens.recipes` group. A broken entry point therefore warns
 when facets are first touched, not at import. Entry points are never scanned
 from local directories.
@@ -470,7 +606,7 @@ from local directories.
 ## Built-In Inventory
 
 TorchLens records built-in facet capabilities as data in
-`torchlens.semantic.recipes.BUILTIN_FACET_CAPABILITY_INVENTORY`. Current classes
+`BUILTIN_FACET_CAPABILITY_INVENTORY` in the private facet-recipes package (no public spelling yet). Current classes
 are:
 
 ```text
@@ -480,7 +616,7 @@ module_input
 computed_read_only
 ```
 
-Only `op_structural` built-in facets may claim facet-gradient capability in P1.
+Only `op_structural` built-in facets may claim facet-gradient capability.
 
 ## Glossary
 
@@ -495,7 +631,7 @@ attention head. With `name=None`, targets default `q`, `k`, and `v` facets.
 `scatter_update`: ABI method that writes an edited facet slice back into the
 full home-op output and returns the edited home tensor.
 
-`MissingGradient`: typed sentinel returned by `facet.grad` when the home op has
+`MissingGrad`: typed sentinel returned by `facet.grad` when the home op has
 no saved gradient or the facet is not grad-capable.
 
 `bijective_view`: transform class for exact view operations such as reshape and
@@ -512,15 +648,15 @@ Write capability: a facet may be edited only when every primitive in its chain
 is scatter-back capable and the home is an op raw output.
 
 Alias policy: explicit rule required before an `aliasing_selection` facet can be
-written; P2 provides no public policy and refuses these writes by default.
+written; TorchLens provides no public policy and refuses these writes by default.
 
 Conflict policy: same-home facet writes compose in attach order when their write
 masks do not overlap; overlapping writes raise before rerun.
 
-`recipes=`: `tl.trace` argument for additive per-trace facet recipes captured in
+`facets=`: `tl.trace` argument for additive per-trace facet recipes captured in
 that trace's registry snapshot.
 
-`using()`: `tl.facets.using(...)` context manager for additive context-local
+`adding()`: `tl.facets.adding(...)` context manager for additive context-local
 recipes used only by traces captured inside the context.
 
 `reset()`: `tl.facets.reset()` restores the process registry to built-in recipes.

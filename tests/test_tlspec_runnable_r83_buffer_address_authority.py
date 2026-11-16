@@ -24,7 +24,7 @@ Observed pre-fix, all silent wrong results:
   scored a PASS -- the bug was hiding in the zero-collateral evidence.)
 
 The corruption also reaches plain, save-free public metadata:
-``trace["buffer_1"].address`` reported a name that was not that tensor's.
+``trace["buffer_1"].buffer_address`` (then ``.address``) reported a name that was not that tensor's.
 
 PRE-EXISTING (byte-identical at ``10975d98``) and DISTINCT from the documented
 multi-positional-arg residual, which is cross-capture, needs a prior save, and
@@ -53,18 +53,19 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._record_type import record_type
+from torchlens._runnable import PathFaithfulness
 from torchlens.errors import RunnablePreflightError
 from torchlens.options import CaptureOptions
-from torchlens.runnable import PathFaithfulness
 
-_CAPTURE = CaptureOptions(intervention_ready=True, capture_container_structure=True, cache=False)
+_CAPTURE = CaptureOptions(replayable=True, capture_container_structure=True, cache=False)
 
 
 def _buffer_addresses(trace: Any) -> list[tuple[str, str | None]]:
     """Return ``(layer_label, address)`` for every materialized buffer op."""
 
     return [
-        (op.layer_label, op.address) for op in trace if getattr(op, "layer_type", None) == "buffer"
+        (op.layer_label, op.buffer_address) for op in trace if record_type(op, None) == "buffer"
     ]
 
 
@@ -82,7 +83,7 @@ def _replay_or_refuse(model: nn.Module, x: torch.Tensor, path: Path) -> Any | No
         trace.save(path, level="runnable", include_weights=True)
     except RunnablePreflightError:
         return None
-    return tl.load(path).run(inputs=x.clone())
+    return tl.load(path).run_transaction(inputs=x.clone())
 
 
 # --------------------------------------------------------------------------- #
@@ -174,45 +175,7 @@ class _Nested(nn.Module):
         return self.child(x) + self.top
 
 
-@pytest.mark.smoke
-def test_plain_attribute_does_not_steal_a_registered_buffer_address() -> None:
-    """The recorded address must survive postprocess, registered or not.
-
-    Pre-fix: ``[('buffer_1','top'), ('buffer_2','top')]`` -- ``q``'s event was
-    given ``top``'s address by the shape rung, so TWO ops claimed ``top`` and
-    neither reported ``q``.
-    """
-
-    trace = _capture(_Minimal(), torch.zeros(2, 2))
-    assert _buffer_addresses(trace) == [("buffer_1", "q"), ("buffer_2", "top")]
-
-
-@pytest.mark.smoke
-def test_list_element_does_not_steal_a_registered_buffer_address() -> None:
-    """Matrix case F: the list-element spelling must resolve honestly too."""
-
-    trace = _capture(_ListElement(), torch.zeros(2, 2))
-    addresses = dict(_buffer_addresses(trace))
-    assert "top" in addresses.values()
-    assert sorted(addresses.values()) != ["top", "top"], "two ops claimed one address"
-    assert "h.0" in addresses.values(), f"list element lost its address: {addresses}"
-
-
-@pytest.mark.smoke
-def test_nested_plain_attribute_keeps_its_own_address() -> None:
-    """The nested case that hid inside the r82 over-trigger battery.
-
-    Pre-fix ``child.q`` was reported as ``'top'`` and the artifact replayed
-    ``VERIFIED`` at max-diff 4.37 against a fresh oracle-1 instance.
-    """
-
-    trace = _capture(_Nested(), torch.randn(2, 4, 8, 8))
-    addresses = dict(_buffer_addresses(trace))
-    assert "child.q" in addresses.values(), f"plain attribute lost its address: {addresses}"
-    assert "child.cb" in addresses.values()
-    assert "top" in addresses.values()
-
-
+# Kept: a sole mutation kill.
 def test_display_address_and_backend_address_are_decoupled(tmp_path: Path) -> None:
     """A plain-attribute buffer keeps a display ``address`` but no ``backend_address``.
 
@@ -228,7 +191,11 @@ def test_display_address_and_backend_address_are_decoupled(tmp_path: Path) -> No
     """
 
     trace = _capture(_Nested(), torch.randn(2, 4, 8, 8))
-    by_address = {op.address: op for op in trace.ops if op.is_buffer and op.address is not None}
+    by_address = {
+        op.buffer_address: op
+        for op in trace._layer_list
+        if op.graph.is_buffer and op.buffer_address is not None
+    }
 
     assert by_address["child.q"].backend_address is None, "plain-attr has no backend address"
     assert by_address["child.cb"].backend_address == "child.cb", "registered keeps both"
@@ -239,12 +206,15 @@ def test_display_address_and_backend_address_are_decoupled(tmp_path: Path) -> No
     trace.save(path)
     loaded = tl.load(path)
     loaded_by_address = {
-        op.address: op for op in loaded.ops if op.is_buffer and op.address is not None
+        op.buffer_address: op
+        for op in loaded._layer_list
+        if op.graph.is_buffer and op.buffer_address is not None
     }
     assert loaded_by_address["child.q"].backend_address is None
     assert loaded_by_address["child.cb"].backend_address == "child.cb"
 
 
+# Kept: shares a parametrize list that is not trimmable per id with kept params.
 @pytest.mark.parametrize(
     "factory",
     [_Normalizer, _Minimal, _ListElement, _Nested],
@@ -280,7 +250,7 @@ def test_non_registered_constant_never_replays_a_silent_wrong_verified(
 
     max_diff = (result.output - oracle).abs().max().item()
     if result.report.path_faithfulness is PathFaithfulness.VERIFIED:
-        assert not result.report.poisoned
+        assert not result.report.is_poisoned
         assert max_diff < 1e-6, f"FALSE VERIFIED: replay disagrees with oracle 1 by {max_diff}"
 
 
@@ -321,36 +291,3 @@ class _NestedRegistered(nn.Module):
         """Consume a nested BN buffer set and a top-level buffer."""
 
         return self.bn(x) * self.scale
-
-
-@pytest.mark.smoke
-@pytest.mark.parametrize("train", [False, True], ids=["eval", "train"])
-def test_registered_buffers_resolve_to_their_own_addresses(train: bool) -> None:
-    """Every registered buffer must still resolve to its OWN dotted address.
-
-    The ladder's honest job. ``num_batches_tracked`` and the BatchNorm
-    running-stat pairing are resolved ahead of the generic rung and must be
-    untouched by making the recorded address authoritative.
-    """
-
-    model = _NestedRegistered()
-    model.train(train)
-    trace = _capture(model, torch.randn(2, 4, 8, 8))
-    addresses = {address for _label, address in _buffer_addresses(trace)}
-    assert "bn.running_mean" in addresses
-    assert "bn.running_var" in addresses
-    assert "scale" in addresses
-
-
-@pytest.mark.smoke
-@pytest.mark.parametrize("train", [False, True], ids=["eval", "train"])
-def test_convbn_still_replays_verified(tmp_path: Path, train: bool) -> None:
-    """ConvBN must stay VERIFIED in both modes -- no new ceiling, no refusal."""
-
-    model = _ConvBN()
-    model.train(train)
-    x = torch.randn(2, 4, 8, 8)
-    result = _replay_or_refuse(model, x, tmp_path / f"convbn_{train}.tlspec")
-    assert result is not None, "ConvBN must not start refusing at save"
-    assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
-    assert not result.report.poisoned

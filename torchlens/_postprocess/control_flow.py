@@ -1,0 +1,1045 @@
+"""Steps 5-6: Conditional branches and buffer layer fixes.
+
+Step 5 (_mark_conditional_branches) runs a six-phase conditional pipeline:
+    5a. Build AST file indexes for files referenced by terminal scalar bools.
+    5b. Classify terminal bools into branch/non-branch contexts.
+    5c. Materialize dense conditional events from structural AST keys.
+    5d. Backward-flood IF edges from branch-participating bools only.
+    5e. Attribute executed ops to THEN/ELIF/ELSE/FALLTHROUGH arms across every forward edge.
+    5f. Materialize derived compatibility views from primary structures.
+Step 6 (_fix_buffer_layers): Connects buffer sources, merges re-logged reads of
+    one buffer version (same module, same parent, same recorded version), and
+    assigns buffer pass numbers.
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from typing import TYPE_CHECKING, Any
+
+from .._data_classes.op import Op
+from .._data_classes.trace import ConditionalEvent
+from ..backends.torch._completeness_escape_state import (
+    host_escape_bool_consumer_locations,
+    host_escape_bool_source_labels,
+)
+from . import _column_passes_graph, ast_branches
+from ._branch_attribution import _translate_conditional_stack
+from ._buffer_source_wiring import _buffer_values_identical, _wire_buffer_to_source
+
+if TYPE_CHECKING:
+    from .._data_classes.trace import ConditionalEvent, Trace
+
+
+_BRANCH_CONTEXT_KINDS = frozenset({"if_test", "elif_test", "ifexp"})
+
+
+def _mark_conditional_branches(self: Trace) -> None:
+    """Step 5: Classify bools, materialize events, and attribute conditional edges.
+
+    The public Step 5 entry point delegates to six internal phases:
+
+    1. Build AST file indexes for all files touched by terminal scalar bools.
+    2. Classify terminal bools and collect observed structural conditional keys.
+    3. Materialize dense ``ConditionalEvent`` records from those keys.
+    4. Backward-flood IF edges from branch-participating bools only.
+    5. Attribute executed ops and forward edges to conditional branch arms.
+    6. Rebuild compatibility views derived from primary structures.
+
+    Performance fast-path: when no terminal scalar bools were captured, the
+    model has no conditional branches the pipeline can attribute, so we skip
+    the AST file indexing, per-bool classification, and per-op
+    ``attribute_op()`` work. All Trace-level conditional collections are
+    already initialized empty in :meth:`Trace.__init__`, and per-layer
+    conditional fields are initialized to their empty defaults during
+    capture (see ``_capture/output_tensors.py``). The fast-path is verified
+    against the slow-path defaults via ``tests/test_perf_bundle.py``.
+    """
+
+    _seed_proven_bool_consumers(self)
+    if _can_fast_skip_step5(self):
+        return
+
+    file_indexes = _build_file_indexes(self)
+    conditional_keys, bool_classifications = _classify_bool_layers(self)
+    # Defensive guard: if no terminal bool produced a structural conditional
+    # key, attribution will produce zero edges, matching the fast-skip output.
+    # This invariant makes bool-detector drift fail explicitly instead of
+    # silently making the fast-path miss work.
+    if not bool_classifications and conditional_keys:
+        # A real raise, not an assert: the whole point of this guard is to make
+        # bool-detector drift fail EXPLICITLY, and `python -O` strips asserts --
+        # which would restore exactly the silent fast-path miss it exists to
+        # prevent.
+        raise RuntimeError(
+            "Internally-terminated bool layers were absent but "
+            f"{len(conditional_keys)} conditional key(s) were produced; the "
+            "fast-skip precondition is stale. This means the bool detector and "
+            "the conditional-key builder disagree, so conditional attribution "
+            "would silently diverge from the fast-path output."
+        )
+    events_by_key = _materialize_conditional_records(
+        self,
+        file_indexes,
+        conditional_keys,
+        bool_classifications,
+    )
+    _mark_conditional_branches_if_backward_flood(self, bool_classifications)
+    _attribute_branches_forward(self, events_by_key)
+    _materialize_derived_views(self)
+
+
+def _seed_proven_bool_consumers(self: Trace) -> None:
+    """Add captured tensor-to-host bool consumers to Step 5's candidate list.
+
+    Parameters
+    ----------
+    self:
+        Trace being postprocessed.
+
+    Notes
+    -----
+    A predicate returned by the model has a synthetic output child, so it is not
+    an internal graph sink. The capture-time ``__bool__`` observer independently
+    proves that the tensor was consumed on the host; that proof, rather than
+    childlessness, makes it a terminal conditional candidate.
+
+    Seeding stays gated on ``is_scalar_bool`` (0-dim ``torch.bool``): the
+    runnable witness-obligation registry can only witness scalar-bool
+    predicates, so seeding a proven non-bool truthiness consumer (or a
+    one-element bool VECTOR) would materialize conditional arm edges that
+    every level="runnable" save refuses at producer preflight. Recording
+    those classes is deferred until the runnable contract gains a matching
+    predicate witness family.
+    """
+
+    proven_labels = host_escape_bool_source_labels(self)
+    # Shadow set over the list[str] ledger: the per-label list scan was
+    # O(k^2) in terminated-bool count.
+    seen_terminated_bool_labels = set(self.internally_terminated_bool_ops)
+    for label in self._raw_graph_ws.raw_layer_labels_list:
+        if label not in proven_labels:
+            continue
+        layer = self[label]
+        if not layer._control_flow_is_scalar_bool or getattr(layer, "_graph_is_orphan", False):
+            continue
+        if label not in seen_terminated_bool_labels:
+            seen_terminated_bool_labels.add(label)
+            self.internally_terminated_bool_ops.append(label)
+        layer._control_flow_is_terminal_bool = True
+
+
+def _can_fast_skip_step5(self: Trace) -> bool:
+    """Return True when Step 5 has no work to do.
+
+    The slow path's only branch-attributing inputs are the Trace's
+    ``internally_terminated_bool_ops``: if no terminal scalar bool was
+    captured, ``_iter_terminal_scalar_bool_labels`` yields nothing, so
+    every downstream collection (events, edges, per-layer arm children)
+    would resolve to its empty default. Skipping the slow path is then
+    semantically equivalent to running it.
+
+    The function also checks the Trace-level conditional collections
+    (``conditional_records``, ``conditional_branch_edges``,
+    ``conditional_arm_entry_edges``, ``conditional_edge_call_indices``). They are initialized empty in
+    :meth:`Trace.__init__`, and the slow path resets them on entry.
+    Any caller that pre-populated these would change the user-visible
+    output if we skipped, so we conservatively run the slow path in that
+    (pathological) case as well.
+    """
+
+    if self.internally_terminated_bool_ops:
+        return False
+    if self._graph_conditional_records:
+        return False
+    if self._graph_conditional_branch_edges:
+        return False
+    if self._graph_conditional_arm_entry_edges:
+        return False
+    return not self._graph_conditional_edge_call_indices
+
+
+def _build_file_indexes(
+    self: Trace,
+) -> dict[str, ast_branches.FileIndex | None]:
+    """Phase 5a: Build cached AST indexes for files touched by terminal bools.
+
+    Parameters
+    ----------
+    self:
+        Model log being postprocessed.
+
+    Returns
+    -------
+    Dict[str, Optional[ast_branches.FileIndex]]
+        Mapping from filename to the cached AST index, or ``None`` when the
+        file could not be parsed or loaded.
+    """
+
+    file_indexes: dict[str, ast_branches.FileIndex | None] = {}
+    consumer_locations = host_escape_bool_consumer_locations(self)
+    for bool_label in _iter_terminal_scalar_bool_labels(self):
+        bool_layer = self[bool_label]
+        for filename, _line_number in consumer_locations.get(bool_label, ()):
+            if filename not in file_indexes:
+                file_indexes[filename] = ast_branches.get_file_index(filename)
+        for frame in bool_layer._source_frames:
+            if frame.file in file_indexes:
+                continue
+            file_indexes[frame.file] = ast_branches.get_file_index(frame.file)
+    return file_indexes
+
+
+def _classify_bool_layers(
+    self: Trace,
+) -> tuple[list[ast_branches.ConditionalKey], dict[str, list[ast_branches.BoolClassification]]]:
+    """Phase 5b: Classify terminal scalar bools and collect observed conditionals.
+
+    Every witnessed consumer location of a bool is classified — not just the
+    first non-``"unknown"`` one. A bool consumed by ``assert``/``while`` and
+    LATER by an ``if`` test is still a conditional bool (order independence),
+    and one bool gating several ``if`` statements yields one classification
+    per gated conditional (1:N predicate reuse). The runtime frame fallback
+    (column-precise) runs only when no consumer location produced a
+    branch-participating classification.
+
+    Parameters
+    ----------
+    self:
+        Model log being postprocessed.
+
+    Returns
+    -------
+    Tuple[List[ast_branches.ConditionalKey], Dict[str, List[ast_branches.BoolClassification]]]
+        First-seen ordered conditional keys plus, per raw bool layer label, the
+        deduplicated list of branch-participating classifications (empty when
+        the bool participates in no conditional).
+    """
+
+    bool_classifications: dict[str, list[ast_branches.BoolClassification]] = {}
+    ordered_conditional_keys: dict[ast_branches.ConditionalKey, None] = {}
+    consumer_locations = host_escape_bool_consumer_locations(self)
+
+    for bool_label in _iter_terminal_scalar_bool_labels(self):
+        bool_layer = self[bool_label]
+        observed: list[ast_branches.BoolClassification] = []
+        for filename, line_number in consumer_locations.get(bool_label, ()):
+            location_classification = ast_branches.classify_bool(filename, line_number, None)
+            if location_classification.kind != "unknown":
+                observed.append(location_classification)
+
+        branch_classifications = _dedup_branch_classifications(observed)
+
+        frame_classification: ast_branches.BoolClassification | None = None
+        for frame in reversed(bool_layer._source_frames):
+            frame_candidate = ast_branches.classify_bool(
+                frame.file,
+                frame.line_number,
+                frame.col_offset,
+            )
+            if frame_candidate.kind == "unknown":
+                continue
+            frame_classification = frame_candidate
+            break
+
+        if not branch_classifications:
+            if frame_classification is not None:
+                observed.append(frame_classification)
+                branch_classifications = _dedup_branch_classifications([frame_classification])
+        elif (
+            frame_classification is not None
+            and frame_classification.kind in _BRANCH_CONTEXT_KINDS
+            and frame_classification.conditional_key is not None
+            and frame_classification.conditional_key
+            not in {c.conditional_key for c in branch_classifications}
+        ):
+            # Creation-site conflict: the bool op was created inside the test
+            # span of one conditional while the witnessed consumer line
+            # attributes it to a DIFFERENT conditional. Line-only runtime
+            # attribution is misreporting one of the two (e.g. a formatter-
+            # wrapped multi-line nested ternary, where the interpreter
+            # reports the inner ternary's line for the outer test's
+            # ``__bool__``). Linking either key could cross-wire a foreign
+            # bool into a conditional's public record, so fail closed for
+            # this bool instead of guessing.
+            observed = []
+            branch_classifications = []
+
+        if branch_classifications:
+            primary = branch_classifications[0]
+        elif observed:
+            primary = observed[0]
+        else:
+            primary = ast_branches.BoolClassification("unknown", None, None, None)
+
+        bool_layer._control_flow_context_kind = primary.kind
+        bool_layer._control_flow_wrapper_kind = primary.wrapper_kind
+        bool_layer._control_flow_is_terminal_conditional_bool = bool(branch_classifications)
+        bool_layer.terminal_conditional_id = None
+        bool_classifications[bool_label] = branch_classifications
+
+        for classification in branch_classifications:
+            assert classification.conditional_key is not None  # mypy narrowing
+            ordered_conditional_keys.setdefault(classification.conditional_key, None)
+
+    return list(ordered_conditional_keys.keys()), bool_classifications
+
+
+def _dedup_branch_classifications(
+    classifications: list[ast_branches.BoolClassification],
+) -> list[ast_branches.BoolClassification]:
+    """Return the branch-participating classifications, deduplicated in order.
+
+    Parameters
+    ----------
+    classifications:
+        Classification results from consumer locations or runtime frames.
+
+    Returns
+    -------
+    List[ast_branches.BoolClassification]
+        Classifications whose kind is branch-participating and whose
+        conditional key is present, deduplicated by
+        ``(conditional_key, branch_test_kind)`` preserving first-seen order.
+    """
+
+    deduplicated: list[ast_branches.BoolClassification] = []
+    seen: set[tuple[ast_branches.ConditionalKey, str | None]] = set()
+    for classification in classifications:
+        if (
+            classification.kind not in _BRANCH_CONTEXT_KINDS
+            or classification.conditional_key is None
+        ):
+            continue
+        identity_key = (classification.conditional_key, classification.branch_test_kind)
+        if identity_key in seen:
+            continue
+        seen.add(identity_key)
+        deduplicated.append(classification)
+    return deduplicated
+
+
+def _materialize_conditional_records(
+    self: Trace,
+    file_indexes: dict[str, ast_branches.FileIndex | None],
+    conditional_keys: list[ast_branches.ConditionalKey],
+    bool_classifications: dict[str, list[ast_branches.BoolClassification]],
+) -> dict[ast_branches.ConditionalKey, ConditionalEvent]:
+    """Phase 5c: Materialize dense conditional events and translate bool keys.
+
+    One bool may gate several conditionals (predicate reuse), so every
+    branch-participating classification links its bool to the matching event.
+    The scalar ``terminal_conditional_id`` keeps its historical 1:1 shape by
+    pointing at the FIRST linked event; the complete 1:N linkage lives on each
+    event's ``bool_layers``. Three postprocess-internal annotations are stashed
+    on each event for finalization's public record builder:
+    ``_arm_bool_indices`` (branch kind -> indices into ``bool_layers`` whose
+    runtime consumption evaluated THAT arm's test; indices survive the
+    raw-to-final label rename that rewrites ``bool_layers`` in place),
+    ``_arm_test_structures`` (branch kind -> ``"bare"``/``"negated"``/
+    ``"compound"`` bool-value semantics of the arm's test expression), and
+    ``_bool_layers_raw`` (index-aligned RAW labels so finalization resolves
+    the exact per-pass evaluating op of rolled multi-pass bools).
+
+    Parameters
+    ----------
+    self:
+        Model log being postprocessed.
+    file_indexes:
+        Cached AST file indexes from phase 5a.
+    conditional_keys:
+        Ordered structural conditional keys observed in phase 5b.
+    bool_classifications:
+        Per-bool branch-participating classifications keyed by raw layer label.
+
+    Returns
+    -------
+    Dict[ast_branches.ConditionalKey, ConditionalEvent]
+        Mapping from structural conditional key to the dense event object.
+    """
+
+    record_lookup = _build_conditional_record_lookup(file_indexes)
+    self._graph_conditional_records = []
+
+    events_by_key: dict[ast_branches.ConditionalKey, ConditionalEvent] = {}
+    for conditional_id, conditional_key in enumerate(conditional_keys):
+        if conditional_key not in record_lookup:
+            raise ValueError(
+                f"Observed conditional key was not found in the AST index: {conditional_key!r}"
+            )
+        record, function_qualname = record_lookup[conditional_key]
+        event = ConditionalEvent(
+            id=conditional_id,
+            kind=record.kind,
+            source_file=record.source_file,
+            function_qualname=function_qualname,
+            function_span=record.function_span,
+            if_stmt_span=record.if_stmt_span,
+            test_span=record.test_span,
+            # Copies, never aliases: the record lives in ast_branches' process-
+            # global file cache, so handing its dicts to the event verbatim let
+            # any caller mutating trace metadata poison every later capture of
+            # the same file (fw3settle: invariant-7's elif-key edit surfaced as
+            # a clean-capture invariant failure in a later test). Span values
+            # are immutable tuples, so a shallow copy is a full fence.
+            branch_ranges=dict(record.branch_ranges),
+            branch_test_spans=dict(record.branch_test_spans),
+            call_depth=record.call_depth,
+            parent_conditional_id=None,
+            parent_branch_kind=record.parent_branch_kind,
+        )
+        # Postprocess-internal annotations consumed by finalization's
+        # ``_build_conditional_records``; instance attributes (not dataclass
+        # fields) so the portable/public ConditionalEvent schema is unchanged.
+        # ``_bool_layers_raw`` mirrors ``bool_layers`` with RAW labels: raw
+        # labels are unique per pass and stay valid ``layer_dict_all_keys``
+        # lookup keys, so finalization can resolve the EXACT evaluating op of
+        # a rolled multi-pass bool layer. The renamed public ``bool_layers``
+        # collapses rolled passes onto one base label, and an unqualified
+        # lookup resolves last-writer-wins to an arbitrary pass (round-24
+        # condbranch seal).
+        setattr(event, "_arm_bool_indices", {})
+        setattr(event, "_arm_test_structures", dict(record.branch_test_structures))
+        setattr(event, "_bool_layers_raw", [])
+        events_by_key[conditional_key] = event
+        self._graph_conditional_records.append(event)
+
+    for conditional_key in conditional_keys:
+        record, _function_qualname = record_lookup[conditional_key]
+        event = events_by_key[conditional_key]
+        parent_conditional_key = record.parent_conditional_key
+        if parent_conditional_key is not None and parent_conditional_key in events_by_key:
+            event.parent_conditional_id = events_by_key[parent_conditional_key].id
+
+    # Position/membership shadows: the list `not in` / `.index`
+    # trio made this loop O(k^2) per conditional over its terminal bool ops
+    # (a bool inside a hot unrolled loop shares one structural key). The
+    # shadows keep `bool_layers`/`_arm_bool_indices` byte-identical --
+    # first-occurrence index, insertion order preserved.
+    bool_positions_by_event: dict[int, dict[str, int]] = {}
+    arm_seen_by_event: dict[int, dict[str, set[int]]] = {}
+    for bool_label, classifications in bool_classifications.items():
+        bool_layer = self[bool_label]
+        bool_layer.terminal_conditional_id = None
+        for classification in classifications:
+            bool_conditional_key: ast_branches.ConditionalKey | None = (
+                classification.conditional_key
+            )
+            if bool_conditional_key is None or bool_conditional_key not in events_by_key:
+                continue
+            event = events_by_key[bool_conditional_key]
+            if bool_layer.terminal_conditional_id is None:
+                bool_layer.terminal_conditional_id = event.id
+            positions = bool_positions_by_event.get(event.id)
+            if positions is None:
+                positions = {}
+                for index, label in enumerate(event.bool_layers):
+                    positions.setdefault(label, index)
+                bool_positions_by_event[event.id] = positions
+            bool_index = positions.get(bool_label)
+            if bool_index is None:
+                bool_index = len(event.bool_layers)
+                positions[bool_label] = bool_index
+                event.bool_layers.append(bool_label)
+                getattr(event, "_bool_layers_raw").append(bool_label)
+            arm_kind = classification.branch_test_kind or "then"
+            arm_bool_indices: dict[str, list[int]] = getattr(event, "_arm_bool_indices")
+            arm_indices = arm_bool_indices.setdefault(arm_kind, [])
+            arm_seen = arm_seen_by_event.setdefault(event.id, {}).get(arm_kind)
+            if arm_seen is None:
+                arm_seen = set(arm_indices)
+                arm_seen_by_event[event.id][arm_kind] = arm_seen
+            if bool_index not in arm_seen:
+                arm_seen.add(bool_index)
+                arm_indices.append(bool_index)
+
+    for bool_label in _iter_terminal_scalar_bool_labels(self):
+        assert not hasattr(self[bool_label], "_bool_conditional_key")
+
+    return events_by_key
+
+
+def _mark_conditional_branches_if_backward_flood(
+    self: Trace,
+    bool_classifications: dict[str, list[ast_branches.BoolClassification]],
+) -> None:
+    """Phase 5d: Backward-flood IF edges from branch-participating bools only.
+
+    Parameters
+    ----------
+    self:
+        Model log being postprocessed.
+    bool_classifications:
+        Per-bool branch-participating classifications keyed by raw layer label.
+    """
+
+    branch_bool_labels = [
+        bool_label
+        for bool_label in _iter_terminal_scalar_bool_labels(self)
+        if bool_classifications[bool_label]
+        and self[bool_label]._control_flow_is_terminal_conditional_bool
+    ]
+    # Reset and flood bodies (column view, facade fallback) live in ``_column_passes_graph``.
+    _column_passes_graph.reset_and_flood_if_edges(self, branch_bool_labels)
+
+
+def _attribute_branches_forward(
+    self: Trace,
+    events_by_key: dict[ast_branches.ConditionalKey, ConditionalEvent],
+) -> None:
+    """Phase 5e: Attribute executed ops and forward edges to conditional arms.
+
+    Parameters
+    ----------
+    self:
+        Model log being postprocessed.
+    events_by_key:
+        Structural-to-dense conditional event lookup created in phase 5c.
+    """
+
+    _assign_conditional_branch_stacks(self, events_by_key)
+    _column_passes_graph.attribute_forward_edges(self)
+
+
+def _assign_conditional_branch_stacks(
+    self: Trace,
+    events_by_key: dict[ast_branches.ConditionalKey, ConditionalEvent],
+) -> None:
+    """Give every non-orphan op its conditional branch stack and reset its arm children.
+
+    Ops from the same call site carry the same frame positions, and the
+    attribution reads nothing else from a frame, so each distinct stack is
+    attributed once per pass; every op still gets its own list.
+
+    Parameters
+    ----------
+    self:
+        Model log being postprocessed.
+    events_by_key:
+        Structural-to-dense conditional event lookup created in phase 5c.
+    """
+
+    _column_passes_graph.assign_conditional_branch_stacks(
+        self, events_by_key, _translate_conditional_stack
+    )
+
+
+def _materialize_derived_views(self: Trace) -> None:
+    """Phase 5f: Rebuild compatibility views derived from primary conditional data.
+
+    Parameters
+    ----------
+    self:
+        Model log being postprocessed.
+    """
+
+    _column_passes_graph.materialize_derived_views(self)
+
+
+def _iter_terminal_scalar_bool_labels(self: Trace) -> list[str]:
+    """Return terminal scalar bool labels in deterministic execution order.
+
+    Parameters
+    ----------
+    self:
+        Model log being postprocessed.
+
+    Returns
+    -------
+    List[str]
+        Raw tensor labels for terminal scalar bool layers, ordered by first-seen
+        execution order in the model log.
+    """
+
+    terminal_bool_labels = set(self.internally_terminated_bool_ops)
+    return [
+        layer_label
+        for layer_label in self._raw_graph_ws.raw_layer_labels_list
+        if layer_label in terminal_bool_labels
+        and self[layer_label]._control_flow_is_scalar_bool
+        and not getattr(self[layer_label], "_graph_is_orphan", False)
+    ]
+
+
+def _build_conditional_record_lookup(
+    file_indexes: dict[str, ast_branches.FileIndex | None],
+) -> dict[ast_branches.ConditionalKey, tuple[ast_branches.ConditionalRecord, str]]:
+    """Build a structural-key lookup for materializing dense conditional events.
+
+    Parameters
+    ----------
+    file_indexes:
+        Cached file indexes produced in phase 5a.
+
+    Returns
+    -------
+    Dict[ast_branches.ConditionalKey, Tuple[ast_branches.ConditionalRecord, str]]
+        Mapping from structural conditional key to its record and owning
+        function qualname.
+    """
+
+    record_lookup: dict[
+        ast_branches.ConditionalKey, tuple[ast_branches.ConditionalRecord, str]
+    ] = {}
+    for file_index in file_indexes.values():
+        if file_index is None:
+            continue
+        for scope in file_index.scopes:
+            for conditional_record in scope.conditionals:
+                record_lookup[conditional_record.key] = (conditional_record, scope.qualname)
+    return record_lookup
+
+
+def _merge_same_version_buffers(
+    self: Trace,
+    buffer_labels: list[str],
+    deferred_removals: dict[str, tuple[Op, Op]],
+    survivor_edge_shadows: dict[str, dict[str, set[str]]],
+    rewired_buffers: list[str],
+) -> None:
+    """Merge the re-logged reads of one buffer version within one hash group.
+
+    A buffer node merges into an earlier node of its group only when capture
+    recorded both as the same buffer version: the same tensor object, storage
+    and version counter (``RawGraphWorkspace.buffer_version_keys``), and the
+    later node is not itself a journaled write (``buffer_write_kind``). Every
+    reassignment, ``.data =``/``set_`` swap and tracked in-place write therefore
+    keeps its own version node whatever value it wrote, so the graph records the
+    same buffer provenance from any entry state: a re-trace whose
+    buffers start from different values builds the same structure. The value
+    check that follows only refuses a merge across an opaque host write (same
+    version, changed bytes). A node with no recorded version (a projected
+    capture carries none) never merges.
+
+    Bucketing by version key also keeps the sweep linear: distinct versions are
+    never compared (avoiding a quadratic sweep).
+
+    Parameters
+    ----------
+    self:
+        Trace being postprocessed.
+    buffer_labels:
+        Buffer labels sharing one (modules + buffer_source + address) hash, in
+        logging order.
+    deferred_removals:
+        Shared deferred-removal map for ``_merge_buffer_entries``.
+    survivor_edge_shadows:
+        Shared survivor edge-membership sets for ``_merge_buffer_entries``.
+    rewired_buffers:
+        Raw labels of buffer rows whose edges changed; survivors are appended.
+    """
+
+    workspace = getattr(self, "_raw_graph_ws", None)
+    version_keys = {} if workspace is None else workspace.buffer_version_keys
+    unique_labels_by_version: dict[tuple[Any, ...], list[str]] = defaultdict(list)
+    for buffer_label in buffer_labels:
+        buffer = self[buffer_label]
+        version_key = version_keys.get(buffer._label_raw)
+        if version_key is None or buffer.out is None:
+            continue
+        survivor = None
+        if buffer.buffer_write_kind is None:
+            survivor = next(
+                (
+                    self[label]
+                    for label in unique_labels_by_version[version_key]
+                    if _buffer_values_identical(buffer.out, self[label].out)
+                ),
+                None,
+            )
+        if survivor is None:
+            unique_labels_by_version[version_key].append(buffer_label)
+            continue
+        _merge_buffer_entries(
+            self,
+            survivor,
+            buffer,
+            deferred_removals=deferred_removals,
+            survivor_edge_shadows=survivor_edge_shadows,
+        )
+        rewired_buffers.append(survivor._label_raw)
+
+
+def _fix_buffer_layers(self: Trace) -> None:
+    """Step 6: Connect buffer sources, merge duplicates, and assign pass numbers.
+
+    Buffer tensors (nn.Module registered buffers) are logged as source tensors
+    during the forward pass but may lack proper parent connections. This function:
+
+    1. Connects each buffer to its buffer_source (the tensor that produced the
+       buffer's value), updating parent/child links and ancestry.
+    2. Merges re-logged reads of one buffer version: within a group sharing the
+       hash (modules + buffer_source + address), a node merges into an earlier
+       node only when capture recorded the same buffer version for both (see
+       ``_merge_same_version_buffers``). Values never decide it.
+    3. Assigns sequential buffer_pass numbers per address.
+    """
+    buffer_counter: dict[str, int] = defaultdict(lambda: 1)
+    buffer_hash_groups: dict[str, list[str]] = defaultdict(list)
+    # Buffer rows whose edges this step changes; their descendant cones need ancestry
+    # re-derived (see _repropagate_ancestry_after_buffer_wiring).
+    rewired_buffers: list[str] = []
+
+    for layer_label in self.buffer_layers:
+        layer = self[layer_label]
+        if layer._graph_buffer_source is not None:
+            rewired_buffers.append(layer._label_raw)
+            _wire_buffer_to_source(self, layer, layer_label)
+
+        if layer.buffer_address is None:
+            equivalence_class = str(getattr(layer, "_graph_equivalence_class", ""))
+            if equivalence_class.startswith("buffer_"):
+                recovered_address = equivalence_class.removeprefix("buffer_")
+                if recovered_address and recovered_address != "None":
+                    layer.buffer_address = recovered_address
+        if layer.buffer_address is None:
+            layer.buffer_address = f"anonymous_buffer_{layer._label_raw}"
+        buffer_hash = str(layer.modules) + str(layer._graph_buffer_source) + layer.buffer_address
+        buffer_hash_groups[buffer_hash].append(layer_label)
+
+    deferred_buffer_removals: dict[str, tuple[Op, Op]] = {}
+    # Per-survivor membership sets shared across the whole sweep: the
+    # membership guards in _merge_buffer_entries otherwise rescan the
+    # survivor's growing edge lists once per merged duplicate.
+    survivor_edge_shadows: dict[str, dict[str, set[str]]] = {}
+    for buffers_orig in buffer_hash_groups.values():
+        _merge_same_version_buffers(
+            self, buffers_orig, deferred_buffer_removals, survivor_edge_shadows, rewired_buffers
+        )
+    _finish_deferred_buffer_removals(self, deferred_buffer_removals)
+
+    _repropagate_ancestry_after_buffer_wiring(self, rewired_buffers)
+    _repropagate_descendants_after_buffer_wiring(self, rewired_buffers)
+
+    # And relabel the buffer ops.
+
+    for layer_label in self.buffer_layers:
+        layer = self[layer_label]
+        address = layer.buffer_address
+        layer._internal_set("buffer_pass", buffer_counter[address])
+        self._buffer_num_calls[address] = buffer_counter[address]
+        buffer_counter[address] += 1
+
+
+def _repropagate_ancestry_after_buffer_wiring(self: Trace, rewired: list[str]) -> None:
+    """Re-derive ancestry over the DESCENDANT CONE of every buffer rewired at step 6.
+
+    Step 6 inserts ``buffer -> buffer_source`` edges AFTER capture-time ancestry
+    propagation and after steps 2/4, and it only ever updated the buffer row's OWN
+    ``input_ancestors``/``root_ancestors``. Nothing revisited the descendants, so on a
+    write-then-reread buffer every op downstream of the buffer kept its pre-edge sets:
+    ``self.b[:2].copy_(x); return self.b.sum()`` produced a ``sum`` op whose parent
+    carries ``input_ancestors={'input_1'}`` while the op itself carried ``set()`` -- an
+    op that demonstrably depends on the model input reporting no input ancestry at all,
+    on the default (depths-off) path where step 4's flood does not run to paper over it.
+    Public ``op.input_ancestors`` / ``root_ancestors`` reads, reachability queries, and
+    ``receptive_field`` all consume these sets, and they are portable state that survives
+    save/load.
+
+    The re-derivation is exactly the closure the ``ancestry_closure`` invariant checks,
+    applied to the affected cone only (raw-label space, topological order):
+
+    * ``input_ancestors``            = own-if-input, else the union over parents;
+    * ``internal_source_ancestors``  = ``{self}`` if an internal source, else the union;
+    * ``internal_source_parents``    = the parents carrying internal-source ancestry;
+    * ``root_ancestors``             = ``input_ancestors | internal_source_ancestors``.
+
+    Internal-source rows keep the ``root_ancestors`` value step 6 assigned them: the
+    source-minting producers disagree about self-inclusion there (a parentless factory
+    records the empty set, a buffer source records ``{self}``), which is a field-naming
+    question, not something to silently change here.
+    """
+
+    if not rewired:
+        return
+    raw_dict = self._raw_graph_ws.raw_layer_dict
+    cone: set[str] = set()
+    frontier = [label for label in rewired if label in raw_dict]
+    while frontier:
+        current = frontier.pop()
+        if current in cone:
+            continue
+        cone.add(current)
+        frontier.extend(child for child in raw_dict[current].children if child in raw_dict)
+
+    for raw_label in self._raw_graph_ws.raw_layer_labels_list:
+        if raw_label not in cone:
+            continue
+        layer = raw_dict[raw_label]
+        parents = [raw_dict[parent] for parent in layer.parents if parent in raw_dict]
+        input_ancestors: set[str] = {raw_label} if layer.is_input else set()
+        for parent in parents:
+            input_ancestors.update(parent.input_ancestors)
+        if layer._graph_is_internal_source:
+            internal_source_ancestors = {raw_label}
+        else:
+            internal_source_ancestors = set()
+            for parent in parents:
+                internal_source_ancestors.update(parent.graph.internal_source_ancestors)
+        layer.input_ancestors = input_ancestors
+        layer._graph_has_input_ancestor = bool(input_ancestors)
+        layer._graph_internal_source_ancestors = internal_source_ancestors
+        layer._graph_has_internal_source_ancestor = bool(internal_source_ancestors)
+        if not layer._graph_is_internal_source:
+            layer._graph_internal_source_parents = [
+                parent._label_raw for parent in parents if parent.graph.has_internal_source_ancestor
+            ]
+            layer._graph_root_ancestors = input_ancestors | internal_source_ancestors
+
+
+def _repropagate_descendants_after_buffer_wiring(self: Trace, rewired: list[str]) -> None:
+    """Re-derive output reach over the ANCESTOR CONE of every buffer rewired at step 6.
+
+    The child-direction mirror of :func:`_repropagate_ancestry_after_buffer_wiring`
+    (which repairs only the four parent-direction sets). ``output_descendants`` /
+    ``has_output_descendant`` are computed once at step 2 from the PRE-MERGE edges,
+    and the step-6 duplicate merge transfers the removed duplicate's children onto
+    the survivor without ever reconciling the survivor's child-direction reach.
+    Merged duplicates reaching DIFFERENT output sets (a multi-output model whose
+    value-identical buffer reads feed different outputs, or a dead-ending survivor
+    merged with an output-reaching duplicate) therefore shipped stale
+    ``output_descendants`` on the survivor and on every ancestor of it -- which the
+    ``ancestry_closure`` invariant (a genuine recompute from the final edges)
+    correctly FAILS on an honest capture.
+
+    The re-derivation is exactly the closure the invariant checks, applied to the
+    affected cone only (raw-label space, reverse topological order):
+
+    * ``output_descendants`` = ``{self}`` if an output, else the union over children;
+    * ``has_output_descendant`` mirrors the set's emptiness.
+
+    The cone walks PARENT edges from every rewired/survivor buffer: only ancestors
+    of a node whose child edges changed can have gained (or lost) output reach.
+    Children outside the cone kept their step-2 values, which are still the closure
+    of their (unchanged) child edges, so reading them is sound.
+
+    Distance fields are deliberately untouched, matching the parent-direction
+    repair's scope: step 4 populates them only under the non-default
+    ``mark_layer_depths`` and the distance closure check skips ``None`` values.
+    """
+
+    if not rewired:
+        return
+    raw_dict = self._raw_graph_ws.raw_layer_dict
+    cone: set[str] = set()
+    frontier = [label for label in rewired if label in raw_dict]
+    while frontier:
+        current = frontier.pop()
+        if current in cone:
+            continue
+        cone.add(current)
+        frontier.extend(parent for parent in raw_dict[current].parents if parent in raw_dict)
+
+    for raw_label in reversed(self._raw_graph_ws.raw_layer_labels_list):
+        if raw_label not in cone:
+            continue
+        layer = raw_dict[raw_label]
+        children = [raw_dict[child] for child in layer.children if child in raw_dict]
+        output_descendants: set[str] = {raw_label} if layer.is_output else set()
+        for child in children:
+            output_descendants.update(child.output_descendants)
+        layer.output_descendants = output_descendants
+        layer._graph_has_output_descendant = bool(output_descendants)
+
+
+def _merge_buffer_entries(
+    self: Trace,
+    source_buffer: Op,
+    buffer_to_remove: Op,
+    *,
+    deferred_removals: dict[str, tuple[Op, Op]] | None = None,
+    survivor_edge_shadows: dict[str, dict[str, set[str]]] | None = None,
+) -> None:
+    """Merge a duplicate buffer into a source buffer, rewiring all edges.
+
+    Transfers all child and parent connections from ``buffer_to_remove`` to
+    ``source_buffer``, updates parent_arg_positions in children to point to
+    the source buffer, fixes internal_source_parents/ancestors references
+    across the graph, and removes the duplicate from the layer dict.
+
+    ``survivor_edge_shadows`` (keyed by survivor raw label) carries the
+    survivor's edge-list membership sets across repeated merges into the same
+    survivor, so the guards below stay O(1) instead of rescanning lists that
+    grow with every merged duplicate. Any entry for a node
+    whose lists this call mutates as a NEIGHBOUR is invalidated, keeping the
+    shadows exact.
+    """
+    if survivor_edge_shadows is None:
+        survivor_edge_shadows = {}
+    shadow = survivor_edge_shadows.get(source_buffer._label_raw)
+    if shadow is None:
+        shadow = {
+            "children": set(source_buffer.children),
+            "parents": set(source_buffer.parents),
+            "internal_source_parents": set(source_buffer.graph.internal_source_parents),
+            "conditional_entry_children": set(source_buffer.control_flow.entry_children),
+        }
+        survivor_edge_shadows[source_buffer._label_raw] = shadow
+    # The removed duplicate can never be a survivor again.
+    survivor_edge_shadows.pop(buffer_to_remove._label_raw, None)
+    for child_layer in buffer_to_remove.children:
+        if child_layer not in shadow["children"]:
+            shadow["children"].add(child_layer)
+            source_buffer.children.append(child_layer)
+        # This call rewrites the child's own parent lists below; drop any
+        # survivor shadow it may hold so a later merge rebuilds it fresh.
+        if child_layer != source_buffer._label_raw:
+            survivor_edge_shadows.pop(child_layer, None)
+        # Preserve edge MULTIPLICITY: ``parents`` is an edge-OCCURRENCE list (one entry
+        # per argument slot), so a child consuming the removed buffer at two slots must
+        # end with two entries naming the survivor. ``list.remove`` strips only the FIRST
+        # occurrence, so repointing one-for-one is the multiplicity-faithful move; the
+        # closing ``_remove_log_entry(..., remove_references=True)`` scrub would otherwise
+        # strip the leftovers and drop the count to 1 (a safe hardening, not a claim
+        # about reachability).
+        child_parents = self[child_layer].parents
+        repointed = 0
+        while buffer_to_remove._label_raw in child_parents:
+            child_parents.remove(buffer_to_remove._label_raw)
+            repointed += 1
+        child_parents.extend([source_buffer._label_raw] * max(1, repointed))
+        if buffer_to_remove._label_raw in self[child_layer]._graph_internal_source_parents:
+            self[child_layer]._graph_internal_source_parents.remove(buffer_to_remove._label_raw)
+            self[child_layer]._graph_internal_source_parents.append(source_buffer._label_raw)
+
+        child_positions = self[child_layer]._call_parent_arg_positions
+        for arg_type in ["args", "kwargs"]:
+            for arg_label, arg_val in child_positions[arg_type].items():
+                if arg_val == buffer_to_remove._label_raw:
+                    child_positions[arg_type][arg_label] = source_buffer._label_raw
+
+    # The survivor now owns the removed duplicate's child edges, so it reaches
+    # every output the duplicate reached: merge the child-direction ancestry
+    # WITH the edges (symmetric with the parent-direction ancestry handling).
+    # The survivor's own ANCESTORS are reconciled afterwards by
+    # _repropagate_descendants_after_buffer_wiring's cone re-derivation.
+    if buffer_to_remove.graph.has_output_descendant:
+        source_buffer.output_descendants.update(buffer_to_remove.output_descendants)
+        source_buffer._graph_has_output_descendant = True
+
+    for parent_layer in buffer_to_remove.parents:
+        if parent_layer not in shadow["parents"]:
+            shadow["parents"].add(parent_layer)
+            source_buffer.parents.append(parent_layer)
+        if parent_layer != source_buffer._label_raw:
+            survivor_edge_shadows.pop(parent_layer, None)
+        parent_children = self[parent_layer].children
+        if buffer_to_remove._label_raw in parent_children:
+            parent_children.remove(buffer_to_remove._label_raw)
+        # Membership-guard the NEIGHBOUR side too (a safe hardening either way, NOT a
+        # claim about reachability). The survivor's own appends above are
+        # guarded, and this one must be as well: both merged duplicates share their
+        # parent BY CONSTRUCTION (the dedup hash at the call site includes
+        # ``buffer_source``), so on any non-None-source merge the shared parent's
+        # ``children`` got the survivor appended a SECOND time -- a duplicated child edge,
+        # a shape no honest capture produces (parents may legitimately duplicate for
+        # multi-slot reuse; children never do).
+        if source_buffer._label_raw not in parent_children:
+            parent_children.append(source_buffer._label_raw)
+
+    for parent_layer in buffer_to_remove.graph.internal_source_parents:
+        if parent_layer not in shadow["internal_source_parents"]:
+            shadow["internal_source_parents"].add(parent_layer)
+            source_buffer.graph.internal_source_parents.append(parent_layer)
+
+    # Step 5 ran BEFORE this merge: transfer the removed duplicate's
+    # conditional-parent annotations so the survivor keeps parenting the
+    # branch bools / arm-entry children the duplicate parented. The matching
+    # trace-level edges (conditional_branch_edges, conditional_arm_entry_edges,
+    # conditional_edge_call_indices) repoint via ``replacement_labels`` in the
+    # closing reference scrub.
+    for entry_child in buffer_to_remove.control_flow.entry_children:
+        if entry_child not in shadow["conditional_entry_children"]:
+            shadow["conditional_entry_children"].add(entry_child)
+            source_buffer.control_flow.entry_children.append(entry_child)
+    for cond_id, branch_children in buffer_to_remove.control_flow.arm_children.items():
+        survivor_branches = source_buffer.control_flow.arm_children.setdefault(cond_id, {})
+        for branch_kind, child_labels in branch_children.items():
+            survivor_children = survivor_branches.setdefault(branch_kind, [])
+            for child_label in child_labels:
+                if child_label not in survivor_children:
+                    survivor_children.append(child_label)
+
+    if deferred_removals is not None:
+        deferred_removals[buffer_to_remove._label_raw] = (source_buffer, buffer_to_remove)
+        return
+
+    self._raw_graph_ws.raw_layer_labels_list.remove(buffer_to_remove._label_raw)
+    self._raw_graph_ws.raw_layer_dict.pop(buffer_to_remove._label_raw)
+
+    for layer in self:
+        if buffer_to_remove._label_raw in layer._graph_root_ancestors:
+            layer._graph_root_ancestors.remove(buffer_to_remove._label_raw)
+            layer._graph_root_ancestors.add(source_buffer._label_raw)
+        if buffer_to_remove._label_raw in layer._graph_internal_source_ancestors:
+            layer._graph_internal_source_ancestors.remove(buffer_to_remove._label_raw)
+            layer._graph_internal_source_ancestors.add(source_buffer._label_raw)
+        # Repoint any op whose scalar ``buffer_source`` still names the removed
+        # buffer to the value-identical survivor. Unlike parents/children, the
+        # ``buffer_source`` field (and its arg-0 mirror in ``parent_arg_positions``)
+        # is NOT rewritten above and is absent from the raw->final rename + scrub
+        # lists, so without this it dangles -- the buffer-merge analogue of the
+        # campaign's "scrub removed buffer graph references" fix (e.g. speechbrain
+        # CRDNN LiGRU per-forward ``drop_mask_te.to(device)`` reassign buffers).
+        if layer._graph_buffer_source == buffer_to_remove._label_raw:
+            layer._graph_buffer_source = source_buffer._label_raw
+            arg_positions = layer._call_parent_arg_positions.get("args")
+            if arg_positions is not None and arg_positions.get(0) == buffer_to_remove._label_raw:
+                arg_positions[0] = source_buffer._label_raw
+
+    self._remove_log_entry(
+        buffer_to_remove,
+        remove_references=True,
+        replacement_labels={buffer_to_remove._label_raw: source_buffer._label_raw},
+    )
+
+
+def _finish_deferred_buffer_removals(
+    self: Trace,
+    removals: dict[str, tuple[Op, Op]],
+) -> None:
+    """Apply all trace-wide buffer substitutions in one graph scan.
+
+    Parameters
+    ----------
+    self:
+        Trace whose duplicate buffers were locally rewired.
+    removals:
+        Removed raw label to ``(survivor, removed op)`` mapping.
+    """
+
+    if not removals:
+        return
+    replacement_labels = {
+        removed_label: source._label_raw for removed_label, (source, _removed) in removals.items()
+    }
+    removed_labels = set(removals)
+    for layer in self:
+        root_hits = layer._graph_root_ancestors & removed_labels
+        if root_hits:
+            layer._graph_root_ancestors.difference_update(root_hits)
+            layer._graph_root_ancestors.update(replacement_labels[label] for label in root_hits)
+        source_hits = layer._graph_internal_source_ancestors & removed_labels
+        if source_hits:
+            layer._graph_internal_source_ancestors.difference_update(source_hits)
+            layer._graph_internal_source_ancestors.update(
+                replacement_labels[label] for label in source_hits
+            )
+        replacement = replacement_labels.get(layer._graph_buffer_source)
+        if replacement is not None:
+            old_source = layer._graph_buffer_source
+            layer._graph_buffer_source = replacement
+            arg_positions = layer._call_parent_arg_positions.get("args")
+            if arg_positions is not None and arg_positions.get(0) == old_source:
+                arg_positions[0] = replacement
+
+    self._raw_graph_ws.raw_layer_labels_list[:] = [
+        label for label in self._raw_graph_ws.raw_layer_labels_list if label not in removed_labels
+    ]
+    for removed_label in removed_labels:
+        self._raw_graph_ws.raw_layer_dict.pop(removed_label, None)
+    self._batch_remove_log_entries(
+        (removed for _source, removed in removals.values()),
+        remove_references=True,
+        replacement_labels=replacement_labels,
+    )

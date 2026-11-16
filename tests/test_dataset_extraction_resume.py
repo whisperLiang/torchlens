@@ -1,9 +1,10 @@
 """Resumability + self-description contract tests for :func:`torchlens.extract_dataset`.
 
-Covers the D7 resume-from-shard mechanism (atomic shard writes, per-batch
-manifest ledger, signature-checked resume, crash-safety proven via a hard
-child-process death) and the V5 self-describing manifest (site identity,
-stimulus provenance, axis semantics, dtype/device, loader round-trip).
+Covers the artifact-v2 resume mechanism (extract memo D1: append-only fsynced
+ledger, commit protocol, field-by-field signature compare, crash-safety proven
+via a hard child-process death) and the self-describing bounded manifest (site
+identity, stimulus provenance, axis semantics, dtype/device, loader
+round-trip).
 """
 
 from __future__ import annotations
@@ -20,12 +21,46 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._data_substrate import ExtractionArtifactError, read_trusted_rows
+from torchlens._extraction.resume import MANIFEST_FILENAME
+from torchlens._utils._torch_compat import HAS_SAFE_WEIGHTS_ONLY_LOAD
 from torchlens.dataset_extraction import (
-    MANIFEST_FILENAME,
-    MANIFEST_SCHEMA,
-    DatasetExtractionResumeError,
     load_extraction,
 )
+from torchlens.errors import DatasetExtractionResumeError
+
+
+def _interrupt_after(tmp_path: Path, n_shards: int) -> None:
+    """Reconstruct a mid-run artifact state: ``n_shards`` committed, in progress.
+
+    Truncates the append-only ledger to its first ``n_shards`` rows, deletes
+    the later shard files, and reverts the manifest to ``in_progress`` — the
+    exact on-disk state a kill between two shard commits leaves behind.
+
+    Parameters
+    ----------
+    tmp_path:
+        Artifact directory.
+    n_shards:
+        Committed-shard count to keep.
+    """
+
+    manifest_path = tmp_path / MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["status"] = "in_progress"
+    manifest["totals"] = None
+    manifest["ledger_digest"] = None
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    ledger_path = tmp_path / "ledger.jsonl"
+    rows = ledger_path.read_text(encoding="utf-8").splitlines()
+    ledger_path.write_text("".join(line + "\n" for line in rows[:n_shards]), encoding="utf-8")
+    for line in rows[n_shards:]:
+        (tmp_path / json.loads(line)["file"]).unlink()
+
+
+#: Forward calls per ``_CountingModel`` (by id), outside the model: a default
+#: capture is a pure observer and restores plain attributes the forward writes.
+_FORWARD_CALLS: dict[int, int] = {}
 
 
 class _CountingModel(nn.Module):
@@ -39,7 +74,17 @@ class _CountingModel(nn.Module):
         self.fc = nn.Linear(3, 4)
         self.relu = nn.ReLU()
         self.head = nn.Linear(4, 2)
-        self.n_forward_calls = 0
+        _FORWARD_CALLS[id(self)] = 0
+
+    @property
+    def n_forward_calls(self) -> int:
+        """Forward invocations, kept outside the model (a capture restores attributes)."""
+
+        return _FORWARD_CALLS[id(self)]
+
+    @n_forward_calls.setter
+    def n_forward_calls(self, value: int) -> None:
+        _FORWARD_CALLS[id(self)] = value
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Run the affine stack and count the call.
@@ -101,129 +146,64 @@ def test_resume_refuses_unmanifested_shard_dir(tmp_path: Path) -> None:
             _stimuli(),
             _LAYERS,
             batch_size=4,
-            output_dir=tmp_path,
+            path=tmp_path,
             progress=False,
             resume=True,
         )
     assert excinfo.value.fields["code"] == "extraction_resume_unmanifested_dir"
 
 
-def test_resume_refuses_mismatched_signature(tmp_path: Path) -> None:
-    """A resume whose run parameters differ from the artifact's refuses typed."""
+def test_deleted_ledgered_shard_refuses_typed(tmp_path: Path) -> None:
+    """A ledgered shard gone missing ends the trusted prefix TYPED (D1).
+
+    The v1 engine silently "healed" the artifact by recomputing from the
+    break; under the append-only v2 ledger a committed row can never be
+    rewritten, so a missing or size-mismatched member is a typed refusal on
+    BOTH resume and load — never a silent truncation, never a lie.
+    """
 
     model = _CountingModel().eval()
-    tl.extract_dataset(
-        model, _stimuli(), _LAYERS, batch_size=4, output_dir=tmp_path, progress=False
-    )
-    with pytest.raises(DatasetExtractionResumeError) as excinfo:
+    tl.extract_dataset(model, _stimuli(), _LAYERS, batch_size=2, path=tmp_path, progress=False)
+    (tmp_path / "batch_00003.safetensors").unlink()
+    with pytest.raises(ExtractionArtifactError) as excinfo:
         tl.extract_dataset(
             model,
             _stimuli(),
             _LAYERS,
-            batch_size=5,
-            output_dir=tmp_path,
+            batch_size=2,
+            path=tmp_path,
             progress=False,
             resume=True,
         )
-    assert excinfo.value.fields["code"] == "extraction_resume_signature_mismatch"
-    assert "batch_size" in excinfo.value.fields["mismatched_fields"]
-
-    with pytest.raises(DatasetExtractionResumeError) as excinfo:
-        tl.extract_dataset(
-            model,
-            _stimuli() + 1.0,
-            _LAYERS,
-            batch_size=4,
-            output_dir=tmp_path,
-            progress=False,
-            resume=True,
-        )
-    assert excinfo.value.fields["code"] == "extraction_resume_signature_mismatch"
-    assert "stimuli" in excinfo.value.fields["mismatched_fields"]
+    assert excinfo.value.fields["code"] == "extraction_ledger_prefix_broken"
+    with pytest.raises(ExtractionArtifactError) as excinfo:
+        load_extraction(tmp_path)
+    assert excinfo.value.fields["code"] == "extraction_ledger_prefix_broken"
 
 
-def test_resume_of_complete_artifact_never_runs_the_model(tmp_path: Path) -> None:
-    """Resuming a finished artifact returns its shard paths without a forward."""
+def test_torn_final_ledger_line_is_dropped_not_fatal(tmp_path: Path) -> None:
+    """Crash debris — a torn final ledger line — is never trusted, never fatal."""
 
     model = _CountingModel().eval()
-    first = tl.extract_dataset(
-        model, _stimuli(), _LAYERS, batch_size=4, output_dir=tmp_path, progress=False
+    tl.extract_dataset(model, _stimuli(), _LAYERS, batch_size=2, path=tmp_path, progress=False)
+    _interrupt_after(tmp_path, 2)
+    ledger_path = tmp_path / "ledger.jsonl"
+    ledger_path.write_text(
+        ledger_path.read_text(encoding="utf-8") + '{"index": 2, "file": "batch_0',
+        encoding="utf-8",
     )
-    calls_after_first = model.n_forward_calls
-    again = tl.extract_dataset(
-        model,
-        _stimuli(),
-        _LAYERS,
-        batch_size=4,
-        output_dir=tmp_path,
-        progress=False,
-        resume=True,
-    )
-    assert model.n_forward_calls == calls_after_first
-    assert again == first
-
-
-def test_resume_recomputes_only_missing_shards(tmp_path: Path) -> None:
-    """An interrupted run resumes from its ledger, recomputing only the tail."""
-
-    model = _CountingModel().eval()
-    tl.extract_dataset(
-        model, _stimuli(), _LAYERS, batch_size=2, output_dir=tmp_path, progress=False
-    )
-    manifest_path = tmp_path / MANIFEST_FILENAME
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    # Reconstruct the mid-run state: 2 of 5 shards ledgered, in progress.
-    manifest["status"] = "in_progress"
-    manifest["batches"] = manifest["batches"][:2]
-    manifest["stimulus_provenance"]["n_stimuli"] = None
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    for stale in ["batch_00002.pt", "batch_00003.pt", "batch_00004.pt"]:
-        (tmp_path / stale).unlink()
-
-    calls_before = model.n_forward_calls
+    rows = read_trusted_rows(tmp_path)
+    assert [row["index"] for row in rows] == [0, 1]
     paths = tl.extract_dataset(
         model,
         _stimuli(),
         _LAYERS,
         batch_size=2,
-        output_dir=tmp_path,
+        path=tmp_path,
         progress=False,
         resume=True,
     )
-    assert model.n_forward_calls == calls_before + 3
-    assert [path.name for path in paths] == [f"batch_0000{i}.pt" for i in range(5)]
-    loaded = load_extraction(tmp_path)
-    clean = tl.extract_dataset(model, _stimuli(), _LAYERS, batch_size=2, progress=False)
-    for key, tensor in clean.items():
-        assert torch.equal(loaded.activations[key], tensor)
-
-
-def test_resume_heals_complete_artifact_with_deleted_shard(tmp_path: Path) -> None:
-    """A complete artifact missing a ledgered shard recomputes it, never lies.
-
-    Regression pin: the completeness check must compare against the ledger as
-    recorded, not against the already-truncated trusted prefix (the two
-    aliased the same list in an early draft, which would have returned a
-    truncated path list for a complete-but-damaged artifact).
-    """
-
-    model = _CountingModel().eval()
-    tl.extract_dataset(
-        model, _stimuli(), _LAYERS, batch_size=2, output_dir=tmp_path, progress=False
-    )
-    (tmp_path / "batch_00003.pt").unlink()
-    calls_before = model.n_forward_calls
-    paths = tl.extract_dataset(
-        model,
-        _stimuli(),
-        _LAYERS,
-        batch_size=2,
-        output_dir=tmp_path,
-        progress=False,
-        resume=True,
-    )
-    assert model.n_forward_calls == calls_before + 2, "shards 3 and 4 recomputed"
-    assert [path.name for path in paths] == [f"batch_0000{i}.pt" for i in range(5)]
+    assert [path.name for path in paths] == [f"batch_0000{i}.safetensors" for i in range(5)]
     assert load_extraction(tmp_path).manifest["status"] == "complete"
 
 
@@ -232,18 +212,12 @@ def test_resume_with_iterable_stimuli_skips_consumed_prefix(tmp_path: Path) -> N
 
     model = _CountingModel().eval()
     rows = list(_stimuli(7))
-    tl.extract_dataset(model, rows, _LAYERS, batch_size=3, output_dir=tmp_path, progress=False)
-    manifest_path = tmp_path / MANIFEST_FILENAME
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["status"] = "in_progress"
-    manifest["batches"] = manifest["batches"][:1]
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    (tmp_path / "batch_00001.pt").unlink()
-    (tmp_path / "batch_00002.pt").unlink()
+    tl.extract_dataset(model, rows, _LAYERS, batch_size=3, path=tmp_path, progress=False)
+    _interrupt_after(tmp_path, 1)
 
     calls_before = model.n_forward_calls
     tl.extract_dataset(
-        model, rows, _LAYERS, batch_size=3, output_dir=tmp_path, progress=False, resume=True
+        model, rows, _LAYERS, batch_size=3, path=tmp_path, progress=False, resume=True
     )
     assert model.n_forward_calls == calls_before + 2
     loaded = load_extraction(tmp_path)
@@ -251,16 +225,20 @@ def test_resume_with_iterable_stimuli_skips_consumed_prefix(tmp_path: Path) -> N
     assert torch.equal(loaded.activations["relu"], clean["relu"])
 
     # A stimulus stream shorter than the ledger is a signature violation.
+    manifest_path = tmp_path / MANIFEST_FILENAME
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["status"] = "in_progress"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(DatasetExtractionResumeError) as excinfo:
         tl.extract_dataset(
-            model, rows[:2], _LAYERS, batch_size=3, output_dir=tmp_path, progress=False, resume=True
+            model, rows[:2], _LAYERS, batch_size=3, path=tmp_path, progress=False, resume=True
         )
     assert excinfo.value.fields["code"] == "extraction_resume_signature_mismatch"
 
 
+@pytest.mark.skipif(
+    not HAS_SAFE_WEIGHTS_ONLY_LOAD, reason=".pt shards need torch 2.6+ (CVE-2025-32434)"
+)
 @pytest.mark.heavy
 def test_hard_process_death_mid_shard_write_then_resume(tmp_path: Path) -> None:
     """A child hard-dies (``os._exit``) mid ``torch.save``; resume heals the run.
@@ -298,8 +276,9 @@ def test_hard_process_death_mid_shard_write_then_resume(tmp_path: Path) -> None:
             stimuli,
             {"relu": "relu", "logits": "output_1"},
             batch_size=2,
-            output_dir=out_dir,
+            path=out_dir,
             progress=False,
+            shard_format="pt",
         )
         """
     )
@@ -320,14 +299,15 @@ def test_hard_process_death_mid_shard_write_then_resume(tmp_path: Path) -> None:
     assert list(tmp_path.glob("*.tmp")), "hard death should leave the temp file behind"
     manifest = json.loads((tmp_path / MANIFEST_FILENAME).read_text(encoding="utf-8"))
     assert manifest["status"] == "in_progress"
-    assert [row["file"] for row in manifest["batches"]] == ["batch_00000.pt", "batch_00001.pt"]
+    trusted = read_trusted_rows(tmp_path)
+    assert [row["file"] for row in trusted] == ["batch_00000.pt", "batch_00001.pt"]
 
     torch.manual_seed(0)
     model = nn.Sequential(nn.Linear(3, 4), nn.ReLU(), nn.Linear(4, 2)).eval()
     stimuli = torch.arange(30, dtype=torch.float32).reshape(10, 3)
     layers = {"relu": "relu", "logits": "output_1"}
     tl.extract_dataset(
-        model, stimuli, layers, batch_size=2, output_dir=tmp_path, progress=False, resume=True
+        model, stimuli, layers, batch_size=2, path=tmp_path, progress=False, resume=True
     )
     assert not list(tmp_path.glob("*.tmp")), "resume sweeps orphan temp files"
     loaded = load_extraction(tmp_path)
@@ -337,70 +317,20 @@ def test_hard_process_death_mid_shard_write_then_resume(tmp_path: Path) -> None:
         assert torch.equal(loaded.activations[key], tensor)
 
 
-def test_manifest_is_self_describing(tmp_path: Path) -> None:
-    """The manifest carries site identity, provenance, axes, dtype, and device."""
-
-    model = _CountingModel().eval()
-    ids = [f"stim-{index:02d}" for index in range(7)]
-    tl.extract_dataset(
-        model,
-        _stimuli(7),
-        _LAYERS,
-        batch_size=3,
-        output_dir=tmp_path,
-        progress=False,
-        transform=lambda tensor: tensor.mean(dim=1),
-        stimulus_ids=ids,
-    )
-    manifest = json.loads((tmp_path / MANIFEST_FILENAME).read_text(encoding="utf-8"))
-    assert manifest["schema"] == MANIFEST_SCHEMA
-    assert manifest["torchlens_version"] == tl.__version__
-    assert manifest["status"] == "complete"
-
-    signature = manifest["signature"]
-    assert signature["layer_plan"] == _LAYERS
-    assert signature["layers_kind"] == "mapping"
-    assert signature["batch_size"] == 3
-    assert signature["transform"]["qualname"].endswith("<lambda>")
-    assert signature["stimuli"]["kind"] == "tensor"
-    assert signature["stimuli"]["shape"] == [7, 3]
-    assert signature["stimuli"]["dtype"] == "torch.float32"
-    assert signature["stimuli"]["digest"].startswith("sha256:")
-
-    provenance = manifest["stimulus_provenance"]
-    assert provenance["n_stimuli"] == 7
-    assert provenance["stimulus_ids"] == ids
-    assert "iteration order" in provenance["order"]
-
-    relu = manifest["layers"]["relu"]
-    assert relu["layer_label"] == "relu_1_2"
-    assert isinstance(relu["site_key"], str) and relu["site_key"].startswith("s1|")
-    assert relu["site_key_unavailable"] is None
-    assert relu["captured_dtype"] == "torch.float32"
-    assert relu["captured_device"] == "cpu"
-    assert relu["per_stimulus_shape"] == [4]
-    # The mean(dim=1) transform collapses the activation axis; the manifest
-    # discloses the stored geometry separately from the captured geometry.
-    assert relu["stored_per_stimulus_shape"] == []
-    assert relu["batch_axis"] == 0
-
-    assert [row["n_stimuli"] for row in manifest["batches"]] == [3, 3, 1]
-
-
 def test_load_extraction_subset_and_refusals(tmp_path: Path) -> None:
     """The loader selects layers, and refuses incomplete or unknown requests."""
 
     model = _CountingModel().eval()
-    tl.extract_dataset(
-        model, _stimuli(6), _LAYERS, batch_size=4, output_dir=tmp_path, progress=False
-    )
+    tl.extract_dataset(model, _stimuli(6), _LAYERS, batch_size=4, path=tmp_path, progress=False)
     subset = load_extraction(tmp_path, layers=["relu"])
     assert set(subset.activations) == {"relu"}
     assert subset.activations["relu"].shape == (6, 4)
 
-    with pytest.raises(DatasetExtractionResumeError) as excinfo:
+    from torchlens._errors import InvalidArgumentError
+
+    with pytest.raises(InvalidArgumentError) as key_excinfo:
         load_extraction(tmp_path, layers=["nope"])
-    assert excinfo.value.fields["code"] == "extraction_manifest_invalid"
+    assert key_excinfo.value.fields["code"] == "extraction_reader_key_unknown"
 
     manifest_path = tmp_path / MANIFEST_FILENAME
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

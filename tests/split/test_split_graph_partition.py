@@ -12,13 +12,13 @@ from dag_helpers import call_ids, close_call_ids
 from test_split_planner import _node
 from torch import nn
 
-from torchlens.intervention.types import CapturedArgTemplate, LiteralValue
+from torchlens._utils.display import identity
+from torchlens.intervention._types import CapturedArgTemplate, LiteralValue
 from torchlens.split import GraphPartition, SplitFeatures, SplitRequest, prepare_graph
 from torchlens.split.errors import SplitUnsupportedError
 from torchlens.split.graph import SplitTraceGraph
 from torchlens.split.placement import PlacementPlan
 from torchlens.split.planner import plan_partition
-from torchlens.utils.display import identity
 
 pytestmark = pytest.mark.usefixtures("fp64_functional")
 

@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from torchlens._utils.display import identity
 from torchlens.split import GraphPartition, SplitRequest
 from torchlens.split.adapters.torch import TorchSplitAdapter
 from torchlens.split.errors import SplitUnsupportedError
@@ -17,7 +18,6 @@ from torchlens.split.program import (
     ensure_capability_report_supported,
     lower_replay_program,
 )
-from torchlens.utils.display import identity
 
 
 def _node(

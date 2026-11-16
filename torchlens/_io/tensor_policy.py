@@ -3,7 +3,7 @@
 This module codifies which tensor layouts and dtypes the portable bundle path
 accepts in this sprint. Save code calls these helpers to decide whether a
 tensor should be written, skipped under ``strict=False``, or rejected with a
-hard ``TorchLensIOError`` under the default strict policy.
+hard ``ArtifactError`` under the default strict policy.
 """
 
 from __future__ import annotations
@@ -41,6 +41,12 @@ _SPARSE_LAYOUTS = {
     getattr(torch, "sparse_bsr", object()),
     getattr(torch, "sparse_bsc", object()),
 }
+# Device types whose payloads the writers move to host memory before
+# ``safetensors.torch.save_file`` (blobs are always host bytes; ``device_at_save``
+# records the origin and load places by ``map_location``). MPS is the device the
+# macOS platform canary exercises; every writer copies non-CPU tensors to CPU
+# explicitly rather than relying on the third-party writer's internal move.
+_SUPPORTED_DEVICE_TYPES = frozenset({"cpu", "cuda", "mps"})
 _SUPPORTED_DTYPES = {
     torch.float16,
     torch.bfloat16,
@@ -53,17 +59,7 @@ _SUPPORTED_DTYPES = {
     torch.uint8,
     torch.bool,
     torch.complex64,
-    # ``torch.complex128`` is deliberately EXCLUDED even though torch itself
-    # fully supports it end-to-end. The physical writer for portable bundles
-    # is ``safetensors.torch.save_file()``, whose dtype-size table (installed
-    # ``safetensors`` 0.8.0) has an entry for ``torch.complex64`` but no entry
-    # for ``torch.complex128`` -- listing it here as "supported" let a
-    # complex128 tensor sail past this allow-list gate and crash `save_file()`
-    # with a raw, unwrapped ``KeyError`` deep inside a third-party library
-    # (cert round 8 BLOCKER). If genuine complex128 support is ever wanted,
-    # bitcast/view it to a representation ``safetensors`` actually supports
-    # (e.g. paired float64 channels, mirroring the existing bfloat16
-    # transport-bitcast pattern) rather than re-adding the raw dtype here.
+    torch.complex128,
 }
 
 
@@ -71,6 +67,7 @@ def is_supported_for_save(
     tensor: torch.Tensor,
     *,
     strict: bool = True,
+    _real_view_codec: bool = True,
 ) -> TensorPolicyDecision:
     """Decide whether a tensor can be persisted in a portable bundle.
 
@@ -81,6 +78,9 @@ def is_supported_for_save(
     strict:
         Whether unsupported tensors should return ``FailReason`` (default) or
         ``SkipReason`` for best-effort bundle creation.
+    _real_view_codec:
+        Whether the caller encodes complex128 through a real-valued view, as
+        the portable payload codec does. Raw safetensors shard writers do not.
 
     Returns
     -------
@@ -90,6 +90,8 @@ def is_supported_for_save(
     """
 
     reason = _unsupported_reason(tensor)
+    if reason is None and tensor.dtype == torch.complex128 and not _real_view_codec:
+        reason = "complex128 tensors require a real-view payload codec"
     if reason is None:
         return Ok()
     if strict:
@@ -126,7 +128,7 @@ def _unsupported_reason(tensor: torch.Tensor) -> str | None:
     complex32_dtype = getattr(torch, "complex32", None)
     if complex32_dtype is not None and tensor.dtype == complex32_dtype:
         return "complex32 tensors are not supported this release"
-    if tensor.device.type not in {"cpu", "cuda"}:
+    if tensor.device.type not in _SUPPORTED_DEVICE_TYPES:
         return f"{tensor.device.type} tensors are not supported this release"
     if tensor.dtype not in _SUPPORTED_DTYPES:
         return f"dtype {tensor.dtype} is not supported this release"

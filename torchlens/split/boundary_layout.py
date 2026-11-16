@@ -22,6 +22,13 @@ class BoundaryTensorLayout:
     future loss is unknown. ``requires_grad`` describes capture evidence; the
     Torch suffix training engine can create roots even for captured inputs that
     did not require gradients. ``alias_group=None`` means unestablished aliasing.
+
+    Examples
+    --------
+    >>> row = tl.split.BoundaryTensorLayout('boundary', 'v:1', (2, 3), 'torch.float32',
+    ...     24, True, (), None, 'activation', True, None)
+    >>> row.bytes, row.backward_required is None
+    (24, True)
     """
 
     key: str
@@ -39,7 +46,18 @@ class BoundaryTensorLayout:
 
 @dataclass(frozen=True)
 class BoundaryLayout:
-    """Immutable logical payload requirements for a split and requested batch."""
+    """Immutable logical payload requirements for a split and requested batch.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> partition = graph.compute_dag().to_partition(())
+    >>> analysis = graph.analyze(partition)
+    >>> runtime = graph.materialize(analysis)
+    >>> layout = runtime.boundary_layout(batch_size=4)
+    >>> layout.batch_size, layout.unique_tensor_count == len(layout.tensors)
+    (4, True)
+    """
 
     graph_identity: str | None
     split_id: str
@@ -89,6 +107,7 @@ def build_boundary_layout(
                     split_point=plan.split_id,
                     reason="boundary_layout_value_unavailable",
                 ),
+                code=SplitBoundaryError.code,
             )
         if value_id in seen:
             continue

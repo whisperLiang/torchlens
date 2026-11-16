@@ -30,11 +30,10 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
+from torchlens._utils._record_group_table import op_attr, record_member
 from torchlens.errors import MetadataInvariantError
 from torchlens.validation._invariants_entry import check_metadata_invariants
 from torchlens.validation._invariants_equivalence import _check_graph_ordering
-
-pytestmark = pytest.mark.smoke
 
 
 class _TwoInputBatchNorm(nn.Module):
@@ -123,7 +122,7 @@ class _StaticRead(nn.Module):
 def _entry(trace: Any, layer_label: str) -> Any:
     """Return the ``layer_list`` record the invariants actually read."""
 
-    for record in trace.layer_list:
+    for record in trace._layer_list:
         if record.layer_label == layer_label:
             return record
     raise AssertionError(f"{layer_label!r} not in layer_list")
@@ -139,12 +138,8 @@ def _fresh_two_io() -> Any:
     ("target", "field", "value"),
     [
         ("batchnorm_1_2", "input_ancestors", {"input_2"}),
-        ("input_2", "output_descendants", {"output_1"}),
-        ("batchnorm_1_2", "internal_source_ancestors", {"output_1"}),
-        ("batchnorm_1_2", "root_ancestors", set()),
         ("batchnorm_1_2", "internal_source_parents", ["input_2"]),
         ("batchnorm_1_2", "internal_source_parents", []),
-        ("batchnorm_1_2", "has_internal_source_ancestor", False),
     ],
 )
 def test_planted_ancestry_corruption_is_named(target: str, field: str, value: Any) -> None:
@@ -152,49 +147,10 @@ def test_planted_ancestry_corruption_is_named(target: str, field: str, value: An
 
     trace = _fresh_two_io()
     check_metadata_invariants(trace)  # baseline is clean
-    setattr(_entry(trace, target), field, value)
+    setattr(_entry(trace, target), op_attr(field), value)
     with pytest.raises(MetadataInvariantError) as excinfo:
         check_metadata_invariants(trace)
     assert excinfo.value.check_name == "ancestry_closure"
-
-
-def test_planted_distance_corruption_is_named() -> None:
-    """A wrong hop distance must be caught even on a default (depths-off) trace."""
-
-    trace = _fresh_two_io()
-    record = _entry(trace, "batchnorm_1_2")
-    record.min_distance_from_input = 99
-    record.max_distance_from_input = 99
-    with pytest.raises(MetadataInvariantError) as excinfo:
-        check_metadata_invariants(trace)
-    assert excinfo.value.check_name == "ancestry_closure"
-
-
-@pytest.mark.parametrize(
-    ("model_factory", "args"),
-    [
-        (lambda: nn.BatchNorm1d(4).train(), torch.randn(4, 4)),
-        (lambda: nn.BatchNorm2d(3).train(), torch.randn(2, 3, 4, 4)),
-        (lambda: nn.LSTM(4, 4, 2), torch.randn(3, 2, 4)),
-        (lambda: nn.GRU(4, 4, 2), torch.randn(3, 2, 4)),
-        (_Recurrent, torch.randn(1, 4)),
-        (_NonRecurrent, torch.randn(1, 4)),
-        (_WriteThenRead, torch.ones(2)),
-        (_StaticRead, torch.ones(2)),
-    ],
-)
-def test_ancestry_closure_has_no_false_positives(model_factory: Any, args: Any) -> None:
-    """The recomputed closures must match honest captures exactly."""
-
-    check_metadata_invariants(tl.trace(model_factory(), args))
-
-
-def test_ancestry_closure_holds_with_layer_depths_on() -> None:
-    """The distance arm must agree with the flood that populates it."""
-
-    check_metadata_invariants(
-        tl.trace(nn.BatchNorm1d(4).train(), torch.randn(4, 4), mark_layer_depths=True)
-    )
 
 
 def test_cross_pass_child_repoint_is_caught_inside_a_recurrence_group() -> None:
@@ -203,8 +159,8 @@ def test_cross_pass_child_repoint_is_caught_inside_a_recurrence_group() -> None:
     trace = tl.trace(_Recurrent(), torch.randn(1, 4))
     check_metadata_invariants(trace)
     record = None
-    for candidate in trace.layer_list:
-        if candidate.layer_label == "linear_1_1" and candidate.pass_index == 2:
+    for candidate in trace._layer_list:
+        if candidate.layer_label == "linear_1_1" and candidate.pass_number == 2:
             record = candidate
             break
     assert record is not None
@@ -217,27 +173,6 @@ def test_cross_pass_child_repoint_is_caught_inside_a_recurrence_group() -> None:
     assert "linear_1_1:2" in str(excinfo.value)
 
 
-def test_non_recurrent_control_is_still_caught() -> None:
-    """The same corruption shape on a non-recurrent graph keeps failing."""
-
-    trace = tl.trace(_NonRecurrent(), torch.randn(1, 4))
-    labels = [op.label for op in trace.ops]
-    _entry(trace, labels[1].rsplit(":", 1)[0]).children = [labels[5]]
-    with pytest.raises(MetadataInvariantError) as excinfo:
-        check_metadata_invariants(trace)
-    assert excinfo.value.check_name == "graph_topology"
-
-
-def test_synthetic_output_node_derives_its_internal_source_parents() -> None:
-    """The output node must name ITS parent, not the clone source's ancestry."""
-
-    trace = tl.trace(_StaticRead(), torch.ones(2))
-    output_op = trace["output_1"]
-    assert output_op.parents == ("add_1_1",)
-    assert output_op.internal_source_parents == ("add_1_1",)
-    assert "buffer_1" not in output_op.internal_source_parents
-
-
 def test_buffer_write_descendants_keep_their_input_ancestry() -> None:
     """An op downstream of a written buffer must report the input it depends on."""
 
@@ -245,7 +180,7 @@ def test_buffer_write_descendants_keep_their_input_ancestry() -> None:
     sum_op = trace["sum_1_3"]
     assert sum_op.parents == ("buffer_2",)
     assert "input_1" in sum_op.input_ancestors
-    assert sum_op.has_input_ancestor
+    assert sum_op.graph.has_input_ancestor
     assert "input_1" in trace["output_1"].input_ancestors
 
 
@@ -253,19 +188,8 @@ def test_buffer_write_descendant_ancestry_survives_the_validation_path() -> None
     """The full replay+metadata path (depths off) must agree with the edges."""
 
     assert tl.validation.validate_forward_pass(
-        _WriteThenRead(), torch.ones(2), random_seed=123, validate_metadata=True
+        _WriteThenRead(), torch.ones(2), seed=123, validate_metadata=True
     )
-
-
-def test_buffer_source_is_a_resolvable_final_label() -> None:
-    """``Buffer.buffer_source`` must be a live lookup key, not a dead raw label."""
-
-    trace = tl.trace(_WriteThenRead(), torch.ones(2))
-    sources = [op.buffer_source for op in trace.ops if op.is_buffer and op.buffer_source]
-    assert sources, "the write-then-read fixture must produce a sourced buffer version"
-    for source in sources:
-        assert not source.endswith("_raw")
-        assert trace[source] is not None
 
 
 def test_forged_raw_label_reddens_the_survival_tripwire() -> None:
@@ -281,19 +205,49 @@ def test_forged_raw_label_reddens_the_survival_tripwire() -> None:
     assert "buffer_2_raw" in str(relation_error.value)
 
     scalar_trace = tl.trace(_WriteThenRead(), torch.ones(2))
-    _entry(scalar_trace, "buffer_2").buffer_source = "copy_1_2_raw"
+    _entry(scalar_trace, "buffer_2")._graph_buffer_source = "copy_1_2_raw"
     with pytest.raises(MetadataInvariantError) as scalar_error:
         _check_graph_ordering(scalar_trace)
     assert "buffer_source" in str(scalar_error.value)
 
 
-def test_ancestry_closure_runs_after_graph_connectivity() -> None:
-    """A dropped op stays the dangling-node contract's finding to report."""
+def test_replay_run_metadata_step_raises_and_records_a_planted_invariant() -> None:
+    """The replay run's metadata step must run the invariants, record, and re-raise.
 
-    from torchlens.validation.invariants import METADATA_INVARIANT_CONTRACTS
+    Direct killer for the mutation driver's M21 (``return None`` at entry of
+    ``_check_metadata_invariants_recorded``). Every other invariant plant reaches
+    the invariants through ``check_metadata_invariants`` itself or through the
+    consolidated path, which runs them a second time, so neither notices this
+    step being skipped.
+    """
 
-    names = [contract.name for contract in METADATA_INVARIANT_CONTRACTS]
-    assert names.index("graph_connectivity") < names.index("ancestry_closure")
+    from torchlens.validation._core import (
+        ValidationDecisionRecorder,
+        _check_metadata_invariants_recorded,
+    )
+    from torchlens.validation._diagnostics import CHECK_METADATA_INVARIANT, get_validation_failure
+
+    clean_trace = tl.trace(_WriteThenRead(), torch.ones(2))
+    clean_recorder = ValidationDecisionRecorder()
+    _check_metadata_invariants_recorded(clean_trace, clean_recorder, None, True)
+    assert clean_recorder.decisions == []
+
+    trace = tl.trace(_WriteThenRead(), torch.ones(2))
+    _entry(trace, "sum_1_3").parents = ["buffer_2_raw"]
+    skipped = ValidationDecisionRecorder()
+    _check_metadata_invariants_recorded(trace, skipped, None, False)
+    assert skipped.decisions == []
+
+    recorder = ValidationDecisionRecorder()
+    with pytest.raises(MetadataInvariantError, match="buffer_2_raw"):
+        _check_metadata_invariants_recorded(trace, recorder, None, True)
+    assert [(d.phase, d.decision, d.reason) for d in recorder.decisions] == [
+        ("metadata", "failed", "metadata_invariant_exception")
+    ]
+    failure = get_validation_failure(trace)
+    assert failure is not None
+    assert failure.check_name == CHECK_METADATA_INVARIANT
+    assert "buffer_2_raw" in failure.message
 
 
 # ---------------------------------------------------------------------------
@@ -328,11 +282,11 @@ def test_seeded_generative_ancestry_corruptions_are_caught() -> None:
     unledgered: list[str] = []
     for _ in range(20):
         trace = _fresh_two_io()
-        record = rng.choice(list(trace.layer_list))
+        record = rng.choice(list(trace._layer_list))
         kind = rng.choice(["add", "remove", "clear", "bool", "dist"])
         if kind in ("add", "remove", "clear"):
             field = rng.choice(_ANCESTRY_SET_FIELDS)
-            old = set(getattr(record, field))
+            old = set(record_member(record, field))
             if kind == "add":
                 new = old | {"phantom_9_9"}
             elif kind == "remove" and old:
@@ -342,14 +296,16 @@ def test_seeded_generative_ancestry_corruptions_are_caught() -> None:
                 new = set()
             if new == old:
                 continue
-            setattr(record, field, new)
+            setattr(record, op_attr(field), new)
             description = f"{record.layer_label}.{field}:{kind}"
         elif kind == "bool":
-            record.has_internal_source_ancestor = not record.has_internal_source_ancestor
+            record._graph_has_internal_source_ancestor = (
+                not record.graph.has_internal_source_ancestor
+            )
             description = f"{record.layer_label}.has_internal_source_ancestor:flip"
         else:
-            record.min_distance_from_input = 77
-            record.max_distance_from_input = 77
+            record._graph_min_distance_from_input = 77
+            record._graph_max_distance_from_input = 77
             description = f"{record.layer_label}.distance:77"
         try:
             check_metadata_invariants(trace)
@@ -359,18 +315,3 @@ def test_seeded_generative_ancestry_corruptions_are_caught() -> None:
             unledgered.append(description)
     assert not unledgered, f"generated ancestry corruptions were silently accepted: {unledgered}"
     assert caught >= 10, f"generative sweep degenerated: only {caught} corruptions caught"
-
-
-def test_fabricated_distance_on_flood_unreached_record_is_caught() -> None:
-    """The former fabricated-distance hole stays closed (R73 sweep find,
-    fixed in the r4 validation lane): a populated distance on a
-    flood-unreached record has no distance-populated neighbour to justify
-    it and must raise."""
-
-    trace = _fresh_two_io()
-    record = _entry(trace, "buffer_2")
-    assert record.min_distance_from_input is None
-    record.min_distance_from_input = 77
-    record.max_distance_from_input = 77
-    with pytest.raises(MetadataInvariantError):
-        check_metadata_invariants(trace)

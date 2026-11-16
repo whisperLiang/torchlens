@@ -6,8 +6,8 @@ import inspect
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from .._errors import BackendUnsupportedError
 from .._finalize import join_module_address as _join_module_address
-from ..registry import BackendUnsupportedError
 
 
 def _iter_tinygrad_model_leaves(module: Any, address: str) -> list[tuple[str, Any]]:
@@ -104,7 +104,9 @@ def _tinygrad_container_children(value: Any, path: str) -> list[tuple[str, Any]]
         if len(keys) != len(set(keys)):
             raise BackendUnsupportedError(
                 f"tinygrad module container {path!r} cannot assign a stable address to "
-                "indistinguishable set members; use a list/tuple or give members distinct names."
+                "indistinguishable set members; use a list/tuple or give members distinct names.",
+                backend="tinygrad",
+                code="module_identity_ambiguous",
             )
         return [(str(index), item) for index, item in enumerate(items)]
     if isinstance(value, tuple):

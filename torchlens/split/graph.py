@@ -9,6 +9,10 @@ from functools import cached_property
 from hashlib import sha256
 from typing import Any, Literal
 
+from torchlens.errors import ArgumentTypeError
+from torchlens.split.errors import SplitRequestError
+
+from .._utils.tensor_utils import safe_copy
 from ..backends.registry import (
     JAX_BACKEND_NAME,
     MLX_BACKEND_NAME,
@@ -16,10 +20,10 @@ from ..backends.registry import (
     TINYGRAD_BACKEND_NAME,
     TORCH_BACKEND_NAME,
 )
-from ..intervention.types import CapturedArgTemplate, LiteralTensor, LiteralValue, ParentRef
-from ..utils.tensor_utils import safe_copy
+from ..intervention._types import CapturedArgTemplate, LiteralTensor, LiteralValue, ParentRef
+from ._capture_projection import capture_batch_size, paddle_call_templates, project_op
 from .ir import GraphPartition
-from .shape import SymbolicShape, infer_traced_batch_size, symbolic_shape_from_tensor_ref
+from .shape import SymbolicShape
 
 ReplaySourcePolicy = Literal[
     "constant",
@@ -27,6 +31,18 @@ ReplaySourcePolicy = Literal[
     "live_param_derived",
     "batch_dynamic_constant",
 ]
+
+
+def _node_aliases(node: SplitTraceNode) -> tuple[str | None, ...]:
+    """Include unique layer spellings alongside captured pass and raw identities."""
+
+    layer, separator, pass_index = node.label.rpartition(":")
+    return (
+        node.canonical_id,
+        node.label,
+        node.raw_label,
+        layer if separator and pass_index.isdigit() else None,
+    )
 
 
 @dataclass(frozen=True)
@@ -94,6 +110,13 @@ class ComputeDAG:
     ``graph_profile()``. Co-location groups are necessary local-write constraints
     for the requested training/placement policy, not a complete legality proof.
     Every converted partition still needs native ``analyze()`` validation.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> dag = graph.compute_dag()
+    >>> len(dag.nodes) > 0, dag.to_partition(()).prefix_node_ids
+    (True, frozenset())
     """
 
     graph_identity: str | None
@@ -117,13 +140,24 @@ class ComputeDAG:
             Canonical compute-value IDs for the existing native planner.
         """
         if isinstance(prefix_call_ids, (str, bytes)):
-            raise TypeError("prefix_call_ids must be a collection of Call ID strings")
+            raise ArgumentTypeError(
+                "prefix_call_ids must be a collection of Call ID strings",
+                code="split_argument_type",
+                remedy="pass an iterable of Call ID strings from dag.nodes",
+            )
         selected = frozenset(prefix_call_ids)
         if any(not isinstance(call_id, str) or not call_id for call_id in selected):
-            raise TypeError("prefix_call_ids must contain non-empty Call ID strings")
+            raise ArgumentTypeError(
+                "prefix_call_ids must contain non-empty Call ID strings",
+                code="split_argument_type",
+                remedy="pass an iterable of Call ID strings from dag.nodes",
+            )
         unknown = selected - {call.call_id for call in self.nodes}
         if unknown:
-            raise ValueError(f"Unknown Compute DAG Call IDs: {tuple(sorted(unknown))!r}")
+            raise SplitRequestError(
+                f"Unknown Compute DAG Call IDs: {tuple(sorted(unknown))!r}",
+                code=SplitRequestError.code,
+            )
         return GraphPartition(
             frozenset(
                 v for call in self.nodes if call.call_id in selected for v in call.output_node_ids
@@ -168,7 +202,7 @@ class SplitTraceGraph:
         aliases: dict[str, str] = {}
         duplicates: set[str] = set()
         for node in self.nodes:
-            for alias in (node.canonical_id, node.label, node.raw_label):
+            for alias in _node_aliases(node):
                 if alias is None:
                     continue
                 existing = aliases.get(alias)
@@ -200,7 +234,7 @@ class SplitTraceGraph:
             parent = self.node_by_id.get(parent_id)
             if parent is None:
                 continue
-            if label in {parent.canonical_id, parent.label, parent.raw_label}:
+            if label in _node_aliases(parent):
                 matches.append(parent.canonical_id)
         unique_matches = tuple(dict.fromkeys(matches))
         return unique_matches[0] if len(unique_matches) == 1 else None
@@ -313,45 +347,6 @@ def _compute_data_edges(
     return tuple(sorted(edges))
 
 
-def _module_path_for_op(op: Any) -> str | None:
-    """Return a stable module path for an op when available."""
-
-    address = getattr(op, "address", None)
-    if isinstance(address, str) and address:
-        return address
-    module = getattr(op, "module", None)
-    if isinstance(module, tuple) and module and module[0]:
-        return str(module[0])
-    modules = getattr(op, "modules", None)
-    if modules:
-        try:
-            return str(modules[-1][0])
-        except (IndexError, TypeError):
-            return None
-    return None
-
-
-def _shape_tuple(value: Any) -> tuple[int, ...] | None:
-    """Normalize shape metadata to a tuple of ints."""
-
-    if value is None:
-        return None
-    try:
-        return tuple(int(dim) for dim in value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _requires_grad_for_op(op: Any) -> bool | None:
-    """Return saved-output grad metadata when a tensor payload is available."""
-
-    out = getattr(op, "out", None)
-    requires_grad = getattr(out, "requires_grad", None)
-    if requires_grad is None:
-        return None
-    return bool(requires_grad)
-
-
 def _children_from_parents(nodes: tuple[SplitTraceNode, ...]) -> dict[str, tuple[str, ...]]:
     """Build child IDs when finalized child metadata is incomplete."""
 
@@ -370,21 +365,6 @@ def _children_from_parents(nodes: tuple[SplitTraceNode, ...]) -> dict[str, tuple
             if parent_node is not None:
                 children[parent_node.canonical_id].append(node.canonical_id)
     return {label: tuple(values) for label, values in children.items()}
-
-
-def _canonical_label_for_op(op: Any, display_label: str) -> str:
-    """Return the stable per-op ID for split replay."""
-
-    op_label = getattr(op, "label", None)
-    if isinstance(op_label, str) and op_label:
-        return op_label
-    raw_label = getattr(op, "_label_raw", None) or getattr(op, "raw_label", None)
-    if isinstance(raw_label, str) and raw_label:
-        return raw_label
-    raw_index = getattr(op, "raw_index", None)
-    if raw_index is not None:
-        return f"{display_label}#{raw_index}"
-    return display_label
 
 
 def _normalize_edge_aliases(nodes: list[SplitTraceNode]) -> tuple[SplitTraceNode, ...]:
@@ -420,14 +400,6 @@ def _attach_paddle_capture_templates(
 ) -> list[SplitTraceNode]:
     """Attach Paddle replay templates that live on backend capture records."""
 
-    params_by_id: dict[int, Any] = {}
-    for param in getattr(trace, "param_logs", ()) or ():
-        handle = getattr(param, "_param_ref", None)
-        if handle is None:
-            handle = getattr(param, "handle", None)
-        if handle is not None:
-            params_by_id[id(handle)] = param
-
     captures = {
         str(getattr(capture, "label_raw")): capture
         for capture in trace._paddle_op_captures or ()
@@ -435,21 +407,29 @@ def _attach_paddle_capture_templates(
     }
     if not captures:
         return nodes
+    params_by_id: dict[int, Any] = {}
+    for param in trace.params or ():
+        handle = getattr(param, "_param_ref", None)
+        if handle is None:
+            handle = getattr(param, "handle", None)
+        if handle is not None:
+            params_by_id[id(handle)] = param
+
     updated: list[SplitTraceNode] = []
     for node in nodes:
         capture = captures.get(str(getattr(node.op, "_label_raw", node.raw_label or "")))
         if capture is None:
             updated.append(node)
             continue
+        args_template, kwargs_template = paddle_call_templates(capture)
         updated.append(
             replace(
                 node,
+                op_type=capture.op_name,
                 target=getattr(capture, "func", node.target),
-                args_template=tuple(getattr(capture, "args_template", ()) or ()),
-                kwargs_template=dict(getattr(capture, "kwargs_template", {}) or {}),
+                args_template=args_template,
+                kwargs_template=kwargs_template,
                 param_refs=_paddle_capture_parameter_refs(capture, params_by_id),
-                output_container_paths=capture.final_output_paths,
-                output_container_spec=capture.final_output_spec or node.output_container_spec,
             )
         )
     return updated
@@ -471,26 +451,11 @@ def _paddle_capture_parameter_refs(capture: Any, params_by_id: dict[int, Any]) -
         Unique consumed parameter records in argument order.
     """
 
-    consumed: dict[int, Any] = {}
-
-    def visit(component: Any) -> None:
-        """Collect live state operands without treating their owning module as consumption."""
-
-        if isinstance(component, dict):
-            if component.get("kind") == "tensor":
-                if component.get("label") is None:
-                    source_id = id(component.get("value"))
-                    if source_id in params_by_id:
-                        consumed.setdefault(source_id, params_by_id[source_id])
-                return
-            for value in component.values():
-                visit(value)
-        elif isinstance(component, (tuple, list)):
-            for value in component:
-                visit(value)
-
-    visit(capture.args_template)
-    visit(capture.kwargs_template)
+    consumed = {
+        id(value): params_by_id[id(value)]
+        for value in capture.param_inputs.values()
+        if id(value) in params_by_id
+    }
     return tuple(consumed.values())
 
 
@@ -537,6 +502,33 @@ def _attach_tinygrad_captures(trace: Any, nodes: list[SplitTraceNode]) -> list[S
     ]
 
 
+def _attach_preview_output_occurrences(
+    trace: Any, nodes: list[SplitTraceNode]
+) -> list[SplitTraceNode]:
+    """Project occurrence paths from the single upstream root-call record."""
+
+    paths_by_label: dict[str, list[tuple[Any, ...]]] = {}
+    root = trace.modules["self"].calls[0]
+    for label, path in zip(trace.output_layers, root.output_paths, strict=True):
+        paths_by_label.setdefault(label, []).append(tuple(path))
+    return [
+        replace(
+            node,
+            output_container_paths=tuple(
+                next(
+                    (
+                        paths_by_label[alias]
+                        for alias in _node_aliases(node)
+                        if alias in paths_by_label
+                    ),
+                    (),
+                )
+            ),
+        )
+        for node in nodes
+    ]
+
+
 def _attach_mlx_captures(trace: Any, nodes: list[SplitTraceNode]) -> list[SplitTraceNode]:
     """Attach MLX wrapper captures and replay templates to graph nodes."""
 
@@ -544,21 +536,8 @@ def _attach_mlx_captures(trace: Any, nodes: list[SplitTraceNode]) -> list[SplitT
     for capture in trace._mlx_op_captures or ():
         for label_raw in getattr(capture, "labels_raw", ()) or ():
             captures[str(label_raw)] = capture
-    paths_by_label: dict[str, list[tuple[Any, ...]]] = {}
-    root = trace.modules["self"].ops[0]
-    for label, path in zip(root.output_ops, root.output_paths, strict=True):
-        paths_by_label.setdefault(label, []).append(tuple(path))
     updated: list[SplitTraceNode] = []
     for node in nodes:
-        paths = next(
-            (
-                paths_by_label[alias]
-                for alias in (node.raw_label, node.label, node.canonical_id)
-                if alias in paths_by_label
-            ),
-            (),
-        )
-        node = replace(node, output_container_paths=tuple(paths))
         raw_label = str(getattr(node.op, "_label_raw", node.raw_label or ""))
         capture = captures.get(raw_label)
         if capture is None:
@@ -702,10 +681,7 @@ def _repair_node_templates(
     """Repair scalar parent references omitted from eager replay graphs."""
 
     available_labels = {
-        alias
-        for node in nodes
-        for alias in (node.canonical_id, node.label, node.raw_label)
-        if alias is not None
+        alias for node in nodes for alias in _node_aliases(node) if alias is not None
     }
     repaired: list[SplitTraceNode] = []
     for node in nodes:
@@ -889,7 +865,8 @@ def _normalize_node_replay_refs(
         from .errors import SplitUnsupportedError
 
         raise SplitUnsupportedError(
-            f"Replay parent references do not resolve uniquely to canonical values: {unresolved!r}."
+            f"Replay parent references do not resolve uniquely to canonical values: {unresolved!r}.",
+            code=SplitUnsupportedError.code,
         )
     return normalized
 
@@ -915,73 +892,6 @@ def _attach_live_buffer_handles(
     return updated
 
 
-def _node_from_op(
-    op: Any,
-    *,
-    backend: str,
-    traced_batch_size: int | None,
-) -> SplitTraceNode:
-    """Project one finalized TorchLens ``Op`` to a split graph node."""
-
-    label = str(getattr(op, "layer_label", getattr(op, "label", "")))
-    canonical_id = _canonical_label_for_op(op, label)
-    raw_label = getattr(op, "_label_raw", None) or getattr(op, "raw_label", None)
-    shape = _shape_tuple(getattr(op, "shape", None))
-    is_buffer = bool(getattr(op, "is_buffer", False))
-    parents = tuple(str(parent) for parent in (getattr(op, "parents", ()) or ()))
-    children = tuple(str(child) for child in (getattr(op, "children", ()) or ()))
-    is_buffer_only_source = (
-        is_buffer and not parents and getattr(op, "buffer_write_kind", None) is None
-    )
-    param_refs = tuple(getattr(op, "_param_logs", ()) or ())
-    is_param_source = bool(getattr(op, "input_was_parameter", False))
-    replay_source_policy: ReplaySourcePolicy = "constant"
-    if param_refs:
-        replay_source_policy = "live_param"
-    elif is_param_source:
-        replay_source_policy = "live_param_derived"
-    elif shape and traced_batch_size is not None:
-        replay_source_policy = "batch_dynamic_constant"
-    return SplitTraceNode(
-        label=label,
-        raw_label=None if raw_label is None else str(raw_label),
-        canonical_id=canonical_id,
-        backend=backend,
-        raw_index=getattr(op, "raw_index", None),
-        op_type=str(getattr(op, "type", getattr(op, "layer_type", "unknown"))),
-        target=getattr(op, "func", None),
-        func_call_id=getattr(op, "func_call_id", None),
-        args_template=getattr(op, "args_template", None),
-        kwargs_template=getattr(op, "kwargs_template", None),
-        parents=parents,
-        children=children,
-        output_ref=getattr(op, "out_ref", None),
-        module_path=_module_path_for_op(op),
-        output_shape=shape,
-        symbolic_output_shape=symbolic_shape_from_tensor_ref(shape),
-        dtype=None if getattr(op, "dtype", None) is None else str(getattr(op, "dtype")),
-        requires_grad=_requires_grad_for_op(op),
-        output_container_path=tuple(getattr(op, "container_path", ()) or ()),
-        output_container_spec=getattr(op, "container_spec", None),
-        is_input=bool(getattr(op, "is_input", False)),
-        is_output=bool(getattr(op, "is_output", False)),
-        is_buffer=is_buffer,
-        is_buffer_only_source=is_buffer_only_source,
-        is_param_source=is_param_source,
-        param_refs=param_refs,
-        replay_source_policy=replay_source_policy,
-        op=op,
-        cost_name=getattr(op, "func_name", None),
-        cost_param_shapes=tuple(tuple(shape) for shape in getattr(op, "param_shapes", ()) or ()),
-        captured_forward_flops=None
-        if (forward := getattr(op, "flops_forward", None)) is None
-        else int(forward),
-        captured_backward_flops=None
-        if (backward := getattr(op, "flops_backward", None)) is None
-        else int(backward),
-    )
-
-
 def split_graph_from_trace(trace: Any) -> SplitTraceGraph:
     """Build a split graph from a current-main TorchLens ``Trace``.
 
@@ -1000,12 +910,14 @@ def split_graph_from_trace(trace: Any) -> SplitTraceGraph:
         Ordered split graph.
     """
 
-    backend = str(getattr(trace, "backend", "torch"))
-    traced_batch_size = infer_traced_batch_size(trace)
+    backend = str(trace.provenance.backend)
+    traced_batch_size = capture_batch_size(trace)
     nodes = [
-        _node_from_op(op, backend=backend, traced_batch_size=traced_batch_size)
-        for op in getattr(trace, "layer_list", ()) or ()
+        project_op(op, backend=backend, traced_batch_size=traced_batch_size)
+        for op in trace._layer_list
     ]
+    if backend in {PADDLE_BACKEND_NAME, MLX_BACKEND_NAME, "tf", "tensorflow"}:
+        nodes = _attach_preview_output_occurrences(trace, nodes)
     if backend == PADDLE_BACKEND_NAME:
         nodes = _attach_paddle_capture_templates(trace, nodes)
     elif backend == JAX_BACKEND_NAME:
@@ -1022,9 +934,7 @@ def split_graph_from_trace(trace: Any) -> SplitTraceGraph:
     if output_aliases:
         nodes = [
             replace(node, is_output=True)
-            if any(
-                alias in output_aliases for alias in (node.raw_label, node.label, node.canonical_id)
-            )
+            if any(alias in output_aliases for alias in _node_aliases(node))
             else node
             for node in nodes
         ]
@@ -1039,7 +949,7 @@ def split_graph_from_trace(trace: Any) -> SplitTraceGraph:
         )
         for node in normalized_nodes
     )
-    graph_hash = getattr(trace, "graph_shape_hash", None)
+    graph_hash = trace.provenance.fingerprint
     if backend == PADDLE_BACKEND_NAME:
         output_contract = tuple(
             (node.canonical_id, node.output_container_paths, node.output_container_spec)
@@ -1100,7 +1010,7 @@ def project_symbolic_shapes(graph: SplitTraceGraph, shape_program: Any) -> Split
     return replace(graph, nodes=tuple(updated), shape_program=shape_program)
 
 
-__all__ = [
+__all__ = (
     "ReplaySourcePolicy",
     "ReplayCall",
     "ReplayValueRef",
@@ -1108,4 +1018,4 @@ __all__ = [
     "SplitTraceNode",
     "project_symbolic_shapes",
     "split_graph_from_trace",
-]
+)

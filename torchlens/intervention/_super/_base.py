@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from typing import Any, Generic, Literal, TypeVar, cast
+from typing import Any, ClassVar, Generic, Literal, TypeVar, cast
 
 import torch
 
 from ..._errors import InvalidArgumentError, PayloadUnavailableError
-from .._metrics import is_scalar_like, relative_l1_scalar, resolve_metric
+from ..._utils._record_group_table import record_member
+from ...errors._episode import ParamEvidenceMissingError
+from .._metrics import is_scalar_like, relative_l1, resolve_metric
 
 T = TypeVar("T")
 S = TypeVar("S", bound="Super[Any]")
@@ -128,7 +130,7 @@ class Super(Generic[T]):
         label: str,
         members: dict[str, T],
         *,
-        query: Any = None,
+        selector: Any = None,
         bundle_member_names: list[str] | None = None,
     ) -> None:
         """Initialize an aligned Super view.
@@ -139,27 +141,27 @@ class Super(Generic[T]):
             Representative label.
         members:
             Resolved objects keyed by bundle member name.
-        query:
-            Original user query, when available.
+        selector:
+            Original user selector, when available.
         bundle_member_names:
             Full bundle member-name order. Missing names are treated as sparse
             alignment gaps and lower ``coverage``.
         """
 
         self._label = label
-        self._query = query
+        self._query = selector
         self._members = dict(members)
         self._bundle_member_names = (
             list(bundle_member_names) if bundle_member_names is not None else list(members)
         )
 
     @classmethod
-    def from_members(cls: type[S], query: Any, members: dict[str, T]) -> S:
+    def from_members(cls: type[S], selector: Any, members: dict[str, T]) -> S:
         """Build a Super view from resolved member objects.
 
         Parameters
         ----------
-        query:
+        selector:
             Original user query.
         members:
             Mapping from bundle member name to resolved object.
@@ -174,12 +176,12 @@ class Super(Generic[T]):
             getattr(
                 next(iter(members.values())),
                 "label",
-                getattr(next(iter(members.values())), "layer_label", repr(query)),
+                getattr(next(iter(members.values())), "layer_label", repr(selector)),
             )
             if members
-            else repr(query)
+            else repr(selector)
         )
-        return cls(str(first_label), members=members, query=query)
+        return cls(str(first_label), members=members, selector=selector)
 
     @property
     def label(self) -> str:
@@ -206,7 +208,7 @@ class Super(Generic[T]):
         return SuperMemberAccessor(self._members)
 
     @property
-    def traces(self) -> set[str]:
+    def names(self) -> set[str]:
         """Return names of bundle members represented by this view.
 
         Returns
@@ -218,7 +220,7 @@ class Super(Generic[T]):
         return set(self._members)
 
     @property
-    def absent_traces(self) -> set[str]:
+    def absent_names(self) -> set[str]:
         """Return bundle member names not represented by this view.
 
         Returns
@@ -239,7 +241,7 @@ class Super(Generic[T]):
             Represented member count.
         """
 
-        return len(self.traces)
+        return len(self.names)
 
     @property
     def num_absent_traces(self) -> int:
@@ -251,10 +253,10 @@ class Super(Generic[T]):
             Absent member count.
         """
 
-        return len(self.absent_traces)
+        return len(self.absent_names)
 
     @property
-    def is_complete_coverage(self) -> bool:
+    def is_complete(self) -> bool:
         """Return whether every bundle member is represented.
 
         Returns
@@ -263,7 +265,7 @@ class Super(Generic[T]):
             Whether this label resolved in every bundle member.
         """
 
-        return not self.absent_traces
+        return not self.absent_names
 
     @property
     def coverage(self) -> float:
@@ -296,6 +298,19 @@ class _TensorBearing:
 
     _members: dict[str, Any]
     _label: str
+
+    #: Claim class of this view's per-member tensors. ``True`` (SuperParam)
+    #: means a cross-member read asserts capture-time PARAMETER values -- a
+    #: historical claim TorchLens cannot prove from live handles -- so the
+    #: ``_tensor_dict`` funnel refuses before tensor lookup unless every
+    #: member carries immutable parameter evidence (A-CKPT).
+    _cross_member_param_claim: ClassVar[bool] = False
+
+    #: Comparison gate installed by ``Bundle.at``: called before
+    #: :meth:`compare` reads any tensor, so the site-axis comparison carries
+    #: the same claim check (shared graph, same input values) as the
+    #: member-pair form. ``None`` for views built outside ``Bundle.at``.
+    _compare_gate: Callable[[], None] | None = None
 
     @property
     def op_type(self) -> str:
@@ -378,7 +393,7 @@ class _TensorBearing:
 
         return self._stacked("grad")
 
-    def diff_pair(
+    def compare(
         self,
         other: str | None = None,
         metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = "cosine",
@@ -401,6 +416,8 @@ class _TensorBearing:
             Pairwise distance matrix.
         """
 
+        if self._compare_gate is not None:
+            self._compare_gate()
         metric_fn = resolve_metric(metric)
         tensor_dict = self._tensor_dict(on)
         names = [name for name, tensor in tensor_dict.items() if isinstance(tensor, torch.Tensor)]
@@ -420,8 +437,10 @@ class _TensorBearing:
                     remedy="compare against a member with a stored tensor at this node",
                     member=str(other),
                 )
+            self._require_equal_shapes(names, tensors, metric)
             ref_idx = names.index(other)
             return self._diff_row(tensors, ref_idx, metric_fn)
+        self._require_equal_shapes(names, tensors, metric)
         return self._diff_matrix(tensors, metric_fn)
 
     def aggregate(
@@ -480,6 +499,12 @@ class _TensorBearing:
     def _tensor_dict(self, field: _TENSOR_FIELD_LITERAL) -> dict[str, torch.Tensor | None]:
         """Return a tensor field keyed by member name.
 
+        This is the ONE funnel every cross-member tensor read passes through
+        (``compare``, ``aggregate``, ``out``/``grad`` via ``_stacked``, and
+        the SuperParam ``weight_norm_diff``), so the checkpoint live-ref
+        guard lives here: for parameter-claim views with two or more members
+        it refuses BEFORE any member tensor is resolved.
+
         Parameters
         ----------
         field:
@@ -491,11 +516,78 @@ class _TensorBearing:
             Per-member tensor values.
         """
 
+        if self._cross_member_param_claim and len(self._members) >= 2:
+            self._require_immutable_param_evidence(field)
         output: dict[str, torch.Tensor | None] = {}
         for name, member in self._members.items():
             value = self._get_tensor(member, field)
             output[name] = value if isinstance(value, torch.Tensor) else None
         return output
+
+    def _require_immutable_param_evidence(self, field: _TENSOR_FIELD_LITERAL) -> None:
+        """Refuse a cross-member parameter read without immutable evidence.
+
+        The guard is keyed on the CLAIM (a cross-member, cross-time parameter
+        value), never on Python object identity: save/load manufactures
+        relationship-rank upgrades, and a reloaded artifact has no model ref
+        to detect. Every member's derived value basis must be immutable
+        capture-time evidence (``snapshot``, R8(b)) for the read to proceed;
+        ``live_ref`` and ``absent`` bases refuse typed.
+
+        Parameters
+        ----------
+        field:
+            Tensor field the caller asked for (``out`` or ``grad``).
+
+        Raises
+        ------
+        ParamEvidenceMissingError
+            With stable code ``checkpoint_series_live_params`` when any
+            member lacks immutable parameter evidence.
+        """
+
+        bases: dict[str, Any] = {
+            name: getattr(member, "value_basis", None) for name, member in self._members.items()
+        }
+        if all(basis is not None and basis.is_immutable for basis in bases.values()):
+            return
+        member_names = list(self._members)
+        first = next(iter(self._members.values()))
+        param_address = str(record_member(first, "address", None) or self._label)
+        quoted = [f"'{name}'" for name in member_names]
+        named = " and ".join(quoted) if len(quoted) == 2 else ", ".join(quoted)
+        any_live = any(basis is not None and basis.basis == "live_ref" for basis in bases.values())
+        if any_live:
+            mechanism = (
+                "TorchLens records which parameter a run used, not its bytes, so a "
+                "parameter read resolves through the live model and returns TODAY'S "
+                "weights, not the weights at capture. Two members of a checkpoint "
+                "series will therefore report identical weights."
+            )
+        else:
+            mechanism = (
+                "TorchLens records which parameter a run used, not its bytes, and "
+                "this artifact was saved without parameter snapshots, so the "
+                "per-member values are gone. Reads would degrade to NaN or empty "
+                "results that look like 'nothing to compare'."
+            )
+        remedy = (
+            "snapshot parameters at capture, or bind each member to an immutable "
+            "checkpoint -- the ordering is still valid; only the weight claim is refused"
+        )
+        raise ParamEvidenceMissingError(
+            f"Members {named} have no immutable capture-time parameter evidence "
+            f"for parameter '{param_address}'. {mechanism} "
+            f"To read a weight trajectory: {remedy}.",
+            code="checkpoint_series_live_params",
+            members=member_names,
+            param_address=param_address,
+            field=str(field),
+            bases={
+                name: str(basis) if basis is not None else None for name, basis in bases.items()
+            },
+            remedy=remedy,
+        )
 
     def _get_tensor(self, member: Any, field: _TENSOR_FIELD_LITERAL) -> torch.Tensor | None:
         """Return one tensor-bearing field from ``member``.
@@ -583,6 +675,59 @@ class _TensorBearing:
         shape = tuple(getattr(member, "shape", ()) or ())
         return () if len(shape) <= 1 else shape[1:]
 
+    def _require_equal_shapes(
+        self,
+        names: list[str],
+        tensors: list[torch.Tensor | None],
+        metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    ) -> None:
+        """Refuse a site whose member tensors differ in shape (typed, site-named).
+
+        Runs on different inputs (prompts of different token counts) reach
+        this site with different shapes; an element-wise distance has no
+        meaning there, so the comparison refuses with the same code as
+        ``Bundle.compare`` instead of failing inside a metric or comparing
+        flattened tensors. All-scalar-like sites still compare.
+
+        Parameters
+        ----------
+        names:
+            Member names, aligned with ``tensors``.
+        tensors:
+            Member tensors at this site (``None`` entries carry no shape and
+            are left to the metric's own handling).
+        metric:
+            Metric name or callable, named in the refusal.
+
+        Raises
+        ------
+        InvalidArgumentError
+            ``code="metric_shape_mismatch"`` when the shapes differ.
+        """
+
+        present = {
+            name: tensor for name, tensor in zip(names, tensors, strict=True) if tensor is not None
+        }
+        if all(is_scalar_like(tensor) for tensor in present.values()):
+            return
+        shapes = {name: tuple(tensor.shape) for name, tensor in present.items()}
+        if len(set(shapes.values())) > 1:
+            metric_name = (
+                metric if isinstance(metric, str) else getattr(metric, "__name__", "metric")
+            )
+            raise InvalidArgumentError(
+                f"Bundle comparison at site {self._label!r} under {metric_name} received "
+                f"different shapes per member: {shapes}",
+                code="metric_shape_mismatch",
+                remedy=(
+                    "compare members whose aligned sites hold the same shape (for runs "
+                    "on different inputs, inputs of the same shape, such as prompts "
+                    "with the same token count)"
+                ),
+                site=str(self._label),
+                member_shapes=shapes,
+            )
+
     @staticmethod
     def _diff_matrix(
         tensors: list[torch.Tensor | None],
@@ -610,7 +755,7 @@ class _TensorBearing:
                 if i == j:
                     continue
                 value = (
-                    relative_l1_scalar(left, right)
+                    relative_l1(left, right)
                     if is_scalar_like(left) and is_scalar_like(right)
                     else metric_fn(left, right)
                 )
@@ -647,7 +792,7 @@ class _TensorBearing:
             if idx == ref_idx:
                 continue
             value = (
-                relative_l1_scalar(ref, tensor)
+                relative_l1(ref, tensor)
                 if is_scalar_like(ref) and is_scalar_like(tensor)
                 else metric_fn(ref, tensor)
             )

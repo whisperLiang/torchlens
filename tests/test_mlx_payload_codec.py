@@ -9,11 +9,11 @@ import pytest
 
 from torchlens._io.payload_codec import get_payload_codec
 from torchlens._io.tensor_policy import FailReason, Ok
-from torchlens.backends import BackendRuntimeCompatibilityError
+from torchlens.errors import BackendRuntimeCompatibilityError
 
 mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 
-pytestmark = [pytest.mark.optional, pytest.mark.backend_mlx]
+pytestmark = [pytest.mark.optional, pytest.mark.backend_mlx, pytest.mark.rare]
 
 
 @pytest.mark.parametrize(

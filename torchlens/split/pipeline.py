@@ -13,12 +13,12 @@ from dataclasses import dataclass, fields, is_dataclass, replace
 from hashlib import sha256
 from typing import Any, Literal
 
-from ..backends import resolve_backend_spec
 from ..backends.registry import (
     JAX_BACKEND_NAME,
     MLX_BACKEND_NAME,
     TINYGRAD_BACKEND_NAME,
     TORCH_BACKEND_NAME,
+    resolve_backend_spec,
 )
 from ..options import CaptureOptions
 from .adapters.base import SegmentBundle
@@ -76,7 +76,8 @@ def _align_shape_witness(
     if len(graph.nodes) != len(witness.nodes):
         raise SplitUnsupportedError(
             f"Batch witness {batch_size} changed graph topology from "
-            f"{len(graph.nodes)} to {len(witness.nodes)} values."
+            f"{len(graph.nodes)} to {len(witness.nodes)} values.",
+            code=SplitUnsupportedError.code,
         )
     shapes: dict[str, tuple[int, ...] | None] = {}
     graph_order = graph.order_by_id
@@ -85,7 +86,8 @@ def _align_shape_witness(
         if _witness_node_signature(base_node) != _witness_node_signature(witness_node):
             raise SplitUnsupportedError(
                 f"Batch witness {batch_size} changed graph topology at value {index}: "
-                f"{base_node.op_type!r} != {witness_node.op_type!r}."
+                f"{base_node.op_type!r} != {witness_node.op_type!r}.",
+                code=SplitUnsupportedError.code,
             )
         base_parent_indexes = tuple(
             graph_order[parent.canonical_id]
@@ -100,7 +102,8 @@ def _align_shape_witness(
         if base_parent_indexes != witness_parent_indexes:
             raise SplitUnsupportedError(
                 f"Batch witness {batch_size} changed parent-call topology at value "
-                f"{index}: {base_parent_indexes!r} != {witness_parent_indexes!r}."
+                f"{index}: {base_parent_indexes!r} != {witness_parent_indexes!r}.",
+                code=SplitUnsupportedError.code,
             )
         shapes[base_node.canonical_id] = witness_node.output_shape
     return shapes
@@ -181,7 +184,10 @@ def _probe_batch_replay(
                 shape_witness=adapter.name == "torch",
             )
             if not outputs:
-                raise SplitUnsupportedError("The backend did not expose the native probe output.")
+                raise SplitUnsupportedError(
+                    "The backend did not expose the native probe output.",
+                    code=SplitUnsupportedError.code,
+                )
             phase = "compare topology"
             # A failed lean witness cannot authorize extrapolation. Do not
             # recapture with a larger activation/argument archive to hide it.
@@ -222,7 +228,10 @@ def _probe_batch_replay(
             phase = "compare outputs"
             mismatch = _probe_output_mismatch(adapter, outputs[-1], actual)
             if mismatch is not None:
-                raise SplitUnsupportedError(mismatch)
+                raise SplitUnsupportedError(
+                    mismatch,
+                    code=SplitUnsupportedError.code,
+                )
         result = BatchProbeResult(traced_batch, probe_batch, "passed", alignment_note)
     except Exception as exc:  # noqa: BLE001 - probe failures restrict capability, not preparation
         result = BatchProbeResult(
@@ -263,7 +272,10 @@ def _isolated_probe_model(model: Any, adapter: Any) -> Any:
 
         witness_model, _snapshot, copied = _model_for_validation_replay(model)
         if not copied:
-            raise SplitUnsupportedError("Cannot copy the model for an isolated B=2 probe.")
+            raise SplitUnsupportedError(
+                "Cannot copy the model for an isolated B=2 probe.",
+                code=SplitUnsupportedError.code,
+            )
     else:
         if adapter.name == "paddle":
             from ..backends.paddle._cuda import paddle_cuda_scope
@@ -274,7 +286,10 @@ def _isolated_probe_model(model: Any, adapter: Any) -> Any:
         else:
             witness_model = deepcopy(model)
         if witness_model is model and not isinstance(model, types.FunctionType):
-            raise SplitUnsupportedError("The model copy aliases the original model.")
+            raise SplitUnsupportedError(
+                "The model copy aliases the original model.",
+                code=SplitUnsupportedError.code,
+            )
         if adapter.name == "tf":
             from ._tf_capture import preserve_probe_layer_names
 
@@ -358,7 +373,7 @@ def _with_probe_rng_states(graph: SplitTraceGraph, witness: SplitTraceGraph) -> 
 def _probe_state_scope(model: Any, adapter: Any) -> Iterator[None]:
     """Restore supported model state and shared RNGs around the complete probe."""
 
-    from ..utils.rng import log_current_rng_states, set_rng_from_saved_states
+    from .._utils.rng import log_current_rng_states, set_rng_from_saved_states
 
     rng_state = log_current_rng_states()
     try:
@@ -479,33 +494,39 @@ def capture_model(
     ``shape_witness`` is internal to the Torch B=2 probe: only topology,
     shape/dtype, per-call RNG and the independent output observer are needed.
     It never changes the forward's grad mode or the public B=1 Trace.
+
+    Examples
+    --------
+    >>> request = tl.SplitRequest(tl.split.GraphPartition(frozenset()))
+    >>> capture = tl.split.capture_model(torch.nn.Linear(3, 2).eval(), (torch.ones(1, 3),), request)
+    >>> capture.provenance.backend
+    'torch'
+    >>> capture.cleanup()
     """
 
     backend_spec = resolve_backend_spec(spec.backend, model, inputs, input_kwargs)
-    from ..user_funcs import trace
+    from .._user_funcs import trace
 
-    capture_kwargs: dict[str, Any] = {"layers_to_save": "all", "keep_orphans": True}
+    capture_kwargs: dict[str, Any] = {"keep_orphans": True}
     if output_observer is not None:
         capture_kwargs["output_transform"] = output_observer
     if random_seed is not None:
-        capture_kwargs["random_seed"] = random_seed
+        capture_kwargs["seed"] = random_seed
     common: dict[str, Any] = {
         "input_kwargs": input_kwargs,
         "backend": str(backend_spec.name),
+        "save": "none" if shape_witness else "all",
     }
     if str(backend_spec.name) == TORCH_BACKEND_NAME:
         capture_kwargs.update(
-            layers_to_save="none" if shape_witness else "all",
-            intervention_ready=True,
+            replayable=True,
             capture_container_structure=True,
-            save_arg_values=not shape_witness,
-            save_rng_states=True,
+            save_args=not shape_witness,
+            save_rng=True,
             detach_saved_activations=False,
             backward_ready=spec.trainable and not shape_witness,
         )
-        common["capture"] = CaptureOptions(**capture_kwargs)
-    else:
-        common.update(capture_kwargs)
+    common["capture"] = CaptureOptions(**capture_kwargs)
     with _backend_capture_state(str(backend_spec.name), model):
         return trace(model, inputs, **common)
 
@@ -550,18 +571,16 @@ def _torch_capture_state(model: Any) -> Iterator[None]:
         _clone_state_dict_with_metadata,
         _ModuleTreePlainAttrSnapshot,
     )
-    from ..utils.rng import log_current_rng_states, set_rng_from_saved_states
+    from .._utils.rng import log_current_rng_states, set_rng_from_saved_states
 
+    modules = tuple(model.modules()) if hasattr(model, "modules") else ()
     rng_state = log_current_rng_states()
     state_dict = (
         _clone_state_dict_with_metadata(model)
         if hasattr(model, "state_dict") and hasattr(model, "load_state_dict")
         else None
     )
-    training_modes = tuple(
-        (module, bool(module.training))
-        for module in (model.modules() if hasattr(model, "modules") else ())
-    )
+    training_modes = tuple((module, bool(module.training)) for module in modules)
     registered_state = tuple(
         (
             module,
@@ -569,7 +588,7 @@ def _torch_capture_state(model: Any) -> Iterator[None]:
             dict(getattr(module, "_buffers", {})),
             dict(getattr(module, "_modules", {})),
         )
-        for module in (model.modules() if hasattr(model, "modules") else ())
+        for module in modules
     )
     hook_registries = tuple(
         (module, name, registry, tuple(registry.items()))
@@ -577,10 +596,7 @@ def _torch_capture_state(model: Any) -> Iterator[None]:
         for name, registry in vars(module).items()
         if isinstance(registry, OrderedDict) and (name.endswith("_hooks") or "_hooks_" in name)
     )
-    plain_attrs = _ModuleTreePlainAttrSnapshot(
-        model,
-        ignored_names=frozenset({"_tl", "forward"}),
-    )
+    plain_attrs = _ModuleTreePlainAttrSnapshot(model)
     try:
         with _prepared_torch_capture(model):
             yield
@@ -675,6 +691,15 @@ def capture_canonical_model(
     -------
     tuple
         ``(capture, canonical_inputs, canonical_kwargs, batch_spec)``.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> capture, inputs, kwargs, batch = tl.split.capture_canonical_model(
+    ...     graph.model, (torch.ones(4, 3),), graph.request, adapter=graph.adapter)
+    >>> inputs[0].shape, batch.canonical_batch_size
+    (torch.Size([1, 3]), 1)
+    >>> capture.cleanup()
     """
 
     batch_spec = resolve_batch_spec(
@@ -707,7 +732,8 @@ def capture_canonical_model(
             except Exception as exc:  # noqa: BLE001 - rebatching is backend-owned
                 raise SplitUnsupportedError(
                     f"Cannot construct canonical batch B={attempt} with backend "
-                    f"{adapter.name!r}: {exc}"
+                    f"{adapter.name!r}: {exc}",
+                    code=SplitUnsupportedError.code,
                 ) from exc
         try:
             capture = capture_model(model, canonical_inputs, spec, input_kwargs=canonical_kwargs)
@@ -748,6 +774,16 @@ def normalize_to_split_ir(
 
     The retained B=1 graph is reused after one empirical B=2 replay check.
     A failed or unavailable check keeps the graph runnable at its capture batch.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> capture = tl.split.capture_model(graph.model, (torch.ones(1, 3),), graph.request)
+    >>> projected, ir = tl.split.normalize_to_split_ir(capture, graph.request,
+    ...     inputs=(torch.ones(1, 3),), adapter=graph.adapter, model=graph.model)
+    >>> projected.backend, ir.backend
+    ('torch', 'torch')
+    >>> capture.cleanup()
     """
 
     graph = capture if isinstance(capture, SplitTraceGraph) else split_graph_from_trace(capture)
@@ -755,10 +791,13 @@ def normalize_to_split_ir(
         from .adapters import resolve_split_adapter
 
         adapter = resolve_split_adapter(graph.backend)
-    random_seed = getattr(capture, "random_seed", None) if adapter.name == "torch" else None
+    random_seed = capture.options.seed if adapter.name == "torch" else None
     if _release_capture:
         if adapter.name != "torch" or isinstance(capture, SplitTraceGraph):
-            raise SplitUnsupportedError("Only an owned Torch capture can be compacted.")
+            raise SplitUnsupportedError(
+                "Only an owned Torch capture can be compacted.",
+                code=SplitUnsupportedError.code,
+            )
         from ._torch_compact import compact_torch_graph
 
         graph = compact_torch_graph(graph, training=spec.trainable)
@@ -829,7 +868,19 @@ def analyze_split_capabilities(
     model_profile: SplitModelProfile | None = None,
     features: dict[str, Any] | None = None,
 ) -> SplitCapabilityReport:
-    """Analyze replay, dynamic-shape, training, and cache capabilities."""
+    """Analyze replay, dynamic-shape, training, and cache capabilities.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> partition = graph.compute_dag().to_partition(())
+    >>> analysis = graph.analyze(partition)
+    >>> report = tl.split.analyze_split_capabilities(graph.adapter, graph.trace_graph,
+    ...     analysis.plan, analysis.request, prefix_program=analysis.prefix_program,
+    ...     suffix_program=analysis.suffix_program, graph_ir=analysis.graph_ir)
+    >>> report.preflight_ok
+    True
+    """
 
     return build_capability_report(
         adapter,
@@ -852,7 +903,18 @@ def lower_split_program(
     adapter: Any,
     segment: ReplaySegment,
 ) -> ReplayProgram:
-    """Lower one IR segment through the selected backend adapter."""
+    """Lower one IR segment through the selected backend adapter.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> partition = graph.compute_dag().to_partition(())
+    >>> analysis = graph.analyze(partition)
+    >>> program = tl.split.lower_split_program(graph.trace_graph, analysis.plan,
+    ...     analysis.request, adapter=graph.adapter, segment='suffix')
+    >>> program.backend, bool(program.ops)
+    ('torch', True)
+    """
 
     return lower_replay_program(graph, plan, spec, segment=segment, adapter=adapter)
 
@@ -863,16 +925,26 @@ def execute_split_runtime(
     plan: SplitPlan,
     spec: SplitRequest,
 ) -> SegmentBundle:
-    """Build executable backend recipes from a lowered split plan."""
+    """Build executable backend recipes from a lowered split plan.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> partition = graph.compute_dag().to_partition(())
+    >>> analysis = graph.analyze(partition)
+    >>> segments = tl.split.execute_split_runtime(graph.adapter, graph.trace_graph, analysis.plan, analysis.request)
+    >>> callable(segments.prefix), callable(segments.suffix)
+    (True, True)
+    """
 
     return adapter.build_segments(graph, plan, spec)
 
 
-__all__ = [
+__all__ = (
     "analyze_split_capabilities",
     "capture_canonical_model",
     "capture_model",
     "execute_split_runtime",
     "lower_split_program",
     "normalize_to_split_ir",
-]
+)

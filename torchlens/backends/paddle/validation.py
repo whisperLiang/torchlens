@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
 from ... import _state
+from ..._utils._record_group_table import record_member
 from .._validation_shared import float_replay_tolerances, ops_by_label as _ops_by_label
-from ._cuda import paddle_cuda_scope
+from ._param_writes import PARAMETER_WRITE_MARKER
+from .validation_decisions import REASON_EFFECTFUL_REGION, REASON_PARENT_PAYLOAD_MISSING
 
 _FACTORY_OR_SOURCE_OPS = {
     "arange",
@@ -44,6 +46,8 @@ class RebuiltPaddleInputs:
         Distinct replay parent payloads keyed by raw producer label.
     leaf_paths_by_parent
         Template tensor leaf paths keyed by raw producer label.
+    param_values
+        Replay copies of module parameters keyed by template leaf path.
     """
 
     ok: bool
@@ -52,6 +56,7 @@ class RebuiltPaddleInputs:
     reason: str | None
     parent_values: dict[str, Any]
     leaf_paths_by_parent: dict[str, tuple[tuple[Any, ...], ...]]
+    param_values: dict[tuple[Any, ...], Any] = field(default_factory=dict)
 
 
 def _is_factory_or_source_capture(capture: Any) -> bool:
@@ -110,23 +115,40 @@ def _rebuild_inputs(capture: Any, ops_by_label: Mapping[str, Any]) -> RebuiltPad
 
     parent_values: dict[str, Any] = {}
     leaf_paths_by_parent: dict[str, list[tuple[Any, ...]]] = {}
+    param_inputs: Mapping[tuple[Any, ...], Any] = {
+        **(getattr(capture, "buffer_inputs", None) or {}),
+        **(getattr(capture, "param_inputs", None) or {}),
+    }
+    param_values: dict[tuple[Any, ...], Any] = {}
+
+    def _rebuild_unlabeled(path: tuple[Any, ...]) -> Any:
+        """Rebuild one unlabeled tensor leaf: a module parameter or a factory hole."""
+
+        if path in param_inputs:
+            param_values[path] = _parameter_replay_copy(param_inputs[path])
+            return param_values[path]
+        if _is_factory_or_source_capture(capture):
+            return None
+        raise ValueError(f"unlabeled tensor input leaf at {path!r}")
+
+    def _rebuild_leaf(value: dict[str, Any], path: tuple[Any, ...]) -> Any:
+        """Rebuild one tensor leaf marker from its parent payload."""
+
+        label = value.get("label")
+        if label is None:
+            return _rebuild_unlabeled(path)
+        if not isinstance(label, str) or label not in ops_by_label:
+            raise ValueError(f"dangling tensor input label {label!r} at {path!r}")
+        parent_value = _saved_payload(ops_by_label[label])
+        parent_values.setdefault(label, parent_value)
+        leaf_paths_by_parent.setdefault(label, []).append(path)
+        return parent_value
 
     def _rebuild(value: Any, path: tuple[Any, ...]) -> Any:
         """Rebuild one nested template value."""
 
         if _is_tensor_marker(value):
-            label = value.get("label")
-            if label is None:
-                if _is_factory_or_source_capture(capture):
-                    return None
-                raise ValueError(f"unlabeled tensor input leaf at {path!r}")
-            if not isinstance(label, str) or label not in ops_by_label:
-                raise ValueError(f"dangling tensor input label {label!r} at {path!r}")
-            parent_op = ops_by_label[label]
-            parent_value = _saved_payload(parent_op)
-            parent_values.setdefault(label, parent_value)
-            leaf_paths_by_parent.setdefault(label, []).append(path)
-            return parent_value
+            return _rebuild_leaf(value, path)
         if isinstance(value, tuple):
             return tuple(_rebuild(item, (*path, index)) for index, item in enumerate(value))
         if isinstance(value, list):
@@ -138,11 +160,11 @@ def _rebuild_inputs(capture: Any, ops_by_label: Mapping[str, Any]) -> RebuiltPad
     try:
         args = tuple(
             _rebuild(item, ("args", index))
-            for index, item in enumerate(getattr(capture, "args_template", ()))
+            for index, item in enumerate(record_member(capture, "args_template", ()))
         )
         kwargs = {
             str(key): _rebuild(item, ("kwargs", str(key)))
-            for key, item in getattr(capture, "kwargs_template", {}).items()
+            for key, item in record_member(capture, "kwargs_template", {}).items()
         }
     except (AttributeError, TypeError, ValueError) as exc:
         return RebuiltPaddleInputs(False, (), {}, str(exc), {}, {})
@@ -153,48 +175,33 @@ def _rebuild_inputs(capture: Any, ops_by_label: Mapping[str, Any]) -> RebuiltPad
         None,
         parent_values,
         {label: tuple(paths) for label, paths in leaf_paths_by_parent.items()},
+        param_values,
     )
 
 
-def _replay_capture_matches(
-    backend: Any,
-    capture: Any,
-    ops_by_label: Mapping[str, Any],
-    rebuilt: RebuiltPaddleInputs,
-    expected_output: Any,
-) -> bool:
-    """Compare one replay and parent perturbations in the tensors' owning CUDA context.
+def _parameter_replay_copy(param: Any) -> Any:
+    """Return a detached copy of a live parameter for replay.
+
+    Replay reads the parameter's CURRENT value. A parameter changed since the
+    forward makes the replay disagree with the saved output, so a stale value
+    can only fail validation, never pass it; the copy keeps a replayed op
+    that writes its inputs from mutating the user's model.
 
     Parameters
     ----------
-    backend
-        Live Paddle backend supplying native execution.
-    capture
-        Captured call and its output path.
-    ops_by_label
-        Materialized operations indexed by capture labels.
-    rebuilt
-        Coverage-checked concrete arguments for the replay.
-    expected_output
-        Saved output, or the corroborated pre-intervention output.
+    param
+        Live Paddle parameter recorded by the capture.
 
     Returns
     -------
-    bool
-        Whether replay agrees and the parent perturbations corroborate dataflow.
+    Any
+        Detached Paddle tensor with the same value, dtype and place.
     """
 
-    with paddle_cuda_scope(rebuilt.args, rebuilt.kwargs, expected_output):
-        with _state.pause_logging(), backend.paddle.no_grad():
-            replayed = capture.func(*rebuilt.args, **rebuilt.kwargs)
-        replayed_output = _value_at_path(replayed, _capture_output_path(capture))
-        return (
-            expected_output is not None
-            and _payloads_close(replayed_output, expected_output)
-            and _parent_perturbations_change_output(
-                backend, capture, ops_by_label, baseline_output=expected_output
-            )
-        )
+    import paddle
+
+    with paddle.no_grad():
+        return paddle.assign(param.detach())
 
 
 def _payloads_close(a: Any, b: Any) -> bool:
@@ -260,9 +267,9 @@ def _arrays_close(left: np.ndarray, right: np.ndarray) -> bool:
     if np.issubdtype(left.dtype, np.bool_) or np.issubdtype(left.dtype, np.integer):
         return bool(np.array_equal(left, right))
     if np.issubdtype(left.dtype, np.floating) or np.issubdtype(left.dtype, np.complexfloating):
-        # The ONE shared eps-derived band (b5-opus R17-1 hoist); complex
-        # payloads take the same component-eps band as mlx/jax (bit-exact
-        # complex here false-failed legitimate replay jitter). equal_nan
+        # The ONE shared eps-derived band; complex payloads take the same
+        # component-eps band as mlx/jax (a bit-exact complex comparison would
+        # false-fail legitimate replay jitter). equal_nan
         # matches this backend's own replay oracle (paddle/backend.py) and
         # every sibling: identical NaN patterns are agreement, NaN-vs-number
         # still fails elementwise.
@@ -295,7 +302,8 @@ def _perturb_candidates(value: Any) -> tuple[Any, ...]:
         if np.issubdtype(array.dtype, np.bool_):
             candidates = (np.logical_not(array),)
         elif np.issubdtype(array.dtype, np.integer):
-            candidates = (array + 1, np.zeros_like(array))
+            # ~x flips the sign without overflow, so a threshold compare (ids < 0) sees it.
+            candidates = (array + 1, np.zeros_like(array), np.invert(array))
         else:
             magnitude = np.max(np.abs(array)).item() + 1.0 if array.size else 1.0
             candidates = (
@@ -315,6 +323,7 @@ def _parent_perturbations_change_output(
     ops_by_label: Mapping[str, Any],
     *,
     baseline_output: Any | None = None,
+    constant_labels: frozenset[str] = frozenset(),
 ) -> bool:
     """Return whether at least one value-parent perturbation changes output.
 
@@ -331,6 +340,12 @@ def _parent_perturbations_change_output(
         the sensitivity check compares perturbed replays against the pre-hook
         value: comparing against the recorded replacement payload would make
         the check vacuously pass for constant replacements.
+    constant_labels
+        Raw labels of ops the constants rule recorded (closure tensors that
+        existed before the forward). They have no upstream, so they are never
+        perturbed (SPEC 2 rule 3); the op is still perturbed on every other
+        value parent, and an op whose value parents are all constants has
+        nothing to perturb (its replay comparison is the whole check).
 
     Returns
     -------
@@ -344,34 +359,88 @@ def _parent_perturbations_change_output(
         return False
     if not rebuilt.parent_values:
         return _is_factory_or_source_capture(capture)
-    saved_output = (
+    if set(rebuilt.parent_values) <= constant_labels:
+        return True
+    saved_output = _perturbation_baseline(baseline_output, ops_by_label, capture)
+    attempted = False
+    for parent_label in rebuilt.parent_values:
+        if parent_label in constant_labels:
+            continue
+        if not rebuilt.leaf_paths_by_parent.get(parent_label, ()):
+            continue
+        tried, changed = _perturb_parent(backend, capture, rebuilt, parent_label, saved_output)
+        attempted = attempted or tried
+        if changed:
+            return True
+    return not attempted and _is_factory_or_source_capture(capture)
+
+
+def _perturbation_baseline(
+    baseline_output: Any, ops_by_label: Mapping[str, Any], capture: Any
+) -> Any:
+    """The output perturbed replays are compared against (explicit baseline or saved payload)."""
+
+    return (
         baseline_output
         if baseline_output is not None
         else _saved_payload(ops_by_label[capture.label_raw])
     )
+
+
+def _perturb_parent(
+    backend: Any,
+    capture: Any,
+    rebuilt: RebuiltPaddleInputs,
+    parent_label: str,
+    saved_output: Any,
+) -> tuple[bool, bool]:
+    """Perturb one value parent through every candidate.
+
+    Returns
+    -------
+    tuple[bool, bool]
+        Whether any candidate replay was attempted, and whether one changed
+        the output.
+    """
+
+    paths = rebuilt.leaf_paths_by_parent.get(parent_label, ())
+    parent_value = rebuilt.parent_values[parent_label]
     output_path = _capture_output_path(capture)
     attempted = False
-    for parent_label, parent_value in rebuilt.parent_values.items():
-        paths = rebuilt.leaf_paths_by_parent.get(parent_label, ())
-        if not paths:
+    for candidate in _perturb_candidates(parent_value):
+        attempted = True
+        args, kwargs = _replace_template_paths(
+            tuple(record_member(capture, "args_template", ())),
+            dict(record_member(capture, "kwargs_template", {})),
+            dict.fromkeys(paths, candidate),
+            rebuilt,
+        )
+        try:
+            with _state.pause_logging(), backend.paddle.no_grad():
+                perturbed = capture.func(*args, **kwargs)
+        except Exception:
             continue
-        for candidate in _perturb_candidates(parent_value):
-            attempted = True
-            args, kwargs = _replace_template_paths(
-                tuple(getattr(capture, "args_template", ())),
-                dict(getattr(capture, "kwargs_template", {})),
-                dict.fromkeys(paths, candidate),
-                rebuilt,
-            )
-            try:
-                with _state.pause_logging(), backend.paddle.no_grad():
-                    perturbed = capture.func(*args, **kwargs)
-            except Exception:
-                continue
-            perturbed_output = _value_at_path(perturbed, output_path)
-            if not _payloads_close(perturbed_output, saved_output):
-                return True
-    return not attempted and _is_factory_or_source_capture(capture)
+        perturbed_output = _value_at_path(perturbed, output_path)
+        if not _payloads_close(perturbed_output, saved_output):
+            return attempted, True
+    return attempted, False
+
+
+def _capture_gap_markers(trace: Any) -> tuple[str, ...]:
+    """Read the capture's DECLARED gap-marker seam, fail-closed.
+
+    ``Trace._paddle_capture_gap_markers`` is a declared session field
+    (``data_classes/_trace_components.py``) that every live Paddle capture
+    initializes before the forward. A direct read breaks loudly on a rename;
+    a trace without it reports a parameter-write marker, so the oracle can
+    never credit parameter reads it has no write evidence for.
+    """
+
+    try:
+        markers = trace._paddle_capture_gap_markers
+    except AttributeError:
+        return (f"{PARAMETER_WRITE_MARKER}: capture gap markers unavailable",)
+    return tuple(str(marker) for marker in markers)
 
 
 def _coverage_oracle(trace: Any) -> bool:
@@ -388,44 +457,120 @@ def _coverage_oracle(trace: Any) -> bool:
         True when capture records conserve tensor inputs and graph parents.
     """
 
+    return _coverage_first_gap(trace) is None
+
+
+def _coverage_first_gap(trace: Any) -> tuple[str | None, str, str] | None:
+    """Return the first coverage gap as ``(raw label, reason, detail)``, or ``None``.
+
+    The single implementation behind :func:`_coverage_oracle`; the tuple names
+    the offending capture so a failed status can say where and why.
+
+    Parameters
+    ----------
+    trace
+        Paddle trace containing independent ``PaddleOpCapture`` records.
+
+    Returns
+    -------
+    tuple[str | None, str, str] | None
+        ``None`` when capture records conserve tensor inputs and graph parents.
+    """
+
+    # A parameter the forward wrote in place outside any wrapped op is an
+    # untraced effect even when nothing reads it afterwards: fail closed.
+    for marker in _capture_gap_markers(trace):
+        if marker.startswith(PARAMETER_WRITE_MARKER):
+            return None, REASON_EFFECTFUL_REGION, marker
     captures = tuple(getattr(trace, "_paddle_op_captures", ()))
     ops_by_label = _ops_by_label(trace)
     for capture in captures:
-        if getattr(capture, "label_raw", None) not in ops_by_label:
+        label_raw = getattr(capture, "label_raw", None)
+        if label_raw not in ops_by_label:
             if tuple(getattr(capture, "alias_annotations", ())):
                 continue
-            return False
-        is_factory = _is_factory_or_source_capture(capture)
-        if not is_factory:
-            for leaf in getattr(capture, "tensor_inputs", ()):
-                if getattr(leaf, "label", None) is None:
-                    return False
-            if tuple(getattr(capture, "capture_gap_markers", ())) != ():
-                return False
+            return label_raw, REASON_PARENT_PAYLOAD_MISSING, "capture has no recorded op"
+        gap = _capture_input_gap(capture)
+        if gap is not None:
+            return label_raw, *gap
         op = ops_by_label.get(getattr(capture, "label_raw", ""))
         if op is None:
             continue
-        # Capture records speak RAW label space (their labels are immutable
-        # capture identities). Recurrence grouping rewrites graph edges to
-        # final pass-qualified labels, so parents are resolved back to raw
-        # space before comparison; an unresolvable parent keeps its literal
-        # label and fails closed.
-        graph_parents: set[str] = set()
-        for parent in getattr(op, "parents", ()):
-            parent_text = str(parent)
-            if parent_text.startswith("input."):
-                continue
-            parent_op = ops_by_label.get(parent_text)
-            parent_raw = getattr(parent_op, "_label_raw", None) if parent_op is not None else None
-            graph_parents.add(parent_raw if isinstance(parent_raw, str) else parent_text)
-        for label in getattr(capture, "producer_labels", frozenset()):
-            if not isinstance(label, str):
-                return False
-            if not label.startswith("input.") and label not in ops_by_label:
-                return False
-            if not label.startswith("input.") and label not in graph_parents:
-                return False
-    return True
+        parent_gap = _producer_parent_gap(capture, op, ops_by_label)
+        if parent_gap is not None:
+            return label_raw, REASON_PARENT_PAYLOAD_MISSING, parent_gap
+    return None
+
+
+def _capture_input_gap(capture: Any) -> tuple[str, str] | None:
+    """Return ``(reason, detail)`` for an untraced input or capture-gap marker."""
+
+    if _is_factory_or_source_capture(capture):
+        return None
+    for leaf in getattr(capture, "tensor_inputs", ()):
+        if getattr(leaf, "label", None) is None and not _is_known_param_leaf(capture, leaf):
+            path = tuple(getattr(leaf, "path", ()))
+            return REASON_PARENT_PAYLOAD_MISSING, f"untraced tensor input at {path!r}"
+    markers = tuple(getattr(capture, "capture_gap_markers", ()))
+    if markers != ():
+        reason = (
+            REASON_EFFECTFUL_REGION
+            if any("same-object" in str(marker) for marker in markers)
+            else REASON_PARENT_PAYLOAD_MISSING
+        )
+        return reason, str(markers[0])
+    return None
+
+
+def _producer_parent_gap(capture: Any, op: Any, ops_by_label: Mapping[str, Any]) -> str | None:
+    """Return why a capture's producer labels disagree with the graph's parents."""
+
+    # Capture records speak RAW label space (their labels are immutable
+    # capture identities). Recurrence grouping rewrites graph edges to
+    # final pass-qualified labels, so parents are resolved back to raw
+    # space before comparison; an unresolvable parent keeps its literal
+    # label and fails closed.
+    graph_parents: set[str] = set()
+    for parent in getattr(op, "parents", ()):
+        parent_text = str(parent)
+        if parent_text.startswith("input."):
+            continue
+        parent_op = ops_by_label.get(parent_text)
+        parent_raw = getattr(parent_op, "_label_raw", None) if parent_op is not None else None
+        graph_parents.add(parent_raw if isinstance(parent_raw, str) else parent_text)
+    for label in getattr(capture, "producer_labels", frozenset()):
+        if not isinstance(label, str):
+            return f"non-string producer label {label!r}"
+        if not label.startswith("input.") and label not in ops_by_label:
+            return f"producer {label!r} is not a recorded op"
+        if not label.startswith("input.") and label not in graph_parents:
+            return f"producer {label!r} is not a graph parent"
+    return None
+
+
+def _is_known_param_leaf(capture: Any, leaf: Any) -> bool:
+    """Return whether an unlabeled input leaf is a recorded module parameter.
+
+    Parameters
+    ----------
+    capture
+        Paddle operation capture record.
+    leaf
+        One of the capture's ``tensor_inputs``.
+
+    Returns
+    -------
+    bool
+        True only when the leaf carries a parameter address AND the capture
+        holds the parameter object for replay at that path.
+    """
+
+    path = tuple(getattr(leaf, "path", ()))
+    param_inputs = getattr(capture, "param_inputs", None) or {}
+    return (getattr(leaf, "param_address", None) is not None and path in param_inputs) or (
+        getattr(leaf, "buffer_address", None) is not None
+        and path in (getattr(capture, "buffer_inputs", None) or {})
+    )
 
 
 def _is_tensor_marker(value: Any) -> bool:
@@ -516,16 +661,23 @@ def _replace_template_paths(
 
     parent_values = rebuilt.parent_values
 
+    def _rebuild_leaf(value: dict[str, Any], path: tuple[Any, ...]) -> Any:
+        """Rebuild one tensor leaf from a parent payload or a parameter copy."""
+
+        label = value.get("label")
+        if isinstance(label, str) and label in parent_values:
+            return parent_values[label]
+        if label is None and path in rebuilt.param_values:
+            return rebuilt.param_values[path]
+        raise ValueError(f"cannot rebuild tensor leaf at {path!r}")
+
     def _rebuild(value: Any, path: tuple[Any, ...]) -> Any:
         """Rebuild one value with replacements."""
 
         if path in replacements:
             return replacements[path]
         if _is_tensor_marker(value):
-            label = value.get("label")
-            if isinstance(label, str) and label in parent_values:
-                return parent_values[label]
-            raise ValueError(f"cannot rebuild tensor leaf at {path!r}")
+            return _rebuild_leaf(value, path)
         if isinstance(value, tuple):
             return tuple(_rebuild(item, (*path, index)) for index, item in enumerate(value))
         if isinstance(value, list):

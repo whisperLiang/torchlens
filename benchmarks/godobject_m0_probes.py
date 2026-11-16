@@ -1,7 +1,7 @@
 """M0 measurement probes for the trace-core columnar re-plumbing.
 
 Measures the evidence items the converged design gates on
-(docs/reference/trace_core_design.md sections 4 and 7, wave M0):
+(docs/internal/reference/trace_core_design.md sections 4 and 7, wave M0):
 
 - A2: retained journal bytes vs semantic-graph bytes on a large capture
   (journal-columnarization reopening condition: journal > 2x semantic store).
@@ -26,7 +26,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.data_classes.op import Op
+from torchlens._data_classes.op import Op
 
 _SEED = 20260812
 
@@ -141,7 +141,7 @@ def probe_scale(target_ops: int) -> None:
         f"-> ratio {journal_bytes / max(op_bytes, 1):.2f}x"
     )
 
-    from torchlens.ir.predicate import RecordContext
+    from torchlens._ir.predicate import RecordContext
 
     gc.collect()
     contexts = sum(1 for obj in gc.get_objects() if isinstance(obj, RecordContext))
@@ -177,11 +177,10 @@ def probe_mutation_inventory() -> None:
             trace = tl.trace(
                 model,
                 x,
-                capture=tl.options.CaptureOptions(backward_ready=True),
-                save_mode="reference",
+                capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"),
             )
             loss = trace[trace.ops.keys()[-1]].out.sum()
-            trace.log_backward(loss)
+            trace.backward(loss)
 
             torch.manual_seed(_SEED)
             ablated = tl.trace(

@@ -7,19 +7,39 @@ import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 from torch import nn
 
 from torchlens._errors import ShapeInferenceError
+from torchlens.debug._infer_failure_classify import classify_nongeometric_failure
+from torchlens.debug._infer_training_states import (
+    _restore_training_states,
+    _training_states,
+    training_states_restored,
+)
+
+from .._user_public_impls import trace
+from .._utils.lazy_state import has_uninitialized_lazy_state
+from .._utils.rng import _snapshot_cuda_rng_states
+from ..options import CaptureOptions
+from ._infer_op_facts import (
+    _shape_op_config_int,
+    _shape_op_label,
+    _shape_op_module,
+    _shape_op_source_line,
+    _shape_tuple,
+)
+from ._infer_report import GuessInputShapeReport
 
 if TYPE_CHECKING:
-    from torchlens.data_classes.trace import Trace
+    from torchlens._data_classes.trace import Trace
 
 FailureReason = Literal[
     "non_shape_blocker",
     "exact_size_unreachable",
+    "multi_input_required",
     "multi_input_unsupported",
     "budget_exhausted",
     "unknown_entry",
@@ -28,61 +48,6 @@ FailureReason = Literal[
     "device_mismatch",
     "rank_undetermined",
 ]
-
-
-@dataclass(frozen=True)
-class InferInputShapeResult:
-    """Result returned by :func:`infer_input_shape`.
-
-    Parameters
-    ----------
-    found:
-        Whether a verified input was found.
-    shape:
-        Single tensor input shape, when applicable.
-    shapes:
-        Multi-input shapes, when applicable.
-    dtype:
-        Input dtype for the primary tensor.
-    value_range:
-        Synthetic value recipe: ``("uniform", 0, 1)`` or ``("randint", 0, vocab)``.
-    flexible_dims:
-        Dimensions that are expected to tolerate other sizes.
-    constraining_module:
-        Module qualname that constrained the inferred shape, when known.
-    constraining_op:
-        Operation name that constrained the inferred shape, when known.
-    source_line:
-        Source line for the constraining op, when known.
-    example_input:
-        Ready-to-use input object.
-    strategy:
-        Strategy that produced the winning input.
-    reason:
-        Failure reason when ``found`` is false.
-    attempts:
-        Probe diary as ``(shape, outcome)`` tuples.
-    trace:
-        Final verification trace when ``return_trace=True``.
-    message:
-        Actionable human-readable summary.
-    """
-
-    found: bool
-    shape: tuple[int, ...] | None
-    shapes: tuple[tuple[int, ...], ...] | None
-    dtype: torch.dtype | None
-    value_range: tuple[str, float, float] | None
-    flexible_dims: tuple[int, ...]
-    constraining_module: str | None
-    constraining_op: str | None
-    source_line: str | None
-    example_input: Any | None
-    strategy: str
-    reason: str | None
-    attempts: tuple[tuple[tuple[int, ...] | None, str], ...]
-    trace: Trace | None
-    message: str
 
 
 @dataclass(frozen=True)
@@ -134,7 +99,7 @@ class _ExecutedConstraint:
 
 
 # Brittleness: these patterns parse PyTorch human error text. They are
-# intentionally centralized so the infer_input_shape redesign can remove them.
+# intentionally centralized so the guess_input_shape redesign can remove them.
 _EXCEPTION_PARSE_PATTERNS: dict[str, re.Pattern[str]] = {
     "linear": re.compile(
         r"mat1 and mat2 shapes cannot be multiplied \((\d+)x(\d+) and (\d+)x(\d+)\)"
@@ -165,28 +130,6 @@ _KERNEL_RE = _EXCEPTION_PARSE_PATTERNS["kernel"]
 _SIZE_RE = _EXCEPTION_PARSE_PATTERNS["size"]
 _POSITION_RE = _EXCEPTION_PARSE_PATTERNS["position"]
 _DEVICE_RE = _EXCEPTION_PARSE_PATTERNS["device"]
-
-
-def _shape_tuple(shape: Any) -> tuple[int, ...] | None:
-    """Convert a Torch/TorchLens shape-like object to an integer tuple.
-
-    Parameters
-    ----------
-    shape:
-        Shape-like object.
-
-    Returns
-    -------
-    tuple[int, ...] | None
-        Converted shape, or ``None`` when conversion is not possible.
-    """
-
-    if shape is None:
-        return None
-    try:
-        return tuple(int(dim) for dim in shape)
-    except TypeError:
-        return None
 
 
 def _dtype_from_message(message: str) -> torch.dtype | None:
@@ -361,7 +304,9 @@ def _has_uninitialized_lazy_state(model: nn.Module) -> bool:
 
     Probing a lazy module would permanently materialize it inside the caller's
     model (often at a degenerate width such as ``in_features=0``), so inference
-    must refuse before building any prior.
+    must refuse before building any prior. The scan itself is the shared
+    detector in ``torchlens._utils.lazy_state`` (hoisted per quickstart memo
+    wave 1a; the capture entry gate consumes the same one).
 
     Parameters
     ----------
@@ -374,18 +319,7 @@ def _has_uninitialized_lazy_state(model: nn.Module) -> bool:
         Whether any module has uninitialized lazy parameters or buffers.
     """
 
-    for module in model.modules():
-        if isinstance(module, nn.modules.lazy.LazyModuleMixin):
-            try:
-                if module.has_uninitialized_params():
-                    return True
-            except Exception:  # noqa: BLE001 - treat unreadable lazy state as uninitialized.
-                return True
-    uninitialized = (nn.parameter.UninitializedParameter, nn.parameter.UninitializedBuffer)
-    return any(
-        isinstance(tensor, uninitialized)
-        for tensor in list(model.parameters(recurse=True)) + list(model.buffers(recurse=True))
-    )
+    return has_uninitialized_lazy_state(model)
 
 
 def _has_adaptive_pool(model: nn.Module) -> bool:
@@ -435,7 +369,7 @@ def _shape_has_executed_adaptive_pool(trace: Trace) -> bool:
     return any(
         "adaptive" in str(getattr(op, "func_name", "")).lower()
         and "pool" in str(getattr(op, "func_name", "")).lower()
-        for op in trace.layers
+        for op in trace.ops
     )
 
 
@@ -542,36 +476,6 @@ def _make_tensor(
             int(value_range[1]), int(value_range[2]), shape, device=device, dtype=dtype
         )
     return torch.rand(shape, device=device, dtype=dtype)
-
-
-def _training_states(model: nn.Module) -> dict[nn.Module, bool]:
-    """Capture training flags for all modules.
-
-    Parameters
-    ----------
-    model:
-        Model whose module states are captured.
-
-    Returns
-    -------
-    dict[nn.Module, bool]
-        Training flags keyed by module object.
-    """
-
-    return {module: module.training for module in model.modules()}
-
-
-def _restore_training_states(states: dict[nn.Module, bool]) -> None:
-    """Restore module training flags.
-
-    Parameters
-    ----------
-    states:
-        Training flags from :func:`_training_states`.
-    """
-
-    for module, training in states.items():
-        module.train(training)
 
 
 def _probe(model: nn.Module, example_input: Any, seed: int) -> _ProbeResult:
@@ -1223,93 +1127,16 @@ def _trace_model(model: nn.Module, example_input: Any) -> Trace:
         Completed TorchLens trace.
     """
 
-    from torchlens.user_funcs import trace
-
     states = _training_states(model)
     try:
         model.eval()
-        return trace(model, example_input, inference_only=True)
+        return trace(model, example_input, capture=CaptureOptions(inference_only=True))
     finally:
         _restore_training_states(states)
 
 
-def _shape_op_label(op: Any) -> str | None:
-    """Return an op label from a TorchLens layer/op object.
-
-    Parameters
-    ----------
-    op:
-        TorchLens op-like object.
-
-    Returns
-    -------
-    str | None
-        Label when present.
-    """
-
-    label = getattr(op, "layer_label", None) or getattr(op, "op_label", None)
-    return str(label) if label is not None else None
-
-
-def _shape_op_module(op: Any) -> str | None:
-    """Return a module address from a TorchLens op-like object.
-
-    Parameters
-    ----------
-    op:
-        TorchLens op-like object.
-
-    Returns
-    -------
-    str | None
-        Module address when present.
-    """
-
-    module = getattr(op, "module_address", None) or getattr(op, "module", None)
-    return str(module) if module is not None else None
-
-
-def _shape_op_source_line(op: Any) -> str | None:
-    """Return an op source-line string when TorchLens exposes one.
-
-    Parameters
-    ----------
-    op:
-        TorchLens op-like object.
-
-    Returns
-    -------
-    str | None
-        Source-line string, or ``None``.
-    """
-
-    source_line = getattr(op, "source_line", None)
-    return str(source_line) if source_line is not None else None
-
-
-def _shape_op_config_int(op: Any, key: str) -> int | None:
-    """Read an integer from an op's ``func_config``.
-
-    Parameters
-    ----------
-    op:
-        TorchLens op-like object.
-    key:
-        Config key.
-
-    Returns
-    -------
-    int | None
-        Integer value when present.
-    """
-
-    config = getattr(op, "func_config", {}) or {}
-    value = config.get(key)
-    return int(value) if value is not None else None
-
-
 def _executed_constraint(trace: Trace) -> _ExecutedConstraint | None:
-    """Read the first executed input-consuming constraint op from a trace.
+    """Read the first executed input-consuming constraint op, pass by pass.
 
     Parameters
     ----------
@@ -1322,7 +1149,7 @@ def _executed_constraint(trace: Trace) -> _ExecutedConstraint | None:
         Executed constraint metadata, or ``None``.
     """
 
-    for op in trace.layers:
+    for op in trace.ops:
         func_name = str(getattr(op, "func_name", "")).lower()
         input_shapes = tuple(_shape_tuple(shape) for shape in getattr(op, "input_shapes", ()) or ())
         input_dtypes = tuple(getattr(op, "input_dtypes", ()) or ())
@@ -1508,7 +1335,7 @@ def _verified_result(
     flexible: tuple[int, ...],
     value_range: tuple[str, float, float],
     message_note: str = "",
-) -> InferInputShapeResult:
+) -> GuessInputShapeReport:
     """Build a successful result from a verified trace.
 
     Parameters
@@ -1538,11 +1365,11 @@ def _verified_result(
 
     Returns
     -------
-    InferInputShapeResult
+    GuessInputShapeReport
         Successful result.
     """
 
-    return InferInputShapeResult(
+    return GuessInputShapeReport(
         found=True,
         shape=shape,
         shapes=None,
@@ -1567,7 +1394,7 @@ def _failure_result(
     reason: FailureReason,
     attempts: list[tuple[tuple[int, ...] | None, str]],
     message: str,
-) -> InferInputShapeResult:
+) -> GuessInputShapeReport:
     """Build a standardized failed inference result.
 
     Parameters
@@ -1581,11 +1408,11 @@ def _failure_result(
 
     Returns
     -------
-    InferInputShapeResult
+    GuessInputShapeReport
         Failed result.
     """
 
-    return InferInputShapeResult(
+    return GuessInputShapeReport(
         found=False,
         shape=None,
         shapes=None,
@@ -1604,7 +1431,7 @@ def _failure_result(
     )
 
 
-def _maybe_raise(result: InferInputShapeResult, on_failure: Literal["return", "raise"]) -> None:
+def _maybe_raise(result: GuessInputShapeReport, on_failure: Literal["return", "raise"]) -> None:
     """Raise for a failed result when requested.
 
     Parameters
@@ -1685,7 +1512,7 @@ def _run_search(
     device: torch.device | str | None,
     seed: int,
     return_trace: bool,
-) -> InferInputShapeResult:
+) -> GuessInputShapeReport:
     """Run the probe/verify search loop and always return a structured result.
 
     This function never raises intentionally; the caller wraps it in the
@@ -1704,11 +1531,11 @@ def _run_search(
         Shared probe diary, mutated in place so partial attempts survive
         internal errors.
     batch_size, input_dtype, channels, spatial_rank, seq_len, min_size, max_size, preferred_sizes, max_probes, device, seed, return_trace:
-        See :func:`infer_input_shape`.
+        See :func:`guess_input_shape`.
 
     Returns
     -------
-    InferInputShapeResult
+    GuessInputShapeReport
         Success or structured failure.
     """
 
@@ -1750,7 +1577,7 @@ def _run_search(
         example: torch.Tensor,
         fallback_strategy: str | None,
         allow_normalize: bool,
-    ) -> InferInputShapeResult | None:
+    ) -> GuessInputShapeReport | None:
         """Verify one successful probe with a trace and build an honest result.
 
         Returns ``None`` when the success is rejected as a broadcast/rank
@@ -2041,6 +1868,11 @@ def _run_search(
             attempts,
             f"Shape inference was blocked by an unsupported forward error: {delayed_blockers[-1]}",
         )
+    # Evidence-led classification (the CLIP-class fix):
+    # see torchlens/debug/_infer_failure_classify.py.
+    classified = classify_nongeometric_failure(attempts, _is_skippable_shape_error)
+    if classified is not None:
+        return _failure_result(cast("FailureReason", classified[0]), attempts, classified[1])
     return _failure_result(
         "exact_size_unreachable",
         attempts,
@@ -2064,10 +1896,10 @@ def _infer_input_shape_impl(
     max_probes: int = 64,
     device: torch.device | str | None = None,
     seed: int = 0,
-    return_trace: bool = False,
+    _return_trace: bool = False,
     on_failure: Literal["return", "raise"] = "return",
     input_specs: Any = None,
-) -> InferInputShapeResult:
+) -> GuessInputShapeReport:
     """Infer a verified synthetic input shape for a PyTorch module.
 
     Parameters
@@ -2099,8 +1931,9 @@ def _infer_input_shape_impl(
         Optional device override; defaults to the model's first parameter or buffer device.
     seed:
         RNG seed used for deterministic probes.
-    return_trace:
-        Whether to include the final verification ``Trace``.
+    _return_trace:
+        Internal: whether to include the final verification ``Trace`` (the
+        zero-argument capture door reuses it).
     on_failure:
         ``"return"`` for notebook-friendly diagnostics or ``"raise"`` for
         ``ShapeInferenceError``. With ``"return"``, inference failures of any kind
@@ -2112,13 +1945,14 @@ def _infer_input_shape_impl(
 
     Returns
     -------
-    InferInputShapeResult
+    GuessInputShapeReport
         Verified input, diagnostic failure, and probe attempts.
 
     Notes
     -----
     The implementation combines static module introspection, forward pre-hook probe diaries,
-    successful ``tl.trace(..., inference_only=True)`` verification, and torch exception parsing.
+    successful ``tl.trace(..., capture=CaptureOptions(inference_only=True))``
+    verification, and torch exception parsing.
     It measures candidate shapes instead of deriving convolution and pooling formulas.
 
     The helper is read-only with respect to the caller's model: probes and verification
@@ -2136,10 +1970,19 @@ def _infer_input_shape_impl(
     or ``past_key_values``, tokenizer/image-processor preprocessing, stateful or buffer-mutating
     forwards, opaque C++/CUDA errors, non-square exact spatial sizes without an aspect hint, or
     ``torch.compile``/scripted/exported artifacts.
+
+    Examples
+    --------
+    >>> mlp = nn.Sequential(nn.Linear(8, 4), nn.ReLU())
+    >>> report = guess_input_shape(mlp)
+    >>> report.found, report.shape[-1]
+    (True, 8)
+    >>> mlp(report.example_input).shape[-1]
+    4
     """
 
     if not isinstance(model, nn.Module):
-        raise ShapeInferenceError("infer_input_shape expects a torch.nn.Module.")
+        raise ShapeInferenceError("guess_input_shape expects a torch.nn.Module.")
     _validate_search_arguments(
         batch_size=batch_size,
         channels=channels,
@@ -2179,40 +2022,38 @@ def _infer_input_shape_impl(
         return result
 
     attempts: list[tuple[tuple[int, ...] | None, str]] = []
-    training_states = _training_states(model)
-    try:
-        result = _run_search(
-            model,
-            attempts,
-            batch_size=batch_size,
-            input_dtype=input_dtype,
-            channels=channels,
-            spatial_rank=spatial_rank,
-            seq_len=seq_len,
-            min_size=min_size,
-            max_size=max_size,
-            preferred_sizes=preferred_sizes,
-            max_probes=max_probes,
-            device=device,
-            seed=seed,
-            return_trace=return_trace,
-        )
-    except Exception as exc:  # noqa: BLE001 - the on_failure contract admits no raw escape.
-        message = f"Shape inference aborted on an unexpected internal error: {exc!r}"
-        if on_failure == "raise":
-            raise ShapeInferenceError(message) from exc
-        return _failure_result("non_shape_blocker", attempts, message)
-    finally:
-        _restore_training_states(training_states)
+    with training_states_restored(model):
+        try:
+            result = _run_search(
+                model,
+                attempts,
+                batch_size=batch_size,
+                input_dtype=input_dtype,
+                channels=channels,
+                spatial_rank=spatial_rank,
+                seq_len=seq_len,
+                min_size=min_size,
+                max_size=max_size,
+                preferred_sizes=preferred_sizes,
+                max_probes=max_probes,
+                device=device,
+                seed=seed,
+                return_trace=_return_trace,
+            )
+        except Exception as exc:  # noqa: BLE001 - the on_failure contract admits no raw escape.
+            message = f"Shape inference aborted on an unexpected internal error: {exc!r}"
+            if on_failure == "raise":
+                raise ShapeInferenceError(message) from exc
+            return _failure_result("non_shape_blocker", attempts, message)
     _maybe_raise(result, on_failure)
     return result
 
 
 @functools.wraps(_infer_input_shape_impl)
-def infer_input_shape(model: nn.Module, **kwargs: Any) -> InferInputShapeResult:
+def guess_input_shape(model: nn.Module, **kwargs: Any) -> GuessInputShapeReport:
     """Infer a synthetic input shape while leaving the caller's global RNG untouched.
 
-    ``infer_input_shape`` synthesizes probe tensors (``torch.rand``/``randn``/
+    ``guess_input_shape`` synthesizes probe tensors (``torch.rand``/``randn``/
     ``randint``) and seeds the probe with ``torch.manual_seed(seed)``. Both mutate
     the process-global torch RNG, so a bare call permanently advanced the caller's
     RNG stream. Snapshot the CPU (and CUDA) RNG state on entry and restore it on
@@ -2221,12 +2062,20 @@ def infer_input_shape(model: nn.Module, **kwargs: Any) -> InferInputShapeResult:
     run in ``eval()`` mode, and lazy modules are never materialized. All
     keyword-only arguments and the full signature/docstring of
     :func:`_infer_input_shape_impl` are preserved via :func:`functools.wraps`.
+
+    Examples
+    --------
+    >>> mlp = nn.Sequential(nn.Linear(8, 4), nn.ReLU())
+    >>> report = guess_input_shape(mlp)
+    >>> report.found, report.shape[-1]
+    (True, 8)
+    >>> mlp(report.example_input).shape[-1]
+    4
     """
 
-    cpu_rng_state = torch.get_rng_state()
-    # Initialized-CUDA-only, latch-guarded (R36-4): the bare is_available()
+    cpu_rng_state = torch.default_generator.get_state()
+    # Initialized-CUDA-only, latch-guarded: the bare is_available
     # gate allocated a CUDA context per visible device on CPU-only runs.
-    from ..utils.rng import _snapshot_cuda_rng_states
 
     cuda_rng_state = _snapshot_cuda_rng_states() or None
     try:
@@ -2238,5 +2087,5 @@ def infer_input_shape(model: nn.Module, **kwargs: Any) -> InferInputShapeResult:
 
 
 # Preserve the honest public identity that ``functools.wraps`` copies from the impl.
-infer_input_shape.__name__ = "infer_input_shape"
-infer_input_shape.__qualname__ = "infer_input_shape"
+guess_input_shape.__name__ = "guess_input_shape"
+guess_input_shape.__qualname__ = "guess_input_shape"

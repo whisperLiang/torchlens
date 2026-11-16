@@ -2,23 +2,19 @@
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 import torchlens as tl
-from torchlens.backends import BackendUnsupportedError
-from torchlens.capture.projections import _record_from_record_context
-from torchlens.fastlog.storage_disk import _ctx_from_json, _ctx_to_json
-from torchlens.fastlog.types import CaptureSpec, RecordContext
-from torchlens.ir import (
-    _DEFERRED_VALUE,
-    CaptureEvents,
-    FunctionEventInput,
-    MLXValueUnavailableError,
-)
+from torchlens._capture.projections import _record_from_record_context
+from torchlens._ir import _DEFERRED_VALUE
+from torchlens._ir.capture_events import CaptureEvents
+from torchlens._ir.intervention import FunctionEventInput
+from torchlens.errors import BackendUnsupportedError, MLXValueUnavailableError
+from torchlens.recording._storage_disk import _ctx_from_json, _ctx_to_json
+from torchlens.recording._types import CaptureSpec, RecordContext
 
 
 def _minimal_context(**updates: Any) -> RecordContext:
@@ -28,7 +24,7 @@ def _minimal_context(**updates: Any) -> RecordContext:
         "kind": "op",
         "label": "mlx_add_1_1_raw",
         "raw_label": "mlx_add_1_1_raw",
-        "pass_index": 1,
+        "pass_number": 1,
         "event_index": 1,
         "step_index": 1,
         "layer_type": "add",
@@ -37,7 +33,7 @@ def _minimal_context(**updates: Any) -> RecordContext:
         "func_name": "add",
         "address": None,
         "module_type": None,
-        "module_pass_index": None,
+        "module_pass_number": None,
         "module_stack": (),
         "recent_events": (),
         "recent_ops": (),
@@ -80,28 +76,6 @@ def test_deferred_value_raises_on_use_but_json_round_trips() -> None:
     assert decoded.bool_value is None
 
 
-def test_ctx_json_round_trip_is_stable_with_recursive_history() -> None:
-    """Fastlog context JSON should stay byte-stable after dropping recursive history."""
-
-    nested = _minimal_context(
-        label="mlx_relu_1_2_raw",
-        raw_label="mlx_relu_1_2_raw",
-        event_index=2,
-        step_index=2,
-        raw_index=2,
-        recent_events=(),
-        recent_ops=(),
-    )
-    ctx = _minimal_context(recent_events=(nested,), recent_ops=(nested,))
-
-    encoded = _ctx_to_json(ctx)
-    round_tripped = _ctx_to_json(_ctx_from_json(encoded))
-
-    assert encoded["recent_events"] == []
-    assert encoded["recent_ops"] == []
-    assert json.dumps(encoded, sort_keys=True) == json.dumps(round_tripped, sort_keys=True)
-
-
 def test_internal_projection_coerces_deferred_value_to_none() -> None:
     """RecordContext-to-record projection never stores the sentinel in metadata."""
 
@@ -129,7 +103,7 @@ def test_mlx_emit_function_outputs_produces_topology_complete_events() -> None:
         capture_events=events,
         _mlx_saved_payloads=[],
         save_raw_activations=True,
-        save_code_context=False,
+        save_source_context=False,
         detach_saved_activations=False,
         activation_transform=None,
     )

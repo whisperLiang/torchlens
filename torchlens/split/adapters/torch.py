@@ -8,24 +8,22 @@ from dataclasses import dataclass, replace
 from types import BuiltinFunctionType, MappingProxyType, MethodDescriptorType, WrapperDescriptorType
 from typing import Any
 
+from torchlens.split.errors import SplitRequestError
+
 from ... import _state
-from ...intervention.types import LiteralTensor, LiteralValue, ParentRef, Unsupported
-from ...ir.container import (
-    DataclassField,
-    DictKey,
-    HFKey,
-    NamedField,
-    TupleIndex,
+from ..._ir.container import (
     rebuild_container_from_spec,
 )
-from ...utils._torch_compat import (
+from ..._utils._torch_compat import (
     autocast_is_enabled,
     get_current_dispatch_mode_stack,
     get_torch_function_mode_stack_length,
     get_variable_functions_class,
 )
-from ...utils._torch_symbols import torch_attr
-from ...utils.rng import AutocastRestore, execute_with_restored_rng_autocast
+from ..._utils._torch_symbols import torch_attr
+from ..._utils.collections import _path_component_key
+from ..._utils.rng import AutocastRestore, execute_with_restored_rng_autocast
+from ...intervention._types import LiteralTensor, LiteralValue, ParentRef, Unsupported
 from .._torch_liveness import release_schedule
 from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
@@ -50,15 +48,7 @@ def _torch() -> Any:
 def _component_key(component: Any) -> Any:
     """Return an index/key value for a TorchLens container path component."""
 
-    if isinstance(component, TupleIndex):
-        return component.index
-    if isinstance(component, DictKey):
-        return component.key
-    if isinstance(component, (NamedField, DataclassField)):
-        return component.name
-    if isinstance(component, HFKey):
-        return component.key
-    return component
+    return _path_component_key(component)
 
 
 def _slice_output_by_path(output: Any, path: tuple[Any, ...]) -> Any:
@@ -164,7 +154,7 @@ def _plain_replay_template(component: Any, torch: Any) -> bool:
 def _rng_free_torch_targets(torch: Any) -> tuple[Any, ...]:
     """Resolve a small, exact-identity set of deterministic Torch builtins."""
 
-    from ...utils.display import identity
+    from ..._utils.display import identity
 
     variable_functions = get_variable_functions_class()
     functions = (
@@ -755,6 +745,7 @@ class _GeneratedSegmentBase:
                 raise SplitUnsupportedError(
                     f"Cannot resolve live parameter source for {node.label!r}.",
                     context=self._context(node, "missing live parameter source"),
+                    code=SplitUnsupportedError.code,
                 )
             handle = self._state.resolve(
                 handle,
@@ -799,6 +790,7 @@ class _GeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} references unavailable parent {reference!r}.",
                 context=self._context(node, "missing parent replay value"),
+                code=SplitUnsupportedError.code,
             )
         return overlay[parent_id]
 
@@ -827,6 +819,7 @@ class _GeneratedSegmentBase:
                 f"{node.label!r} has unsupported replay template component: "
                 f"{component.reason} ({component.value_type}).",
                 context=self._context(node, "unsupported replay template component"),
+                code=SplitUnsupportedError.code,
             )
         if isinstance(component, tuple):
             if _is_template_dict(component):
@@ -920,6 +913,7 @@ class _GeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} has no captured args_template.",
                 context=self._context(node, "missing args_template"),
+                code=SplitUnsupportedError.code,
             )
         param_cursor = (
             _LiveParamCursor(self._param_handles_for_node(node))
@@ -972,16 +966,19 @@ class _GeneratedSegmentBase:
                 raise SplitUnsupportedError(
                     "Cannot establish ordinary tensor semantics for ordered partition writes.",
                     context=self._context(node, "partition_mutation_dispatch_unsupported"),
+                    code=SplitUnsupportedError.code,
                 ) from error
             if not plain:
                 raise SplitUnsupportedError(
                     "Ordered partition writes require ordinary tensors without custom dispatch.",
                     context=self._context(node, "partition_mutation_dispatch_unsupported"),
+                    code=SplitUnsupportedError.code,
                 )
         if node.target is None:
             raise SplitUnsupportedError(
                 f"{node.label!r} has no callable target for split replay.",
                 context=self._context(node, "missing callable target"),
+                code=SplitUnsupportedError.code,
             )
         try:
             # Factory calls without a device argument must also allocate on
@@ -998,6 +995,7 @@ class _GeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"Torch replay failed at {node.canonical_id!r} ({node.op_type}): {exc}",
                 context=self._context(node, "backend replay execution failed"),
+                code=SplitUnsupportedError.code,
             ) from exc
         if output is None and args:
             return args[0]
@@ -1013,6 +1011,7 @@ class _GeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"Torch replay node {node.canonical_id!r} has no callable target.",
                 context=self._context(node, "missing replay target"),
+                code=SplitUnsupportedError.code,
             )
         autocast_state = getattr(node.op, "func_autocast_state", None)
         from .._torch_rng_replay import route_stochastic_call
@@ -1086,6 +1085,7 @@ class _GeneratedSegmentBase:
                 raise SplitUnsupportedError(
                     f"{node.label!r} live buffer value is unavailable.",
                     context=self._context(node, "missing live buffer source"),
+                    code=SplitUnsupportedError.code,
                 )
             return self._state.resolve(handle, source_id=getattr(buffer, "source_id", id(buffer)))
         value = getattr(node.op, "out", None)
@@ -1093,6 +1093,7 @@ class _GeneratedSegmentBase:
             raise SplitUnsupportedError(
                 f"{node.label!r} source value is unavailable.",
                 context=self._context(node, "missing source value"),
+                code=SplitUnsupportedError.code,
             )
         return self._state.resolve(value)
 
@@ -1124,6 +1125,7 @@ class _GeneratedSegmentBase:
                 raise SplitUnsupportedError(
                     f"{node.label!r} has no callable target for split replay.",
                     context=self._context(node, "missing callable target"),
+                    code=SplitUnsupportedError.code,
                 )
             args, kwargs = self._reconstruct_args(executor, overlay)
             if fast_guard:
@@ -1168,6 +1170,7 @@ class GeneratedPrefix(_GeneratedSegmentBase):
                     split_point=self.spec.boundary,
                     reason="input count mismatch",
                 ),
+                code=SplitUnsupportedError.code,
             )
         overlay = dict(zip(self.graph.input_node_ids, input_leaves))
         if self.graph.shape_program is not None:
@@ -1262,6 +1265,7 @@ class GeneratedSuffix(_GeneratedSegmentBase):
             raise SplitUnsupportedError(
                 f"Final output {node.canonical_id!r} has no available replay parent.",
                 context=self._context(node, "missing output replay value"),
+                code=SplitUnsupportedError.code,
             )
         # A declared parent-less output is a constant source, not a cached
         # substitute for a missing executed value. Keep its explicit payload.
@@ -1279,6 +1283,7 @@ class GeneratedSuffix(_GeneratedSegmentBase):
                     split_point=self.spec.boundary,
                     reason="missing output records",
                 ),
+                code=SplitUnsupportedError.code,
             )
         leaves = [self._output_leaf(node, overlay) for node in output_nodes]
         spec = next(
@@ -1398,7 +1403,10 @@ class TorchSplitAdapter(SplitPolicyMixin):
         normalized_axis = axis if axis >= 0 else value.ndim + axis
         current = int(value.shape[normalized_axis])
         if current <= 0:
-            raise ValueError("Cannot resize an empty batch axis for shape witnessing.")
+            raise SplitRequestError(
+                "Cannot resize an empty batch axis for shape witnessing.",
+                code=SplitRequestError.code,
+            )
         indexes = torch.arange(batch_size, device=value.device) % current
         return value.index_select(normalized_axis, indexes)
 
@@ -1462,9 +1470,10 @@ class TorchSplitAdapter(SplitPolicyMixin):
         return SegmentBundle(prefix=prefix, training_prefix=training_prefix, suffix=suffix)
 
 
-__all__ = [
+__all__ = (
+    "AutocastRestore",
     "GeneratedPrefix",
     "GeneratedSuffix",
     "SegmentBundle",
     "TorchSplitAdapter",
-]
+)

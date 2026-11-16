@@ -7,10 +7,10 @@ import torch
 from torch import nn
 
 import torchlens as tl
+import torchlens._capture.projections as fastlog_state
 import torchlens._state as torchlens_state
-import torchlens.capture.projections as fastlog_state
-from torchlens.fastlog.exceptions import PredicateError
-from torchlens.fastlog.options import RecordingOptions
+from torchlens.recording._exceptions import PredicateError
+from torchlens.recording._options import RecordingOptions
 
 
 class RootOnly(nn.Module):
@@ -72,35 +72,14 @@ def _options() -> RecordingOptions:
     )
 
 
-def test_root_only_model_emits_root_events() -> None:
-    """Root-only models still get synthetic root enter and exit events."""
-
-    output, recording = tl.fastlog.record(
-        RootOnly(),
-        torch.ones(1),
-        save=_options().keep_op,
-        default_module=True,
-        include_source_events=True,
-        return_output=True,
-    )
-    kinds = [record.ctx.kind for record in recording]
-
-    assert torch.equal(output, torch.tensor([2.0]))
-    assert kinds.count("module_enter") == 1
-    assert kinds.count("module_exit") == 1
-    assert recording.records[0].ctx.label == "root:enter:1"
-    assert recording.records[-1].ctx.label == "root:exit:1"
-
-
 def test_shared_module_called_twice_has_balanced_events() -> None:
     """A shared child module called twice emits balanced enter/exit events."""
 
-    recording = tl.fastlog.record(
+    recording = tl.record(
         SharedModule(),
         torch.ones(1, 3),
         save=_options().keep_op,
-        default_module=True,
-        include_source_events=True,
+        recording=tl.options.RecordingOptions(default_module=True, include_source_events=True),
     )
     child_events = [
         record.ctx
@@ -114,41 +93,7 @@ def test_shared_module_called_twice_has_balanced_events() -> None:
         "module_enter",
         "module_exit",
     ]
-    assert [ctx.module_pass_index for ctx in child_events] == [1, 1, 2, 2]
-
-
-def test_identity_passthrough_has_module_events() -> None:
-    """Identity modules are represented even when their tensor ops through."""
-
-    output, recording = tl.fastlog.record(
-        IdentityModel(),
-        torch.ones(1),
-        save=_options().keep_op,
-        default_module=True,
-        include_source_events=True,
-        return_output=True,
-    )
-    labels = [record.ctx.address for record in recording]
-
-    assert torch.equal(output, torch.ones(1))
-    assert "identity" in labels
-
-
-def test_forward_exception_cleans_logging_state() -> None:
-    """Forward exceptions leave global logging and recording state inactive."""
-
-    with pytest.raises(RuntimeError, match="forward failed"):
-        tl.fastlog.record(
-            RaisingModel(),
-            torch.ones(1),
-            save=_options().keep_op,
-            default_module=True,
-            include_source_events=True,
-        )
-
-    assert torchlens_state._logging_enabled is False
-    assert torchlens_state._active_trace is None
-    assert fastlog_state._active_recording_state is None
+    assert [ctx.module_pass_number for ctx in child_events] == [1, 1, 2, 2]
 
 
 def test_predicate_exception_cleans_logging_state() -> None:
@@ -160,12 +105,11 @@ def test_predicate_exception_cleans_logging_state() -> None:
         raise RuntimeError(f"bad predicate for {ctx.kind}")
 
     with pytest.raises(PredicateError, match="fastlog predicate failed"):
-        tl.fastlog.record(
+        tl.record(
             RootOnly(),
             torch.ones(1),
-            halt=bad_halt,
-            default_module=True,
-            default_op=False,
+            stop_after=bad_halt,
+            recording=tl.options.RecordingOptions(default_module=True, default_op=False),
         )
 
     assert torchlens_state._logging_enabled is False

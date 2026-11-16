@@ -1,9 +1,9 @@
-"""Classic clean-versus-corrupted out patching.
+"""Classic clean-versus-corrupted activation patching.
 
 What this demonstrates
 ----------------------
 Capture a clean run and a corrupted run, then patch the corrupted ReLU
-out with the clean out.
+out with the clean activation.
 
 How to run
 ----------
@@ -44,17 +44,16 @@ def main() -> None:
     clean_x = torch.randn(2, 8)
     corrupted_x = clean_x + 0.75
 
-    clean = tl.trace(model, clean_x, intervention_ready=True)
-    corrupted = tl.trace(model, corrupted_x, intervention_ready=True)
+    clean = tl.trace(model, clean_x)
+    corrupted = tl.trace(model, corrupted_x)
     clean_relu = clean.find_sites(tl.func("relu")).first().out
 
     patched = corrupted.fork("patched")
-    patched.set(tl.func("relu"), clean_relu, confirm_mutation=True)
-    patched.replay()
+    patched.do(tl.func("relu"), clean_relu)
 
-    clean_out = clean.layer_list[-1].out
-    corrupted_out = corrupted.layer_list[-1].out
-    patched_out = patched.layer_list[-1].out
+    clean_out = clean.output_ops[-1].out
+    corrupted_out = corrupted.output_ops[-1].out
+    patched_out = patched.output_ops[-1].out
     assert torch.linalg.vector_norm(patched_out - clean_out) < torch.linalg.vector_norm(
         corrupted_out - clean_out
     )

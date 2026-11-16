@@ -8,12 +8,12 @@ from typing import Any
 import pytest
 from dag_helpers import call_ids, close_call_ids
 
-from torchlens.ir.container import DictKey, TupleIndex
+from torchlens._ir.container import DictKey, TupleIndex
 from torchlens.split import prepare_graph
 from torchlens.split.adapters.jax import JaxGeneratedSuffix, _slice_output_by_path
 from torchlens.split.errors import SplitUnsupportedError
 
-pytestmark = [pytest.mark.smoke, pytest.mark.backend_jax]
+pytestmark = [pytest.mark.backend_jax]
 
 
 @pytest.fixture

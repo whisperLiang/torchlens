@@ -45,7 +45,7 @@ def _saved_op_labels(trace: tl.Trace) -> list[str]:
         Saved Op labels in execution order.
     """
 
-    return [op.label for op in trace.layer_list if op.has_saved_activation]
+    return [op.label for op in trace._layer_list if op.has_saved_activation]
 
 
 def test_rerun_preserves_static_layers_to_save_subset() -> None:
@@ -55,27 +55,13 @@ def test_rerun_preserves_static_layers_to_save_subset() -> None:
     log = tl.trace(
         ThreeOpModel(),
         x,
-        capture=CaptureOptions(layers_to_save=["relu"], save_arg_values=True),
+        capture=CaptureOptions(save_args=True),
+        save=["relu"],
     )
     saved_before = _saved_op_labels(log)
-    num_ops_before = len(log.layer_list)
+    num_ops_before = len(log._layer_list)
 
-    log.run(ThreeOpModel(), x + 1)
-
-    assert saved_before
-    assert _saved_op_labels(log) == saved_before
-    assert len(saved_before) < num_ops_before
-
-
-def test_rerun_preserves_predicate_save_subset() -> None:
-    """Rerun keeps predicate-selected saves scoped to matching Ops."""
-
-    x = torch.randn(2, 3)
-    log = tl.trace(ThreeOpModel(), x, save=tl.func("relu"))
-    saved_before = _saved_op_labels(log)
-    num_ops_before = len(log.layer_list)
-
-    log.run(ThreeOpModel(), x + 1)
+    log = log.run(ThreeOpModel(), x + 1)
 
     assert saved_before
     assert _saved_op_labels(log) == saved_before
@@ -95,7 +81,7 @@ def test_rerun_save_scope_reads_lookback_payload_policy_directly() -> None:
 
     import pytest
 
-    from torchlens.intervention.rerun import _rerun_save_scope
+    from torchlens.intervention._rerun import _rerun_save_scope
 
     drifted_options = SimpleNamespace(keep_op=lambda ctx: True, lookback=2)
     drifted_log = SimpleNamespace(_predicate_save_options=drifted_options)

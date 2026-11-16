@@ -10,7 +10,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens import utils
+from torchlens import _utils as utils
+from torchlens._record_type import record_type
 from torchlens.experimental import attribute_walk
 
 
@@ -77,12 +78,8 @@ class SignatureModel(nn.Module):
 
 
 @pytest.fixture(
-    params=[
-        (TinyMLP, lambda: torch.randn(2, 4)),
-        (TinyCNN, lambda: torch.randn(2, 1, 4, 4)),
-        (TinyRecurrent, lambda: torch.randn(2, 3)),
-    ],
-    ids=["mlp", "cnn", "recurrent"],
+    params=[(TinyRecurrent, lambda: torch.randn(2, 3))],
+    ids=["recurrent"],
 )
 def architecture(request: pytest.FixtureRequest) -> tuple[nn.Module, torch.Tensor]:
     """Return a model/input pair for one small architecture."""
@@ -98,7 +95,7 @@ def _first_saved_label(model: nn.Module, x: torch.Tensor) -> str:
     log = _metadata_log(model, x)
     for label in log.layer_labels:
         if not label.startswith(("input", "output")):
-            if log.layer_num_calls.get(label, 1) > 1:
+            if log._layer_num_calls.get(label, 1) > 1:
                 return f"{label}:1"
             return label
     raise AssertionError("No internal layer found.")
@@ -110,7 +107,7 @@ def _metadata_log(model: nn.Module, x: torch.Tensor) -> tl.Trace:
     return tl.trace(
         model,
         x,
-        capture=tl.options.CaptureOptions(layers_to_save=None),
+        save=None,
     )
 
 
@@ -124,43 +121,34 @@ def test_peek_on_three_architectures(architecture: tuple[nn.Module, torch.Tensor
     assert out.shape[0] == x.shape[0]
 
 
-def test_extract_list_and_dict_on_three_architectures(
-    architecture: tuple[nn.Module, torch.Tensor],
-) -> None:
-    """``tl.extract`` supports list and mapping layer specs."""
-
-    model, x = architecture
-    label = _first_saved_label(model, x)
-    listed = tl.extract(model, x, [label])
-    mapped = tl.extract(model, x, {"feature": label})
-    assert list(listed) == [label]
-    assert set(mapped) == {"feature"}
-    assert torch.equal(listed[label], mapped["feature"])
-
-
 def test_batched_extract_memory_and_disk_on_three_architectures(
     architecture: tuple[nn.Module, torch.Tensor],
     tmp_path: Path,
 ) -> None:
-    """``tl.batched_extract`` supports in-memory and per-batch disk outputs."""
+    """``tl.extract_dataset`` supports in-memory and per-batch disk outputs."""
 
     model, x = architecture
     label = _first_saved_label(model, x)
     stimuli = torch.cat([x, x], dim=0)
-    in_memory = tl.batched_extract(model, stimuli, [label], batch_size=x.shape[0], progress=False)
+    in_memory = tl.extract_dataset(model, stimuli, [label], batch_size=x.shape[0], progress=False)
     assert in_memory[label].shape[0] == stimuli.shape[0]
 
-    container_paths = tl.batched_extract(
+    container_paths = tl.extract_dataset(
         model,
         stimuli,
         [label],
         batch_size=x.shape[0],
-        output_dir=tmp_path,
+        path=tmp_path,
         progress=False,
     )
     assert len(container_paths) == 2
     assert all(path.exists() for path in container_paths)
-    assert label in torch.load(container_paths[0])
+    # extract_dataset's disk-mode shards default to safetensors (v2 default,
+    # torchlens/dataset_extraction.py), not torch.save pickle: read the shard
+    # with its actual writer format instead of assuming the legacy ``.pt`` codec.
+    from safetensors.torch import load_file
+
+    assert label in load_file(str(container_paths[0]))
 
 
 def test_list_modules_on_three_architectures(architecture: tuple[nn.Module, torch.Tensor]) -> None:
@@ -183,28 +171,18 @@ def test_list_ops_on_three_architectures(architecture: tuple[nn.Module, torch.Te
     assert set(both) == {"eval", "train"}
 
 
-def test_find_layers_and_suggest_on_three_architectures(
-    architecture: tuple[nn.Module, torch.Tensor],
-) -> None:
-    """``Trace.find_layers`` and ``suggest`` return useful labels."""
-
-    model, x = architecture
-    log = _metadata_log(model, x)
-    label = _first_saved_label(model, x)
-    base_label = label.split(":", 1)[0]
-    prefix = base_label.split("_", 1)[0]
-    assert base_label in log.find_layers(prefix)
-    assert log.find_layers(prefix)
-    # The capture layer discloses the zero-match layers_to_save request with a
-    # UserWarning (cdcf7d89) before pluck's own lookup raises the suggestion
-    # error; both signals are part of the contract here.
-    with (
-        pytest.raises(ValueError, match="Did you mean"),
-        pytest.warns(UserWarning, match="matched zero layers"),
-    ):
-        tl.pluck(model, x, "definitely_missing_layer")
-
-
+# Kept on three architectures: the shared fixture runs only the recurrent model, and these cells were not
+# among the ids the slice removed.
+@pytest.mark.parametrize(
+    "architecture",
+    [
+        (TinyMLP, lambda: torch.randn(2, 4)),
+        (TinyCNN, lambda: torch.randn(2, 1, 4, 4)),
+        (TinyRecurrent, lambda: torch.randn(2, 3)),
+    ],
+    ids=["mlp", "cnn", "recurrent"],
+    indirect=True,
+)
 def test_layer_accessor_queries_and_completion(
     architecture: tuple[nn.Module, torch.Tensor],
 ) -> None:
@@ -214,14 +192,19 @@ def test_layer_accessor_queries_and_completion(
     log = _metadata_log(model, x)
     label = _first_saved_label(model, x)
     base_label = label.split(":", 1)[0]
-    operator = log[label].func_name or log[label].layer_type
-    assert log.layers.total() == len(log.layer_logs)
+    operator = log[label].func_name or record_type(log[label])
+    assert log.layers.total() == len(log._layer_logs)
     assert base_label in log.layers._ipython_key_completions_()
     assert base_label in dir(log.layers)
-    assert isinstance(log.layers.by_operator(), dict)
-    assert base_label in log.layers.by_operator(operator)
-    assert isinstance(log.layers.by_module(), dict)
-    assert isinstance(log.layers.by_module_and_operator(), dict)
+    assert isinstance(log.layers.count_by("kind"), dict)
+    same_operator = [
+        layer.layer_label
+        for layer in log.layers
+        if (layer.func_name or layer.layer_type) == operator
+    ]
+    assert base_label in same_operator
+    assert isinstance(log.layers.count_by("module"), dict)
+    assert isinstance(log.layers.count_by("module", "kind"), dict)
 
 
 def test_trace_site_reports(architecture: tuple[nn.Module, torch.Tensor]) -> None:

@@ -1,0 +1,246 @@
+"""``Trace.is_pristine`` is derived from the evidence a trace carries, never a stored flag.
+
+A plain capture reads pristine before and after ``Trace.save``/``tl.load``; any
+intervention, staged hook, value replacement or hooked run reads not pristine, and
+no reset (clearing hooks, reassigning ``Trace.state``, forking, saving) makes it
+pristine again. An artifact that cannot carry the evidence reads ``None`` (no
+evidence), never pristine. The reading never changes a verdict.
+"""
+
+from __future__ import annotations
+
+import pickle
+import shutil
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+import torch
+from _refuses_as_2x import assert_refuses_as_2x
+from torch import nn
+
+import torchlens as tl
+from torchlens._data_classes._trace_pristine import derive_pristine
+from torchlens._runnable import PathFaithfulness
+from torchlens._trace_state import TraceState
+from torchlens.intervention.errors import BaselineUndeterminedError
+from torchlens.options import CaptureOptions
+
+pytestmark = pytest.mark.usefixtures("root_edits_in_place")  # D.12: no per-call mutation keyword
+#: Stage a sticky hook on the trace without propagating it.
+_STAGE = tl.options.InterventionOptions(engine="set_only")
+
+_DIM = 8
+_HERE = Path(__file__).parent
+_V9_ARTIFACT = _HERE / "goldens" / "legacy" / "tlspec_v9.tlspec"
+_V7_ARTIFACT = _HERE / "goldens" / "legacy" / "tlspec_v7.tlspec"
+
+
+class _Block(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(_DIM, _DIM)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(self.fc(x))
+
+
+class _Net(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.block = _Block()
+        self.head = nn.Linear(_DIM, 2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.head(self.block(x))
+
+
+def _model() -> nn.Module:
+    torch.manual_seed(0)
+    return _Net().eval()
+
+
+def _x(seed: int = 0) -> torch.Tensor:
+    return torch.randn(1, 3, _DIM, generator=torch.Generator().manual_seed(seed))
+
+
+def _saved(trace: tl.Trace, tmp_path: Path, name: str = "t") -> tl.Trace:
+    path = tmp_path / f"{name}.tlspec"
+    trace.save(str(path))
+    return tl.load(str(path))
+
+
+def _ablated(model: nn.Module) -> tl.Trace:
+    return tl.trace(model, _x(), intervene=tl.when(tl.func("relu"), tl.zero_ablate()))
+
+
+def _steered(model: nn.Module) -> tl.Trace:
+    direction = torch.randn(_DIM, generator=torch.Generator().manual_seed(3))
+    spec = tl.when(tl.module("block"), tl.steer(direction, strength=3.0, dim=-1))
+    return tl.trace(model, _x(), save=tl.module("block") | tl.module("head"), intervene=spec)
+
+
+def _ready(model: nn.Module) -> tl.Trace:
+    return tl.trace(model, _x(), capture=CaptureOptions(replayable=True))
+
+
+def _double(out: torch.Tensor, *, ctx: object) -> torch.Tensor:
+    return out * 2.0
+
+
+# Kept: a sole mutation kill.
+def test_steered_capture_reads_not_pristine_after_save(tmp_path: Path) -> None:
+    trace = _steered(_model())
+    assert trace.is_pristine is False
+    assert _saved(trace, tmp_path).is_pristine is False
+
+
+# Kept: sole branch coverage of intervention/_zero_fire.py; a sole mutation kill.
+def test_zero_fire_capture_reads_not_pristine(tmp_path: Path) -> None:
+    never = tl.when(tl.func("sigmoid"), tl.zero_ablate())
+    trace = tl.trace(_model(), _x(), intervene=never, on_zero_fire="disclose")
+    assert trace.is_pristine is False
+    assert _saved(trace, tmp_path).is_pristine is False
+
+
+# Kept: sole branch coverage of _data_classes/trace.py, intervention/_trace_edits.py, intervention/hooks.py and more.
+def test_fork_inherits_the_reading_and_never_touches_its_parent() -> None:
+    model = _model()
+    plain = tl.trace(model, _x(), capture=CaptureOptions(replayable=True))
+    fork = plain.fork("f")
+    assert fork.is_pristine is True and plain.is_pristine is True
+    fork.do(
+        tl.module("block"),
+        _double,
+        intervention=tl.options.InterventionOptions(engine="set_only"),
+    )
+    assert fork.is_pristine is False
+    assert plain.is_pristine is True
+    assert fork.fork("g").is_pristine is False
+
+
+# Kept: a sole mutation kill.
+def test_hooked_fast_run_agrees_with_the_flag() -> None:
+    model = _model()
+    plain = tl.trace(model, _x(), save=tl.module("block") | tl.module("head"))
+    plain_report = plain.run_transaction(inputs=_x(1), fast=True).report
+    assert plain_report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert plain.is_pristine is True
+
+    hooked = _steered(model)
+    result = hooked.run_transaction(inputs=_x(1), fast=True)
+    mismatch = result.report.first_mismatch
+    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    assert mismatch is not None and ("pristine", "false") in tuple(mismatch.details)
+    assert result.trace.is_pristine is False
+    assert pickle.loads(pickle.dumps(result.trace)).is_pristine is False
+
+
+# Kept: sole branch coverage of _io/bundle.py, _io/format_contract.py; a sole mutation kill.
+def test_pre_v9_artifact_refuses_as_2x(tmp_path: Path) -> None:
+    """A pre-v9 artifact written by torchlens 2.x refuses typed at load."""
+
+    work = tmp_path / "tiny_v7.tlspec"
+    shutil.copytree(_V7_ARTIFACT, work)
+    assert_refuses_as_2x(work)
+
+
+# Kept: sole branch coverage of _data_classes/_trace_pristine.py; its other params stay because the list is not trimmable per id.
+@pytest.mark.parametrize(
+    ("backend", "version", "history", "expected"),
+    [
+        ("torch", 10, [], True),
+        ("torch", 8, [], None),
+        ("torch", 8, [{"op": "do"}], False),
+        ("tf", 10, [], None),
+        ("tf", 10, [{"op": "set"}], False),
+        ("torch", 10, [{"op": "rerun", "hook_count": 0, "hook_fire_count": 0}], True),
+        ("torch", 10, [{"op": "rerun", "hook_count": 1, "hook_fire_count": 0}], False),
+        ("torch", 10, [{"op": "append", "hook_count": 0, "hook_fire_count": 2}], False),
+        ("torch", 10, [{"op": "clear_hooks"}, {"op": "fork"}, {"op": "detach_hooks"}], True),
+    ],
+)
+def test_derivation_rule(backend: str, version: int, history: list[Any], expected: Any) -> None:
+    stub = SimpleNamespace(
+        _provenance_backend=backend,
+        tlspec_version=version,
+        state_history=history,
+        intervention_audit=[],
+        state=TraceState.RERUN_PROPAGATED,
+        _has_direct_writes=False,
+        _layer_list=[],
+    )
+    assert derive_pristine(stub) is expected
+
+
+# Kept: sole branch coverage of _data_classes/_trace_pristine.py; its other params stay because the list is not trimmable per id.
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("intervention_audit", [{"kind": "ACT"}]),
+        ("_has_direct_writes", True),
+        ("state", TraceState.DIRECT_WRITE_DIRTY),
+        ("state", TraceState.REPLAY_PROPAGATED),
+        ("state", TraceState.LIVE_CAPTURED),
+        ("_layer_list", [SimpleNamespace(is_edited=True)]),
+    ],
+)
+def test_each_evidence_kind_reads_not_pristine(field: str, value: Any) -> None:
+    stub = SimpleNamespace(
+        _provenance_backend="torch",
+        tlspec_version=10,
+        state_history=[],
+        intervention_audit=[],
+        state=TraceState.PRISTINE,
+        _has_direct_writes=False,
+        _layer_list=[],
+    )
+    setattr(stub, field, value)
+    assert derive_pristine(stub) is False
+
+
+# Kept: sole branch coverage of bundle/__init__.py.
+def test_bundle_auto_baseline_reads_the_derived_flag() -> None:
+    model = _model()
+    clean = tl.trace(model, _x())
+    ablated = _ablated(model)
+    bundle = tl.Bundle({"clean": clean, "ablated": ablated})
+    assert bundle.baseline_name == "clean"
+    assert derive_pristine(bundle["clean"]) is True
+    assert derive_pristine(bundle["ablated"]) is False
+
+
+# Kept: sole branch coverage of bundle/__init__.py, bundle/_comparisons.py, bundle/_members.py.
+def test_bundle_without_a_pristine_member_refuses_typed() -> None:
+    model = _model()
+    bundle = tl.Bundle({"a": _ablated(model), "b": _steered(model)})
+    assert bundle.baseline_name is None
+    with pytest.raises(BaselineUndeterminedError):
+        bundle.rank_changes()
+
+
+def test_runnable_model_doc_states_the_hooked_run_disclosure() -> None:
+    """The short runnable model and the exhaustive contract tell one story.
+
+    ``run_transaction(inputs=)`` pushes inputs through the model; a hooked or intervened
+    run settles ``unverifiable`` under ``hooked_run_unverified`` and the trace
+    reads ``is_pristine == False``: disclosed, never silent. The user-facing
+    model page must say so in the contract's own vocabulary.
+    """
+
+    docs = Path(__file__).resolve().parents[1] / "docs" / "reference"
+    model = (docs / "runnable_model.md").read_text(encoding="utf-8")
+    contract = (docs / "runnable_tlspec_contract.md").read_text(encoding="utf-8")
+    section = model.split("## Clean run, hooked run, and disclosure", 1)[1].split("\n## ", 1)[0]
+    for anchor in (
+        "`Trace.is_pristine == False`",
+        "`hooked_run_unverified`",
+        "`pristine=false`",
+        "`run_staged_spec_unapplied`",
+        "`user_intervention_unsupported`",
+        "never silent",
+    ):
+        assert anchor in section, anchor
+    for anchor in ("hooked_run_unverified", "pristine=false", "run_staged_spec_unapplied"):
+        assert anchor in contract, anchor

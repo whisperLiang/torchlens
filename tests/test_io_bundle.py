@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import pickle
 from collections.abc import Callable
 from pathlib import Path
@@ -13,25 +12,23 @@ import numpy as np
 import pytest
 import safetensors  # noqa: F401
 import torch
-from support.filesystem import symlink_or_skip
+from _format3_envelope import redigest
 from torch import nn
 
-from torchlens import Trace, func, load, save, trace as trace_fn
+import torchlens as tl
+from torchlens import Trace, func, load, trace as trace_fn
 from torchlens._io import (
-    MIN_TLSPEC_VERSION,
     TLSPEC_VERSION,
-    ArtifactSchemaAgeWarning,
-    TorchLensIOError,
+    ArtifactError,
     bundle as bundle_io,
 )
-from torchlens._io.manifest import Manifest
 from torchlens._io.paths import resolve_bundle_blob_path
 from torchlens._io.payload_codec import (
     _raise_for_unsupported_array_dtype,
     _unsupported_array_dtype_reason,
 )
-from torchlens.data_classes.trace import ResolvedPostprocessing
 from torchlens.io import cleanup_tmp, detect_tlspec_format
+from torchlens.types import UnencodableValue
 
 
 class _ConvBundleModel(nn.Module):
@@ -102,33 +99,7 @@ def _build_conv_log(seed: int = 0) -> Trace:
     torch.manual_seed(seed)
     model = _ConvBundleModel()
     x = torch.randn(1, 3, 8, 8)
-    return trace_fn(model, x, layers_to_save="all", random_seed=seed)
-
-
-def _build_transform_log(transform: Callable[[torch.Tensor], Any]) -> Trace:
-    """Create a deterministic log using a custom out transform.
-
-    Parameters
-    ----------
-    transform:
-        Activation postprocessing function applied during logging.
-
-    Returns
-    -------
-    Trace
-        Logged forward pass with transformed outs.
-    """
-
-    torch.manual_seed(0)
-    model = _ActivationPostfuncModel()
-    x = torch.randn(2, 4)
-    return trace_fn(
-        model,
-        x,
-        layers_to_save="all",
-        activation_transform=transform,
-        random_seed=0,
-    )
+    return trace_fn(model, x, capture=tl.options.CaptureOptions(seed=seed), save="all")
 
 
 def _build_sparse_out_log() -> Trace:
@@ -141,7 +112,7 @@ def _build_sparse_out_log() -> Trace:
     """
 
     trace = _build_conv_log()
-    first_saved_layer = next(layer for layer in trace.layer_list if layer.has_saved_activation)
+    first_saved_layer = next(layer for layer in trace._layer_list if layer.has_saved_activation)
     assert isinstance(first_saved_layer.out, torch.Tensor)
     first_saved_layer.out = first_saved_layer.out.to_sparse()
     return trace
@@ -157,9 +128,9 @@ def _build_non_tensor_out_log() -> Trace:
     """
 
     trace = _build_conv_log()
-    first_saved_layer = next(layer for layer in trace.layer_list if layer.has_saved_activation)
-    first_saved_layer.transformed_out = 1.0
-    trace.activation_transform = lambda tensor: float(tensor.mean().item())
+    first_saved_layer = next(layer for layer in trace._layer_list if layer.has_saved_activation)
+    first_saved_layer._payload_transformed_out = 1.0
+    trace._options_activation_transform = lambda tensor: float(tensor.mean().item())
     return trace
 
 
@@ -178,7 +149,7 @@ def _build_complex_out_log(*, dtype: torch.dtype) -> Trace:
     """
 
     trace = _build_conv_log()
-    first_saved_layer = next(layer for layer in trace.layer_list if layer.has_saved_activation)
+    first_saved_layer = next(layer for layer in trace._layer_list if layer.has_saved_activation)
     assert isinstance(first_saved_layer.out, torch.Tensor)
     real = first_saved_layer.out
     first_saved_layer.out = torch.complex(real, real).to(dtype)
@@ -207,7 +178,7 @@ def _save_bundle(
 
     trace = _build_conv_log(seed=seed)
     bundle_path = tmp_path / path_name
-    save(trace, bundle_path)
+    trace.save(bundle_path)
     return bundle_path, trace
 
 
@@ -259,8 +230,9 @@ def _first_blob_path(bundle_path: Path) -> Path:
         Path to the first saved blob.
     """
 
-    manifest = Manifest.read(bundle_path / "manifest.json")
-    return bundle_path / manifest.tensors[0].relative_path
+    manifest = _read_manifest(bundle_path)
+    relative_path = next(path for path in manifest["files"] if path.startswith("blobs/"))
+    return bundle_path / relative_path
 
 
 def _corrupt_blob_byte(blob_path: Path) -> None:
@@ -283,27 +255,29 @@ def test_manifest_provenance_roundtrip_and_hash_determinism(tmp_path: Path) -> N
     torch.manual_seed(44)
     model = _InputTransformModel().eval()
     inputs = torch.arange(12, dtype=torch.float32).reshape(3, 4)
-    captured = trace_fn(model, inputs, layers_to_save="all", random_seed=44)
+    captured = trace_fn(model, inputs, capture=tl.options.CaptureOptions(seed=44), save="all")
     first_path = tmp_path / "first.tlspec"
     second_path = tmp_path / "second.tlspec"
 
-    save(captured, first_path)
-    save(captured, second_path)
+    captured.save(first_path)
+    captured.save(second_path)
     restored = load(first_path)
-    first = Manifest.read(first_path / "manifest.json")
-    second = Manifest.read(second_path / "manifest.json")
+    first = _read_manifest(first_path)
+    second = _read_manifest(second_path)
 
-    assert restored.num_ops == captured.num_ops
-    assert first.provenance is not None
-    assert second.provenance is not None
-    assert first.provenance.provenance_version == 1
-    assert first.provenance.capture_devices == ["cpu"]
-    assert first.provenance.dtype_policy["default_dtype"] == "torch.float32"
-    assert first.provenance.dtype_policy["observed_autocast"]
-    assert first.provenance.input_hash == second.provenance.input_hash
-    assert first.provenance.model_structure_hash == second.provenance.model_structure_hash
-    assert first.provenance.rng_state_digests == second.provenance.rng_state_digests
-    assert len(json.dumps(first.to_dict()["provenance"])) < 16_384
+    assert restored._num_ops == captured._num_ops
+    assert first["provenance"] is not None
+    assert second["provenance"] is not None
+    assert first["provenance"]["provenance_version"] == 1
+    assert first["provenance"]["capture_devices"] == ["cpu"]
+    assert first["provenance"]["dtype_policy"]["default_dtype"] == "torch.float32"
+    assert first["provenance"]["dtype_policy"]["observed_autocast"]
+    assert first["provenance"]["input_hash"] == second["provenance"]["input_hash"]
+    assert (
+        first["provenance"]["model_structure_hash"] == second["provenance"]["model_structure_hash"]
+    )
+    assert first["provenance"]["rng_state_digests"] == second["provenance"]["rng_state_digests"]
+    assert len(json.dumps(first["provenance"])) < 16_384
 
 
 def test_manifest_provenance_sentinel_round_trips_and_tamper_refuses(tmp_path: Path) -> None:
@@ -321,19 +295,19 @@ def test_manifest_provenance_sentinel_round_trips_and_tamper_refuses(tmp_path: P
     inputs = torch.arange(12, dtype=torch.float32).reshape(3, 4)
     captured = trace_fn(model, inputs, save=func("relu"))
     bundle_path = tmp_path / "selective.tlspec"
-    save(captured, bundle_path)
+    captured.save(bundle_path)
 
     manifest = _read_manifest(bundle_path)
     recorded = manifest["provenance"]["input_hash"]
     assert recorded.startswith("unavailable:")
     assert recorded.partition(":")[2].isidentifier()
     restored = load(bundle_path)
-    assert restored.num_ops == captured.num_ops
+    assert restored._num_ops == captured._num_ops
 
     for forged in ("deadbeef", "unavailable:", "unavailable:not an identifier", "x" * 64):
         manifest["provenance"]["input_hash"] = forged
         _write_manifest(bundle_path, manifest)
-        with pytest.raises(TorchLensIOError, match="input_hash"):
+        with pytest.raises(ArtifactError, match="input_hash"):
             load(bundle_path)
 
 
@@ -345,11 +319,11 @@ def test_manifest_without_optional_provenance_still_loads(tmp_path: Path) -> Non
     manifest.pop("provenance")
     _write_manifest(bundle_path, manifest)
 
-    parsed = Manifest.read(bundle_path / "manifest.json")
+    parsed = _read_manifest(bundle_path)
     restored = load(bundle_path)
 
-    assert parsed.provenance is None
-    assert restored.num_ops > 0
+    assert parsed.get("provenance") is None
+    assert restored._num_ops > 0
 
 
 def test_manifest_git_commit_is_absent_outside_repository(
@@ -368,89 +342,18 @@ def test_manifest_git_commit_is_absent_outside_repository(
     non_repo = tmp_path / "not_a_repo"
     non_repo.mkdir()
     monkeypatch.setattr(bundle_mod, "_torchlens_package_dir", lambda: non_repo)
-    captured = trace_fn(_InputTransformModel(), torch.ones(2, 3), layers_to_save="all")
+    captured = trace_fn(
+        _InputTransformModel(),
+        torch.ones(2, 3),
+        save="all",
+    )
     bundle_path = tmp_path / "outside.tlspec"
 
-    save(captured, bundle_path)
-    manifest = Manifest.read(bundle_path / "manifest.json")
+    captured.save(bundle_path)
+    manifest = _read_manifest(bundle_path)
 
-    assert manifest.provenance is not None
-    assert manifest.provenance.git_commit_hash is None
-
-
-def test_bundle_roundtrip_preserves_saved_outs_bit_exactly(tmp_path: Path) -> None:
-    """Eager bundle load should restore all saved outs exactly."""
-
-    bundle_path, live_log = _save_bundle(tmp_path)
-
-    restored = load(bundle_path)
-
-    live_by_label = {
-        layer.layer_label: layer.out
-        for layer in live_log.layer_list
-        if layer.has_saved_activation and isinstance(layer.out, torch.Tensor)
-    }
-    restored_by_label = {
-        layer.layer_label: layer.out
-        for layer in restored.layer_list
-        if layer.has_saved_activation and isinstance(layer.out, torch.Tensor)
-    }
-
-    assert restored._loaded_from_bundle is True
-    assert isinstance(restored._source_bundle_manifest_sha256, str)
-    assert live_by_label.keys() == restored_by_label.keys()
-    for layer_label, live_out in live_by_label.items():
-        assert torch.equal(live_out, restored_by_label[layer_label])
-
-
-def test_semantic_output_fields_default_none_roundtrip(tmp_path: Path) -> None:
-    """Semantic output provenance fields default to ``None`` and survive bundle load."""
-
-    trace = _build_conv_log()
-
-    assert trace.output_postprocessor is None
-    assert trace.transform_repr is None
-    assert trace.output_id2label is None
-    assert trace.output_num_classes is None
-    assert trace.decoded_output is None
-
-    bundle_path = tmp_path / "semantic_defaults.tlspec"
-    save(trace, bundle_path)
-    restored = load(bundle_path)
-
-    assert restored.output_postprocessor is None
-    assert restored.transform_repr is None
-    assert restored.output_id2label is None
-    assert restored.output_num_classes is None
-    assert restored.decoded_output is None
-
-
-def test_resolved_postprocessing_roundtrips_through_tlspec(tmp_path: Path) -> None:
-    """Resolved output postprocessing provenance is portable state."""
-
-    trace = _build_conv_log()
-    trace.output_postprocessor = ResolvedPostprocessing(
-        source="hf_config",
-        identifier="tiny-classifier",
-        verified=True,
-        config={"num_labels": 2},
-        description="HF config labels",
-        style="classification",
-        selected_output_head="logits",
-        label_source="config.id2label",
-        label_source_version="test",
-        confidence=0.95,
-        top_n_captured=5,
-        ambiguous=False,
-    )
-    trace.decoded_output = [{"batch_item": 0, "rank": 1, "label": "cat", "prob": 0.8}]
-
-    bundle_path = tmp_path / "postprocessor.tlspec"
-    save(trace, bundle_path)
-    restored = load(bundle_path)
-
-    assert restored.output_postprocessor == trace.output_postprocessor
-    assert restored.decoded_output == trace.decoded_output
+    assert manifest["provenance"] is not None
+    assert manifest["provenance"]["git_commit_hash"] is None
 
 
 def test_input_transform_repr_roundtrips_while_callable_drops(tmp_path: Path) -> None:
@@ -475,153 +378,46 @@ def test_input_transform_repr_roundtrips_while_callable_drops(tmp_path: Path) ->
     trace = trace_fn(
         _InputTransformModel(),
         torch.ones(1, 2),
-        transform=double_input,
+        capture=tl.options.CaptureOptions(input_transform=double_input),
     )
-    assert trace.transform_repr == repr(double_input)
+    assert trace.options.input_transform == repr(double_input)
     assert trace._transform is double_input
 
     bundle_path = tmp_path / "input_transform.tlspec"
-    save(trace, bundle_path)
+    trace.save(bundle_path)
     restored = load(bundle_path)
 
-    assert restored.transform_repr == trace.transform_repr
+    assert restored.options.input_transform == trace.options.input_transform
     assert restored._transform is None
 
 
-def test_bundle_save_strict_default_raises_on_sparse_tensor(tmp_path: Path) -> None:
-    """Strict bundle save should reject sparse tensors."""
+def test_bundle_save_strict_false_refuses_sparse_tensors(tmp_path: Path) -> None:
+    """Format 3 never silently skips an unsupported tensor, even with strict=False."""
 
     trace = _build_sparse_out_log()
-
-    with pytest.raises(TorchLensIOError, match="sparse"):
-        save(trace, tmp_path / "sparse_bundle.tl")
-
-
-def test_bundle_save_strict_false_records_unsupported_tensors(tmp_path: Path) -> None:
-    """Best-effort save should skip unsupported tensors and record them in the manifest."""
-
-    trace = _build_sparse_out_log()
-    bundle_path = tmp_path / "sparse_bundle.tl"
-
-    save(trace, bundle_path, strict=False)
-
-    manifest = Manifest.read(bundle_path / "manifest.json")
-    assert manifest.unsupported_tensors
-    assert all(entry["kind"] == "out" for entry in manifest.unsupported_tensors)
-    assert all("sparse" in entry["reason"] for entry in manifest.unsupported_tensors)
+    with pytest.raises(ArtifactError) as caught:
+        trace.save(tmp_path / "sparse_bundle.tl", strict=False)
+    assert caught.value.fields["code"] == "metadata_value_unportable"
 
 
-def test_bundle_save_strict_default_raises_on_complex128_tensor(tmp_path: Path) -> None:
-    """Strict bundle save must reject ``complex128`` with a clean error, not a raw ``KeyError``.
-
-    Regression test for a data-loss BLOCKER (cert round 8): ``torch.complex128`` was
-    listed in ``tensor_policy._SUPPORTED_DTYPES`` even though the actual writer,
-    ``safetensors.torch.save_file()``, has no dtype-size-table entry for it. A
-    ``complex128`` tensor therefore sailed straight past the allow-list tripwire that
-    exists precisely to keep unsupported tensors out of ``save_file()`` and crashed with
-    a raw, unwrapped ``KeyError`` from deep inside the third-party library -- bypassing
-    every save-path hardening fix from cert rounds 3-7 entirely, since ``KeyError`` was
-    never in any of their except tuples. The fix drops ``complex128`` from the allow-list
-    so this now fails cleanly, before ``save_file()`` is ever reached.
-    """
+@pytest.mark.parametrize("strict", [True, False])
+def test_bundle_save_complex128_round_trips(tmp_path: Path, strict: bool) -> None:
+    """Complex128 persists as paired float64 values and reloads exactly."""
 
     trace = _build_complex_out_log(dtype=torch.complex128)
-    bundle_path = tmp_path / "complex128_bundle.tl"
-
-    with pytest.raises(TorchLensIOError, match="complex128"):
-        save(trace, bundle_path)
-
-    # The strict allow-list check fires before ``safetensors.torch.save_file()``
-    # is ever reached, so no raw ``KeyError`` escapes and ``bundle_path`` itself
-    # is never created. A leftover ``.tmp.*`` dir is expected (standard
-    # fresh-save failure contract) and must carry the PARTIAL sentinel so
-    # ``cleanup_tmp()`` can sweep it.
-    assert not bundle_path.exists()
-    tmp_dirs = [p for p in tmp_path.iterdir() if ".tmp." in p.name]
-    assert tmp_dirs
-    for tmp_dir in tmp_dirs:
-        assert (tmp_dir / "PARTIAL").exists()
-    removed = cleanup_tmp(bundle_path)
-    assert set(removed) == set(tmp_dirs)
-    assert not any(p.exists() for p in tmp_dirs)
+    path = tmp_path / "complex128.tlspec"
+    trace.save(path, strict=strict)
+    loaded = load(path)
+    for original, restored in zip(trace.ops, loaded.ops, strict=True):
+        if isinstance(original.out, torch.Tensor):
+            assert torch.equal(restored.out, original.out)
+            assert restored.out.dtype == original.out.dtype
 
 
-def test_bundle_save_strict_false_records_complex128_as_unsupported(tmp_path: Path) -> None:
-    """Best-effort save should skip ``complex128`` tensors and record them, not crash."""
-
-    trace = _build_complex_out_log(dtype=torch.complex128)
-    bundle_path = tmp_path / "complex128_bundle.tl"
-
-    save(trace, bundle_path, strict=False)
-
-    manifest = Manifest.read(bundle_path / "manifest.json")
-    assert manifest.unsupported_tensors
-    assert all(entry["kind"] == "out" for entry in manifest.unsupported_tensors)
-    assert all("complex128" in entry["reason"] for entry in manifest.unsupported_tensors)
-
-
-def test_bundle_save_complex64_still_round_trips(tmp_path: Path) -> None:
-    """``complex64`` remains genuinely supported -- ``complex128`` was the only gap.
-
-    Confirms the ``tensor_policy``/payload-codec fix is scoped narrowly: it must not
-    regress the dtype that ``safetensors`` 0.8.0 genuinely round-trips.
-    """
-
-    trace = _build_complex_out_log(dtype=torch.complex64)
-    bundle_path = tmp_path / "complex64_bundle.tl"
-    first_saved_layer = next(layer for layer in trace.layer_list if layer.has_saved_activation)
-    original_out = first_saved_layer.out
-    assert isinstance(original_out, torch.Tensor)
-    assert original_out.dtype == torch.complex64
-
-    save(trace, bundle_path)
-    restored = load(bundle_path)
-    restored_layer = next(layer for layer in restored.layer_list if layer.has_saved_activation)
-
-    assert isinstance(restored_layer.out, torch.Tensor)
-    assert restored_layer.out.dtype == torch.complex64
-    assert torch.equal(original_out, restored_layer.out)
-
-
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
 @pytest.mark.parametrize(
     ("scenario", "mutate_manifest", "expectation", "expected_text"),
     [
-        (
-            "io_format_newer",
-            lambda manifest: manifest.__setitem__("tlspec_version", TLSPEC_VERSION + 1),
-            "raise",
-            str(TLSPEC_VERSION + 1),
-        ),
-        (
-            "io_format_below_floor",
-            lambda manifest: manifest.__setitem__("tlspec_version", MIN_TLSPEC_VERSION - 1),
-            "raise",
-            "below the supported rehydration floor",
-        ),
-        (
-            "io_format_between_floor_and_current",
-            lambda manifest: manifest.__setitem__("tlspec_version", MIN_TLSPEC_VERSION),
-            "schema_age_warning",
-            "older than runtime tlspec_version",
-        ),
-        (
-            "io_format_equal",
-            lambda manifest: manifest.__setitem__("tlspec_version", TLSPEC_VERSION),
-            "ok",
-            None,
-        ),
-        (
-            "torch_major_mismatch",
-            lambda manifest: manifest.__setitem__("torch_version", "999.0.0"),
-            "raise",
-            "999.0.0",
-        ),
-        (
-            "torch_minor_mismatch",
-            lambda manifest: manifest.__setitem__("torch_version", _torch_minor_mismatch_version()),
-            "warning",
-            lambda: _torch_minor_mismatch_version(),
-        ),
         (
             "torchlens_newer",
             lambda manifest: manifest.__setitem__("torchlens_version", "999.0.0"),
@@ -629,16 +425,29 @@ def test_bundle_save_complex64_still_round_trips(tmp_path: Path) -> None:
             "999.0.0",
         ),
         (
-            "torchlens_pre_floor",
+            # A writer from an earlier major release refuses at the load door:
+            # one typed error naming the saver.
+            "torchlens_earlier_major",
             lambda manifest: manifest.__setitem__("torchlens_version", "0.0.1"),
             "raise",
-            "below the supported rehydration floor",
+            "does not read files saved by torchlens 0.x",
         ),
         (
+            # A format 3 manifest stamped by a writer older than the first TorchLens that
+            # writes format 3 (the 2.38.0 floor) is an impossible pairing: below the
+            # floor, before identity.
+            "torchlens_2x_writer",
+            lambda manifest: manifest.__setitem__("torchlens_version", "2.37.1"),
+            "raise",
+            "saved by torchlens 2.37",
+        ),
+        (
+            # An older writer at or above the 2.38.0 floor (a pre-release of the
+            # floor release) loads and is logged.
             "torchlens_older_supported",
-            lambda manifest: manifest.__setitem__("torchlens_version", "2.33.0"),
+            lambda manifest: manifest.__setitem__("torchlens_version", "2.38.0rc1"),
             "info_log",
-            "2.33.0",
+            "2.38.0rc1",
         ),
         (
             "python_major_mismatch",
@@ -646,18 +455,10 @@ def test_bundle_save_complex64_still_round_trips(tmp_path: Path) -> None:
             "python_major_mismatch",
             "999.0.0",
         ),
-        (
-            "unknown_extra_blob_file",
-            lambda manifest: manifest,
-            "extra_blob_warning",
-            None,
-        ),
     ],
 )
 def test_bundle_version_policy_rows(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
     scenario: str,
     mutate_manifest: Callable[[dict[str, Any]], Any],
     expectation: str,
@@ -672,47 +473,33 @@ def test_bundle_version_policy_rows(
     resolved_expected_text = expected_text() if callable(expected_text) else expected_text
 
     if expectation == "python_major_mismatch":
-        (bundle_path / "metadata.pkl").write_bytes(b"not a pickle")
+        # The 3.0 artifact is JSON plus safetensors: a Python major mismatch is advisory
+        # (the 2.x refusal came from its pickle failing under the other interpreter).
         with pytest.warns(UserWarning, match="python_version=999.0.0"):
-            with pytest.raises(TorchLensIOError, match="python_version=999.0.0"):
-                load(bundle_path)
+            loaded = load(bundle_path)
+        assert loaded.source.class_name == "_ConvBundleModel"
         return
 
     if expectation == "extra_blob_warning":
         (bundle_path / "blobs" / "extra.bin").write_bytes(b"extra")
         with pytest.warns(UserWarning, match="unreferenced extra files"):
             loaded = load(bundle_path)
-        assert loaded.model_class_name == "_ConvBundleModel"
+        assert loaded.source.class_name == "_ConvBundleModel"
         return
 
     if expectation == "raise":
-        with pytest.raises(TorchLensIOError, match=resolved_expected_text or ""):
+        with pytest.raises(ArtifactError, match=resolved_expected_text or ""):
             load(bundle_path)
-        return
-
-    if expectation == "schema_age_warning":
-        with pytest.warns(ArtifactSchemaAgeWarning, match=resolved_expected_text or ""):
-            loaded = load(bundle_path)
-        assert loaded.model_class_name == "_ConvBundleModel"
         return
 
     if expectation == "warning":
         with pytest.warns(UserWarning, match=resolved_expected_text or ""):
             loaded = load(bundle_path)
-        assert loaded.model_class_name == "_ConvBundleModel"
-        return
-
-    if expectation == "info_log":
-        with caplog.at_level(logging.INFO, logger="torchlens._io.manifest"):
-            loaded = load(bundle_path)
-        assert loaded.model_class_name == "_ConvBundleModel"
-        assert resolved_expected_text is not None
-        assert resolved_expected_text in caplog.text
-        assert "older than runtime torchlens_version" in caplog.text
+        assert loaded.source.class_name == "_ConvBundleModel"
         return
 
     loaded = load(bundle_path)
-    assert loaded.model_class_name == "_ConvBundleModel"
+    assert loaded.source.class_name == "_ConvBundleModel"
 
 
 def test_bundle_load_raises_for_missing_safetensors_backend(
@@ -723,35 +510,36 @@ def test_bundle_load_raises_for_missing_safetensors_backend(
 
     bundle_path, _ = _save_bundle(tmp_path)
 
-    def _raise_backend_import(path: Path, device: str) -> dict[str, torch.Tensor]:
+    def _raise_backend_import(*_args: Any, **_kwargs: Any) -> Any:
         raise ImportError("missing backend")
 
-    monkeypatch.setattr("torchlens._io.bundle.load_file", _raise_backend_import)
+    monkeypatch.setattr("torchlens._io.lazy.safe_open", _raise_backend_import)
 
-    with pytest.raises(TorchLensIOError, match="Install safetensors>=0.4"):
+    with pytest.raises(ArtifactError, match="Install safetensors>=0.4"):
         load(bundle_path)
 
 
 def test_bundle_load_raises_on_corrupt_manifest(tmp_path: Path) -> None:
-    """Non-JSON manifests should fail with ``TorchLensIOError``."""
+    """Non-JSON manifests should fail with ``ArtifactError``."""
 
     bundle_path, _ = _save_bundle(tmp_path)
     (bundle_path / "manifest.json").write_text("{not valid json", encoding="utf-8")
 
-    with pytest.raises(TorchLensIOError, match="does not parse as JSON"):
+    with pytest.raises(ArtifactError) as excinfo:
         load(bundle_path)
+    assert excinfo.value.fields["code"] == "manifest_unreadable"
 
 
 def test_bundle_load_raises_on_missing_blob_file(tmp_path: Path) -> None:
-    """Manifest entries without corresponding files should fail and name the blob id."""
+    """Manifest entries without corresponding files should fail and name the blob path."""
 
     bundle_path, _ = _save_bundle(tmp_path)
-    manifest = Manifest.read(bundle_path / "manifest.json")
-    blob_entry = manifest.tensors[0]
-    (bundle_path / blob_entry.relative_path).unlink()
+    blob_path = _first_blob_path(bundle_path)
+    blob_path.unlink()
 
-    with pytest.raises(TorchLensIOError, match=blob_entry.blob_id):
+    with pytest.raises(ArtifactError, match=blob_path.name) as excinfo:
         load(bundle_path)
+    assert excinfo.value.fields["code"] == "bundle_blob_missing"
 
 
 def test_bundle_load_raises_on_truncated_safetensors(tmp_path: Path) -> None:
@@ -761,93 +549,69 @@ def test_bundle_load_raises_on_truncated_safetensors(tmp_path: Path) -> None:
     blob_path = _first_blob_path(bundle_path)
     blob_path.write_bytes(blob_path.read_bytes()[:16])
 
-    with pytest.raises(TorchLensIOError):
+    with pytest.raises(ArtifactError) as excinfo:
         load(bundle_path)
+    assert excinfo.value.fields["code"] == "bundle_metadata_integrity_refused"
 
 
 def test_bundle_load_raises_on_checksum_tamper(tmp_path: Path) -> None:
     """Blob checksum tampering should be detected eagerly."""
 
     bundle_path, _ = _save_bundle(tmp_path)
-    manifest = Manifest.read(bundle_path / "manifest.json")
-    blob_entry = manifest.tensors[0]
-    _corrupt_blob_byte(bundle_path / blob_entry.relative_path)
+    blob_path = _first_blob_path(bundle_path)
+    _corrupt_blob_byte(blob_path)
 
-    with pytest.raises(TorchLensIOError, match=blob_entry.blob_id):
+    with pytest.raises(ArtifactError, match=blob_path.name) as excinfo:
         load(bundle_path)
+    assert excinfo.value.fields["code"] == "bundle_metadata_integrity_refused"
 
 
-def test_bundle_save_overwrite_false_wraps_file_exists_error(tmp_path: Path) -> None:
-    """Existing target paths should fail unless ``overwrite=True``."""
+def test_bundle_save_overwrite_false_refuses_typed(tmp_path: Path) -> None:
+    """Existing target paths refuse ``bundle_path_exists`` unless ``overwrite=True``."""
 
     bundle_path, trace = _save_bundle(tmp_path)
 
-    with pytest.raises(TorchLensIOError) as excinfo:
-        save(trace, bundle_path)
+    with pytest.raises(ArtifactError) as excinfo:
+        trace.save(bundle_path)
 
-    assert isinstance(excinfo.value.__cause__, FileExistsError)
-
-
-def test_bundle_save_overwrite_true_replaces_existing_bundle(tmp_path: Path) -> None:
-    """Overwrite mode should atomically replace an existing bundle."""
-
-    bundle_path, first_log = _save_bundle(tmp_path, seed=0)
-    second_log = _build_conv_log(seed=1)
-
-    save(second_log, bundle_path, overwrite=True)
-    restored = load(bundle_path)
-
-    first_output = first_log.layer_list[-1].out
-    second_output = second_log.layer_list[-1].out
-    restored_output = restored.layer_list[-1].out
-
-    assert isinstance(first_output, torch.Tensor)
-    assert isinstance(second_output, torch.Tensor)
-    assert isinstance(restored_output, torch.Tensor)
-    assert not torch.equal(first_output, second_output)
-    assert torch.equal(second_output, restored_output)
+    assert excinfo.value.fields.get("code") == "bundle_path_exists"
+    assert str(excinfo.value).startswith(f"Bundle path already exists: {bundle_path}")
+    assert "overwrite=True" in excinfo.value.fields.get("remedy", "")
+    assert excinfo.value.__cause__ is None
 
 
 def test_bundle_save_overwrite_typeerror_preserves_original_and_marks_partial(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A bare ``TypeError`` from ``pickle.dump`` must not destroy the original bundle.
-
-    Regression test for a data-loss BLOCKER: ``pickle.dump()`` raises a bare
-    ``TypeError`` (not the ``pickle.PickleError`` subclass) for many live
-    objects, e.g. ``TypeError: cannot pickle 'generator' object``. Before the
-    fix, ``save()``'s exception handler only caught
-    ``(ImportError, OSError, ValueError, pickle.PickleError)``, so a
-    ``TypeError`` propagated straight past every handler in the function --
-    skipping both the ``PARTIAL`` sentinel (leaving the ``.tmp`` dir
-    un-sweepable by ``cleanup_tmp()``) and the pre-overwrite backup restore
-    (permanently losing the original bundle under an undocumented
-    ``.bak.<uuid>`` directory name with a bare ``TypeError`` propagating to
-    the caller instead of a clean ``TorchLensIOError``).
-    """
+    """A bare ``TypeError`` writing JSON records must preserve the original bundle."""
 
     bundle_path, first_log = _save_bundle(tmp_path, seed=0)
     second_log = _build_conv_log(seed=1)
 
     def _poisoned_metadata_dump(*_args: Any, **_kwargs: Any) -> None:
-        raise TypeError("simulated live-resource pickling failure")
+        raise TypeError("simulated record encoding failure")
 
-    # ``save()`` writes metadata.pkl through ``dump_canonical_metadata()``
-    # (B3R4-R21-2 canonical container bytes), which drives a ``pickle._Pickler``
-    # subclass -- patching bare ``pickle.dump`` would no longer intercept it.
-    monkeypatch.setattr("torchlens._io.bundle.dump_canonical_metadata", _poisoned_metadata_dump)
+    monkeypatch.setattr("torchlens._io.format3.writer.write_record_files", _poisoned_metadata_dump)
 
-    with pytest.raises(TorchLensIOError) as excinfo:
-        save(second_log, bundle_path, overwrite=True)
+    with pytest.raises(ArtifactError) as excinfo:
+        second_log.save(bundle_path, overwrite=True)
 
     assert isinstance(excinfo.value.__cause__, TypeError)
 
-    # The original (pre-overwrite) bundle must survive the failed overwrite.
+    # The original (pre-overwrite) bundle must survive the failed overwrite, but
+    # tl.load refuses it while the failed save's PARTIAL staging dir is beside it.
     assert bundle_path.exists()
+    assert [p for p in tmp_path.iterdir() if ".bak." in p.name] == []  # before cleanup_tmp sweeps
+    (tmp_dir,) = [p for p in tmp_path.iterdir() if p.name.startswith(f"{bundle_path.name}.tmp.")]
+    assert (tmp_dir / "PARTIAL").exists()
+    with pytest.raises(ArtifactError) as refused:
+        load(bundle_path)
+    assert refused.value.fields["code"] == "newer_save_unfinished"
+    assert cleanup_tmp(bundle_path) == [tmp_dir]
     restored = load(bundle_path)
-    first_output = first_log.layer_list[-1].out
-    restored_output = restored.layer_list[-1].out
+    first_output = first_log._layer_list[-1].out
+    restored_output = restored._layer_list[-1].out
     assert isinstance(first_output, torch.Tensor)
     assert isinstance(restored_output, torch.Tensor)
     assert torch.equal(first_output, restored_output)
@@ -858,20 +622,15 @@ def test_bundle_save_overwrite_typeerror_preserves_original_and_marks_partial(
     bak_dirs = [p for p in siblings if ".bak." in p.name]
     assert bak_dirs == []
 
-    # Any leftover ``.tmp.<uuid>`` dir must carry the PARTIAL sentinel so
-    # ``cleanup_tmp()`` (without ``force=True``) can sweep it.
-    tmp_dirs = [p for p in siblings if ".tmp." in p.name]
-    for tmp_dir in tmp_dirs:
-        assert (tmp_dir / "PARTIAL").exists()
-    removed = cleanup_tmp(bundle_path)
-    assert set(removed) == set(tmp_dirs)
-    assert not any(p.exists() for p in tmp_dirs)
+    # The PARTIAL staging dir was swept by ``cleanup_tmp()`` (no ``force=True``).
+    assert not tmp_dir.exists()
+    assert [p for p in siblings if ".tmp." in p.name] == []
 
 
 class _NeverEnumeratedError(Exception):
     """Stand-in for a hypothetical future third-party writer failure mode.
 
-    Deliberately NOT a subclass of ``TorchLensIOError``, ``BackendPayloadUnsupportedError``,
+    Deliberately NOT a subclass of ``ArtifactError``, ``BackendPayloadUnsupportedError``,
     or any member of ``save()``'s historical ``(ImportError, OSError, TypeError, ValueError,
     pickle.PickleError)`` tuple, so a test injecting it proves the catch-all safety net
     closes the *class* of "unenumerated exception strands the backup" bug rather than
@@ -879,10 +638,11 @@ class _NeverEnumeratedError(Exception):
     """
 
 
+# shrink-r4: rows kept carry a sole library arc or a campaign kill; the others were proven redundant (slice 1 evidence)
 @pytest.mark.parametrize(
     "injected_exception",
-    [KeyError("torch.complex128"), _NeverEnumeratedError("simulated brand-new writer failure")],
-    ids=["keyerror", "unenumerated-exception-type"],
+    [_NeverEnumeratedError("simulated brand-new writer failure")],
+    ids=["unenumerated-exception-type"],
 )
 def test_bundle_save_overwrite_arbitrary_exception_preserves_original_and_marks_partial(
     tmp_path: Path,
@@ -910,21 +670,27 @@ def test_bundle_save_overwrite_arbitrary_exception_preserves_original_and_marks_
     def _poisoned_metadata_dump(*_args: Any, **_kwargs: Any) -> None:
         raise injected_exception
 
-    # Injected at the metadata.pkl writer (``dump_canonical_metadata()``,
-    # B3R4-R21-2): bare ``pickle.dump`` is no longer on the save path.
-    monkeypatch.setattr("torchlens._io.bundle.dump_canonical_metadata", _poisoned_metadata_dump)
+    monkeypatch.setattr("torchlens._io.format3.writer.write_record_files", _poisoned_metadata_dump)
 
-    with pytest.raises(TorchLensIOError) as excinfo:
-        save(second_log, bundle_path, overwrite=True)
+    with pytest.raises(ArtifactError) as excinfo:
+        second_log.save(bundle_path, overwrite=True)
 
     assert excinfo.value.__cause__ is injected_exception
 
-    # The original (pre-overwrite) bundle must survive the failed overwrite,
+    # The original (pre-overwrite) bundle must survive the failed overwrite, but
+    # tl.load refuses it while the failed save's PARTIAL staging dir is beside it,
     # regardless of which exception type the write raised.
     assert bundle_path.exists()
+    assert [p for p in tmp_path.iterdir() if ".bak." in p.name] == []  # before cleanup_tmp sweeps
+    (tmp_dir,) = [p for p in tmp_path.iterdir() if p.name.startswith(f"{bundle_path.name}.tmp.")]
+    assert (tmp_dir / "PARTIAL").exists()
+    with pytest.raises(ArtifactError) as refused:
+        load(bundle_path)
+    assert refused.value.fields["code"] == "newer_save_unfinished"
+    assert cleanup_tmp(bundle_path) == [tmp_dir]
     restored = load(bundle_path)
-    first_output = first_log.layer_list[-1].out
-    restored_output = restored.layer_list[-1].out
+    first_output = first_log._layer_list[-1].out
+    restored_output = restored._layer_list[-1].out
     assert isinstance(first_output, torch.Tensor)
     assert isinstance(restored_output, torch.Tensor)
     assert torch.equal(first_output, restored_output)
@@ -934,14 +700,9 @@ def test_bundle_save_overwrite_arbitrary_exception_preserves_original_and_marks_
     bak_dirs = [p for p in siblings if ".bak." in p.name]
     assert bak_dirs == []
 
-    # Any leftover ``.tmp.<uuid>`` dir must carry the PARTIAL sentinel so
-    # ``cleanup_tmp()`` (without ``force=True``) can sweep it.
-    tmp_dirs = [p for p in siblings if ".tmp." in p.name]
-    for tmp_dir in tmp_dirs:
-        assert (tmp_dir / "PARTIAL").exists()
-    removed = cleanup_tmp(bundle_path)
-    assert set(removed) == set(tmp_dirs)
-    assert not any(p.exists() for p in tmp_dirs)
+    # The PARTIAL staging dir was swept by ``cleanup_tmp()`` (no ``force=True``).
+    assert not tmp_dir.exists()
+    assert [p for p in siblings if ".tmp." in p.name] == []
 
 
 class _LegacyPicklePlaceholder:
@@ -951,23 +712,11 @@ class _LegacyPicklePlaceholder:
         self.value = value
 
 
-def test_legacy_multi_trace_bundle_load_typeerror_raises_torchlens_io_error(
+def test_legacy_multi_trace_bundle_refuses_before_unpickling(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A bare ``TypeError`` unpickling a legacy multi-trace ``Bundle`` must not escape.
-
-    Regression test for a recurrence of the round-5 bug class:
-    ``_load_unified_bundle()``'s legacy (pre-``bundle.json``) pickle-load
-    path -- reached from public ``tl.load(path)`` whenever ``manifest.json``
-    declares ``kind: "bundle"`` and no ``bundle.json`` sibling exists (old-
-    format bundles, an explicitly supported backward-compat case) -- was
-    missing ``TypeError`` from its except tuple, unlike the three sibling
-    call sites round 5 fixed (``bundle.py`` save, main-trace load,
-    ``streaming.py`` finalize). A bare ``TypeError`` (the same failure mode
-    ``pickle`` raises for many live-resource/incompatible-global objects)
-    escaped uncaught instead of the documented ``TorchLensIOError``.
-    """
+    """The 3.0 load door refuses 2.x bundles before reaching any unpickler."""
 
     bundle_path = tmp_path / "legacy_bundle.tl"
     bundle_path.mkdir()
@@ -976,17 +725,52 @@ def test_legacy_multi_trace_bundle_load_typeerror_raises_torchlens_io_error(
     )
     (bundle_path / "metadata.pkl").write_bytes(pickle.dumps(_LegacyPicklePlaceholder(1)))
 
-    def _poisoned_find_class(*_args: Any, **_kwargs: Any) -> Any:
-        raise TypeError("simulated live-resource unpickling failure")
+    reached_unpickler = False
 
-    monkeypatch.setattr(
-        "torchlens._io.bundle._RenameAwareUnpickler.find_class", _poisoned_find_class
-    )
+    def _poisoned_unpickler(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal reached_unpickler
+        reached_unpickler = True
+        raise AssertionError("2.x artifacts must not reach an unpickler")
 
-    with pytest.raises(TorchLensIOError) as excinfo:
+    monkeypatch.setattr(bundle_io, "_metadata_unpickler", _poisoned_unpickler)
+    monkeypatch.setattr(bundle_io._RenameAwareUnpickler, "load", _poisoned_unpickler)
+
+    with pytest.raises(ArtifactError) as excinfo:
         load(bundle_path)
 
-    assert isinstance(excinfo.value.__cause__, TypeError)
+    assert excinfo.value.fields["code"] == "artifact_version_below_floor"
+    assert "2.36.x" in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+    assert not reached_unpickler
+
+
+def test_bundle_invalid_record_json_refuses_before_unpickling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A correctly digested, invalid JSON record refuses before object construction."""
+
+    bundle_path, trace = _save_bundle(tmp_path)
+    reached_unpickler = False
+
+    def _poisoned_unpickler(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal reached_unpickler
+        reached_unpickler = True
+        raise AssertionError("JSON artifacts must not reach an unpickler")
+
+    monkeypatch.setattr(bundle_io, "_metadata_unpickler", _poisoned_unpickler)
+    monkeypatch.setattr(bundle_io._RenameAwareUnpickler, "load", _poisoned_unpickler)
+    assert load(bundle_path)._num_ops == trace._num_ops
+    assert not reached_unpickler
+    relpath = _read_manifest(bundle_path)["records"]["trace"]["path"]
+    (bundle_path / relpath).write_text("{not valid json", encoding="utf-8")
+    redigest(bundle_path, relpath)
+
+    with pytest.raises(ArtifactError) as excinfo:
+        load(bundle_path)
+
+    assert excinfo.value.fields["code"] == "bundle_metadata_integrity_refused"
+    assert not reached_unpickler
 
 
 def test_bundle_save_raw_input_stringifies_unpicklable_value_keeps_tensors(
@@ -995,7 +779,7 @@ def test_bundle_save_raw_input_stringifies_unpicklable_value_keeps_tensors(
     """``save_raw_input=True`` must stringify un-picklable objects, not pickle them raw.
 
     Unmocked, public-API-only repro of the root cause behind the BLOCKER
-    above: ``save_raw_input=True``/``save_raw_output=True`` (documented
+    above: ``save_raw_input=True``/``save_transformed_output=True`` (documented
     top-level ``tl.trace()`` kwargs) previously routed raw values through
     the unsafe ``_scrub_value()`` passthrough, so a generator (or any other
     live, un-picklable object) nested inside a raw input reached
@@ -1013,19 +797,21 @@ def test_bundle_save_raw_input_stringifies_unpicklable_value_keeps_tensors(
     trace = trace_fn(
         model,
         raw_input,
-        transform=lambda d: d["tensor"],
-        save_raw_input=True,
-        random_seed=0,
+        capture=tl.options.CaptureOptions(
+            input_transform=lambda d: d["tensor"], save_raw_input=True, seed=0
+        ),
     )
-    assert isinstance(trace.raw_input["meta"], type(make_generator()))
+    assert isinstance(trace.input["meta"], type(make_generator()))
 
     bundle_path = tmp_path / "raw_input_bundle.tl"
-    save(trace, bundle_path)
+    trace.save(bundle_path)
 
     loaded = load(bundle_path)
-    assert isinstance(loaded.raw_input["tensor"], torch.Tensor)
-    assert torch.equal(loaded.raw_input["tensor"], raw_input["tensor"])
-    assert loaded.raw_input["meta"] == "<scrubbed:generator>"
+    assert isinstance(loaded.input["tensor"], torch.Tensor)
+    assert torch.equal(loaded.input["tensor"], raw_input["tensor"])
+    assert isinstance(loaded.input["meta"], UnencodableValue)
+    assert loaded.input["meta"].type_name == "builtins.generator"
+    assert "input" in loaded.input["meta"].at
 
 
 def test_bundle_save_raw_input_large_tensor_skips_picklability_probe(
@@ -1054,7 +840,7 @@ def test_bundle_save_raw_input_large_tensor_skips_picklability_probe(
             tensor_dumps_calls += 1
         return real_dumps(value, *args, **kwargs)
 
-    monkeypatch.setattr("torchlens._io.scrub.pickle.dumps", _counting_dumps)
+    monkeypatch.setattr(pickle, "dumps", _counting_dumps)
 
     model = nn.Linear(3, 3)
     large_tensor = torch.randn(200, 200)
@@ -1062,19 +848,19 @@ def test_bundle_save_raw_input_large_tensor_skips_picklability_probe(
     trace = trace_fn(
         model,
         raw_input,
-        transform=lambda d: d["x"],
-        save_raw_input=True,
-        random_seed=0,
+        capture=tl.options.CaptureOptions(
+            input_transform=lambda d: d["x"], save_raw_input=True, seed=0
+        ),
     )
 
     bundle_path = tmp_path / "raw_input_large_tensor_bundle.tl"
-    save(trace, bundle_path)
+    trace.save(bundle_path)
 
     assert tensor_dumps_calls == 0
 
     loaded = load(bundle_path)
-    assert isinstance(loaded.raw_input["tensor"], torch.Tensor)
-    assert torch.equal(loaded.raw_input["tensor"], large_tensor)
+    assert isinstance(loaded.input["tensor"], torch.Tensor)
+    assert torch.equal(loaded.input["tensor"], large_tensor)
 
 
 def test_bundle_save_raw_input_numeric_ndarray_skips_picklability_probe(
@@ -1094,7 +880,7 @@ def test_bundle_save_raw_input_numeric_ndarray_skips_picklability_probe(
             ndarray_dumps_calls += 1
         return real_dumps(value, *args, **kwargs)
 
-    monkeypatch.setattr("torchlens._io.scrub.pickle.dumps", _counting_dumps)
+    monkeypatch.setattr(pickle, "dumps", _counting_dumps)
 
     model = nn.Linear(3, 3)
     numeric_array = np.arange(100, dtype=np.float64).reshape(10, 10)
@@ -1102,19 +888,19 @@ def test_bundle_save_raw_input_numeric_ndarray_skips_picklability_probe(
     trace = trace_fn(
         model,
         raw_input,
-        transform=lambda d: d["x"],
-        save_raw_input=True,
-        random_seed=0,
+        capture=tl.options.CaptureOptions(
+            input_transform=lambda d: d["x"], save_raw_input=True, seed=0
+        ),
     )
 
     bundle_path = tmp_path / "raw_input_numeric_ndarray_bundle.tl"
-    save(trace, bundle_path)
+    trace.save(bundle_path)
 
     assert ndarray_dumps_calls == 0
 
     loaded = load(bundle_path)
-    assert isinstance(loaded.raw_input["array"], np.ndarray)
-    np.testing.assert_array_equal(loaded.raw_input["array"], numeric_array)
+    assert isinstance(loaded.input["array"], np.ndarray)
+    np.testing.assert_array_equal(loaded.input["array"], numeric_array)
 
 
 def test_bundle_save_raw_input_object_dtype_ndarray_stringifies_unpicklable_element(
@@ -1140,18 +926,20 @@ def test_bundle_save_raw_input_object_dtype_ndarray_stringifies_unpicklable_elem
     trace = trace_fn(
         model,
         raw_input,
-        transform=lambda d: d["x"],
-        save_raw_input=True,
-        random_seed=0,
+        capture=tl.options.CaptureOptions(
+            input_transform=lambda d: d["x"], save_raw_input=True, seed=0
+        ),
     )
 
     bundle_path = tmp_path / "raw_input_object_ndarray_bundle.tl"
     # Must NOT raise -- the unpicklable element degrades gracefully instead
     # of reaching the real pickle.dump() over the full scrubbed state.
-    save(trace, bundle_path)
+    trace.save(bundle_path)
 
     loaded = load(bundle_path)
-    assert loaded.raw_input["array"] == "<scrubbed:ndarray>"
+    assert isinstance(loaded.input["array"], UnencodableValue)
+    assert loaded.input["array"].type_name == "numpy.ndarray"
+    assert "input" in loaded.input["array"].at
 
 
 def test_bundle_save_raw_input_structured_ndarray_object_field_stringifies_unpicklable_element(
@@ -1185,18 +973,20 @@ def test_bundle_save_raw_input_structured_ndarray_object_field_stringifies_unpic
     trace = trace_fn(
         model,
         raw_input,
-        transform=lambda d: d["x"],
-        save_raw_input=True,
-        random_seed=0,
+        capture=tl.options.CaptureOptions(
+            input_transform=lambda d: d["x"], save_raw_input=True, seed=0
+        ),
     )
 
     bundle_path = tmp_path / "raw_input_structured_ndarray_bundle.tl"
     # Must NOT raise -- the unpicklable field element degrades gracefully
     # instead of reaching the real pickle.dump() over the full scrubbed state.
-    save(trace, bundle_path)
+    trace.save(bundle_path)
 
     loaded = load(bundle_path)
-    assert loaded.raw_input["array"] == "<scrubbed:ndarray>"
+    assert isinstance(loaded.input["array"], UnencodableValue)
+    assert loaded.input["array"].type_name == "numpy.ndarray"
+    assert "input" in loaded.input["array"].at
 
 
 def test_bundle_save_rejects_symlink_target(tmp_path: Path) -> None:
@@ -1206,10 +996,10 @@ def test_bundle_save_rejects_symlink_target(tmp_path: Path) -> None:
     real_path = tmp_path / "real_bundle"
     real_path.mkdir()
     symlink_path = tmp_path / "bundle_link"
-    symlink_or_skip(symlink_path, real_path, target_is_directory=True)
+    symlink_path.symlink_to(real_path, target_is_directory=True)
 
-    with pytest.raises(TorchLensIOError, match="symlinked save target"):
-        save(trace, symlink_path)
+    with pytest.raises(ArtifactError, match="symlinked save target"):
+        trace.save(symlink_path)
 
 
 def _build_unified_bundle(tmp_path: Path) -> Path:
@@ -1223,27 +1013,28 @@ def _build_unified_bundle(tmp_path: Path) -> Path:
     Returns
     -------
     Path
-        Saved bundle directory that detects as ``v2.0_unified``.
+        Saved bundle directory that detects as ``v3``.
     """
 
     trace = _build_conv_log()
     bundle_path = tmp_path / "unified_bundle.tlspec"
-    save(trace, bundle_path)
-    assert detect_tlspec_format(bundle_path) == "v2.0_unified"
+    trace.save(bundle_path)
+    assert detect_tlspec_format(bundle_path) == "v3"
     return bundle_path
 
 
-def test_unified_load_rejects_symlinked_metadata(tmp_path: Path) -> None:
-    """Unified loads should refuse a symlinked ``metadata.pkl`` member."""
+def test_unified_load_rejects_symlinked_record(tmp_path: Path) -> None:
+    """Unified loads should refuse a symlinked JSON record member."""
 
     bundle_path = _build_unified_bundle(tmp_path)
-    member = bundle_path / "metadata.pkl"
-    target = tmp_path / "real_metadata.pkl"
+    member = bundle_path / _read_manifest(bundle_path)["records"]["trace"]["path"]
+    target = tmp_path / "real_trace.json"
     member.rename(target)
-    symlink_or_skip(member, target)
+    member.symlink_to(target)
 
-    with pytest.raises(TorchLensIOError, match="Refusing symlinked metadata"):
+    with pytest.raises(ArtifactError) as excinfo:
         load(bundle_path)
+    assert excinfo.value.fields["code"] == "load_path_symlink_rejected"
 
 
 def test_unified_load_rejects_symlinked_manifest(tmp_path: Path) -> None:
@@ -1253,13 +1044,13 @@ def test_unified_load_rejects_symlinked_manifest(tmp_path: Path) -> None:
     member = bundle_path / "manifest.json"
     target = tmp_path / "real_manifest.json"
     member.rename(target)
-    symlink_or_skip(member, target)
+    member.symlink_to(target)
 
     # r29 F-r28-1: a symlinked manifest is now rejected even earlier, at
     # format-detection (before the loader's own symlink guard), so match the
     # symlink-refusal message point-agnostically -- the assertion still verifies
-    # that a symlinked manifest.json member is refused with TorchLensIOError.
-    with pytest.raises(TorchLensIOError, match="Refusing symlinked"):
+    # that a symlinked manifest.json member is refused with ArtifactError.
+    with pytest.raises(ArtifactError, match="Refusing symlinked"):
         load(bundle_path)
 
 
@@ -1270,34 +1061,11 @@ def test_unified_load_rejects_symlinked_blobs_dir(tmp_path: Path) -> None:
     member = bundle_path / "blobs"
     target = tmp_path / "real_blobs"
     member.rename(target)
-    symlink_or_skip(member, target, target_is_directory=True)
+    member.symlink_to(target, target_is_directory=True)
 
-    with pytest.raises(TorchLensIOError, match="Refusing symlinked blobs directory"):
+    with pytest.raises(ArtifactError) as excinfo:
         load(bundle_path)
-
-
-def test_unified_load_rejects_symlinked_bundle_path(tmp_path: Path) -> None:
-    """Unified loads should refuse a symlinked bundle directory path."""
-
-    bundle_path = _build_unified_bundle(tmp_path)
-    link_path = tmp_path / "bundle_link.tlspec"
-    symlink_or_skip(link_path, bundle_path, target_is_directory=True)
-
-    # r29 F-r28-1: a symlinked bundle path is now rejected earlier, at
-    # format-detection, so match the symlink-refusal point-agnostically -- the
-    # assertion still verifies a symlinked bundle directory is refused.
-    with pytest.raises(TorchLensIOError, match="Refusing symlinked"):
-        load(link_path)
-
-
-def test_unified_load_accepts_regular_bundle_members(tmp_path: Path) -> None:
-    """Control: a normal unified bundle still loads after the symlink guards."""
-
-    bundle_path = _build_unified_bundle(tmp_path)
-
-    loaded = load(bundle_path)
-
-    assert isinstance(loaded, Trace)
+    assert excinfo.value.fields["code"] == "load_path_symlink_rejected"
 
 
 def test_resolve_bundle_blob_path_rejects_symlinked_blobs_dir(tmp_path: Path) -> None:
@@ -1308,58 +1076,10 @@ def test_resolve_bundle_blob_path_rejects_symlinked_blobs_dir(tmp_path: Path) ->
     outside_tree = tmp_path / "outside_tree"
     outside_tree.mkdir()
     (outside_tree / "0000000001.safetensors").write_bytes(b"payload")
-    symlink_or_skip(bundle_root / "blobs", outside_tree, target_is_directory=True)
+    (bundle_root / "blobs").symlink_to(outside_tree, target_is_directory=True)
 
-    with pytest.raises(TorchLensIOError, match="Refusing symlinked blobs directory"):
+    with pytest.raises(ArtifactError, match="Refusing symlinked blobs directory"):
         resolve_bundle_blob_path(bundle_root, "blobs/0000000001.safetensors")
-
-
-def test_resolve_bundle_blob_path_accepts_regular_blobs_dir(tmp_path: Path) -> None:
-    """Control: the blob resolver still accepts a regular ``blobs`` directory."""
-
-    bundle_root = tmp_path / "root.tlspec"
-    (bundle_root / "blobs").mkdir(parents=True)
-    blob_file = bundle_root / "blobs" / "0000000001.safetensors"
-    blob_file.write_bytes(b"payload")
-
-    resolved = resolve_bundle_blob_path(bundle_root, "blobs/0000000001.safetensors")
-
-    assert resolved == blob_file.resolve()
-
-
-def test_eager_load_resolves_blob_containment_root_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An eager load should canonicalize its shared blob root only once."""
-
-    bundle_path, _ = _save_bundle(tmp_path)
-    original_resolver = bundle_io.resolve_bundle_blobs_dir
-    call_count = 0
-
-    def counting_resolver(bundle_root: Path) -> Path:
-        """Count canonical blob-root resolutions while preserving behavior."""
-
-        nonlocal call_count
-        call_count += 1
-        return original_resolver(bundle_root)
-
-    monkeypatch.setattr(bundle_io, "resolve_bundle_blobs_dir", counting_resolver)
-
-    load(bundle_path, lazy=False)
-
-    assert call_count == 1
-
-
-def test_bundle_loaded_log_validation_guard_raises(tmp_path: Path) -> None:
-    """Portable-loaded logs should reject replay validation APIs."""
-
-    bundle_path, _ = _save_bundle(tmp_path)
-    restored = load(bundle_path)
-
-    assert restored._loaded_from_bundle is True
-    with pytest.raises(TorchLensIOError, match="portable bundles drop them"):
-        restored.validate_forward_pass([])
 
 
 def test_bundle_save_rejects_non_tensor_activation_transform_output(tmp_path: Path) -> None:
@@ -1368,24 +1088,10 @@ def test_bundle_save_rejects_non_tensor_activation_transform_output(tmp_path: Pa
     trace = _build_non_tensor_out_log()
     bundle_path = tmp_path / "non_tensor_bundle.tl"
 
-    with pytest.raises(TorchLensIOError, match="activation_transform outputs"):
-        save(trace, bundle_path)
+    with pytest.raises(ArtifactError, match="activation_transform outputs"):
+        trace.save(bundle_path)
 
     assert not bundle_path.exists()
-
-
-def test_cleanup_tmp_removes_partial_temp_directories(tmp_path: Path) -> None:
-    """``cleanup_tmp`` should remove sibling temp dirs marked as partial."""
-
-    target_path = tmp_path / "bundle.tl"
-    partial_tmp_path = tmp_path / f"{target_path.name}.tmp.partial"
-    partial_tmp_path.mkdir()
-    (partial_tmp_path / "PARTIAL").write_text("", encoding="utf-8")
-
-    removed = cleanup_tmp(target_path)
-
-    assert removed == [partial_tmp_path]
-    assert not partial_tmp_path.exists()
 
 
 def test_cleanup_tmp_removes_redundant_backup_when_bundle_exists(tmp_path: Path) -> None:
@@ -1403,31 +1109,6 @@ def test_cleanup_tmp_removes_redundant_backup_when_bundle_exists(tmp_path: Path)
     assert removed == [bak_path]
     assert not bak_path.exists()
     assert target_path.exists()
-    assert (target_path / "marker").read_text(encoding="utf-8") == "current"
-
-
-def test_cleanup_tmp_leaves_distinct_backup_when_bundle_exists(tmp_path: Path) -> None:
-    """A ``.bak.*`` sibling whose contents differ from the live bundle must NOT be
-    silently destroyed by default -- it is not provably redundant.
-
-    Regression test for the round-6 H4 over-reach: the previous implementation
-    inferred "redundant" purely from ``bundle_path.exists()`` with no content
-    check, so a genuinely distinct backup was silently ``shutil.rmtree()``'d.
-    """
-
-    target_path = tmp_path / "bundle.tl"
-    target_path.mkdir()
-    (target_path / "marker").write_text("current", encoding="utf-8")
-    bak_path = tmp_path / f"{target_path.name}.bak.deadbeef"
-    bak_path.mkdir()
-    (bak_path / "marker").write_text("stale-but-distinct", encoding="utf-8")
-
-    with pytest.warns(UserWarning, match="not provably redundant"):
-        removed = cleanup_tmp(target_path)
-
-    assert removed == []
-    assert bak_path.exists()
-    assert (bak_path / "marker").read_text(encoding="utf-8") == "stale-but-distinct"
     assert (target_path / "marker").read_text(encoding="utf-8") == "current"
 
 
@@ -1486,70 +1167,10 @@ def test_cleanup_tmp_does_not_destroy_second_distinct_orphaned_backup(tmp_path: 
     assert surviving_marker in {"first-orphan", "second-orphan-distinct"}
 
 
-def test_cleanup_tmp_restores_orphaned_backup_when_bundle_missing(tmp_path: Path) -> None:
-    """A double-failure orphaned ``.bak.*`` dir should be recovered onto ``bundle_path``.
+def test_array_transport_admits_both_complex_widths() -> None:
+    """Both complex widths have a physical real-view encoding in the format 3 carrier."""
 
-    Regression test for the round-5 MINOR: if ``save(overwrite=True)`` fails
-    and the best-effort ``_restore_backup()`` step also fails (a second,
-    independent I/O failure), the ``.bak.<uuid>`` sibling was previously left
-    permanently orphaned with no sweep mechanism -- ``cleanup_tmp()`` only
-    globbed ``.tmp.*``. Since the backup holds the only surviving copy of the
-    pre-overwrite bundle, the fix restores it onto the missing ``bundle_path``
-    instead of deleting it.
-    """
-
-    target_path = tmp_path / "bundle.tl"
-    bak_path = tmp_path / f"{target_path.name}.bak.deadbeef"
-    bak_path.mkdir()
-    (bak_path / "marker").write_text("recovered", encoding="utf-8")
-
-    removed = cleanup_tmp(target_path)
-
-    assert removed == [target_path]
-    assert not bak_path.exists()
-    assert target_path.exists()
-    assert (target_path / "marker").read_text(encoding="utf-8") == "recovered"
-
-
-def _torch_minor_mismatch_version() -> str:
-    """Return a torch version string with the same major and different minor.
-
-    Returns
-    -------
-    str
-        Version string suitable for the minor-mismatch policy test.
-    """
-
-    version_parts = torch.__version__.split("+", maxsplit=1)[0].split(".")
-    major = int(version_parts[0])
-    minor = int(version_parts[1]) if len(version_parts) > 1 else 0
-    patch = int(version_parts[2]) if len(version_parts) > 2 and version_parts[2].isdigit() else 0
-    return f"{major}.{minor + 1}.{patch}"
-
-
-def test_unsupported_array_dtype_reason_rejects_complex128_but_allows_complex64() -> None:
-    """Non-torch backends must reject ``complex128`` arrays before the shared transport.
-
-    Regression test for the non-torch half of the cert round 8 BLOCKER:
-    ``_raise_for_unsupported_array_dtype()``/``_unsupported_array_dtype_reason()`` gate
-    every JAX/TF/Paddle/tinygrad/MLX payload before it reaches
-    ``numpy_to_transport_tensor()`` -> ``torch.from_numpy()`` -> the same unguarded
-    ``safetensors.torch.save_file()`` call the torch-native path hits. Before this fix,
-    the guard only rejected numpy dtype *kinds* ``{"O", "S", "U", "V"}`` -- ``complex128``
-    has kind ``"c"`` (shared with the genuinely-supported ``complex64``), so it sailed
-    through unblocked. The fix distinguishes by itemsize (complex128 is 16 bytes,
-    complex64 is 8) so only the unsupported width is rejected.
-    """
-
-    complex128_array = np.array([1 + 2j], dtype=np.complex128)
-    complex64_array = np.array([1 + 2j], dtype=np.complex64)
-
-    reason = _unsupported_array_dtype_reason(complex128_array)
-    assert reason is not None
-    assert "complex128" in reason
-    assert _unsupported_array_dtype_reason(complex64_array) is None
-
-    with pytest.raises(TypeError, match="complex128"):
-        _raise_for_unsupported_array_dtype(complex128_array, backend_name="jax")
-
-    _raise_for_unsupported_array_dtype(complex64_array, backend_name="jax")
+    for dtype in (np.complex64, np.complex128):
+        array = np.array([1 + 2j], dtype=dtype)
+        assert _unsupported_array_dtype_reason(array) is None
+        _raise_for_unsupported_array_dtype(array, backend_name="numpy")

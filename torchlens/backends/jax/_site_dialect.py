@@ -15,10 +15,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ...postprocess._site_key import SiteKeyMinter
+from ..._data_classes._site_key import SiteKeyMinter
+from ..._utils._record_group_table import record_member
 
 if TYPE_CHECKING:
-    from ...data_classes.trace import Trace
+    from ..._data_classes.trace import Trace
 
 
 def _jax_site_components(op_log: Any) -> tuple[tuple[str, ...], str]:
@@ -50,13 +51,13 @@ def jax_site_keys(trace: Trace) -> dict[str, str]:
     -------
     dict[str, str]
         Rendered site key per retained raw label (orphans excluded -- they
-        consume no ordinals and carry no keys, the SF-63 ruling).
+        consume no ordinals and carry no keys, the ruling).
     """
 
     minter = SiteKeyMinter()
     keys: dict[str, str] = {}
     for label, op_log in trace._raw_graph_ws.raw_layer_dict.items():
-        if getattr(op_log, "is_orphan", False):
+        if record_member(op_log, "is_orphan", False):
             continue
         module_site, call_instance = _jax_site_components(op_log)
         keys[label] = minter.mint_at(

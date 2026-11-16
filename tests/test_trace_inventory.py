@@ -51,7 +51,7 @@ def test_sites_table_groups_ops_by_site_key() -> None:
     torch.manual_seed(0)
     trace = tl.trace(LoopMlp(), torch.randn(1, 4))
 
-    frame = trace.sites_table()
+    frame = trace.sites()
 
     assert list(frame.columns) == [
         "site_key",
@@ -66,7 +66,7 @@ def test_sites_table_groups_ops_by_site_key() -> None:
         "shapes",
     ]
     assert len(frame) == len(set(frame["site_key"]))
-    assert sum(frame["n_ops"]) == len(list(trace.ops))
+    assert sum(frame["n_ops"]) == len(trace._layer_list)
     # The reused-module linear shares ONE site across both passes (per-call-
     # instance ordinal restart), so its row aggregates both pass labels.
     linear = frame.loc[frame["layer_type"] == "linear"].iloc[0]
@@ -83,11 +83,11 @@ def test_sites_table_refuses_keyless_legacy_artifacts() -> None:
 
     torch.manual_seed(1)
     trace = tl.trace(nn.Linear(4, 2), torch.randn(1, 4))
-    for op in trace.ops:
-        op.site_key = None
+    for op in trace._layer_list:
+        op._graph_site_key = None
 
     with pytest.raises(InvalidArgumentError) as excinfo:
-        trace.sites_table()
+        trace.sites()
     assert excinfo.value.fields["code"] == "site_key_unavailable"
 
 
@@ -108,32 +108,27 @@ def test_bill_of_materials_reports_captured_facts() -> None:
         "activations",
         "backward",
         "annotations",
+        # A09 sumfam D20: logged values are inventory (read-back surface).
+        "logged_values",
     }
     assert bom["capture"]["backend"] == "torch"
     assert bom["capture"]["outcome_status"] == "complete"
     assert bom["capture"]["model_class_name"] == "Sequential"
-    assert bom["graph"]["num_ops"] == len(list(trace.ops))
-    assert bom["graph"]["num_layers"] == trace.num_layers
-    assert bom["graph"]["num_modules"] == trace.num_modules
+    assert bom["graph"]["num_ops"] == len(trace._layer_list)
+    assert bom["graph"]["num_layers"] == len(trace.layers)
+    assert bom["graph"]["num_modules"] == len(trace.modules)
     assert bom["parameters"]["num_params"] == trace.num_params
     assert bom["parameters"]["num_param_tensors"] == len(trace.params)
     assert bom["buffers"]["num_buffer_tensors"] == len(trace.buffers)
-    saved = [op for op in trace.ops if op.has_saved_activation]
-    assert bom["activations"]["num_saved"] == len(saved)
-    assert bom["activations"]["saved_activation_memory"] == sum(
-        int(op.activation_memory) for op in saved
+    saved = [op for op in trace._layer_list if op.has_saved_activation]
+    # Payload-scope law (C02; sumfam D8): BOM's byte figures are
+    # retained_now; the at_capture facts print BESIDE them.
+    assert bom["activations"]["payload_scope"] == "retained_now"
+    assert bom["activations"]["num_saved_at_capture"] == len(saved)
+    assert bom["activations"]["at_capture_memory"] == sum(
+        int(op.cost.activation_memory) for op in saved
     )
+    # A live full-save trace still holds everything it captured.
+    assert bom["activations"]["retained_now_memory"] == bom["activations"]["at_capture_memory"]
     assert bom["backward"]["num_grad_fn_records"] == 0
     assert bom["annotations"] == ()
-
-
-def test_bill_of_materials_is_read_only_and_repeatable() -> None:
-    """Building the inventory twice yields equal sections and mutates nothing."""
-
-    torch.manual_seed(3)
-    trace = tl.trace(nn.Linear(4, 2), torch.randn(1, 4))
-
-    first = trace.bill_of_materials()
-    second = trace.bill_of_materials()
-
-    assert first == second

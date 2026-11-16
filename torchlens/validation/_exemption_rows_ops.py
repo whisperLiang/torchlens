@@ -1,0 +1,539 @@
+"""Op-keyed rows of the validation exemption table.
+
+Each row here is derived into a run-time registry in
+:mod:`torchlens.validation._exemptions` (``SKIP_VALIDATION_ENTIRELY``,
+``SKIP_PERTURBATION_ENTIRELY``, ``STRUCTURAL_ARG_POSITIONS``,
+``STRUCTURAL_ARG_KWARG_ALIASES``, ``CUSTOM_EXEMPTION_CHECKS``). The assembled
+table and its views live in :mod:`torchlens.validation._exemption_table`.
+"""
+
+from __future__ import annotations
+
+from ._exemption_schema import ExemptionRow
+
+_HARDENING = "tests/validation_goldens/test_validation_exemption_hardening.py::"
+_TIGHTENING = "tests/test_validation_exemption_tightening.py::"
+_SLOTS = "tests/test_validation_structural_slots.py::"
+_KERNEL = "tests/test_foreign_kernel_dependence.py::"
+_MASKS = "tests/test_validation_mask_builder_table.py::"
+_TABLE_TESTS = "tests/test_validation_exemption_table.py::"
+_DEGENERATE = "tests/test_validation_degenerate_domains.py::"
+_EX = "torchlens.validation._exemptions:"
+_CORE = "torchlens.validation._core:"
+
+
+def _spell(names: str | tuple[str, ...]) -> tuple[str, ...]:
+    """Return the row's spellings as a tuple (a single name becomes a 1-tuple)."""
+
+    return (names,) if isinstance(names, str) else names
+
+
+def _member_test(kind: str, name: str) -> str:
+    """Return the table test that fails when a registry member disappears."""
+
+    return f"{_TABLE_TESTS}test_registry_member_is_declared[{kind}:{name}]"
+
+
+def _skip_validation(name: str, reason: str, negative_test: str | None) -> ExemptionRow:
+    """Declare an op whose forward replay and perturbation are both skipped."""
+
+    admits = (
+        "forward replay and perturbation are both skipped for this op; the saved "
+        "bytes are uninitialized memory and no deterministic replay exists"
+    )
+    return ExemptionRow(
+        (name,),
+        "skip_validation",
+        admits,
+        reason,
+        _EX + "uninitialized_by_design_applies",
+        _member_test("skip_validation", name),
+        negative_test,
+    )
+
+
+def _skip_perturbation(name: str, reason: str, negative_test: str | None) -> ExemptionRow:
+    """Declare an op whose parents are never perturbed (forward replay still runs)."""
+
+    admits = (
+        "perturbation is skipped for every parent of this op; forward replay still "
+        "runs and must reproduce the saved output"
+    )
+    return ExemptionRow(
+        (name,),
+        "skip_perturbation",
+        admits,
+        reason,
+        _CORE + "validate_parents_of_saved_layer",
+        _member_test("skip_perturbation", name),
+        negative_test,
+    )
+
+
+_Aliases = tuple[tuple[int, frozenset[str]], ...]
+
+
+def _structural(
+    names: str | tuple[str, ...],
+    slots: frozenset[int] | tuple[frozenset[int], _Aliases],
+    admits: str,
+    reason: str,
+    negative_test: str | None,
+) -> ExemptionRow:
+    """Declare structural positions; ``slots`` is the position set, optionally paired with
+    the kwarg aliases that name those positions."""
+
+    spelled = _spell(names)
+    positions, aliases = slots if isinstance(slots, tuple) else (slots, ())
+    return ExemptionRow(
+        spelled,
+        "structural_position",
+        admits,
+        reason,
+        _EX + "perturbed_layer_at_structural_position",
+        _member_test("structural_position", spelled[0]),
+        negative_test,
+        positions,
+        aliases,
+    )
+
+
+def _custom(
+    names: str | tuple[str, ...], check: str, admits: str, reason: str, negative_test: str | None
+) -> ExemptionRow:
+    """Declare spellings whose exemption is decided by the named predicate in exemptions.py."""
+
+    spelled = _spell(names)
+    return ExemptionRow(
+        spelled,
+        "custom_check",
+        admits,
+        reason,
+        _EX + check,
+        _member_test("custom_check", spelled[0]),
+        negative_test,
+    )
+
+
+_UNINIT_NEGATIVE = _HARDENING + "test_empty_like_is_justified_exempted_not_unverified"
+_POSITION_NEGATIVE = (
+    _HARDENING + "test_structural_arg_exemption_uses_parent_position_not_equal_value"
+)
+_FACTORY = "factory template: the self tensor supplies dtype, device and layout only"
+_SHAPE = "shape template: the tensor is read for its size only, never its elements"
+_COORDS = (
+    "SAFETY skip, not a value-irrelevance proof: perturbed coordinates or offsets can index "
+    "out of bounds inside the native kernel and segfault past Python; replay still guards "
+    "the value edge"
+)
+
+_REGISTRY_ROWS: tuple[ExemptionRow, ...] = (
+    # ------------------------------------------------------------ skip_validation
+    _skip_validation(
+        "empty_like",
+        "returns uninitialized memory by construction; saved bytes are not replayable",
+        _UNINIT_NEGATIVE,
+    ),
+    _skip_validation(
+        "new",
+        "torch.Tensor.new() returns uninitialized memory by construction for the "
+        "argless/size-only overloads ONLY, proved per call by "
+        "uninitialized_by_design_applies",
+        _TIGHTENING + "test_value_bearing_tensor_new_corruption_fails_not_exempted",
+    ),
+    _skip_validation(
+        "new_empty",
+        "torch.Tensor.new_empty() returns uninitialized memory by construction",
+        _UNINIT_NEGATIVE,
+    ),
+    _skip_validation(
+        "new_empty_strided",
+        "torch.Tensor.new_empty_strided() returns uninitialized memory by construction",
+        _UNINIT_NEGATIVE,
+    ),
+    _skip_validation(
+        "newempty",
+        "canonical torch.Tensor.new_empty() spelling returns uninitialized memory",
+        _UNINIT_NEGATIVE,
+    ),
+    _skip_validation(
+        "newemptystrided",
+        "canonical torch.Tensor.new_empty_strided() spelling returns uninitialized memory",
+        _UNINIT_NEGATIVE,
+    ),
+    # ---------------------------------------------------------- skip_perturbation
+    _skip_perturbation(
+        "new_zeros", "output is all zeros by construction; no parent value reaches it", None
+    ),
+    _skip_perturbation(
+        "new_ones", "output is all ones by construction; no parent value reaches it", None
+    ),
+    _skip_perturbation(
+        "zero_", "in-place zero fill; the destination's prior values are discarded", None
+    ),
+    _skip_perturbation(
+        "zeros_like",
+        "shape/dtype/device template only; the output value is constant zero",
+        None,
+    ),
+    _skip_perturbation(
+        "ones_like", "shape/dtype/device template only; the output value is constant one", None
+    ),
+    _skip_perturbation(
+        "rand_like", "values are RNG-drawn; the parent supplies shape/dtype/device only", None
+    ),
+    _skip_perturbation(
+        "randn_like", "values are RNG-drawn; the parent supplies shape/dtype/device only", None
+    ),
+    _skip_perturbation(
+        "exponential_",
+        "in-place RNG draw; the output is determined by RNG state, not inputs",
+        None,
+    ),
+    # -------------------------------------------------------- structural_position
+    _structural(
+        "new",
+        frozenset({0}),
+        "value-bearing new(tensor)/new(data): the self tensor at arg 0 is the template",
+        _FACTORY + "; the data source at arg 1 stays perturbation-tested",
+        _TIGHTENING + "test_value_bearing_tensor_new_corruption_fails_not_exempted",
+    ),
+    _structural(
+        "copy_",
+        frozenset({0}),
+        "the destination at arg 0 is fully overwritten by the source",
+        "destination values are overwritten; source values determine the output",
+        _POSITION_NEGATIVE,
+    ),
+    _structural(
+        ("_foreach_copy_", "foreachcopy"),
+        frozenset({0}),
+        "each destination member (arg 0, zipped slot) is totally overwritten by its source",
+        "destination members are value-irrelevant by construction; sources stay tested",
+        _POSITION_NEGATIVE,
+    ),
+    _structural(
+        "fill_",
+        frozenset({0}),
+        "the destination at arg 0 is overwritten by the fill value",
+        "destination values are overwritten; the fill VALUE at arg 1 stays tested",
+        _POSITION_NEGATIVE,
+    ),
+    _structural(
+        "set_",
+        frozenset({0}),
+        "the receiver at arg 0 is rebound to the source storage",
+        "the receiver's prior values never reach the output; a source at arg 1 stays tested",
+        _POSITION_NEGATIVE,
+    ),
+    _structural(
+        ("expand_as", "expandas"),
+        frozenset({1}),
+        "the template at arg 1 supplies the target shape",
+        _SHAPE + "; arg 0 values flow into the output and stay tested",
+        _POSITION_NEGATIVE,
+    ),
+    _structural(
+        ("reshape_as", "reshapeas"),
+        (frozenset({1}), ((1, frozenset({"other"})),)),
+        "reshape_as(other) is self.reshape(other.sizes())",
+        _SHAPE,
+        _POSITION_NEGATIVE,
+    ),
+    _structural(
+        ("view_as", "viewas"),
+        (frozenset({1}), ((1, frozenset({"other"})),)),
+        "view_as(other) is self.view(other.size())",
+        _SHAPE,
+        _POSITION_NEGATIVE,
+    ),
+    # Ruling Lead 3, 4 Nov 2026 2:31 PM PT (view-func-replay): torch reads only the receiver's
+    # view chain, never its values (view_func_impl / rev_view_func_impl in
+    # torch/csrc/autograd/python_variable.cpp); replay rebuilds that chain from the saved
+    # view context. The new base (or new view) at arg 1 stays perturbation-tested.
+    _structural(
+        ("_view_func", "_view_func_unsafe", "_rev_view_func_unsafe"),
+        frozenset({0}),
+        "the receiver at arg 0 supplies its view chain",
+        "view-chain template: the receiver's elements never reach the output; arg 1 stays tested",
+        "tests/test_view_func_replay.py::test_planted_new_base_blind_replay_fails_perturbation",
+    ),
+    _structural(
+        "resize_as_",
+        (frozenset({1}), ((1, frozenset({"the_template"})),)),
+        "resize_as_(the_template) is self.resize_(the_template.size())",
+        _SHAPE + "; the receiver keeps the element prefix it carries and stays tested",
+        _POSITION_NEGATIVE,
+    ),
+    _structural(
+        "_pack_padded_sequence",
+        (frozenset({1}), ((1, frozenset({"lengths"})),)),
+        "the lengths tensor at arg 1 (keyword lengths)",
+        "lengths are packing metadata, not output values",
+        _POSITION_NEGATIVE,
+    ),
+    _structural(
+        "_pad_packed_sequence",
+        (frozenset({1}), ((1, frozenset({"lengths"})),)),
+        "the lengths tensor at arg 1 (keyword lengths)",
+        "lengths are packing metadata, not output values",
+        _POSITION_NEGATIVE,
+    ),
+    _structural(
+        "type_as",
+        (frozenset({1}), ((1, frozenset({"tensor", "other"})),)),
+        "the type template at arg 1 (keywords tensor, other)",
+        "type template tensor; its values are irrelevant",
+        _POSITION_NEGATIVE,
+    ),
+    _structural(
+        ("new_tensor", "newtensor"),
+        frozenset({0}),
+        "the self tensor at arg 0 of Tensor.new_tensor",
+        _FACTORY,
+        _POSITION_NEGATIVE,
+    ),
+    _structural(
+        ("new_full", "newfull"),
+        frozenset({0}),
+        "the self tensor at arg 0 of Tensor.new_full; size and fill args determine the output",
+        _FACTORY,
+        _POSITION_NEGATIVE,
+    ),
+    _structural(
+        ("new_zeros", "newzeros"),
+        frozenset({0}),
+        "the self tensor at arg 0 of Tensor.new_zeros",
+        _FACTORY,
+        _POSITION_NEGATIVE,
+    ),
+    _structural(
+        ("new_ones", "newones"),
+        frozenset({0}),
+        "the self tensor at arg 0 of Tensor.new_ones",
+        _FACTORY,
+        _POSITION_NEGATIVE,
+    ),
+    _structural(
+        "nms",
+        (frozenset({0}), ((0, frozenset({"boxes"})),)),
+        "boxes at arg 0 (keyword boxes); scores at arg 1 stay tested",
+        _COORDS,
+        None,
+    ),
+    # No deform_conv2d row: the captured op is torch.ops.torchvision.deform_conv2d,
+    # whose arg 1 is the WEIGHT (the offset is arg 2), so a former "offset at arg 1"
+    # row exempted the weight. The weight now stays tested
+    # (tests/test_validation_deform_conv_slots.py).
+    _structural(
+        "roi_align",
+        (frozenset({1}), ((1, frozenset({"boxes", "rois"})),)),
+        "boxes at arg 1 (keywords boxes, rois); the feature map at arg 0 stays tested",
+        _COORDS,
+        None,
+    ),
+    _structural(
+        "roi_pool",
+        (frozenset({1}), ((1, frozenset({"boxes", "rois"})),)),
+        "boxes at arg 1 (keywords boxes, rois)",
+        _COORDS,
+        None,
+    ),
+    _structural(
+        "ps_roi_align",
+        (frozenset({1}), ((1, frozenset({"boxes", "rois"})),)),
+        "boxes at arg 1 (keywords boxes, rois)",
+        _COORDS,
+        None,
+    ),
+    _structural(
+        "ps_roi_pool",
+        (frozenset({1}), ((1, frozenset({"boxes", "rois"})),)),
+        "boxes at arg 1 (keywords boxes, rois)",
+        _COORDS,
+        None,
+    ),
+    # --------------------------------------------------------------- custom_check
+    _custom(
+        ("meshgrid", "broadcast_tensors", "broadcasttensors"),
+        "_check_zipped_sibling_exempt",
+        "a perturbed parent that feeds only OTHER outputs of a zipped multi-output op",
+        "per-output parent projection: each output's own value edge stays tested",
+        _TIGHTENING + "test_meshgrid_dead_own_edge_now_fails_perturbation",
+    ),
+    _custom(
+        "__getitem__",
+        "_check_getitem_exempt",
+        "a perturbed parent occupying only index positions (never arg 0, the data)",
+        "index tensors select positions; the indexed data at arg 0 stays tested",
+        _HARDENING + "test_getitem_exemption_uses_parent_position_not_equal_value",
+    ),
+    _custom(
+        "__setitem__",
+        "_check_setitem_exempt",
+        "a perturbed destination whose written slice is provably fully overwritten, "
+        "or an uninitialized destination",
+        "a totally overwritten destination's prior values cannot reach the output",
+        _HARDENING + "test_setitem_blank_destination_partial_overwrite_is_not_exempt",
+    ),
+    _custom(
+        ("index_put", "index_put_"),
+        "_check_index_put_exempt",
+        "a perturbed destination (arg 0) whose indexed positions are fully overwritten "
+        "with accumulate=False",
+        "the destination's prior value at overwritten positions is provably irrelevant",
+        _HARDENING + "test_index_put_overwrite_proof_rejects_negative_index_aliasing",
+    ),
+    _custom(
+        "lstm",
+        "_check_lstm_exempt",
+        "a perturbed parent at the hidden or cell state argument position",
+        "keyed on argument position, never on tensor equality with h0",
+        _POSITION_NEGATIVE,
+    ),
+    _custom(
+        "interpolate",
+        "_check_interpolate_exempt",
+        "a perturbed parent at the scale_factor argument position",
+        "keyed on argument position, never on tensor equality with the saved scale",
+        _POSITION_NEGATIVE,
+    ),
+    _custom(
+        ("scatter", "scatter_"),
+        "_check_scatter_or_index_domain_exempt",
+        "a perturbed destination whose scattered dimension is fully overwritten, or an "
+        "index domain with no in-domain alternative",
+        "overwritten destination values and degenerate index domains cannot matter",
+        _HARDENING + "test_scatter_exemption_uses_destination_position_not_equal_value",
+    ),
+    _custom(
+        (
+            "scatter_add",
+            "scatter_add_",
+            "scatteradd",
+            "embedding",
+            "gather",
+            "index_select",
+            "cross_entropy",
+            "index_add",
+            "index_add_",
+            "index_copy",
+            "index_copy_",
+            "index_fill",
+            "index_fill_",
+            "take_along_dim",
+            "nll_loss",
+        ),
+        "_check_index_domain_degenerate",
+        "an index parent whose domain has n <= 1 valid values or zero in-domain entries",
+        "value-irrelevance is forced by the domain constraint, not assumed; any perturbable "
+        "domain runs the strict in-domain rotation check",
+        _TIGHTENING + "test_dead_embedding_index_edge_now_fails",
+    ),
+    _custom(
+        ("masked_scatter", "masked_scatter_", "maskedscatter"),
+        "check_masked_scatter_empty_source_exempt",
+        "the mask parent when the saved source is empty, so the all-False mask is the "
+        "only valid mask",
+        "degenerate domain: the source must hold at least one element per "
+        "True mask entry; the input, the source and a mask over a non-empty source stay strict",
+        _DEGENERATE + "test_masked_scatter_mask_over_a_live_source_still_fails_when_frozen",
+    ),
+    _custom(
+        "ctc_loss",
+        "check_ctc_single_target_length_exempt",
+        "the target_lengths parent of a batch of one with batched log_probs and "
+        "concatenated 1-D targets",
+        "degenerate domain: concatenated targets force sum(target_lengths) "
+        "== targets.numel(); padded targets, input lengths and batches of two or more stay "
+        "strict",
+        _DEGENERATE + "test_ctc_target_lengths_of_a_batch_of_two_still_fail_when_frozen",
+    ),
+    _custom(
+        ("conv_transpose1d", "conv_transpose2d", "conv_transpose3d"),
+        "check_conv_transpose_unit_output_padding_exempt",
+        "the output_padding parent when every saved stride and dilation is 1 and the saved "
+        "padding is 0",
+        "degenerate domain: output_padding must be below the stride or the "
+        "dilation, so 0 is the only valid value; any stride or dilation above 1 stays strict",
+        _DEGENERATE + "test_conv_transpose_output_padding_under_stride_two_is_not_exempt",
+    ),
+    _custom(
+        "argsort",
+        "check_argsort_singleton_dim_exempt",
+        "the input parent of an argsort over a dim of size 1 whose saved output is all zero",
+        "degenerate domain: sorting one element returns index 0 for every "
+        "input; a sorted dim of two or more stays strict",
+        _DEGENERATE + "test_argsort_over_two_elements_still_fails_when_frozen",
+    ),
+    _custom(
+        "where",
+        "_check_where_exempt",
+        "a condition parent when the saved branches are equal after broadcasting; a branch "
+        "parent when the saved condition selects the other branch everywhere; the one-arg "
+        "index form",
+        "saved value semantics prove the parent cannot reach the output",
+        "tests/test_validation.py::test_where_mixed_condition_true_branch_is_not_exempt",
+    ),
+    _custom(
+        ("maskedfill", "masked_fill", "masked_fill_"),
+        "_check_masked_fill_exempt",
+        "input parent when the saved mask is all true; fill parent when all false; mask "
+        "parent when the input already equals the fill value everywhere",
+        "masked_fill(input, mask, value) is where(mask, value, input); saved values prove it",
+        _HARDENING + "test_scalar_masked_fill_all_selected_input_parent_is_structural",
+    ),
+    _custom(
+        ("batch_norm", "instance_norm"),
+        "_check_norm_running_stat_exempt",
+        "training-mode running-stat parents (update targets, not inputs) and parents "
+        "annihilated by an all-zero weight",
+        "running stats are written, not read, in training; a zero weight annihilates",
+        _HARDENING + "test_instance_norm_running_stats_are_training_update_targets",
+    ),
+    _custom(
+        ("gru", "rnn_tanh", "rnn_relu"),
+        "check_packed_rnn_batch_sizes_exempt",
+        "the packed-sequence batch_sizes slot of a gru or rnn call",
+        "batch_sizes is a structural length table the kernel indexes by, never a value input",
+        _SLOTS + "test_packed_recurrence_data_slot_still_fails_when_frozen",
+    ),
+    _custom(
+        "autogradfunction",
+        "check_foreign_kernel_dependence_exempt",
+        "a perturbed parent of one output of a known foreign kernel's multi-output boundary "
+        "call, at a position the kernel table declares that output independent of",
+        "per-output dependence declared per kernel in a table (FlashAttention 4's log-sum-exp "
+        "depends on q and k, not v); undeclared kernels, outputs and positions stay strict",
+        _KERNEL + "test_undeclared_kernel_unmoved_sibling_output_still_fails",
+    ),
+    _custom(
+        "_flash_attn_forward",
+        "check_foreign_kernel_dependence_exempt",
+        "a perturbed parent of one output of FlashAttention 2's native custom op "
+        "flash_attn::_flash_attn_forward, at a position the kernel table declares that "
+        "output independent of",
+        "per-output dependence declared per kernel in a table (the log-sum-exp and dropout "
+        "mask depend on q and k, not v; the rng state on none of q, k, v); the attention "
+        "output, other operators and undeclared positions stay strict",
+        _KERNEL + "test_undeclared_custom_op_unmoved_sibling_output_still_fails",
+    ),
+    _custom(
+        "vmap",
+        "check_mask_builder_unread_exempt",
+        "a perturbed parent of a vmap boundary over a known transformers mask builder, at the "
+        "position the mask-builder table declares unread (head_idx, position 1)",
+        "ruling d-aad71aaad45648ba93beaf7e05f2a1bb: declared per-argument use for known mask "
+        "builders, identified by callable identity and composition; any composed function "
+        "outside the table, a builder whose code reads head_idx and every other position stay "
+        "strict",
+        _MASKS + "test_and_mask_with_a_user_function_keeps_the_head_edge_strict",
+    ),
+    _custom(
+        "expand",
+        "check_expand_pinned_size_exempt",
+        "an expand size pinned to the input extent at that dim (-1 or the same size)",
+        "a size equal to the input extent repeats nothing; a singleton dim size is a real input",
+        _SLOTS + "test_expand_size_at_a_singleton_dim_still_fails_when_frozen",
+    ),
+)

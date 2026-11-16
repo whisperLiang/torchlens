@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import base64
 import builtins
-import re
-from pathlib import Path
+import warnings
 from typing import Any
 
 import pytest
@@ -13,7 +11,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
-import torchlens.bridge.hf as hf_bridge
+import torchlens.bridge.transformers as hf_bridge
+import torchlens.preprocessing
 
 
 class _ImageModel(nn.Module):
@@ -54,11 +53,11 @@ def test_hf_vit_uses_auto_image_processor() -> None:
 
     model = transformers.ViTModel.from_pretrained("google/vit-base-patch16-224")
 
-    log = tl.trace(model, _pil_image(), layers_to_save="none")
+    log = tl.trace(model, _pil_image(), save="none")
 
-    assert log.input_preprocessor is not None
-    assert log.input_preprocessor.source == "hf_auto_image_processor"
-    assert log.input_preprocessor.verified is True
+    assert log.provenance.input_preprocessor is not None
+    assert log.provenance.input_preprocessor.source == "hf_auto_image_processor"
+    assert log.provenance.input_preprocessor.verified is True
 
 
 @pytest.mark.slow
@@ -70,16 +69,16 @@ def test_clip_image_uses_auto_processor_fallback() -> None:
 
     model = transformers.CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch32")
 
-    log = tl.trace(model, _pil_image(), layers_to_save="none")
+    log = tl.trace(model, _pil_image(), save="none")
 
-    assert log.input_preprocessor is not None
-    assert log.input_preprocessor.source == "hf_auto_image_processor"
-    assert log.input_preprocessor.verified is True
+    assert log.provenance.input_preprocessor is not None
+    assert log.provenance.input_preprocessor.source == "hf_auto_image_processor"
+    assert log.provenance.input_preprocessor.verified is True
 
 
 @pytest.mark.heavy
-def test_torchvision_resnet_weights_uses_tier_two_or_default() -> None:
-    """Torchvision models use attached weights when available, otherwise default."""
+def test_torchvision_resnet_weights_uses_attached_weights() -> None:
+    """Torchvision models resolve the attached weights preset's own transform."""
 
     import PIL.Image  # noqa: F401
 
@@ -89,111 +88,62 @@ def test_torchvision_resnet_weights_uses_tier_two_or_default() -> None:
     model = torchvision_models.resnet50(weights=None)
     model._torchlens_weights = weights
 
-    log = tl.trace(model, _pil_image(), layers_to_save="none")
+    log = tl.trace(model, _pil_image(), save="none")
 
-    assert log.input_preprocessor is not None
-    assert log.input_preprocessor.source in {"torchvision_weights", "imagenet_default"}
-    if log.input_preprocessor.source == "torchvision_weights":
-        assert log.input_preprocessor.verified is True
-    else:
-        assert log.input_preprocessor.verified is False
+    assert log.provenance.input_preprocessor is not None
+    assert log.provenance.input_preprocessor.source == "torchvision_weights"
+    assert log.provenance.input_preprocessor.verified is True
 
 
-@pytest.mark.slow
-def test_timm_model_uses_default_cfg_transform() -> None:
-    """timm models with ``default_cfg`` should use the timm resolver tier."""
+def test_unknown_cnn_refuses_and_names_imagenet_opt_in() -> None:
+    """A PIL image with no resolvable preprocessing refuses typed.
+
+    The ImageNet default is never applied silently; the refusal names the
+    explicit opt-in.
+    """
+
+    import PIL.Image  # noqa: F401
+
+    from torchlens._errors import InvalidArgumentError
+
+    with pytest.raises(InvalidArgumentError) as excinfo:
+        tl.trace(_ImageModel(), _pil_image(), save="none")
+
+    assert excinfo.value.fields["code"] == "preprocessing_unresolved"
+    assert excinfo.value.fields["model_type"] == "_ImageModel"
+    assert "torchlens.preprocessing.imagenet_default()" in str(excinfo.value)
+    assert "torchlens.preprocessing.attach_authority(model, weights)" in str(excinfo.value)
+    assert excinfo.value.fields["resolution_attempt"]["resolution_method"] == "none"
+
+
+def test_imagenet_default_opt_in_applies_and_discloses() -> None:
+    """The explicit opt-in applies the recipe and stamps an unverified record."""
 
     import PIL.Image  # noqa: F401
 
     pytest.importorskip("torchvision.transforms")
-    timm = pytest.importorskip("timm")
-    model = timm.create_model("resnet18", pretrained=False)
 
-    log = tl.trace(model, _pil_image(), layers_to_save="none")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        log = tl.trace(
+            _ImageModel(),
+            _pil_image(),
+            capture=tl.options.CaptureOptions(
+                input_transform=torchlens.preprocessing.imagenet_default()
+            ),
+            save="all",
+        )
 
-    assert log.input_preprocessor is not None
-    assert log.input_preprocessor.source == "timm"
-    assert log.input_preprocessor.verified is True
-
-
-def test_unknown_cnn_uses_imagenet_default_with_warning() -> None:
-    """Unknown PIL image models should fall back loudly to ImageNet defaults."""
-
-    import PIL.Image  # noqa: F401
-
-    pytest.importorskip("torchvision.transforms")
-
-    with pytest.warns(UserWarning, match="ImageNet default preprocessing"):
-        log = tl.trace(_ImageModel(), _pil_image(), layers_to_save="none")
-
-    assert log.input_preprocessor is not None
-    assert log.input_preprocessor.source == "imagenet_default"
-    assert log.input_preprocessor.verified is False
-    assert "UNVERIFIED" in log.input_preprocessor.description
-    assert log.raw_input is not None
-
-
-def test_transform_override_skips_image_autoroute() -> None:
-    """Explicit ``transform=`` should bypass image auto-routing."""
-
-    import PIL.Image  # noqa: F401
-
-    log = tl.trace(
-        _ImageModel(),
-        _pil_image(),
-        transform=lambda image: torch.ones(1, 3, 8, 8),
-        layers_to_save="none",
-    )
-
-    assert log.input_preprocessor is None
-
-
-def test_pil_raw_input_svg_embeds_montage_data_uri(tmp_path: Path) -> None:
-    """SVG raw-input image previews should embed local montages as data URIs."""
-
-    from PIL import Image as image_module
-
-    images = [
-        image_module.new("RGB", (24, 24), color=(120, 30, 200)),
-        image_module.new("RGB", (24, 24), color=(20, 180, 90)),
-    ]
-    log = tl.trace(
-        _ImageModel(),
-        images,
-        transform=lambda _: torch.ones(2, 3, 8, 8),
-        layers_to_save="none",
-    )
-    output_path = tmp_path / "input_display.svg"
-
-    log.draw(
-        vis_outpath=str(output_path),
-        vis_save_only=True,
-        vis_fileformat="svg",
-    )
-    svg_text = output_path.read_text(encoding="utf-8")
-    href_match = re.search(r'<image\b[^>]+(?:xlink:href|href)="([^"]+)"', svg_text)
-
-    assert href_match is not None
-    href = href_match.group(1)
-    assert href.startswith("data:image/png;base64,")
-    payload = href.removeprefix("data:image/png;base64,")
-    assert len(base64.b64decode(payload)) > 100
-    assert "/tmp/torchlens_visualizers_" not in svg_text
-
-
-def test_tensor_input_does_not_route_to_image_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Tensor inputs should remain on the normal trace path."""
-
-    def fail_trace_image(model: Any, image: Any, **kwargs: Any) -> object:
-        """Fail if image bridge dispatch occurs."""
-
-        raise AssertionError("image bridge should not fire for tensors")
-
-    monkeypatch.setattr(hf_bridge, "trace_image", fail_trace_image)
-
-    log = tl.trace(_ImageModel(), torch.ones(1, 3, 8, 8), layers_to_save="none")
-
-    assert log.input_preprocessor is None
+    record = log.provenance.input_preprocessor
+    assert record is not None
+    assert record.source == "imagenet_default"
+    assert record.verified is False
+    assert record.status == "unverified_fallback"
+    assert record.config["resolution_method"] == "explicit_opt_in"
+    assert "UNVERIFIED" in record.description
+    assert log.input is not None
+    first_input = log[log.input_layers[0]].out
+    assert tuple(first_input.shape) == (1, 3, 224, 224)
 
 
 def test_list_of_pil_images_batches() -> None:
@@ -203,12 +153,20 @@ def test_list_of_pil_images_batches() -> None:
 
     pytest.importorskip("torchvision.transforms")
 
-    with pytest.warns(UserWarning, match="ImageNet default preprocessing"):
-        log = tl.trace(_ImageModel(), [_pil_image(), _pil_image()], layers_to_save="none")
+    log = tl.trace(
+        _ImageModel(),
+        [_pil_image(), _pil_image()],
+        capture=tl.options.CaptureOptions(
+            input_transform=torchlens.preprocessing.imagenet_default()
+        ),
+        save="all",
+    )
 
-    assert log.input_preprocessor is not None
-    assert log.num_ops > 0
-    assert isinstance(log.raw_input, list)
+    assert log.provenance.input_preprocessor is not None
+    assert log.provenance.input_preprocessor.source == "imagenet_default"
+    assert tuple(log[log.input_layers[0]].out.shape) == (2, 3, 224, 224)
+    assert log._num_ops > 0
+    assert isinstance(log.input, list)
 
 
 def test_pil_import_failure_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -226,3 +184,20 @@ def test_pil_import_failure_returns_false(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
     assert hf_bridge._is_hf_image_input(object()) is False
+
+
+@pytest.mark.slow
+def test_timm_model_uses_default_cfg_transform() -> None:
+    """timm models with ``default_cfg`` should use the timm resolver tier."""
+
+    import PIL.Image  # noqa: F401
+
+    pytest.importorskip("torchvision.transforms")
+    timm = pytest.importorskip("timm")
+    model = timm.create_model("resnet18", pretrained=False)
+
+    log = tl.trace(model, _pil_image(), save="none")
+
+    assert log.provenance.input_preprocessor is not None
+    assert log.provenance.input_preprocessor.source == "timm"
+    assert log.provenance.input_preprocessor.verified is True

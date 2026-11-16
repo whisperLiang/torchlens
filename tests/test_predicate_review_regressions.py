@@ -19,19 +19,17 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.intervention.errors import (
-    SelectorCapabilityError,
-    SiteResolutionError,
-)
-from torchlens.intervention.selectors import (
+from torchlens._ir.selector_eval import ensure_supported, selector_from_spec
+from torchlens._selection.selectors import (
     BaseSelector,
     CompositeSelector,
     SelectorKind,
 )
-from torchlens.intervention.types import TargetSpec
-from torchlens.ir.selector_eval import ensure_supported, selector_from_spec
-
-pytestmark = pytest.mark.smoke
+from torchlens.intervention._types import TargetSpec
+from torchlens.intervention.errors import (
+    SelectorCapabilityError,
+    SiteResolutionError,
+)
 
 
 class TinyConvNet(nn.Module):
@@ -118,6 +116,7 @@ def test_flat_nary_or_spec_resolves(conv_trace: Any) -> None:
     assert conv_trace.find_sites(spec, max_fanout=10**6).labels() == expected
 
 
+@pytest.mark.smoke
 def test_nary_live_backward_matcher_does_not_crash() -> None:
     """FIX: three-child composites crashed ``_live_backward_context_matches``."""
 
@@ -130,9 +129,14 @@ def test_nary_live_backward_matcher_does_not_crash() -> None:
             _conv_input().requires_grad_(True),
             capture=tl.options.CaptureOptions(save_grads="all", backward_ready=True),
         )
-        armed.log_backward(armed[armed.output_layers[0]].out.sum(), retain_graph=True)
-    grad_fns = {g.label: g for g in armed.grad_fns}
-    selector = CompositeSelector("and", (tl.grad_input(), tl.func("relu"), tl.contains("relu")))
+        armed.backward(armed[armed.output_layers[0]].out.sum(), retain_graph=True)
+    grad_fns = {g.label: g for g in armed.autograd.grad_fns}
+    # Three node-universe children: a bare forward kind joined to a node
+    # selector refuses since the gradient-sites change, so the n-ary shape is
+    # exercised with node selectors only.
+    selector = CompositeSelector(
+        "and", (tl.grad_input(), tl.grad_fn("ReluBackward0"), tl.grad_fn(label="relu"))
+    )
     grads = (torch.ones(1),)
     matches = {
         label: live_backward_selector_matches(
@@ -154,7 +158,7 @@ def test_flat_nary_followed_by_conjunction_capture() -> None:
 
     flat = CompositeSelector(
         "and",
-        (tl.func("conv2d"), tl.contains("conv"), tl.followed_by(tl.func("relu"))),
+        (tl.func("conv2d"), tl.label_contains("conv"), tl.followed_by(tl.func("relu"))),
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -162,21 +166,19 @@ def test_flat_nary_followed_by_conjunction_capture() -> None:
             TinyConvNet(),
             _conv_input(),
             save=flat,
-            lookback=4,
-            lookback_payload_policy="detached_raw",
+            capture=tl.options.CaptureOptions(lookback=4, lookback_payload_policy="detached_raw"),
         )
         binary_log = tl.trace(
             TinyConvNet(),
             _conv_input(),
             save=tl.func("conv2d") & tl.followed_by(tl.func("relu")),
-            lookback=4,
-            lookback_payload_policy="detached_raw",
+            capture=tl.options.CaptureOptions(lookback=4, lookback_payload_policy="detached_raw"),
         )
 
     def _saved(log: Any) -> list[str]:
         return sorted(
             str(op.layer_label)
-            for op in log.layer_list
+            for op in log._layer_list
             if getattr(op, "has_saved_activation", False)
         )
 
@@ -189,16 +191,18 @@ def test_flat_nary_followed_by_conjunction_capture() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.smoke
 def test_contains_raw_only_substring_matches_nothing_posthoc(conv_trace: Any) -> None:
     """FIX: ``contains("_raw")`` matched every op via ``_layer_label_raw``."""
 
-    assert conv_trace.find_sites(tl.contains("_raw"), max_fanout=10**6).labels() == ()
+    assert conv_trace.find_sites(tl.label_contains("_raw"), max_fanout=10**6).labels() == ()
 
 
+@pytest.mark.smoke
 def test_regex_raw_suffix_matches_nothing_posthoc(conv_trace: Any) -> None:
     """FIX: ``regex(r"_raw$")`` matched every op via ``_layer_label_raw``."""
 
-    assert conv_trace.find_sites(tl.regex(r"_raw$"), max_fanout=10**6).labels() == ()
+    assert conv_trace.find_sites(tl.label_matches(r"_raw$"), max_fanout=10**6).labels() == ()
 
 
 def test_exact_raw_label_still_matches_posthoc(conv_trace: Any) -> None:
@@ -254,7 +258,7 @@ def test_posthoc_or_short_circuits_where_predicate(conv_trace: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _noop_hook(out: torch.Tensor, *, hook: Any) -> torch.Tensor:
+def _noop_hook(out: torch.Tensor, *, ctx: Any) -> torch.Tensor:
     return out
 
 
@@ -265,7 +269,9 @@ def test_live_followed_by_refused_under_nonmatching_and() -> None:
         tl.trace(
             TinyConvNet(),
             _conv_input(),
-            hooks=[(tl.func("zzz_never") & tl.followed_by(tl.func("relu")), _noop_hook)],
+            capture=tl.options.CaptureOptions(
+                hooks=[(tl.func("zzz_never") & tl.followed_by(tl.func("relu")), _noop_hook)]
+            ),
         )
 
 
@@ -276,7 +282,9 @@ def test_live_preceded_by_refused_under_nonmatching_and() -> None:
         tl.trace(
             TinyConvNet(),
             _conv_input(),
-            hooks=[(tl.func("zzz_never") & tl.preceded_by(tl.func("relu")), _noop_hook)],
+            capture=tl.options.CaptureOptions(
+                hooks=[(tl.func("zzz_never") & tl.preceded_by(tl.func("relu")), _noop_hook)]
+            ),
         )
 
 
@@ -287,7 +295,9 @@ def test_live_capability_refusal_is_site_resolution_subclass() -> None:
         tl.trace(
             TinyConvNet(),
             _conv_input(),
-            hooks=[(tl.followed_by(tl.func("relu")), _noop_hook)],
+            capture=tl.options.CaptureOptions(
+                hooks=[(tl.followed_by(tl.func("relu")), _noop_hook)]
+            ),
         )
 
 
@@ -296,6 +306,7 @@ def test_live_capability_refusal_is_site_resolution_subclass() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.smoke
 def test_followed_by_spec_rebuilds_for_capture_lifecycle() -> None:
     """FIX: capture-lifecycle deserialization refused its own window sugar."""
 
@@ -306,6 +317,7 @@ def test_followed_by_spec_rebuilds_for_capture_lifecycle() -> None:
     assert repr(rebuilt) == repr(tl.followed_by(tl.func("relu")))
 
 
+@pytest.mark.smoke
 def test_preceded_by_spec_rebuilds_for_capture_lifecycle() -> None:
     """FIX: capture-lifecycle deserialization refused the lookback selector."""
 
@@ -389,6 +401,13 @@ _KIND_PAYLOADS: dict[str, Any] = {
     "regex": "x",
     "followed_by": None,
     "preceded_by": None,
+    "site": {"key": "x"},
+    # F42 step qualifier: post-hoc site evaluation reads Op.episode_step
+    # stamps (bool result, no capability refusal), matching upfront.
+    "episode_step": (0,),
+    # Gradient address: evaluates its forward-site inner (no capability
+    # refusal); the universe split happens in the site plan, not here.
+    "grad": "x",
 }
 
 
@@ -401,7 +420,7 @@ def test_site_upfront_refusal_set_matches_evaluator_contract() -> None:
     short-circuiting sibling.
     """
 
-    from torchlens.ir.selector_eval import _evaluate_subject
+    from torchlens._ir.selector_eval import _evaluate_subject
 
     site = SimpleNamespace(
         layer_label="relu_1_1", lookup_keys=(), func_name="relu", layer_type="relu"
@@ -464,16 +483,21 @@ def test_bare_string_live_is_exact_raw_label() -> None:
 
     fired: list[str] = []
 
-    def _hook(out: torch.Tensor, *, hook: Any) -> torch.Tensor:
-        fired.append(str(hook.layer_log.get("layer_label")))
+    def _hook(out: torch.Tensor, *, ctx: Any) -> torch.Tensor:
+        fired.append(str(ctx.op.get("layer_label")))
         return out
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        tl.trace(TinyConvNet(), _conv_input(), hooks=[("relu_1_3_raw", _hook)])
+        tl.trace(
+            TinyConvNet(),
+            _conv_input(),
+            capture=tl.options.CaptureOptions(hooks=[("relu_1_3_raw", _hook)]),
+        )
     assert fired == ["relu_1_3_raw"]
 
 
+@pytest.mark.smoke
 def test_strict_rejects_nested_where(conv_trace: Any) -> None:
     """strict=True refuses ``tl.where`` anywhere in the tree (walk sweep)."""
 
@@ -486,11 +510,16 @@ def test_strict_rejects_nested_where(conv_trace: Any) -> None:
 def test_capture_module_fallback_for_nontorch_backend() -> None:
     """Non-torch capture subjects fall back to the single ``module`` candidate."""
 
-    from torchlens.ir.selector_eval import evaluate
+    from torchlens._data_classes.trace import Trace
+    from torchlens._ir.selector_eval import evaluate
 
+    # A Trace instance (built without a capture) owning a non-torch backend
+    # store; the fallback reads the backend from live Traces only.
+    mlx_session = object.__new__(Trace)
+    mlx_session.__dict__["_provenance_backend"] = "mlx"
     subject = SimpleNamespace(
         output_of_module_calls=(),
-        source_trace=SimpleNamespace(backend="mlx"),
+        source_trace=mlx_session,
         module="encoder.block",
         func_name=None,
         layer_type=None,
@@ -513,15 +542,15 @@ def test_followed_by_conjunction_is_association_insensitive() -> None:
     """
 
     def _mid() -> BaseSelector:
-        return tl.func("conv2d") & tl.followed_by(tl.func("relu")) & tl.contains("conv")
+        return tl.func("conv2d") & tl.followed_by(tl.func("relu")) & tl.label_contains("conv")
 
     def _tail() -> BaseSelector:
-        return tl.func("conv2d") & tl.contains("conv") & tl.followed_by(tl.func("relu"))
+        return tl.func("conv2d") & tl.label_contains("conv") & tl.followed_by(tl.func("relu"))
 
     def _flat() -> BaseSelector:
         return CompositeSelector(
             "and",
-            (tl.func("conv2d"), tl.contains("conv"), tl.followed_by(tl.func("relu"))),
+            (tl.func("conv2d"), tl.label_contains("conv"), tl.followed_by(tl.func("relu"))),
         )
 
     def _saved(predicate: BaseSelector) -> list[str]:
@@ -531,12 +560,13 @@ def test_followed_by_conjunction_is_association_insensitive() -> None:
                 TinyConvNet(),
                 _conv_input(),
                 save=predicate,
-                lookback=4,
-                lookback_payload_policy="detached_raw",
+                capture=tl.options.CaptureOptions(
+                    lookback=4, lookback_payload_policy="detached_raw"
+                ),
             )
         return sorted(
             str(op.layer_label)
-            for op in log.layer_list
+            for op in log._layer_list
             if getattr(op, "has_saved_activation", False)
         )
 
@@ -584,11 +614,8 @@ def test_followed_by_target_spec_serializes_structurally() -> None:
 
     import json
 
-    from torchlens.intervention.save import (
-        SaveLevel,
-        _target_spec_from_json,
-        _target_spec_to_json,
-    )
+    from torchlens.intervention._save import SaveLevel
+    from torchlens.intervention._spec_codec import _target_spec_from_json, _target_spec_to_json
 
     for selector in (
         tl.followed_by(tl.func("relu")),
@@ -611,15 +638,12 @@ def test_followed_by_opaque_inner_refuses_typed_never_mangles() -> None:
     """FIX: an opaque-callable temporal inner must refuse typed, never rebuild
     as a ``contains`` selector over its repr string."""
 
-    from torchlens.intervention.errors import OpaqueCallableInExecutableSaveError
-    from torchlens.intervention.save import (
-        SaveLevel,
-        _target_spec_from_json,
-        _target_spec_to_json,
-    )
+    from torchlens.intervention._save import SaveLevel
+    from torchlens.intervention._spec_codec import _target_spec_from_json, _target_spec_to_json
+    from torchlens.intervention.errors import OpaqueCallableError
 
     spec = tl.followed_by(lambda ctx: True).to_target_spec()
-    with pytest.raises(OpaqueCallableInExecutableSaveError):
+    with pytest.raises(OpaqueCallableError):
         _target_spec_to_json(spec, SaveLevel.PORTABLE)
     audit_spec = _target_spec_from_json(_target_spec_to_json(spec, SaveLevel.AUDIT))
     with pytest.raises(SiteResolutionError, match="opaque audit payload"):

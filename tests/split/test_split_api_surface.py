@@ -90,12 +90,10 @@ def test_prepare_uses_supported_capture_options() -> None:
 
     import torch
 
-    from torchlens._deprecations import TorchLensDeprecationWarning
-
     model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.ReLU()).eval()
     inputs = torch.ones(2, 4)
     with warnings.catch_warnings():
-        warnings.simplefilter("error", TorchLensDeprecationWarning)
+        warnings.simplefilter("error", DeprecationWarning)
         graph = prepare_graph(model, inputs)
         dag = graph.compute_dag()
         partition = dag.to_partition(

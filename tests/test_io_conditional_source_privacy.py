@@ -1,8 +1,8 @@
 """B8-18: a captured conditional must not leak an absolute source path on save.
 
-``Trace.conditional_records`` holds ``ConditionalEvent`` objects whose
+``Trace.graph.conditional_records`` holds ``ConditionalEvent`` objects whose
 ``source_file`` is the ABSOLUTE path of the user's ``forward``-defining module.
-Those dataclasses had no ``PORTABLE_STATE_SPEC``, so the scrubber returned them
+Those dataclasses had no ``_PORTABLE_STATE_SPEC``, so the scrubber returned them
 verbatim and the source-path relativizer never ran -- the absolute path (with its
 ``$HOME``, OS username, and filesystem layout) persisted into ``metadata.pkl`` at
 EVERY save level, INCLUDING ``include_source=False``. That is a direct regression
@@ -15,13 +15,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import pytest
 import torch
 from torch import nn
 
 import torchlens as tl
-
-pytestmark = pytest.mark.smoke
 
 
 class _BranchingModel(nn.Module):
@@ -43,7 +40,7 @@ def _conditional_source_files(trace: tl.Trace) -> list[str]:
 
     return [
         getattr(record, "source_file", "")
-        for record in trace.conditional_records
+        for record in trace.graph.conditional_records
         if getattr(record, "source_file", None)
     ]
 
@@ -71,7 +68,7 @@ def test_conditional_source_path_relativized_with_source_kept(tmp_path: Path) ->
 
     trace = _capture()
     spec = tmp_path / "kept.tlspec"
-    tl.save(trace, str(spec), include_source=True)
+    trace.save(str(spec), include_source=True)
     loaded = tl.load(str(spec))
     saved_paths = _conditional_source_files(loaded)
     assert saved_paths, "conditional records vanished on round-trip"
@@ -87,7 +84,7 @@ def test_conditional_source_path_dropped_with_source_excluded(tmp_path: Path) ->
 
     trace = _capture()
     spec = tmp_path / "dropped.tlspec"
-    tl.save(trace, str(spec), include_source=False)
+    trace.save(str(spec), include_source=False)
 
     # Nothing in the on-disk artifact may carry the absolute path.
     absolute_here = os.path.abspath(__file__)

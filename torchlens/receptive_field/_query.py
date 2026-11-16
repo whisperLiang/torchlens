@@ -2,16 +2,28 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+import threading
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from fractions import Fraction
-from itertools import islice
-from math import ceil, floor, gcd, ulp
+from math import ceil, floor
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 from . import _engine
 from ._engine_geometry import _as_tuple, _select_full_axes
 from ._errors import AmbiguousInputError, ReceptiveFieldError
+from ._index_set import (
+    _AxisSets,
+    _IndexSet,
+    _Progression,
+    _progression_sumset,
+    _union_optional,
+)
+from ._query_causal import EXTENDED_KINDS, map_extended_to_parent
+from ._query_maps import _call_interval_callback, _coerce_index_set, widen_channel_axis
+from ._query_walk_memo import _distinct_terminals, shared_walk_memo
+from ._reshape_blocks import apply_blocks
 from ._rules import _RuleResult
 from ._types import (
     ReceptiveField,
@@ -22,162 +34,98 @@ from ._types import (
 )
 
 if TYPE_CHECKING:
-    from ..data_classes.op import Op
+    from .._data_classes.op import Op
 
 
-_PROGRESSION_BUDGET = 16
+class _SharedQueryState(threading.local):
+    """Per-thread facts shared by the per-unit queries inside one :func:`_shared_query_scope`.
 
-
-@dataclass(frozen=True, order=True)
-class _Progression:
-    """Finite arithmetic progression of integer indices."""
-
-    start: int
-    step: int
-    count: int
-
-    def __post_init__(self) -> None:
-        """Validate canonical progression parameters."""
-        if self.step <= 0 or self.count <= 0:
-            raise ValueError("progression step and count must be positive")
-
-    @property
-    def stop(self) -> int:
-        """Return the inclusive final index."""
-        return self.start + self.step * (self.count - 1)
-
-    def values(self) -> range:
-        """Return a lazy range over all represented indices."""
-        return range(self.start, self.stop + 1, self.step)
-
-
-@dataclass(frozen=True)
-class _IndexSet:
-    """Bounded union of arithmetic progressions with honest collapse metadata.
-
-    CANONICAL FORM INVARIANT. Every instance is produced either by
-    :meth:`empty`, :meth:`singleton`, :meth:`interval`, :meth:`from_values`, or
-    by re-wrapping another instance's ``progressions`` with a weaker ``exact``
-    flag. All of those yield exactly the greedy run decomposition that
-    :meth:`from_values` derives from the sorted, de-duplicated value list, so
-    ``progressions`` is always ascending, disjoint, maximal, and no longer than
-    ``_PROGRESSION_BUDGET``. The fast paths below rely on that invariant: they
-    are shortcuts for results the general algorithm would reproduce, never a
-    different answer.
+    Each query derives the solved operations, their reference index and the
+    endpoint's path slice from the trace and solution alone, and its walk asks
+    the engine for every operation's local rule result. Those are pure functions
+    of the trace, the solution and the rule-registry epoch (which the engine's
+    rule memo re-checks), so queries issued back to back over one solution can
+    share them. Outside a scope nothing is cached and every query derives its
+    own, exactly as before.
     """
 
-    progressions: tuple[_Progression, ...]
-    exact: bool = True
+    def __init__(self) -> None:
+        """Start this thread with no open scope."""
 
-    @classmethod
-    def empty(cls, *, exact: bool = True) -> _IndexSet:
-        """Construct an empty index set with the requested exactness."""
-        return cls((), exact)
-
-    @classmethod
-    def singleton(cls, value: int) -> _IndexSet:
-        """Construct a singleton index set."""
-        return cls((_Progression(value, 1, 1),))
-
-    @classmethod
-    def interval(cls, start: int, stop: int, *, exact: bool = True) -> _IndexSet:
-        """Construct an inclusive integer interval."""
-        if stop < start:
-            return cls.empty(exact=exact)
-        return cls((_Progression(start, 1, stop - start + 1),), exact)
-
-    @classmethod
-    def from_values(cls, values: Iterable[int], *, exact: bool = True) -> _IndexSet:
-        """Compress values into at most sixteen runs, else an inexact dense hull."""
-        return cls._from_sorted_unique(sorted(set(values)), exact=exact)
-
-    @classmethod
-    def _from_sorted_unique(cls, ordered: Sequence[int], *, exact: bool = True) -> _IndexSet:
-        """Compress an already sorted, de-duplicated value list into runs.
-
-        This is the body of :meth:`from_values`; callers that already hold
-        ascending distinct values skip the redundant ``sorted(set(...))``.
-        """
-        if not ordered:
-            return cls.empty(exact=exact)
-        runs: list[_Progression] = []
-        run_start = ordered[0]
-        run_step = 1
-        run_count = 1
-        previous = run_start
-        for value in islice(ordered, 1, None):
-            difference = value - previous
-            previous = value
-            if run_count == 1:
-                run_step = difference
-                run_count = 2
-            elif difference == run_step:
-                run_count += 1
-            else:
-                runs.append(_Progression(run_start, run_step, run_count))
-                run_start = value
-                run_step = 1
-                run_count = 1
-        runs.append(_Progression(run_start, run_step, run_count))
-        if len(runs) > _PROGRESSION_BUDGET:
-            return cls.interval(ordered[0], ordered[-1], exact=False)
-        return cls(tuple(runs), exact)
-
-    @property
-    def is_empty(self) -> bool:
-        """Return whether no indices are represented."""
-        return not self.progressions
-
-    @property
-    def minimum(self) -> int | None:
-        """Return the smallest index, or ``None`` for an empty set."""
-        return None if self.is_empty else min(item.start for item in self.progressions)
-
-    @property
-    def maximum(self) -> int | None:
-        """Return the largest index, or ``None`` for an empty set."""
-        return None if self.is_empty else max(item.stop for item in self.progressions)
-
-    def values(self) -> tuple[int, ...]:
-        """Materialize represented indices in sorted order."""
-        progressions = self.progressions
-        if len(progressions) == 1:
-            item = progressions[0]
-            return tuple(range(item.start, item.stop + 1, item.step))
-        # Canonical progressions are ascending and disjoint, so chaining them
-        # already yields the sorted distinct order the contract promises.
-        return tuple(value for item in progressions for value in item.values())
-
-    def clipped(self, extent: int) -> _IndexSet:
-        """Intersect this set with ``[0, extent)`` without changing exactness."""
-        progressions = self.progressions
-        if not progressions:
-            return self
-        if progressions[0].start >= 0 and progressions[-1].stop < extent:
-            # Nothing is dropped, so recompressing would rebuild this exact
-            # canonical decomposition with this exact ``exact`` flag.
-            return self
-        return _IndexSet._from_sorted_unique(
-            [value for value in self.values() if 0 <= value < extent], exact=self.exact
-        )
-
-    @classmethod
-    def union(cls, sets: Iterable[_IndexSet]) -> _IndexSet:
-        """Union progression sets and enforce the global progression budget."""
-        # Path enumeration hands the same set in many times. Union is idempotent
-        # and ``all(...)`` over exactness ignores repeats, so collapsing equal
-        # operands leaves both the value set and the exactness flag unchanged.
-        materialized = tuple(dict.fromkeys(sets))
-        if len(materialized) == 1:
-            # Recompressing one canonical set with its own exactness is identity.
-            return materialized[0]
-        return cls.from_values(
-            (value for index_set in materialized for value in index_set.values()),
-            exact=all(index_set.exact for index_set in materialized),
-        )
+        self.depth = 0
+        self.graphs: dict[int, tuple[object, object, tuple[Op, ...], dict[str, Op]]] = {}
+        self.reach: dict[tuple[str, int, str], tuple[object, frozenset[str]]] = {}
+        self.walks: dict[tuple[int, str], tuple[object, dict[Any, Any]]] = {}
 
 
-_AxisSets: TypeAlias = tuple[_IndexSet | None, ...]
+_SHARED_QUERY_STATE = _SharedQueryState()
+
+
+@contextmanager
+def _shared_query_scope() -> Iterator[None]:
+    """Share graph facts and rule results across the per-unit queries run inside it.
+
+    The always-on metadata invariants query one box per solved operation; on a
+    chain of ``n`` operations each query re-derived ``O(n)`` graph facts and
+    ``O(n)`` rule results. Inside this scope they are derived once per solution
+    (graph facts) and once per operation (rule results, through one enclosing
+    engine memo scope). Every query still walks its own path, so the boxes are
+    unchanged.
+    """
+
+    state = _SHARED_QUERY_STATE
+    with _engine._geometry_memo():
+        state.depth += 1
+        try:
+            yield
+        finally:
+            state.depth -= 1
+            if not state.depth:
+                state.graphs.clear()
+                state.reach.clear()
+                state.walks.clear()
+
+
+def _query_graph(trace: Any, solution: Any) -> tuple[tuple[Op, ...], dict[str, Op]]:
+    """Return the solved operations in trace order and their label index."""
+
+    state = _SHARED_QUERY_STATE
+    if state.depth:
+        cached = state.graphs.get(id(solution))
+        if cached is not None and cached[0] is solution and cached[1] is trace:
+            return cached[2], cached[3]
+    operations = tuple(item for item in trace._layer_list if item.label in solution.per_op)
+    by_reference = {
+        reference: item
+        for item in operations
+        for reference in (item.label, item.layer_label, item._layer_label_raw)
+    }
+    if state.depth:
+        state.graphs[id(solution)] = (solution, trace, operations, by_reference)
+    return operations, by_reference
+
+
+def _shared_reach(
+    kind: str, solution: Any, label: str, derive: Callable[[], frozenset[str]]
+) -> frozenset[str]:
+    """Return ``derive()``, shared per ``(kind, solution, label)`` inside a scope."""
+
+    state = _SHARED_QUERY_STATE
+    if not state.depth:
+        return derive()
+    key = (kind, id(solution), label)
+    cached = state.reach.get(key)
+    if cached is not None and cached[0] is solution:
+        return cached[1]
+    value = derive()
+    state.reach[key] = (solution, value)
+    return value
+
+
+def _query_memo_scope() -> AbstractContextManager[None]:
+    """Return the per-query engine memo scope, or the enclosing shared one."""
+
+    return nullcontext() if _SHARED_QUERY_STATE.depth else _engine._geometry_memo()
 
 
 @dataclass(frozen=True)
@@ -194,7 +142,7 @@ def box_for_unit(
     op: Op,
     unit: Sequence[int],
     *,
-    input: Op | str | None = None,
+    input_op: Op | str | None = None,
     source: Op | None = None,
     clip: bool = True,
     complete_unit: Sequence[int] | None = None,
@@ -210,7 +158,7 @@ def box_for_unit(
     unit:
         Coordinates over the target's derived windowed output axes, ordered
         by ascending output axis (the target's own grid order).
-    input:
+    input_op:
         Optional input operation or exact IO role/operation label.
     source:
         Optional source operation for a source-seeded solution. Its output grid is the
@@ -221,7 +169,7 @@ def box_for_unit(
         Optional complete target index used internally to route structural axes.
 
     """
-    if input is not None and source is not None:
+    if input_op is not None and source is not None:
         raise TypeError("input and source cannot be supplied together.")
     descriptors = solution.per_op.get(op.label)
     if not descriptors:
@@ -229,22 +177,22 @@ def box_for_unit(
         raise ReceptiveFieldError(
             f"No receptive-field solution is available from {endpoint} to {op.label}."
         )
-    descriptor = _select_descriptor(descriptors, source if source is not None else input)
+    descriptor = _select_descriptor(descriptors, source if source is not None else input_op)
     _validate_descriptor_for_query(descriptor)
     coordinates = _normalize_unit(op, descriptor, unit)
     initial = _initial_axis_sets(op, descriptor, coordinates, complete_unit=complete_unit)
-    trace = op.source_trace
-    operations = tuple(item for item in trace.layer_list if item.label in solution.per_op)
-    by_reference = {
-        reference: item
-        for item in operations
-        for reference in (item.label, item.layer_label, item._layer_label_raw)
-    }
-    ancestry = _ancestor_labels(descriptor.input_op_label, operations, by_reference)
+    operations, by_reference = _query_graph(op.source_trace, solution)
+    ancestry = _shared_reach(
+        "receptive",
+        solution,
+        descriptor.input_op_label,
+        lambda: _ancestor_labels(descriptor.input_op_label, operations, by_reference),
+    )
     # The walk enumerates paths, so it revisits each operation once per path
     # through it, re-deriving per-operation facts that are linear in that
-    # operation's parents. Memoize them for this one query.
-    with _engine._geometry_memo():
+    # operation's parents. Memoize them for this one query (or for every query
+    # of an enclosing shared scope).
+    with _query_memo_scope():
         terminals = _walk_to_input(
             op,
             initial,
@@ -252,7 +200,7 @@ def box_for_unit(
             ancestry,
             by_reference,
             True,
-            {},
+            shared_walk_memo(_SHARED_QUERY_STATE, solution, descriptor.input_op_label),
         )
     if not terminals:
         raise ReceptiveFieldError(
@@ -277,18 +225,24 @@ def _select_descriptor(
     raise ReceptiveFieldError(f"Input {identity!r} is not reachable from this target.")
 
 
-def _validate_descriptor_for_query(descriptor: ReceptiveField) -> None:
-    """Reject descriptors whose derived grid cannot support a geometric unit query."""
+def _validate_descriptor_for_query(
+    descriptor: ReceptiveField, *, require_windowed: bool = True
+) -> None:
+    """Reject descriptors whose derived grid cannot support a geometric query.
+
+    A single-unit query needs a windowed axis; a set query narrows whole-extent
+    axes as it walks, so it only needs a solved descriptor (``require_windowed``).
+    """
     if descriptor.axes is None or descriptor.status in {
         ReceptiveFieldStatus.DATA_DEPENDENT,
         ReceptiveFieldStatus.UNKNOWN,
         ReceptiveFieldStatus.UNSUPPORTED,
     }:
-        raise ReceptiveFieldError("Per-unit geometry is unavailable; use .gradient() instead.")
-    if not descriptor.layout.windowed_axes:
-        raise ReceptiveFieldError("No windowed axes are available; use .gradient() instead.")
-    if any(kind == "unknown" for kind in descriptor.layout.axis_kinds):
-        raise ReceptiveFieldError("The derived layout is ambiguous; use .gradient() instead.")
+        raise ReceptiveFieldError("Per-unit geometry is unavailable; use .probe_grad() instead.")
+    if require_windowed and not descriptor.axis_roles.windowed_axes:
+        raise ReceptiveFieldError("No windowed axes are available; use .probe_grad() instead.")
+    if any(kind == "unknown" for kind in descriptor.axis_roles.axis_kinds):
+        raise ReceptiveFieldError("The derived layout is ambiguous; use .probe_grad() instead.")
 
 
 def _windowed_axes_in_unit_order(descriptor: ReceptiveField) -> tuple[ReceptiveFieldAxis, ...]:
@@ -300,8 +254,8 @@ def _windowed_axes_in_unit_order(descriptor: ReceptiveField) -> tuple[ReceptiveF
     by ascending ``input_axis`` instead, and any axis permutation between the
     two endpoints (transpose/permute/movedim) makes those orders differ, so
     every producer and consumer of a windowed unit tuple must route through
-    this one ordering (R20-1: zipping coordinates in descriptor order silently
-    transposed exact boxes).
+    this one ordering (zipping coordinates in descriptor order would silently
+    transpose exact boxes).
     """
     assert descriptor.axes is not None
     windowed = tuple(axis for axis in descriptor.axes if axis.kind == "windowed")
@@ -382,17 +336,57 @@ def _ancestor_labels(
     return frozenset(reachable)
 
 
-def _distinct_terminals(terminals: Iterable[_TerminalState]) -> tuple[_TerminalState, ...]:
-    """Collapse repeated terminal states produced by distinct paths.
+_WalkKey: TypeAlias = tuple[str, _AxisSets, bool]
+_WalkStep: TypeAlias = Generator[
+    tuple["Op", _AxisSets, bool], tuple[_TerminalState, ...], tuple[_TerminalState, ...]
+]
 
-    Path enumeration reaches the same terminal state once per path, so a
-    merge-heavy graph grows the terminal tuple exponentially while adding no
-    information. Every consumer -- the emptiness test in the two query entry
-    points and all four aggregations in :func:`_build_box` (two unions, one
-    ``any``, one ``all``) -- is insensitive to both multiplicity and order, and
-    first-occurrence order is preserved here, so the resolved box is unchanged.
+
+def _run_memoized_walk(
+    body: Callable[[Op, _AxisSets, bool], _WalkStep],
+    op: Op,
+    sets: _AxisSets,
+    exact: bool,
+    memo: dict[_WalkKey, tuple[_TerminalState, ...]],
+) -> tuple[_TerminalState, ...]:
+    """Drive a hop-by-hop graph walk on an explicit stack.
+
+    ``body(op, sets, exact)`` is a generator for one hop: it yields one
+    ``(next_op, next_sets, next_exact)`` request per branch, receives that
+    branch's terminal tuple back, and returns the hop's own terminal tuple.
+    This driver is the recursion ``f(op, sets, exact) = memo or body(...)``
+    with every pending hop kept on a list instead of the interpreter stack,
+    so the walk's depth is bounded by memory rather than the recursion limit.
+    Branches are visited in yield order and each finishes before the next
+    starts, so ``memo`` gains its ``(label, sets, exact)`` keys and the
+    terminal tuples keep their first-occurrence order exactly as the
+    recursion produced them.
     """
-    return tuple(dict.fromkeys(terminals))
+    key: _WalkKey = (op.label, sets, exact)
+    cached = memo.get(key)
+    if cached is not None:
+        return cached
+    stack: list[tuple[_WalkKey, _WalkStep]] = [(key, body(op, sets, exact))]
+    sent: tuple[_TerminalState, ...] | None = None
+    while True:
+        frame_key, step = stack[-1]
+        try:
+            request = next(step) if sent is None else step.send(sent)
+        except StopIteration as finished:
+            stack.pop()
+            memo[frame_key] = finished.value
+            if not stack:
+                return finished.value
+            sent = finished.value
+            continue
+        next_op, next_sets, next_exact = request
+        next_key: _WalkKey = (next_op.label, next_sets, next_exact)
+        cached = memo.get(next_key)
+        if cached is not None:
+            sent = cached
+            continue
+        stack.append((next_key, body(next_op, next_sets, next_exact)))
+        sent = None
 
 
 def _walk_to_input(
@@ -402,26 +396,25 @@ def _walk_to_input(
     ancestry: frozenset[str],
     by_reference: Mapping[str, Op],
     exact: bool,
-    memo: dict[tuple[str, _AxisSets, bool], tuple[_TerminalState, ...]],
+    memo: dict[_WalkKey, tuple[_TerminalState, ...]],
 ) -> tuple[_TerminalState, ...]:
-    """Recursively map a joint axis-set state to one requested model input.
+    """Map a joint axis-set state to one requested model input.
 
     The walk enumerates paths, so a merge-heavy graph re-derives the same
     ``(operation, axis-set state)`` subwalk once per path that reaches it --
     exponential in the number of merges. ``memo`` caches that pure subresult
     for the duration of one query. It is plain memoization of a pure function:
-    the cached tuple is exactly what the recursion would rebuild. Terminal
-    de-duplication is a separate step; see :func:`_distinct_terminals`.
+    the cached tuple is exactly what a fresh walk would rebuild. Terminal
+    de-duplication is a separate step; see :func:`_distinct_terminals`. The
+    hops run on :func:`_run_memoized_walk`'s explicit stack, so a model of any
+    depth walks without reaching the interpreter's recursion limit.
     """
-    key = (op.label, output_sets, exact)
-    cached = memo.get(key)
-    if cached is not None:
-        return cached
-    terminals_for_key = _walk_body(
-        op, output_sets, input_label, ancestry, by_reference, exact, memo
-    )
-    memo[key] = terminals_for_key
-    return terminals_for_key
+
+    def body(item: Op, sets: _AxisSets, item_exact: bool) -> _WalkStep:
+        """Start one receptive hop from ``item`` toward this query's input."""
+        return _walk_body(item, sets, input_label, ancestry, by_reference, item_exact)
+
+    return _run_memoized_walk(body, op, output_sets, exact, memo)
 
 
 def _walk_body(
@@ -431,9 +424,12 @@ def _walk_body(
     ancestry: frozenset[str],
     by_reference: Mapping[str, Op],
     exact: bool,
-    memo: dict[tuple[str, _AxisSets, bool], tuple[_TerminalState, ...]],
-) -> tuple[_TerminalState, ...]:
-    """Map one joint axis-set state across a single reverse hop."""
+) -> _WalkStep:
+    """Map one joint axis-set state across a single reverse hop.
+
+    Yields one request per live parent branch and receives that branch's
+    terminals; see :func:`_run_memoized_walk`.
+    """
     if op.label == input_label:
         clipped = tuple(
             None if item is None else item.clipped(int(op.shape[axis]))
@@ -463,14 +459,12 @@ def _walk_body(
             )
         )
         terminals.extend(
-            _walk_to_input(
-                parent,
-                bounded,
-                input_label,
-                ancestry,
-                by_reference,
-                exact and hop_exact and all(item is None or item.exact for item in parent_sets),
-                memo,
+            (
+                yield (
+                    parent,
+                    bounded,
+                    exact and hop_exact and all(item is None or item.exact for item in parent_sets),
+                )
             )
         )
     return _distinct_terminals(terminals)
@@ -480,6 +474,8 @@ def _map_to_parent(
     op: Op, parent: Op, output_sets: _AxisSets, result: _RuleResult
 ) -> tuple[_AxisSets, bool]:
     """Apply one local rule result to one parent branch."""
+    if result.kind in EXTENDED_KINDS:
+        return map_extended_to_parent(_map_to_parent, op, parent, output_sets, result)
     if result.kind == "window":
         return _map_window(op, parent, output_sets, result)
     if result.kind == "window_edges":
@@ -490,7 +486,7 @@ def _map_to_parent(
             mapped[axis] = _IndexSet.interval(0, int(parent.shape[axis]) - 1)
         return tuple(mapped), bool(result.values.get("exact", True))
     if result.kind == "axis_map":
-        return _map_axis_mapping(parent, output_sets, result)
+        return _map_axis_mapping(op, parent, output_sets, result)
     if result.kind == "passthrough":
         return _map_passthrough(op, parent, output_sets, result), True
     return _map_composed_envelope(op, parent, output_sets), False
@@ -533,20 +529,30 @@ def _map_window(
         parent_sets[parent_start + local_axis] = mapped
         exact = exact and callback_exact
     channel_dependency = str(result.values.get("channel_dependency", "full_exact"))
-    channel_axis = parent_start - 1
-    if channel_axis >= 0 and channel_dependency != "pointwise":
-        channel_exact = channel_dependency == "full_exact"
-        parent_sets[channel_axis] = _IndexSet.interval(
-            0, int(parent.shape[channel_axis]) - 1, exact=channel_exact
-        )
-        exact = exact and channel_exact
-    return tuple(parent_sets), exact
+    channel_exact = widen_channel_axis(
+        parent_sets, parent.shape, parent_start - 1, channel_dependency
+    )
+    return tuple(parent_sets), exact and channel_exact
 
 
 def _standard_window_index_set(
     output_set: _IndexSet, *, kernel: int, stride: int, padding: int, dilation: int
 ) -> _IndexSet:
-    """Map a standard affine window while retaining dilation residue structure."""
+    """Map a standard affine window while retaining dilation residue structure.
+
+    A one-progression output set whose window image is again one progression
+    (every stride-1 window over an interval) is mapped in closed form; anything
+    else enumerates. Both yield the same canonical set.
+    """
+    progressions = output_set.progressions
+    if len(progressions) == 1 and kernel > 0 and stride > 0 and dilation > 0:
+        item = progressions[0]
+        image = _progression_sumset(
+            _Progression(stride * item.start - padding, stride * item.step, item.count),
+            _Progression(0, dilation, kernel),
+        )
+        if image is not None:
+            return _IndexSet((image,), output_set.exact)
     values = (
         stride * output_index - padding + dilation * tap
         for output_index in output_set.values()
@@ -639,16 +645,16 @@ def _route_stacked_parent(
 
 
 def _map_axis_mapping(
-    parent: Op, output_sets: _AxisSets, result: _RuleResult
+    op: Op, parent: Op, output_sets: _AxisSets, result: _RuleResult
 ) -> tuple[_AxisSets, bool]:
     """Apply an explicit output-axis to parent-axis mapping.
 
     Surviving sliced axes apply their recorded exact affine
-    (``parent = step * out + start``; the historical path copied index sets
-    through unshifted, dropping every slice offset — disputed-r2 b6/R20-2).
+    (``parent = step * out + start``; copying index sets through unshifted
+    would drop every slice offset).
     Scalar-selected parent axes narrow to their recorded singleton index;
     a selected axis with no recorded index and extent > 1 falls back to its
-    conservative full extent and makes the hop non-exact (R20-3: the
+    conservative full extent and makes the hop non-exact (the
     conservative bound must be visible in the box's exactness claim).
     """
     raw = result.values.get("out_to_parent_axis", {})
@@ -690,7 +696,7 @@ def _map_axis_mapping(
         else:
             mapped[parent_axis] = _IndexSet.interval(0, extent - 1, exact=False)
             exact = False
-    return tuple(mapped), exact
+    return apply_blocks(result, output_sets, op, parent, mapped, exact, forward=False)
 
 
 def _map_window_edges(
@@ -732,9 +738,15 @@ def _map_window_edges(
         mapped[len(parent.shape) - rank + local_axis] = _IndexSet.interval(
             floor(min(starts)), ceil(max(stops))
         )
+    # Only a rule that declares channel mixing widens it (transposed convolution);
+    # interpolation, adaptive pooling, padding and slicing keep channels pointwise.
+    dependency = str(result.values.get("channel_dependency", "pointwise"))
+    channel_exact = widen_channel_axis(
+        mapped, parent.shape, len(parent.shape) - rank - 1, dependency
+    )
     if result.map_index_set or result.map_interval:
-        return tuple(mapped), callbacks_exact
-    return tuple(mapped), bool(result.values.get("exact", False))
+        return tuple(mapped), callbacks_exact and channel_exact
+    return tuple(mapped), bool(result.values.get("exact", False)) and channel_exact
 
 
 def _map_composed_envelope(op: Op, parent: Op, output_sets: _AxisSets) -> _AxisSets:
@@ -749,206 +761,6 @@ def _call_index_callback(callback: Any, axis: int, output_set: _IndexSet) -> tup
     raw, exact = callback(axis, output_set)
     mapped = _coerce_index_set(raw, exact=bool(exact) and output_set.exact)
     return mapped, bool(exact)
-
-
-def _call_interval_callback(
-    callback: Any, axis: int, output_set: _IndexSet
-) -> tuple[_IndexSet, bool]:
-    """Lift a monotone interval callback across each progression hull."""
-    results: list[_IndexSet] = []
-    exact = output_set.exact
-    for progression in output_set.progressions:
-        starts = progression.values() if progression.step > 1 else (progression.start,)
-        for start in starts:
-            stop = start if progression.step > 1 else progression.stop
-            raw, interval_exact = callback(axis, (start, stop))
-            results.append(_coerce_index_set(raw, exact=bool(interval_exact)))
-            exact = exact and bool(interval_exact)
-    combined = _IndexSet.union(results)
-    return _IndexSet(combined.progressions, combined.exact and exact), exact
-
-
-def _coerce_index_set(raw: object, *, exact: bool) -> _IndexSet:
-    """Normalize callback values into the walk's bounded set representation."""
-    if isinstance(raw, _IndexSet):
-        return _IndexSet(raw.progressions, raw.exact and exact)
-    if isinstance(raw, range):
-        return _IndexSet.from_values(raw, exact=exact)
-    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
-        return _IndexSet.from_values((int(value) for value in raw), exact=exact)
-    raise TypeError("map_index_set/map_interval callbacks must return an integer index set")
-
-
-def map_transposed_convolution_index_set(
-    axis: int,
-    output_set: _IndexSet,
-    *,
-    kernel: int | Sequence[int],
-    stride: int | Sequence[int],
-    padding: int | Sequence[int],
-    dilation: int | Sequence[int],
-    input_extent: int | Sequence[int],
-) -> tuple[_IndexSet, bool]:
-    """Map transposed-convolution outputs by authoritative feasible-tap enumeration.
-
-    The gcd test is only a necessary pre-filter. Every surviving output/tap pair must
-    also produce an integral, in-range input index.
-    """
-    kernels = _parameter_tuple(kernel)
-    strides = _parameter_tuple(stride, len(kernels))
-    paddings = _parameter_tuple(padding, len(kernels))
-    dilations = _parameter_tuple(dilation, len(kernels))
-    extents = _parameter_tuple(input_extent, len(kernels))
-    kernel_value = kernels[axis]
-    stride_value = strides[axis]
-    padding_value = paddings[axis]
-    dilation_value = dilations[axis]
-    extent = extents[axis]
-    feasible: list[int] = []
-    divisor = gcd(stride_value, dilation_value)
-    for output_index in output_set.values():
-        shifted = output_index + padding_value
-        if shifted % divisor:
-            continue
-        for tap in range(kernel_value):
-            numerator = shifted - dilation_value * tap
-            if numerator % stride_value:
-                continue
-            input_index = numerator // stride_value
-            if 0 <= input_index < extent:
-                feasible.append(input_index)
-    return _IndexSet.from_values(feasible, exact=output_set.exact), True
-
-
-def map_adaptive_pool_index_set(
-    axis: int,
-    output_set: _IndexSet,
-    *,
-    input_extent: int | Sequence[int],
-    output_extent: int | Sequence[int],
-) -> tuple[_IndexSet, bool]:
-    """Map adaptive-pooling bins exactly using floor/ceil endpoint rules."""
-    inputs = _parameter_tuple(input_extent)
-    outputs = _parameter_tuple(output_extent, len(inputs))
-    values = (
-        input_index
-        for output_index in output_set.values()
-        for input_index in range(
-            floor(Fraction(output_index * inputs[axis], outputs[axis])),
-            ceil(Fraction((output_index + 1) * inputs[axis], outputs[axis])),
-        )
-    )
-    return _IndexSet.from_values(values, exact=output_set.exact), True
-
-
-def map_interpolation_index_set(
-    axis: int,
-    output_set: _IndexSet,
-    *,
-    mode: str,
-    input_extent: int | Sequence[int],
-    output_extent: int | Sequence[int],
-    align_corners: bool | None = None,
-    scale_factor: int | float | Fraction | Sequence[int | float | Fraction] | None = None,
-    recompute_scale_factor: bool | None = None,
-) -> tuple[_IndexSet, bool]:
-    """Map supported interpolation modes with branch-correct rational source indices."""
-    inputs = _parameter_tuple(input_extent)
-    outputs = _parameter_tuple(output_extent, len(inputs))
-    scales = _fraction_tuple(scale_factor, len(inputs)) if scale_factor is not None else None
-    source_scale = (
-        Fraction(inputs[axis], outputs[axis])
-        if scales is None or recompute_scale_factor is True
-        else Fraction(1, 1) / scales[axis]
-    )
-    linear_modes = {"linear", "bilinear", "trilinear", "bicubic"}
-    nearest_modes = {"nearest", "nearest-exact"}
-    if mode not in linear_modes | nearest_modes:
-        return _IndexSet.interval(0, inputs[axis] - 1, exact=False), False
-    support: list[int] = []
-    exact = output_set.exact
-    for output_index in output_set.values():
-        candidates: tuple[int, ...]
-        source = _interpolation_source(
-            output_index,
-            inputs[axis],
-            outputs[axis],
-            align_corners=align_corners,
-            supplied_scale=None if scales is None else scales[axis],
-            recompute_scale_factor=recompute_scale_factor,
-        )
-        if mode == "nearest":
-            phase = Fraction(output_index) * source_scale
-            candidates = (floor(phase),)
-        elif mode == "nearest-exact":
-            phase = (Fraction(output_index) + Fraction(1, 2)) * source_scale
-            candidates = (floor(phase),)
-        elif source.denominator == 1:
-            phase = source
-            candidates = (int(source),)
-        elif mode == "bicubic":
-            phase = source
-            base = floor(source)
-            candidates = (base - 1, base, base + 1, base + 2)
-        else:
-            phase = source
-            candidates = (floor(source), ceil(source))
-        phase_float = float(phase)
-        boundary = round(phase_float)
-        if phase.denominator != 1 and abs(phase_float - boundary) <= ulp(phase_float):
-            radius = 2 if mode == "bicubic" else 1
-            candidates += tuple(range(boundary - radius, boundary + radius + 1))
-            exact = False
-        support.extend(min(max(candidate, 0), inputs[axis] - 1) for candidate in candidates)
-    return _IndexSet.from_values(support, exact=exact), exact
-
-
-def _interpolation_source(
-    output_index: int,
-    input_extent: int,
-    output_extent: int,
-    *,
-    align_corners: bool | None,
-    supplied_scale: Fraction | None,
-    recompute_scale_factor: bool | None,
-) -> Fraction:
-    """Return the branch-correct linear-family source coordinate."""
-    if align_corners:
-        if output_extent == 1:
-            return Fraction(0)
-        return Fraction(output_index * (input_extent - 1), output_extent - 1)
-    scale = (
-        Fraction(input_extent, output_extent)
-        if supplied_scale is None or recompute_scale_factor is True
-        else Fraction(1, 1) / supplied_scale
-    )
-    return (Fraction(output_index) + Fraction(1, 2)) * scale - Fraction(1, 2)
-
-
-def _parameter_tuple(value: int | Sequence[int], rank: int | None = None) -> tuple[int, ...]:
-    """Normalize callback integer parameters without accepting strings."""
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        result = tuple(int(item) for item in value)
-    else:
-        result = (int(cast(Any, value)),)
-    if rank is not None and len(result) == 1:
-        result *= rank
-    if rank is not None and len(result) != rank:
-        raise ValueError("callback parameter rank mismatch")
-    return result
-
-
-def _fraction_tuple(
-    value: int | float | Fraction | Sequence[int | float | Fraction], rank: int
-) -> tuple[Fraction, ...]:
-    """Normalize supplied interpolation scales using exact rational conversion."""
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        result = tuple(Fraction(item) for item in value)
-    else:
-        result = (Fraction(cast(Any, value)),) * rank
-    if len(result) != rank:
-        raise ValueError("scale_factor rank mismatch")
-    return result
 
 
 def _build_box(
@@ -972,7 +784,7 @@ def _build_box(
     path_nonempty = any(
         all(
             item is not None and not item.is_empty
-            for item in (terminal.clipped[axis] for axis in descriptor.layout.windowed_axes)
+            for item in (terminal.clipped[axis] for axis in descriptor.axis_roles.windowed_axes)
         )
         for terminal in terminals
     )
@@ -985,7 +797,7 @@ def _build_box(
         if axis_descriptor.kind == "pointwise":
             # A surviving pointwise axis is identity-geometry by construction
             # (non-identity composed geometry degrades to a "full" envelope in
-            # _engine_descriptor, disputed-r3 F1/F2, and the full case below
+            # _engine_descriptor, and the full case below
             # folds its inexactness), so the same-index claim is sound and the
             # box's exactness stays the query-time derivation from windowed
             # terminals — the static descriptor ``exact`` flag is a
@@ -1032,9 +844,8 @@ def _build_box(
                 # as the descriptor's own axis evidence. A conservative full
                 # axis (for example an unresolved scalar selection over
                 # extent > 1) must be visible in the box's exactness claim —
-                # the historical box derived `exact` from windowed terminals
-                # alone, so this dishonest-exact class was tripwire-BLIND
-                # (disputed-r2 b6/R20-3).
+                # deriving `exact` from windowed terminals alone would let
+                # this dishonest-exact class slip past the tripwire.
                 exact = exact and axis_descriptor.exact
                 box_axes.append(
                     ReceptiveFieldBoxAxis(
@@ -1114,12 +925,6 @@ def _build_box(
         empty=empty,
         covers_input=covers_input,
     )
-
-
-def _union_optional(sets: Iterable[_IndexSet | None]) -> _IndexSet | None:
-    """Union constrained sets while preserving an unconstrained ``None`` result."""
-    materialized = tuple(item for item in sets if item is not None)
-    return None if not materialized else _IndexSet.union(materialized)
 
 
 __all__: list[str] = []

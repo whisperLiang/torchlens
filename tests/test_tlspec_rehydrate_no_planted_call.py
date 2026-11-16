@@ -21,25 +21,24 @@ without first calling the filter.
 from __future__ import annotations
 
 import ast
-import pickle
+import shutil
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy
 import pytest
 import torch
 import torch.nn as nn
+from _format3_envelope import read_record, write_record
 
 import torchlens as tl
-from torchlens._io.bundle import _RenameAwareUnpickler
+from torchlens._data_classes.trace import Trace
 from torchlens._io.rehydrate import _assign_rehydrated_field
 from torchlens._io.state_keys import (
     PortableStateKeyError,
     refuse_callable_shadowing_state_keys,
 )
-from torchlens.data_classes.trace import Trace
 from torchlens.options import CaptureOptions
-
-pytestmark = pytest.mark.smoke
 
 
 class _M(nn.Module):
@@ -53,20 +52,17 @@ class _M(nn.Module):
 
 def _build(tmp_path: Path) -> Path:
     torch.manual_seed(0)
-    cap = CaptureOptions(intervention_ready=True, capture_container_structure=True, cache=False)
+    cap = CaptureOptions(replayable=True, capture_container_structure=True, cache=False)
     trace = tl.trace(_M().eval(), torch.randn(2, 4), capture=cap)
     bundle = tmp_path / "base.tlspec"
-    tl.save(trace, str(bundle), level="runnable", include_weights=True)
+    trace.save(str(bundle), level="runnable", include_weights=True)
     return bundle
 
 
-def _repickle_metadata(bundle: Path, mutate) -> None:
-    with (bundle / "metadata.pkl").open("rb") as handle:
-        state = _RenameAwareUnpickler(handle).load()
-    assert isinstance(state, dict)
-    mutate(state)
-    with (bundle / "metadata.pkl").open("wb") as handle:
-        pickle.dump(state, handle)
+def _rewrite_trace_record(bundle: Path, mutate) -> None:
+    record = read_record(bundle, "trace")
+    mutate(record["fields"])
+    write_record(bundle, "trace", record)
 
 
 # --------------------------------------------------------------------------- #
@@ -74,22 +70,46 @@ def _repickle_metadata(bundle: Path, mutate) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_planted_internal_set_not_invoked_on_load(tmp_path: Path) -> None:
-    """A planted ``_internal_set`` (numpy.dtype) is NOT invoked; load still succeeds.
+@pytest.mark.parametrize(
+    "planted_key",
+    ["_internal_set", "save"],
+    ids=["planted_internal_set_not_invoked_on_load", "shadow_key_refused_on_load"],
+)
+def test_planted_key_refused_on_load(tmp_path: Path, planted_key: str) -> None:
+    """A planted metadata key (numpy.dtype value) is NOT invoked; the load refuses typed.
 
-    Before the fix, loading raised ``TypeError: data type ... not understood`` --
-    proof the planted ``numpy.dtype`` was called from ``_assign_rehydrated_field``.
-    After resolving the setter off the class, the planted instance key is inert and
-    the load completes without invoking it.
+    ``_internal_set``: before the sec_3 fix, loading raised ``TypeError: data
+    type ... not understood`` -- proof the planted ``numpy.dtype`` was called
+    from ``_assign_rehydrated_field``. Layer 1 (class-static setter resolution,
+    unit-pinned below) made the planted key inert; since the persisted-state
+    contract (MEMO 3.3), the governed load refuses the unknown key OUTRIGHT --
+    typed, before any state mutation, and provably without invoking the
+    planted callable (a ``TypeError`` here would mean it ran).
+    ``_internal_set`` is not a ``Trace`` method, so the narrow layer-2 filter
+    does not catch it; the unknown-field partition refuses it first and
+    layer 1 (class-static resolution) stays the backstop, unit-pinned below.
+
+    ``save``: planting a method-shadow key in metadata refuses the load, typed.
+    On the governed artifact path the unknown-field partition (MEMO 3.3)
+    fires FIRST -- a method name is never a declared field, so the plant
+    refuses before the layer-2 shadow filter is even consulted. The filter's
+    own refusal stays end-to-end-pinned on the session-pickle path below.
     """
 
-    bundle = _build(tmp_path)
-    # ``_internal_set`` is not a ``Trace`` method, so the narrow filter does not
-    # catch it -- layer 1 (class-static resolution) is what neutralizes it.
-    _repickle_metadata(bundle, lambda state: state.__setitem__("_internal_set", numpy.dtype))
+    from torchlens._io import UnknownPersistedFieldError
 
-    trace = tl.load(str(bundle))
-    assert trace is not None
+    bundle = _build(tmp_path)
+    _rewrite_trace_record(
+        bundle, lambda state: state.__setitem__(planted_key, {"$tl": "type", "name": "numpy.dtype"})
+    )
+
+    with patch(
+        "torchlens._io.rehydrate._assign_rehydrated_field", wraps=_assign_rehydrated_field
+    ) as assign:
+        with pytest.raises(UnknownPersistedFieldError) as excinfo:
+            tl.load(str(bundle))
+        assign.assert_not_called()
+    assert planted_key in excinfo.value.fields["unknown_fields"]
 
 
 def test_assign_rehydrated_field_ignores_instance_setter() -> None:
@@ -152,13 +172,16 @@ def test_property_backed_fields_are_not_refused() -> None:
         refuse_callable_shadowing_state_keys(Trace, {name: object()})  # must not raise
 
 
-def test_shadow_key_refused_on_load(tmp_path: Path) -> None:
-    """Planting a method-shadow key (``save``) in metadata refuses the load, typed."""
+def test_shadow_key_refused_on_session_pickle_restore() -> None:
+    """Layer 2 stays armed OUTSIDE the governed window: a method-shadow key in
+    plain session ``__setstate__`` state refuses through the narrow filter."""
 
-    bundle = _build(tmp_path)
-    _repickle_metadata(bundle, lambda state: state.__setitem__("save", numpy.dtype))
+    torch.manual_seed(0)
+    trace = tl.trace(_M().eval(), torch.randn(2, 4))
+    state = trace.__getstate__()
+    state["save"] = numpy.dtype
     with pytest.raises(PortableStateKeyError):
-        tl.load(str(bundle))
+        Trace.__new__(Trace).__setstate__(state)
 
 
 # --------------------------------------------------------------------------- #
@@ -176,30 +199,120 @@ def test_untampered_runnable_load_and_run_succeeds(tmp_path: Path) -> None:
 
     bundle = _build(tmp_path)
     loaded = tl.load(str(bundle))
-    result = loaded.run(inputs=torch.randn(2, 4))
+    result = loaded.run_transaction(inputs=torch.randn(2, 4))
     assert result.report.path_faithfulness.value == "verified"
+
+
+# 88 tracked ``.py`` files under ``torchlens/_data_classes`` on 2026-11-03
+# (``git ls-files 'torchlens/_data_classes/*.py'``). The floor sits a little below
+# that so a consolidation does not trip it, but far above zero: a wrong directory
+# (the scan once pointed at a ``data_classes`` folder that does not exist and passed
+# on zero files) fails here instead of passing vacuously.
+_MIN_SCANNED_DATA_CLASS_FILES = 75
+# Restore paths that update ``__dict__`` from state today: ``_accessor_base``,
+# ``layer`` and ``_trace_state_io.trace_setstate`` (the path ``Trace.__setstate__``
+# delegates to).
+_MIN_GUARDED_RESTORE_SITES = 3
+_DATA_CLASSES_DIR = Path(tl.__file__).parent / "_data_classes"
+
+
+def _is_state_restore(node: ast.AST) -> bool:
+    """Return whether ``node`` is a ``__setstate__`` or a ``*_setstate`` helper."""
+
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    return node.name == "__setstate__" or node.name.endswith("_setstate")
+
+
+def _scan_state_restores(directory: Path) -> tuple[int, int, list[str]]:
+    """Scan every module under ``directory`` for unguarded ``__dict__`` updates.
+
+    Returns the number of files scanned, the number of restore functions that
+    update ``__dict__`` from state, and the offenders: restore functions whose
+    ``__dict__.update(state)`` is not preceded by
+    ``refuse_callable_shadowing_state_keys``.
+    """
+
+    files_scanned = 0
+    guarded_sites = 0
+    offenders: list[str] = []
+    for source_path in sorted(directory.rglob("*.py")):
+        files_scanned += 1
+        source = source_path.read_text()
+        for node in ast.walk(ast.parse(source)):
+            if not _is_state_restore(node):
+                continue
+            body_src = ast.get_source_segment(source, node) or ""
+            update_at = body_src.find("__dict__.update(state)")
+            if update_at < 0:
+                continue
+            guard_at = body_src.find("refuse_callable_shadowing_state_keys(")
+            if 0 <= guard_at < update_at:
+                guarded_sites += 1
+            else:
+                name = getattr(node, "name", "?")
+                offenders.append(f"{source_path.relative_to(directory)}::{name}")
+    return files_scanned, guarded_sites, offenders
 
 
 def test_every_portable_setstate_guards_dict_update() -> None:
     """No portable ``__setstate__`` updates ``__dict__`` without the shadow filter.
 
-    AST source-scan tripwire: a NEW portable ``__setstate__`` that calls
-    ``self.__dict__.update(state)`` without first calling
-    ``refuse_callable_shadowing_state_keys`` re-opens the sec_3 enabler class.
+    AST source-scan tripwire: a NEW portable ``__setstate__`` (or ``*_setstate``
+    helper it delegates to) that calls ``__dict__.update(state)`` without first
+    calling ``refuse_callable_shadowing_state_keys`` re-opens the sec_3 enabler
+    class. The file and site floors keep the scan from passing on an empty or
+    wrong directory.
     """
 
-    data_classes_dir = Path(tl.__file__).parent / "data_classes"
-    offenders: list[str] = []
-    for source_path in sorted(data_classes_dir.glob("*.py")):
-        tree = ast.parse(source_path.read_text())
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.FunctionDef) and node.name == "__setstate__"):
-                continue
-            body_src = ast.get_source_segment(source_path.read_text(), node) or ""
-            if "__dict__.update(state)" not in body_src:
-                continue
-            if "refuse_callable_shadowing_state_keys" not in body_src:
-                offenders.append(f"{source_path.name}::{node.name}")
+    assert _DATA_CLASSES_DIR.is_dir(), f"data classes package not found: {_DATA_CLASSES_DIR}"
+    files_scanned, guarded_sites, offenders = _scan_state_restores(_DATA_CLASSES_DIR)
+    assert files_scanned >= _MIN_SCANNED_DATA_CLASS_FILES, (
+        f"tripwire scanned {files_scanned} files under {_DATA_CLASSES_DIR}; "
+        f"expected at least {_MIN_SCANNED_DATA_CLASS_FILES}"
+    )
+    assert guarded_sites >= _MIN_GUARDED_RESTORE_SITES, (
+        f"tripwire found {guarded_sites} guarded state restores; "
+        f"expected at least {_MIN_GUARDED_RESTORE_SITES}"
+    )
     assert not offenders, (
         f"portable __setstate__ updates __dict__ without the callable-shadow filter: {offenders}"
     )
+
+
+_PLANTED_UNGUARDED_SETSTATE = """
+
+class _PlantedState:
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+"""
+
+
+def test_setstate_tripwire_catches_planted_unguarded_update(tmp_path: Path) -> None:
+    """The tripwire reads the real files: a planted unguarded restore fails it."""
+
+    copy_dir = tmp_path / "_data_classes"
+    shutil.copytree(_DATA_CLASSES_DIR, copy_dir)
+    planted = copy_dir / "_accessor_base.py"
+    planted.write_text(planted.read_text() + _PLANTED_UNGUARDED_SETSTATE)
+
+    files_scanned, _guarded, offenders = _scan_state_restores(copy_dir)
+
+    assert files_scanned >= _MIN_SCANNED_DATA_CLASS_FILES
+    assert offenders == ["_accessor_base.py::__setstate__"]
+
+
+def test_setstate_tripwire_catches_removed_guard(tmp_path: Path) -> None:
+    """Dropping the filter from the real ``Trace`` restore path fails the tripwire."""
+
+    copy_dir = tmp_path / "_data_classes"
+    shutil.copytree(_DATA_CLASSES_DIR, copy_dir)
+    trace_io = copy_dir / "_trace_state_io.py"
+    source = trace_io.read_text()
+    guard_call = "refuse_callable_shadowing_state_keys(type(trace), state)"
+    assert guard_call in source
+    trace_io.write_text(source.replace(guard_call, "pass", 1))
+
+    _files, _guarded, offenders = _scan_state_restores(copy_dir)
+
+    assert offenders == ["_trace_state_io.py::trace_setstate"]

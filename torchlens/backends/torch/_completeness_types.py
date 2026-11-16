@@ -9,6 +9,7 @@ from typing import Any
 import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
 
+from ..._utils._display_bounded import short_dataclass_repr
 from .escape_detection import (
     ExpectedOriginalToken,
 )
@@ -46,7 +47,7 @@ class _DispatchCallsite:
 class _DispatchEvent:
     """One aten dispatcher event and its exact live wrapper owner, if any.
 
-    r35 I2: every event carries a lifecycle ``outcome`` -- ``started`` (armed),
+    Every event carries a lifecycle ``outcome`` -- ``started`` (armed),
     then ``returned_tensor`` / ``returned_host_or_none`` / ``raised`` -- so the
     runnable ledger can discharge every observed event as an accounted call, an
     exact witness, an audited opaque boundary, or an explicit incomplete fact.
@@ -63,17 +64,28 @@ class _DispatchEvent:
     outcome: str = "started"
     exception_type: str | None = None
     contained_view: bool = False
-    """``aten.as_strided`` whose result byte span is contained in its operand's (r37)."""
+    """``aten.as_strided`` whose result byte span is contained in its operand's."""
     metadata_witnessed: bool = False
-    """r67 C3: a host-returning metadata dispatch (``aten.is_pinned``) whose receiver was
+    """A host-returning metadata dispatch (``aten.is_pinned``) whose receiver was
     positively attributed and recorded by the placement metadata net -- discharged as
     witnessed (the observed-value ledger / input fact owns it); an UNATTRIBUTED receiver
     keeps the incomplete fact (fail closed)."""
+    credit_refs: tuple[weakref.ref[torch.Tensor], ...] = ()
+    """Weak references to the tensor results (and a pure alias op's operand), recorded only
+    when the event has no owner or an output-scoped owner (module-forward tokens). Weak, so the
+    census never extends an intermediate's lifetime; the token holds its boundary tensors
+    strongly, so a dead reference can never name one of them."""
+    apply_epilogue_alias: bool = False
+    """A pure alias dispatched by the C++ part of ``Function.apply`` (no Python frame of the
+    user's forward between ``apply`` and the dispatcher); ``_function_epilogue`` credits it
+    only when its operand is one of that call's own returned tensors."""
 
 
 @dataclass
 class _WitnessState:
     """Per-forward dispatch census state."""
+
+    __repr__ = short_dataclass_repr
 
     trace: Any
     owner_thread_id: int
@@ -84,8 +96,16 @@ class _WitnessState:
     record_escapes: bool = False
     ledger: bool = False
     record_aten: bool = False
+    record_aten_values: bool = False
+    """``CaptureOptions(aten_ops="values")``: keep each recorded ATen call's output
+    tensor(s) on its event, under the owner Op's save rules."""
+    aten_value_cells: dict[int, list[Any]] = field(default_factory=dict)
+    """Speculatively kept value cells by owner wrapper call id, awaiting that
+    owner's ``save=`` verdict (``_aten_capture._note_aten_owner_verdict``)."""
+    aten_owner_verdicts: dict[int, str] = field(default_factory=dict)
+    """Owner wrapper call id -> ``keep`` | ``deferred`` | ``drop`` (never downgraded)."""
     plane_p: bool = False
-    """Merge-ranks C2 plane-P: record EVERY dispatched op (any namespace,
+    """Plane-P: record EVERY dispatched op (any namespace,
     paused windows included) for armed distributed captures. Feeds the
     session-time ``trace._distributed_plane_p`` journal the capture-fidelity
     census criteria 2-4 consume; never installed for unarmed captures."""
@@ -96,11 +116,11 @@ class _WitnessState:
     capture_phase: str = "forward"
     backward_epoch_index: int | None = None
     aten_storage_alias_groups: dict[tuple[str, int], int] = field(default_factory=dict)
-    # r43: armed for the entire forward window (SAME lifetime as
+    # armed for the entire forward window (SAME lifetime as
     # ``_observe_invisible_host_escapes``), cleared in its ``finally``. The
     # non-owner captured-tensor belt gates on THIS flag, never the racy global
     # ``_state._logging_enabled`` (which the owner flips under ``pause_logging``),
-    # closing the hon2_3 pause-race coin-flip.
+    # closing the pause-race coin-flip.
     belt_armed: bool = False
     # (source_tensor, version_at_escape, byte_snapshot) for each mutable zero-copy alias
     # (``numpy`` / ``__array__``) handed to the host this forward. Checked for host write-back
@@ -108,7 +128,7 @@ class _WitnessState:
     writeback_watch: list[tuple[torch.Tensor, int | None, torch.Tensor]] = field(
         default_factory=list
     )
-    # r67 C3: capture-scoped storage-origin map -- storage handle object ->
+    # capture-scoped storage-origin map -- storage handle object ->
     # ("input", site) | ("state", frozenset[str]) | ("other", None). Populated by the
     # pre-index (known state/input storages) and by every bridge return; consulted by the
     # storage accessor wrappers so a handle acquired ANYWHERE this forward attributes its
@@ -116,9 +136,32 @@ class _WitnessState:
     # identity-keyed strong entries on older torch whose ephemeral storage weakrefs can dangle.
     # ``None`` until the wrappers arm.
     storage_origins: _StorageOriginRegistry | None = None
-    # r67 C3: lazy ptr -> full state-name-set index (params + buffers, alias groups merged)
+    # lazy ptr -> full state-name-set index (params + buffers, alias groups merged)
     # backing the origin resolver's pointer fallback. Built once per forward on first use.
     storage_state_ptr_names: dict[int, frozenset[str]] | None = None
+
+    def release(self) -> None:
+        """Drop every per-forward reference once the capture that built this state ends.
+
+        torch's import-time registries (the sharded-op tables, dynamo's tensor attribute
+        map and its object rule cache) keep whichever callable was installed on
+        ``torch.Tensor`` or ``torch`` when they were first imported. A capture that
+        triggers such an import leaves one of this state's wrapper closures in those
+        tables for the life of the process, so the state they reach must hold nothing of
+        the finished capture: the trace dies by refcount with its last user reference,
+        and the wrapper's owner-thread and belt gates fail closed from then on.
+        """
+
+        self.trace = None
+        self.owner_thread_id = -1
+        self.belt_armed = False
+        self.events = []
+        self.plane_p_events = []
+        self.aten_events = None
+        self.aten_storage_alias_groups = {}
+        self.writeback_watch = []
+        self.storage_origins = None
+        self.storage_state_ptr_names = None
 
 
 class _StorageOriginRegistry:
@@ -264,3 +307,5 @@ class _PlainScalarEscapeState:
     count: int = 0
     first_file: str | None = None
     first_line: int | None = None
+    #: Bool tests among ``count`` whose source TorchLens cannot read (no branch recorded).
+    unreadable_source_count: int = 0

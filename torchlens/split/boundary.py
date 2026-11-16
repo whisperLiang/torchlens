@@ -23,7 +23,18 @@ _COLLATE_METADATA_KEYS = (
 
 @dataclass(frozen=True)
 class ReplayBoundary:
-    """Split/graph/schema/shape ABI payload, independent of model parameter values."""
+    """Split/graph/schema/shape ABI payload, independent of model parameter values.
+
+    Examples
+    --------
+    >>> graph = tl.split.prepare_graph(torch.nn.Linear(3, 2).eval(), torch.ones(1, 3))
+    >>> partition = graph.compute_dag().to_partition(())
+    >>> analysis = graph.analyze(partition)
+    >>> runtime = graph.materialize(analysis)
+    >>> boundary = runtime.run_prefix(torch.ones(2, 3))
+    >>> boundary.backend, set(boundary.tensors) == set(boundary.spec)
+    ('torch', True)
+    """
 
     backend: str
     tensors: dict[str, Any]
@@ -76,6 +87,7 @@ class ReplayBoundary:
                     split_point=str(split_id),
                     reason="split_id mismatch",
                 ),
+                code=SplitBoundaryError.code,
             )
         expected_metadata = (
             ("graph_shape_hash", graph_hash),
@@ -93,6 +105,7 @@ class ReplayBoundary:
                         split_point=str(split_id or self.metadata.get("split_id", "")),
                         reason=f"{field_name} mismatch",
                     ),
+                    code=SplitBoundaryError.code,
                 )
         if set(self.tensors) != set(expected_spec):
             raise SplitBoundaryError(
@@ -102,6 +115,7 @@ class ReplayBoundary:
                     split_point=str(split_id or self.metadata.get("split_id", "")),
                     reason="tensor id set mismatch",
                 ),
+                code=SplitBoundaryError.code,
             )
         if set(self.spec) != set(expected_spec):
             raise SplitBoundaryError(
@@ -111,6 +125,7 @@ class ReplayBoundary:
                     split_point=str(split_id or self.metadata.get("split_id", "")),
                     reason="spec id set mismatch",
                 ),
+                code=SplitBoundaryError.code,
             )
         for key, expected_item in expected_spec.items():
             _validate_schema_identity(key, self.spec[key], expected_item)
@@ -132,6 +147,7 @@ class ReplayBoundary:
                         reason="dtype mismatch",
                         dtype=dtype,
                     ),
+                    code=SplitBoundaryError.code,
                 )
             if shape_program is None:
                 validate_tensor_against_symbolic_shape(
@@ -170,7 +186,8 @@ class ReplayBoundary:
             ):
                 raise SplitBoundaryError(
                     f"Boundary tensor {key!r} shape is {actual_runtime_shape}, "
-                    f"expected solved shape {expected_runtime_shape}."
+                    f"expected solved shape {expected_runtime_shape}.",
+                    code=SplitBoundaryError.code,
                 )
 
     def detach(self, adapter: SplitBackendAdapter | None = None) -> ReplayBoundary:
@@ -228,7 +245,10 @@ class ReplayBoundary:
         """Collate a list of same-spec boundaries by tensor key."""
 
         if not boundaries:
-            raise SplitBoundaryError("ReplayBoundary.collate requires at least one boundary.")
+            raise SplitBoundaryError(
+                "ReplayBoundary.collate requires at least one boundary.",
+                code=SplitBoundaryError.code,
+            )
         first = boundaries[0]
         resolved_adapter = first._adapter(adapter)
         first_metadata_abi = cls._collate_metadata_abi(first)
@@ -239,7 +259,10 @@ class ReplayBoundary:
                 or boundary.spec != first.spec
                 or cls._collate_metadata_abi(boundary) != first_metadata_abi
             ):
-                raise SplitBoundaryError("Cannot collate boundaries with different ABI IDs.")
+                raise SplitBoundaryError(
+                    "Cannot collate boundaries with different ABI IDs.",
+                    code=SplitBoundaryError.code,
+                )
         return cls(
             backend=first.backend,
             tensors={
@@ -259,13 +282,25 @@ def _validate_schema_identity(key: str, actual: BoundarySchema, expected: Bounda
     """Check the ordered identity fields of one boundary ABI entry."""
 
     if actual.canonical_id != expected.canonical_id:
-        raise SplitBoundaryError(f"Boundary canonical ID mismatch for {key!r}.")
+        raise SplitBoundaryError(
+            f"Boundary canonical ID mismatch for {key!r}.",
+            code=SplitBoundaryError.code,
+        )
     if actual.role != expected.role:
-        raise SplitBoundaryError(f"Boundary role mismatch for {key!r}.")
+        raise SplitBoundaryError(
+            f"Boundary role mismatch for {key!r}.",
+            code=SplitBoundaryError.code,
+        )
     if actual.output_index != expected.output_index:
-        raise SplitBoundaryError(f"Boundary output index mismatch for {key!r}.")
+        raise SplitBoundaryError(
+            f"Boundary output index mismatch for {key!r}.",
+            code=SplitBoundaryError.code,
+        )
     if tuple(actual.container_path) != tuple(expected.container_path):
-        raise SplitBoundaryError(f"Boundary container path mismatch for {key!r}.")
+        raise SplitBoundaryError(
+            f"Boundary container path mismatch for {key!r}.",
+            code=SplitBoundaryError.code,
+        )
 
 
-__all__ = ["ReplayBoundary"]
+__all__ = ("ReplayBoundary",)

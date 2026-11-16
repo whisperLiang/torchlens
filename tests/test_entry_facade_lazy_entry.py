@@ -1,0 +1,189 @@
+"""Lazy-module entry tolerance and residual refusals (quickstart B13/B14).
+
+The wave-1a all-verbs entry refusal flipped off on the memo's own signal
+(4.4) when the numbers-truth lane landed the parameter completion unit, and
+the BUFFER-side refusal flipped off with the F20 lazy-buffer completion
+(A10-fix2 remainder): the buffer-write tracker skips storage-less pending
+buffers at index time, torch's lazy pre-hook materialization plumbing
+passes through the wrapper unlogged, and buffers materialized during the
+captured forward register at the module-entry gate. The typed
+``lazy_uninitialized`` teach survives only where the request is genuinely
+unanswerable: zero-input shape inference, plus the armed-lane state
+baseline's ``state_baseline_unavailable`` (a pending slot has no bytes to
+witness).
+"""
+
+from __future__ import annotations
+
+import pytest
+import torch
+from torch import nn
+
+import torchlens as tl
+from torchlens._runnable.state import snapshot_capture_state
+from torchlens._utils.lazy_state import has_uninitialized_lazy_state, pending_lazy_state
+from torchlens.errors import CaptureNotActiveError, TraceCaptureError
+
+
+def _lazy_mlp() -> nn.Sequential:
+    """Return a fresh model whose head is an un-materialized LazyLinear."""
+
+    torch.manual_seed(0)
+    return nn.Sequential(nn.Linear(4, 6), nn.ReLU(), nn.LazyLinear(8))
+
+
+def _lazy_bn() -> nn.Sequential:
+    """Return a fresh model with un-materialized lazy BUFFERS (running stats)."""
+
+    torch.manual_seed(0)
+    return nn.Sequential(nn.Linear(4, 4), nn.LazyBatchNorm1d())
+
+
+def _pending(model: nn.Module) -> bool:
+    """Return whether any lazy module in ``model`` is still pending."""
+
+    return has_uninitialized_lazy_state(model)
+
+
+# Kept: sole branch coverage of backends/torch/buffer_writes.py; a sole mutation kill.
+def test_trace_tolerates_lazy_buffer_model() -> None:
+    """Pending lazy BUFFERS capture directly (F20 buffer-side completion).
+
+    Torch's lazy pre-hook materializes the running stats before the module's
+    forward body runs; capture completes with the module's ops recorded and
+    the model materialized in place.
+    """
+
+    model = _lazy_bn()
+    log = tl.trace(model, torch.randn(3, 4))
+    assert log._num_ops >= 2
+    assert not _pending(model), "the captured forward materializes the buffers"
+    labels = " ".join(op.label for op in log._layer_list)
+    assert "batchnorm" in labels
+    # The materialized running stats registered as first-class buffer
+    # sources (the late-index path), so the pre-hook init ops carry real
+    # provenance instead of the unattributed-args escape.
+    assert "buffer" in labels
+    log.cleanup()
+
+
+# Kept: sole branch coverage of backends/torch/_tl.py, backends/torch/param_mutation.py; a sole mutation kill.
+def test_record_tolerates_lazy_buffer_model() -> None:
+    """tl.record rides the same buffer-completion path."""
+
+    model = _lazy_bn()
+    recording = tl.record(model, torch.randn(3, 4), save=tl.func("linear"))
+    assert recording.status == "complete"
+    assert not _pending(model)
+
+
+# Kept: sole branch coverage of _utils/tensor_utils.py.
+def test_self_prime_remedy_unlocks_capture() -> None:
+    """The taught two-line self-prime materializes and capture then succeeds."""
+
+    model = _lazy_bn()
+    x = torch.randn(3, 4)
+    with torch.no_grad():
+        model(x)
+    assert not _pending(model)
+    log = tl.trace(model, x)
+    assert log._num_ops >= 2
+    log.cleanup()
+
+
+# Kept: sole branch coverage of _utils/lazy_state.py.
+def test_pending_enumeration_is_id_keyed_and_falsy_when_clear() -> None:
+    """pending_lazy_state keys by id() and answers falsy after materialization."""
+
+    model = _lazy_mlp()
+    pending = pending_lazy_state(model)
+    assert bool(pending) is True
+    lazy_module = model[2]
+    assert pending.modules[0][2] == id(lazy_module)
+    param_ids = {tensor_id for _, tensor_id in pending.parameters}
+    assert id(lazy_module.weight) in param_ids and id(lazy_module.bias) in param_ids
+    with torch.no_grad():
+        model(torch.randn(2, 4))
+    assert bool(pending_lazy_state(model)) is False
+
+
+# Kept: sole branch coverage of _errors.py, _runnable/state.py, _utils/lazy_state.py.
+def test_armed_lane_state_baseline_refuses_typed() -> None:
+    """snapshot_capture_state refuses pending slots before any mutation."""
+
+    model = _lazy_mlp()
+    with pytest.raises(CaptureNotActiveError) as excinfo:
+        snapshot_capture_state(model)
+    err = excinfo.value
+    assert err.fields["code"] == "state_baseline_unavailable"
+    assert set(err.fields["pending_slots"]) == {"2.weight", "2.bias"}
+    assert "no_grad" in str(err)
+    assert _pending(model)
+
+
+# Kept: sole branch coverage of _runnable/state.py.
+def test_snapshot_clone_failures_degrade_to_none_not_crash() -> None:
+    """The clone loop sits inside its guard: unclonable state answers None."""
+
+    class _HostileTensor(torch.Tensor):
+        @classmethod
+        def __torch_function__(cls, func, types, args=(), kwargs=None):  # noqa: ANN001, ANN206
+            if func is torch.Tensor.clone or getattr(func, "__name__", "") == "clone":
+                raise RuntimeError("clone refused")
+            return super().__torch_function__(func, types, args, kwargs or {})
+
+    class _HostileState(nn.Module):
+        def state_dict(self, *args: object, **kwargs: object) -> dict[str, torch.Tensor]:  # type: ignore[override]
+            return {"w": torch.randn(2).as_subclass(_HostileTensor)}
+
+    assert snapshot_capture_state(_HostileState()) is None
+
+
+# Kept: sole branch coverage of backends/torch/rescue.py; a sole mutation kill.
+def test_capture_failure_advisory_scopes_the_restoration_claim() -> None:
+    """The failed-capture advisory no longer claims the MODEL was restored."""
+
+    class _Boom(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            raise RuntimeError("mid-forward failure")
+
+    with (
+        pytest.warns(Warning) as caught,
+        pytest.raises(TraceCaptureError, match="mid-forward failure") as _tce_info,
+    ):
+        tl.trace(_Boom(), torch.randn(2, 4))
+    assert isinstance(_tce_info.value.__cause__, RuntimeError)
+    advisories = [
+        str(w.message) for w in caught if "TorchLens capture attempt failed" in str(w.message)
+    ]
+    assert advisories, "the CaptureAttemptFailedWarning advisory must still fire"
+    for message in advisories:
+        assert "the model and torch environment were restored" not in message
+        assert "not rolled back" in message
+
+
+# Kept: a sole mutation kill.
+def test_materialized_lazy_param_trace_round_trips_through_save_load(tmp_path) -> None:
+    """A captured lazy-module trace saves and loads (nightly platform-canary).
+
+    The prep-time flag the finalization pipeline uses to track an
+    UninitializedParameter (``Param._lazy_at_prep``, reset False once step
+    15 re-reads the materialized geometry) is plain instance state with no
+    declared portable policy; before it got one, ``Trace.save`` on ANY trace of
+    a model holding a lazy module (``nn.LazyLinear`` et al.) raised
+    ``ArtifactError: Param._lazy_at_prep is missing from
+    _PORTABLE_STATE_SPEC`` -- exactly the shape of model nightly.yml's
+    platform-canary step traces with a predicate ``save=``.
+    """
+
+    model = nn.Sequential(nn.Conv2d(3, 4, 3), nn.ReLU(), nn.Flatten(), nn.LazyLinear(5))
+    trace = tl.trace(model, torch.randn(2, 3, 8, 8), save=tl.func("relu"))
+
+    path = tmp_path / "lazy_canary.tlspec"
+    trace.save(str(path))
+    loaded = tl.load(str(path))
+    assert loaded.layer_labels == trace.layer_labels

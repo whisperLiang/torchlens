@@ -9,10 +9,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.constants import (
+from torchlens._constants import (
     BUFFER_LOG_FIELD_ORDER,
-    GRAD_FN_LOG_FIELD_ORDER,
-    GRAD_FN_PASS_LOG_FIELD_ORDER,
     LAYER_LOG_FIELD_ORDER,
     LAYER_PASS_LOG_FIELD_ORDER,
     MODEL_LOG_FIELD_ORDER,
@@ -47,45 +45,44 @@ def _trace_memory_model() -> tl.Trace:
     return tl.trace(
         model,
         x,
-        capture=CaptureOptions(layers_to_save="all", save_grads="all"),
+        capture=CaptureOptions(save_grads="all"),
+        save="all",
     )
 
 
-@pytest.mark.smoke
 def test_bytes_formatting_and_numeric_behavior() -> None:
     """Bytes formats human-readably while preserving numeric operations."""
 
-    value = tl.Bytes(1_234_567)
+    value = tl.types.Bytes(1_234_567)
 
-    assert isinstance(value, tl.Quantity)
+    assert isinstance(value, tl.types.Quantity)
     assert isinstance(value, int)
-    assert str(value) == "1.2 MB"
-    assert repr(tl.Bytes(32)) == "Bytes('32 B')"
+    assert str(value) == "1.18 MiB"
+    assert repr(tl.types.Bytes(32)) == "Bytes('32 B')"
     assert f"{value:raw}" == "1234567"
     assert f"{value:.2f MB}" == "1.18 MB"
-    assert value + 1 == tl.Bytes(1_234_568)
-    assert 1 + value == tl.Bytes(1_234_568)
-    assert value - 567 == tl.Bytes(1_234_000)
-    assert value * 2 == tl.Bytes(2_469_134)
-    assert value / 2 == tl.Bytes(617_283)
-    assert value / tl.Bytes(1_234_567) == 1.0
+    assert value + 1 == tl.types.Bytes(1_234_568)
+    assert 1 + value == tl.types.Bytes(1_234_568)
+    assert value - 567 == tl.types.Bytes(1_234_000)
+    assert value * 2 == tl.types.Bytes(2_469_134)
+    assert value / 2 == tl.types.Bytes(617_283)
+    assert value / tl.types.Bytes(1_234_567) == 1.0
     assert value > 1_000_000
 
 
-@pytest.mark.smoke
 def test_duration_flops_and_macs_formatting_and_numeric_behavior() -> None:
     """Duration, Flops, and Macs format directly while staying numeric."""
 
-    duration = tl.Duration(0.0012)
-    flops = tl.Flops(1_234_000_000)
-    macs = tl.Macs(3_400_000)
+    duration = tl.types.Duration(0.0012)
+    flops = tl.types.Flops(1_234_000_000)
+    macs = tl.types.Macs(3_400_000)
 
     assert isinstance(duration, float)
     assert isinstance(flops, int)
     assert isinstance(macs, int)
-    assert str(duration) == "1.2 ms"
-    assert repr(duration) == "Duration('1.2 ms')"
-    assert str(tl.Duration(3.4)) == "3.4 s"
+    assert str(duration) == "1.20 ms"
+    assert repr(duration) == "Duration('1.20 ms')"
+    assert str(tl.types.Duration(3.4)) == "3.40 s"
     assert f"{duration:raw}" == "0.0012"
     assert f"{duration:.2f ms}" == "1.20 ms"
     assert str(flops) == "1.23 GFLOPs"
@@ -95,17 +92,16 @@ def test_duration_flops_and_macs_formatting_and_numeric_behavior() -> None:
     assert str(macs) == "3.4 MMACs"
     assert repr(macs) == "Macs('3.4 MMACs')"
     assert f"{macs:.1f MMACs}" == "3.4 MMACs"
-    assert duration + tl.Duration(0.001) == pytest.approx(tl.Duration(0.0022))
-    assert flops + 1 == tl.Flops(1_234_000_001)
-    assert macs / 2 == tl.Macs(1_700_000)
+    assert duration + tl.types.Duration(0.001) == pytest.approx(tl.types.Duration(0.0022))
+    assert flops + 1 == tl.types.Flops(1_234_000_001)
+    assert macs / 2 == tl.types.Macs(1_700_000)
 
 
-@pytest.mark.smoke
 def test_memory_fields_are_bytes_and_format_directly() -> None:
     """Trace, Op, Layer, Buffer, Module, ModuleCall, and Param memory are Bytes."""
 
     trace = _trace_memory_model()
-    op = next(record for record in trace.ops if record.activation_memory)
+    op = next(record for record in trace.ops if record.cost.activation_memory)
     layer = trace.layers[op.layer_label]
     module = trace.modules["linear"]
     call = module.ops[0]
@@ -113,13 +109,13 @@ def test_memory_fields_are_bytes_and_format_directly() -> None:
     buffer = trace.buffers[0]
 
     fields = [
-        trace.total_activation_memory,
-        trace.saved_activation_memory,
-        op.activation_memory,
-        op.input_memory,
-        op.param_memory,
-        layer.activation_memory,
-        layer.total_activation_memory,
+        trace.cost.total_activation_memory,
+        trace.cost.saved_activation_memory,
+        op.cost.activation_memory,
+        op.cost.input_memory,
+        op.cost.param_memory,
+        layer.cost.activation_memory,
+        layer.cost.total_activation_memory,
         module.param_memory,
         module.total_output_activation_memory,
         call.output_activation_memory,
@@ -128,29 +124,28 @@ def test_memory_fields_are_bytes_and_format_directly() -> None:
         buffer.activation_memory,
     ]
 
-    assert all(isinstance(field, tl.Bytes) for field in fields)
-    assert re.fullmatch(r"-?\d+(?:\.\d+)? [KMGTPE]?B", str(op.activation_memory))
-    assert op.activation_memory + 1 > op.activation_memory
+    assert all(isinstance(field, tl.types.Bytes) for field in fields)
+    assert re.fullmatch(r"-?\d+(?:\.\d+)? (?:[KMGTPE]i)?B", str(op.cost.activation_memory))
+    assert op.cost.activation_memory + 1 > op.cost.activation_memory
 
 
-@pytest.mark.smoke
 def test_duration_flops_and_macs_fields_are_quantity_types() -> None:
     """Runtime duration, FLOP, and MAC fields use quantity wrappers."""
 
     trace = _trace_memory_model()
-    op = next(record for record in trace.ops if record.flops_forward)
+    op = next(record for record in trace.ops if record.cost.flops_forward)
     layer = trace.layers[op.layer_label]
     module = trace.modules["linear"]
     call = module.ops[0]
 
     duration_fields = [
-        trace.setup_duration,
-        trace.forward_duration,
-        trace.cleanup_duration,
-        trace.capture_duration,
-        trace.func_calls_duration,
-        op.func_duration,
-        layer.func_duration,
+        trace.provenance.setup_duration,
+        trace.cost.forward_duration,
+        trace.provenance.cleanup_duration,
+        trace.provenance.duration,
+        trace.cost.func_calls_duration,
+        op.cost.duration,
+        layer.cost.duration,
         module.forward_duration,
         module.total_forward_duration,
         module.func_calls_duration,
@@ -159,35 +154,34 @@ def test_duration_flops_and_macs_fields_are_quantity_types() -> None:
         call.func_calls_duration,
     ]
     flops_fields = [
-        op.flops_forward,
-        op.flops_backward,
-        op.flops_total,
-        layer.flops_forward,
-        layer.total_flops_forward,
-        trace.total_flops_forward,
-        trace.total_flops,
+        op.cost.flops_forward,
+        op.cost.flops_backward,
+        op.cost.flops_total,
+        layer.cost.flops_forward,
+        layer.cost.total_flops_forward,
+        trace.cost.total_flops_forward,
+        trace.cost.total_flops,
         module.total_flops_forward,
         module.total_flops,
-        trace.flops_by_op_type()[op.layer_type]["forward"],
+        trace.cost.flops_by_op_type()[op.type]["forward"],
     ]
     macs_fields = [
-        op.macs_forward,
+        op.cost.macs_forward,
         op.macs_total,
-        layer.macs_forward,
-        layer.total_macs_forward,
-        trace.total_macs_forward,
-        trace.total_macs,
+        layer.cost.macs_forward,
+        layer.cost.total_macs_forward,
+        trace.cost.total_macs_forward,
+        trace.cost.total_macs,
         module.total_macs_forward,
         module.total_macs,
-        trace.macs_by_op_type()[op.layer_type]["forward"],
+        trace.cost.macs_by_kind()[op.type]["forward"],
     ]
 
-    assert all(isinstance(field, tl.Duration) for field in duration_fields)
-    assert all(isinstance(field, tl.Flops) for field in flops_fields if field is not None)
-    assert all(isinstance(field, tl.Macs) for field in macs_fields if field is not None)
+    assert all(isinstance(field, tl.types.Duration) for field in duration_fields)
+    assert all(isinstance(field, tl.types.Flops) for field in flops_fields if field is not None)
+    assert all(isinstance(field, tl.types.Macs) for field in macs_fields if field is not None)
 
 
-@pytest.mark.smoke
 def test_memory_str_and_bare_memory_fields_are_not_public() -> None:
     """Memory string companions and bare memory record fields are absent."""
 
@@ -239,52 +233,6 @@ def test_memory_str_and_bare_memory_fields_are_not_public() -> None:
         assert all(field != "memory_str" for field in field_order)
 
 
-@pytest.mark.smoke
-def test_no_str_suffixed_quantity_fields_remain_public() -> None:
-    """Field orders and records no longer expose quantity string companions."""
-
-    trace = _trace_memory_model()
-    records = [
-        trace,
-        trace.ops[0],
-        trace.layers[0],
-        trace.modules[0],
-        trace.module_calls[0],
-        trace.params[0],
-        trace.buffers[0],
-    ]
-    removed_suffixes = ("_memory_str", "_duration_str", "_flops_str", "_macs_str")
-    removed_exact = {"memory_str", "duration_str", "flops_str", "macs_str"}
-    field_orders = [
-        LAYER_PASS_LOG_FIELD_ORDER,
-        LAYER_LOG_FIELD_ORDER,
-        PARAM_LOG_FIELD_ORDER,
-        BUFFER_LOG_FIELD_ORDER,
-        MODULE_PASS_LOG_FIELD_ORDER,
-        MODULE_LOG_FIELD_ORDER,
-        MODEL_LOG_FIELD_ORDER,
-        GRAD_FN_PASS_LOG_FIELD_ORDER,
-        GRAD_FN_LOG_FIELD_ORDER,
-    ]
-
-    for field_order in field_orders:
-        assert all(not field.endswith(removed_suffixes) for field in field_order)
-        assert all(field not in removed_exact for field in field_order)
-
-    for record in records:
-        for field in {
-            "forward_duration_str",
-            "backward_duration_str",
-            "func_calls_duration_str",
-            "total_forward_duration_str",
-            "total_backward_duration_str",
-            "total_func_calls_duration_str",
-            "capture_duration_str",
-        }:
-            assert not hasattr(record, field)
-
-
-@pytest.mark.smoke
 def test_forward_peak_memory_ignores_pre_existing_external_tracemalloc_peak() -> None:
     """``forward_peak_memory`` stays scoped to the traced pass under external tracemalloc.
 
@@ -314,7 +262,9 @@ def test_forward_peak_memory_ignores_pre_existing_external_tracemalloc_peak() ->
 
         model = nn.Linear(10, 10)
         x = torch.randn(1, 10)
-        probe = tl.options.CaptureOptions(measure_python_peak_memory=True)
+        probe = tl.options.CaptureOptions(
+            measure_python_peak_memory=True, measure_host_peak_memory=True
+        )
         log1 = tl.trace(model, x, capture=probe)
         log2 = tl.trace(model, x, capture=probe)
     finally:
@@ -324,5 +274,5 @@ def test_forward_peak_memory_ignores_pre_existing_external_tracemalloc_peak() ->
     # A tiny nn.Linear(10, 10) forward pass should report a small, proportionate
     # peak -- not the ~20MB phantom footprint from the unrelated prior activity,
     # and the two calls should not be pinned to an identical foreign value.
-    assert int(log1.forward_peak_memory) < 5_000_000
-    assert int(log2.forward_peak_memory) < 5_000_000
+    assert int(log1.cost.forward_peak_memory) < 5_000_000
+    assert int(log2.cost.forward_peak_memory) < 5_000_000

@@ -44,4 +44,4 @@ def mlx_shape_templates(capture: Any, node_id: str, program: Any, binding: Any) 
     return args, kwargs
 
 
-__all__ = ["mlx_shape_templates"]
+__all__ = ("mlx_shape_templates",)

@@ -116,7 +116,7 @@ def test_yolo26_detection_split_replay_cross_batch_and_device(cross_device: bool
         from torch import nn
 
         from torchlens.split import SplitFeatures, prepare_graph
-        from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
+        from torchlens._utils._torch_compat import get_dynamo_optimized_module_type
 
         get_dynamo_optimized_module_type(force_probe=True)
         from ultralytics import YOLO
@@ -204,7 +204,7 @@ def test_yolov8n_smallest_dag_partitions_cross_batch_and_device() -> None:
         from dag_helpers import smallest_transfer_partitions
 
         from torchlens.split import prepare_graph
-        from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
+        from torchlens._utils._torch_compat import get_dynamo_optimized_module_type
 
         torch.set_num_threads(1)
         get_dynamo_optimized_module_type(force_probe=True)
@@ -306,6 +306,7 @@ def test_yolov8n_smallest_dag_partitions_cross_batch_and_device() -> None:
                         cpu_boundary.to("cuda", adapter=gpu_runtime.adapter)
                     )
                     assert_structure(cpu_to_cuda, gpu_expected[batch], "cuda")
+                    assert_same(cpu_to_cuda, gpu_expected[batch])
                     counts["cpu_cuda"] += 1
                     gpu_boundary = gpu_runtime.run_prefix(gpu_inputs[batch])
                     assert gpu_boundary.tensors.keys() == gpu_boundary.spec.keys()
@@ -313,6 +314,7 @@ def test_yolov8n_smallest_dag_partitions_cross_batch_and_device() -> None:
                         gpu_boundary.to("cpu", adapter=cpu_runtime.adapter)
                     )
                     assert_structure(cuda_to_cpu, cpu_expected[batch], "cpu")
+                    assert_same(cuda_to_cpu, cpu_expected[batch])
                     counts["cuda_cpu"] += 1
         expected_counts = {
             "cpu": len(points) * 3,
@@ -347,7 +349,7 @@ def test_rfdetr_smallest_dag_partitions_cross_batch_and_device() -> None:
         from torch import nn
 
         from torchlens.split import prepare_graph
-        from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
+        from torchlens._utils._torch_compat import get_dynamo_optimized_module_type
 
         torch.set_num_threads(1)
         os.environ.setdefault("RF_HOME", str(Path.home() / ".cache" / "torchlens" / "models" / "rfdetr"))
@@ -411,6 +413,11 @@ def test_rfdetr_smallest_dag_partitions_cross_batch_and_device() -> None:
 
 
         detector = RFDETRNano()
+        # The model constructor enables TF32. CPU and CUDA numerical oracles
+        # must use the same float32 policy; proposal ranking amplifies TF32
+        # rounding into different detections even without Split execution.
+        torch.set_float32_matmul_precision("highest")
+        torch.backends.cudnn.allow_tf32 = False
         checkpoint_path = Path(os.environ["RF_HOME"]) / "rf-detr-nano.pth"
         hasher = hashlib.sha256()
         with checkpoint_path.open("rb") as checkpoint:
@@ -480,6 +487,7 @@ def test_rfdetr_smallest_dag_partitions_cross_batch_and_device() -> None:
                         cpu_boundary.to("cuda", adapter=gpu_runtime.adapter)
                     )
                     assert_structure(cpu_to_cuda, gpu_expected[batch], "cuda")
+                    assert_same(cpu_to_cuda, gpu_expected[batch])
                     counts["cpu_cuda"] += 1
                     del cpu_boundary, cpu_to_cuda
                     gpu_boundary = gpu_runtime.run_prefix(gpu_inputs[batch])
@@ -488,6 +496,7 @@ def test_rfdetr_smallest_dag_partitions_cross_batch_and_device() -> None:
                         gpu_boundary.to("cpu", adapter=cpu_runtime.adapter)
                     )
                     assert_structure(cuda_to_cpu, cpu_expected[batch], "cpu")
+                    assert_same(cuda_to_cpu, cpu_expected[batch])
                     counts["cuda_cpu"] += 1
                     del gpu_boundary, cuda_to_cpu
                 if progress_prefix:

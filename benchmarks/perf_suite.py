@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from benchmarks.host_label import benchmark_host_label, redact_local_paths  # noqa: E402
 from benchmarks.op_ownership import is_torchlens_operation  # noqa: E402
 from benchmarks.perf_gate import (  # noqa: E402
     compare_gate_payloads,
@@ -104,10 +105,10 @@ OP_LABELS = {
     "tl_trace": "TL Trace, every-op capture",
     "tl_trace_profile": "TL Trace, phase profile",
     "trace_no_save": "TL Trace, metadata only (no saved outs)",
-    "tl_trace_intervention_ready": "TL Trace, intervention_ready=True",
-    "tl_rerun": "Trace.rerun(model, x)",
-    "rerun_metadata_only": "Trace.rerun(model, x), metadata-only save scope",
-    "rerun_no_save": "Trace.rerun(model, x), metadata-only save scope (legacy alias)",
+    "tl_trace_intervention_ready": "TL Trace, replayable=True",
+    "tl_rerun": "Trace.run(model, x)",
+    "rerun_metadata_only": "Trace.run(model, x), metadata-only save scope",
+    "rerun_no_save": "Trace.run(model, x), metadata-only save scope (legacy alias)",
     "fastlog_module": "fastlog module-boundary metadata",
     "fastlog_zero": "fastlog zero-retention predicates",
     "fastlog_halt_25": "fastlog halt at 25% op depth",
@@ -117,8 +118,8 @@ OP_LABELS = {
     "fastlog_op_50": "fastlog 50% op selectivity",
     "fastlog_all": "fastlog all-op/all-module",
     "aux_validate": "tl.validate(scope='forward')",
-    "aux_compat_report": "tl.compat.report",
-    "aux_save": "tl.save fresh tlspec path",
+    "aux_compat_report": "tl.report.doctor",
+    "aux_save": "Trace.save fresh tlspec bundle",
     "aux_load": "tl.load saved fixture",
     "peer_manual_hooks": "Vanilla hooks manual dict",
     "peer_context_hooks": "Vanilla hooks context manager",
@@ -177,7 +178,7 @@ def _git_sha() -> str | None:
 
 
 def _redact_subprocess_tail(text: str) -> str:
-    """Redact long hex strings from subprocess output tails.
+    """Redact long hex strings and local paths from subprocess output tails.
 
     Parameters
     ----------
@@ -187,10 +188,10 @@ def _redact_subprocess_tail(text: str) -> str:
     Returns
     -------
     str
-        Output with high-entropy hashes replaced.
+        Output with high-entropy hashes replaced and the checkout spelled ``<repo>``.
     """
 
-    return LONG_HEX_RE.sub("<hex-redacted>", text)
+    return redact_local_paths(LONG_HEX_RE.sub("<hex-redacted>", text), REPO_ROOT)
 
 
 def _cuda_core_models() -> list[str]:
@@ -817,7 +818,7 @@ def _wrapper_only_headline(rows: list[dict[str, Any]]) -> str:
     if trace_ratio is None or full_ratio is None:
         return (
             "Headline insight: the no-save rows separate TorchLens wrapper and metadata "
-            "overhead from tensor data the user chose to capture. `layers_to_save=[]` is "
+            "overhead from tensor data the user chose to capture. `save=[]` is "
             "the verified metadata-only Trace path, and `fastlog_zero` retains no op or "
             "module records."
         )
@@ -988,7 +989,7 @@ def _write_report(payload: dict[str, Any], path: Path = RESULT_MD) -> None:
         "",
         "Gradient mode is enabled for headline rows, models are in eval mode, dtype is "
         "float32, autocast is not used, TF32 is disabled, and seeds are fixed to 0. "
-        "`Trace.rerun(model, x)` uses the round-4 steady-state contract: capture once before "
+        "`Trace.run(model, x)` uses the round-4 steady-state contract: capture once before "
         "the timing loop, run warmups, then measure repeated reruns on that same Trace.",
         "",
         "## Environment",
@@ -1065,7 +1066,7 @@ def _write_report(payload: dict[str, Any], path: Path = RESULT_MD) -> None:
             "- Sub-ms operations can legitimately show 0.0 MB USS delta because allocators reuse pages.",
             "- TorchLens Trace captures every tensor-producing torch operation; peer hook rows capture module boundaries only.",
             "- HF GPT-2 and HookedTransformer GPT-2 are separate model implementations and should not be compared row-by-row.",
-            "- No-save Trace rows use `layers_to_save=[]`, which records metadata for every op but saves no activation tensors.",
+            "- No-save Trace rows use `save=[]`, which records metadata for every op but saves no activation tensors.",
             "",
             "## Rerun Tolerance",
             "",
@@ -1104,7 +1105,7 @@ def _hooked_smoke(timeout: int, threads: int) -> dict[str, Any]:
         timeout=timeout,
         tag="hooked_smoke",
         threads=threads,
-    ) | {"smoke": "hooked_transformer_tl_capture", "out": str(out)}
+    ) | {"smoke": "hooked_transformer_tl_capture", "out": redact_local_paths(str(out), REPO_ROOT)}
 
 
 def parse_args() -> argparse.Namespace:
@@ -1291,7 +1292,7 @@ def main() -> None:
             "smoke": args.smoke,
             "wall_clock_s": addendum_wall_clock_s,
             "environment": {
-                "hostname": platform.node(),
+                "hostname": benchmark_host_label(),
                 "os": f"{platform.system()} {platform.release()}",
                 "cpu_model": _cpu_model(),
                 "torch_threads_pin": args.threads,

@@ -10,12 +10,9 @@ dtype's own ULP scale (fp16 must not inherit bf16's 10x coarser band).
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from torchlens.backends.mlx.validation import _payloads_close as mlx_payloads_close
 from torchlens.backends.tf.validation import _payloads_close as tf_payloads_close
-
-pytestmark = pytest.mark.smoke
 
 
 def test_tf_oracle_treats_identical_nan_patterns_as_agreement() -> None:
@@ -85,7 +82,7 @@ def test_blas_layout_band_rejects_beyond_64_ulp() -> None:
 
     import torch
 
-    from torchlens._runnable_path_faithfulness import _within_layout_reduction_tolerance
+    from torchlens._runnable.path_faithfulness import _within_layout_reduction_tolerance
 
     eps = torch.finfo(torch.float32).eps
     archived = torch.full((64,), 1.0, dtype=torch.float32)

@@ -6,64 +6,18 @@ import inspect
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 import torch.utils.dlpack  # noqa: F401  (ensure torch.utils.dlpack.to_dlpack is importable to patch)
 
 from ... import _state
 
-# r-b4 R26-6c: module import so the flag is read at USE time (an import-time
+# module import so the flag is read at USE time (an import-time
 # value binding never sees runtime capability flips).
-from ...utils import _torch_compat
-from ...utils._torch_symbols import torch_attr
-
-if TYPE_CHECKING:
-    from .completeness_witness import (
-        _HOST_ESCAPE_OBSERVER_FAILED,
-        _INPUT_METADATA_INT_PROPERTY_NAMES,
-        _INPUT_METADATA_PRESENCE_PROPERTY_NAMES,
-        _MODULE_ESCAPE_TARGETS,
-        _STATE_METADATA_DIRECT_ONLY_NAMES,
-        _STATE_METADATA_PLACEMENT_OBSERVED_NAMES,
-        _STATE_ROUTE_READ_KIND,
-        _STORAGE_RAW_POINTER_TARGETS,
-        _STORAGE_WRAPPED_DISPOSITIONS,
-        HOST_VALUE_ESCAPE_METHODS,
-        HOST_VALUE_ESCAPE_MODULE_FUNCS,
-        INPUT_METADATA_BOOL_METHODS,
-        INPUT_METADATA_PREDICATE_FUNCS,
-        INPUT_METADATA_PROPERTY_NAMES,
-        INVISIBLE_HOST_ESCAPE_FUNCS,
-        INVISIBLE_HOST_ESCAPE_PROPERTIES,
-        STATE_METADATA_MIRROR,
-        STORAGE_BRIDGE_ESCAPE_FUNCS,
-        STORAGE_METADATA_ACCESSOR_DISPOSITIONS,
-        _check_writeback_watch,
-        _discharge_placement_dispatch,
-        _internal_read_active,
-        _make_host_value_escape_method,
-        _make_host_value_predicate_module_wrapper,
-        _make_invisible_escape_property,
-        _make_invisible_escape_wrapper,
-        _make_module_escape_wrapper,
-        _make_nonowner_ops_call,
-        _make_nonowner_private_c_callable,
-        _make_storage_metadata_wrapper,
-        _make_storage_property_wrapper,
-        _make_storage_raw_pointer_wrapper,
-        _nonowner_escape_observe,
-        _observe_input_metadata_read,
-        _observe_state_metadata_read,
-        _observe_state_metadata_read_direct,
-        _observe_state_placement_read,
-        _observe_state_property_read,
-        _placement_read_witnessed,
-        _private_c_module_callables,
-        _StorageOriginRegistry,
-        _torch_ops_call_classes,
-        _WitnessState,
-    )
+from ..._utils import _torch_compat
+from ..._utils._tensor_label import DescriptorCompatProperty
+from ..._utils._torch_symbols import torch_attr
 
 __all__ = (
     "_make_input_metadata_wrapper",
@@ -112,7 +66,7 @@ def _make_input_metadata_wrapper(
         if isinstance(self, torch.Tensor) and _state._active_trace is state.trace:
             if threading.get_ident() == state.owner_thread_id:
                 if _state._logging_enabled and not _internal_read_active():
-                    # r63 C1 (r65: table-driven): a layout read on REGISTERED STATE (param/
+                    # Table-driven: a layout read on REGISTERED STATE (param/
                     # buffer or a storage alias of one) attributes a state escape + a
                     # per-slot read-kind fact BEFORE the input-scoped observation (receiver
                     # sets are disjoint; a state receiver is invisible to the input nets).
@@ -142,7 +96,7 @@ def _make_input_metadata_wrapper(
                             return result
                         _observe_input_metadata_read(state.trace, self, "stride", full_stride)
             elif state.belt_armed:
-                # r43: a non-owner metadata read on a CAPTURED input tensor is a captured-tensor
+                # a non-owner metadata read on a CAPTURED input tensor is a captured-tensor
                 # touch -> ceiling; a read on an unrelated own tensor records nothing.
                 _nonowner_escape_observe(state, self)
         return result
@@ -153,7 +107,7 @@ def _make_input_metadata_wrapper(
 def _make_input_metadata_bool_method(original: Any, state: _WitnessState, name: str) -> Any:
     """Wrap a boolean host-value METHOD (``is_conj`` / ``is_neg`` / ``is_inference`` /
     ``is_pinned`` / ``is_shared`` / ``is_coalesced`` / ``_is_view``) to record a MODEL-INPUT
-    metadata fact, then call through (r31).
+    metadata fact, then call through.
 
     The wrapper computes the original result first (byte-identical behavior; an accessor that
     raises -- e.g. ``is_coalesced`` on a dense tensor -- propagates unchanged and records
@@ -203,7 +157,7 @@ def _make_input_metadata_bool_method(original: Any, state: _WitnessState, name: 
         try:
             result = original(self, *args, **kwargs)
         except Exception:
-            # r67 C3: a RAISING placement accessor on a state receiver is control-flow
+            # a RAISING placement accessor on a state receiver is control-flow
             # signal with no reproducible observed value -- record unknown (refuse).
             if is_placement and _owner_observing():
                 _observe_state_placement_read(state.trace, self, name, None)
@@ -220,8 +174,7 @@ def _make_input_metadata_bool_method(original: Any, state: _WitnessState, name: 
                     and _state._logging_enabled
                     and not _internal_read_active()
                 ):
-                    # r63 C1 (r65: FULL mirror, table-driven -- the is_conj/is_neg-only
-                    # branch is gone): every bool metadata accessor is a PHYSICAL state
+                    # Full mirror, table-driven: every bool metadata accessor is a PHYSICAL state
                     # fact normalized by transport+staging, so a read on registered state
                     # attributes a state escape + read-kind fact. The alias-safe subset
                     # (conj/neg bits, storage/creation placement) attributes by STORAGE
@@ -229,12 +182,12 @@ def _make_input_metadata_bool_method(original: Any, state: _WitnessState, name: 
                     # ``_is_view`` is autograd-family and attributes DIRECT-receiver-only;
                     # ``is_coalesced`` is structural (raises on dense strided state, and
                     # sparse layouts are refused at bind/save by the layout dim).
-                    # r67 C3: ``is_shared``/``is_pinned`` carry the ACTUAL returned value
+                    # ``is_shared``/``is_pinned`` carry the ACTUAL returned value
                     # into the observation ledger (observed-value read kinds).
                     state_route = STATE_METADATA_MIRROR.get(name)
                     if is_placement:
                         _observe_state_placement_read(state.trace, self, name, bool(result))
-                        # r67 C3: an attributed placement dispatch (``aten.is_pinned``) is
+                        # an attributed placement dispatch (``aten.is_pinned``) is
                         # witnessed by the observation/fact ledgers -- discharge its census
                         # event so an ATTRIBUTED read no longer ceilings as an unmodeled
                         # host return; an unattributed receiver keeps the fact.
@@ -291,9 +244,9 @@ def _make_input_metadata_grad_property(
         if isinstance(self, torch.Tensor) and _state._active_trace is state.trace:
             if threading.get_ident() == state.owner_thread_id:
                 if _state._logging_enabled and not _internal_read_active():
-                    # r65 Cluster X: the STATE branch (the r64 gap -- this wrapper had
-                    # none, so ``self.w.requires_grad`` / ``self.b._version`` reads on
-                    # registered state recorded NOTHING). Dispatched through the
+                    # The STATE branch (so ``self.w.requires_grad`` /
+                    # ``self.b._version`` reads on registered state are recorded).
+                    # Dispatched through the
                     # authoritative mirror BEFORE the input-scoped observation (receiver
                     # sets are disjoint): ``requires_grad``/``grad_fn`` record a declared
                     # fact staging reproduces; the rest record escape-gated read kinds.
@@ -327,7 +280,12 @@ def _make_input_metadata_grad_property(
         """
         descriptor.__set__(self, value)
 
-    return property(getter, setter if has_setter else None)
+    # doc= MUST be explicit (never defaulted): see DescriptorCompatProperty's
+    # constructor-landmine note in _tl.py.
+    replacement = DescriptorCompatProperty(getter, setter if has_setter else None, doc=name)
+    replacement.__objclass__ = getattr(descriptor, "__objclass__", torch.Tensor)
+    replacement.__name__ = name
+    return replacement
 
 
 @contextmanager
@@ -343,7 +301,7 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
     the active forward, so TorchLens-internal conversions do not register as user escapes.
     """
 
-    # r3 R07 (shadow gaps): every ``torch.Tensor``/storage-class registry is
+    # Every ``torch.Tensor``/storage-class registry is
     # shadow-aware -- most of these names (``tolist``/``numpy``/``data_ptr``/
     # ``stride``/``is_contiguous``/the bool-method belt/``UntypedStorage.
     # data_ptr``) live as C slots on the BASE class and are NOT in the patched
@@ -372,7 +330,7 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
 
         state.belt_armed = False
         _state._nonowner_belt_armed = False
-        # r47 hon2_1: restore the ``torch._ops`` class ``__call__`` patches FIRST and only when the
+        # Restore the ``torch._ops`` class ``__call__`` patches FIRST and only when the
         # current attr is still OUR wrapper (preserve a user mutation). A restore failure fails
         # closed. A leaked patch would corrupt ALL torch dispatch process-wide, so this must always
         # run -- it is the first action of the unconditional ``finally``.
@@ -383,7 +341,7 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
                     setattr(_ops_cls, "__call__", _ops_original)
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        # r49 hon2_1: restore the private-C module free-function patches, sentinel-guarded
+        # Restore the private-C module free-function patches, sentinel-guarded
         # (preserve any user mutation) and fail-closed on a restore failure. A leaked patch
         # would misobserve later forwards, so this runs in the unconditional ``finally``
         # alongside the ``torch._ops`` restore.
@@ -415,7 +373,7 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
                     delattr(storage_cls, "data_ptr")
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        # r67 C3: restore the storage accessor wrappers shadow-aware (delete a shadow that
+        # restore the storage accessor wrappers shadow-aware (delete a shadow that
         # was not originally in the class ``__dict__``) and disarm the origin map. A restore
         # failure fails closed -- a leaked wrapper would misobserve later forwards.
         for storage_cls, member, was_shadowed, restore_value in storage_member_restore:
@@ -460,7 +418,7 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
                     delattr(torch.Tensor, prop_name)
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
-        # r39 hon2_1: restore the host-value method belt shadow-aware (delete a shadow that
+        # Restore the host-value method belt shadow-aware (delete a shadow that
         # was not originally in ``torch.Tensor.__dict__``). A restore failure fails closed.
         for name, (was_shadowed, original) in host_value_method_restore.items():
             try:
@@ -490,7 +448,7 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
             originals[name] = (shadowed, original)
-        # r39 hon2_1: mode-independent belt for the aten census -- the scalar numeric protocol
+        # Mode-independent belt for the aten census -- the scalar numeric protocol
         # (``item``/``__bool__``/``__int__``/``__float__``/``__index__``/``__complex__``) and the
         # pure predicates (``equal``/``allclose``/``is_nonzero``). These fire regardless of
         # dispatch-mode state, so a scalar/predicate escape inside torch's own
@@ -525,14 +483,12 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
             module_originals.append((module, func_name, original_func))
-        # r39 hon2_1: the ``torch.*`` MODULE predicate spellings (``torch.equal`` / ``torch.allclose``
+        # The ``torch.*`` MODULE predicate spellings (``torch.equal`` / ``torch.allclose``
         # / ``torch.is_nonzero``) return a raw Python bool DIRECTLY from the dispatcher and, under an
-        # explicit ``_disable_current_modes()`` region, bypass the census (E6). Record every tensor
+        # explicit ``_disable_current_modes()`` region, bypass the census. Record every tensor
         # operand -- the same shared source table as the Tensor-method belt.
         for predicate_name in HOST_VALUE_ESCAPE_MODULE_FUNCS:
-            original_predicate = torch_attr(
-                predicate_name
-            )  # r47 secD_1: no lazy ``torch.__getattr__``
+            original_predicate = torch_attr(predicate_name)  # no lazy ``torch.__getattr__``
             if original_predicate is None or not callable(original_predicate):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
@@ -546,7 +502,7 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
             module_originals.append((torch, predicate_name, original_predicate))
-        # Storage-handle raw-pointer accessors (r16-C1): ``UntypedStorage.data_ptr`` /
+        # Storage-handle raw-pointer accessors: ``UntypedStorage.data_ptr`` /
         # ``TypedStorage.data_ptr`` reach the SAME raw pointer as ``Tensor.data_ptr`` but off the
         # storage object, so the Tensor patch never sees them. Fail closed on a genuine user call.
         # W1_F3 (round7 B1 class): an EMPTY storage-class scan is version-drift uncertainty, not
@@ -569,7 +525,7 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
             storage_originals.append((storage_cls, storage_shadowed, storage_original))
-        # r67 C3/C6: arm the capture-scoped storage-origin map and install the actual-read
+        # arm the capture-scoped storage-origin map and install the actual-read
         # accessor wrappers over BOTH storage classes' public surfaces, table-driven from
         # ``STORAGE_METADATA_ACCESSOR_DISPOSITIONS``. Fail CLOSED: an install failure on a
         # wrap-required row downgrades the capture to INCOMPLETE (a silent skip would be a
@@ -618,12 +574,14 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
                 continue
             shadowed = name in torch.Tensor.__dict__
             try:
-                setattr(torch.Tensor, name, _make_invisible_escape_property(descriptor, state))
+                setattr(
+                    torch.Tensor, name, _make_invisible_escape_property(descriptor, state, name)
+                )
             except (TypeError, AttributeError):
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
             property_originals[name] = (shadowed, descriptor)
-        # Model-input METADATA-PREDICATE observers (r27-H2): ``is_contiguous`` / ``stride``
+        # Model-input METADATA-PREDICATE observers: ``is_contiguous`` / ``stride``
         # methods and the ``requires_grad`` getset descriptor. Read-through recorders gated to
         # MODEL-INPUT receivers only; a model that never reads input layout/grad records nothing.
         stride_original = getattr(torch.Tensor, "stride", None)
@@ -643,7 +601,7 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
             metadata_originals[name] = (shadowed, original)
-        # Model-input BOOLEAN metadata METHODS beyond the layout trio (r31): ``is_conj`` /
+        # Model-input BOOLEAN metadata METHODS beyond the layout trio: ``is_conj`` /
         # ``is_neg`` / ``is_inference`` / ``is_pinned`` / ``is_shared`` / ``is_coalesced`` /
         # ``_is_view``. Feature-detected (an accessor absent on the running torch is skipped) and
         # gated to model-input receivers/aliases only; a model that never reads them records nothing.
@@ -679,14 +637,14 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
             grad_property_restore[prop_name] = (shadowed, prop_descriptor)
-        # r43: arm the non-owner captured-tensor belt for the whole forward window. The non-owner
+        # arm the non-owner captured-tensor belt for the whole forward window. The non-owner
         # observers gate on THIS flag, never the owner's ``pause_logging``-toggled ``_logging_enabled``.
-        # r45 hon2_1: ``_state._nonowner_belt_armed`` mirrors ``belt_armed`` (SAME lifetime) so the
+        # ``_state._nonowner_belt_armed`` mirrors ``belt_armed`` (SAME lifetime) so the
         # GLOBAL torch-function wrapper's non-owner fast path can short-circuit on one bool read and
         # only invoke the captured-operand observer during an armed runnable capture.
         state.belt_armed = True
         _state._nonowner_belt_armed = True
-        # r47 hon2_1: install a PROCESS-WIDE class-level observer on every ``torch._ops`` class that
+        # Install a PROCESS-WIDE class-level observer on every ``torch._ops`` class that
         # defines its own ``__call__`` (the ``torch.ops.*`` aten / higher-order / TorchBind surface,
         # which bypasses the global torch-FUNCTION wrapper and whose aten census is thread-local). This
         # is armed-lifecycle-scoped: installed for EXACTLY this forward window and restored FIRST in the
@@ -704,7 +662,7 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
                 _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
             torch_ops_call_restore.append((_ops_cls, _ops_original))
-        # r49 hon2_1: extend the armed-lifecycle observer to the patchable private-C FREE-FUNCTION
+        # Extend the armed-lifecycle observer to the patchable private-C FREE-FUNCTION
         # modules (``torch._C._{nn,special,fft,linalg,sparse,nested}``), structurally enumerated
         # from the SAME curated forward-op module authority. These are a THIRD op surface: a
         # private-C free function bypasses BOTH the global torch-FUNCTION wrapper AND the
@@ -730,3 +688,64 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
     finally:
         _restore_installed()
         _check_writeback_watch(state)
+
+
+# Late imports: the split modules of this package import one another (cycles), so each
+# imports its siblings once every definition above exists.
+from ._completeness_boundaries import (  # noqa: E402
+    _observe_input_metadata_read,
+)
+from ._completeness_cross_thread import (  # noqa: E402
+    _internal_read_active,
+    _make_nonowner_ops_call,
+    _make_nonowner_private_c_callable,
+    _nonowner_escape_observe,
+    _private_c_module_callables,
+    _torch_ops_call_classes,
+)
+from ._completeness_dispatch import (  # noqa: E402
+    _make_invisible_escape_wrapper,
+)
+from ._completeness_finalize import (  # noqa: E402
+    _MODULE_ESCAPE_TARGETS,
+    _STORAGE_RAW_POINTER_TARGETS,
+    _check_writeback_watch,
+)
+from ._completeness_metadata import (  # noqa: E402
+    _discharge_placement_dispatch,
+    _observe_state_metadata_read,
+    _observe_state_metadata_read_direct,
+    _observe_state_placement_read,
+    _observe_state_property_read,
+    _placement_read_witnessed,
+)
+from ._completeness_storage import (  # noqa: E402
+    _make_host_value_escape_method,
+    _make_host_value_predicate_module_wrapper,
+    _make_invisible_escape_property,
+    _make_module_escape_wrapper,
+    _make_storage_metadata_wrapper,
+    _make_storage_property_wrapper,
+    _make_storage_raw_pointer_wrapper,
+)
+from .completeness_witness import (  # noqa: E402
+    _HOST_ESCAPE_OBSERVER_FAILED,
+    _INPUT_METADATA_INT_PROPERTY_NAMES,
+    _INPUT_METADATA_PRESENCE_PROPERTY_NAMES,
+    _STATE_METADATA_DIRECT_ONLY_NAMES,
+    _STATE_METADATA_PLACEMENT_OBSERVED_NAMES,
+    _STATE_ROUTE_READ_KIND,
+    _STORAGE_WRAPPED_DISPOSITIONS,
+    HOST_VALUE_ESCAPE_METHODS,
+    HOST_VALUE_ESCAPE_MODULE_FUNCS,
+    INPUT_METADATA_BOOL_METHODS,
+    INPUT_METADATA_PREDICATE_FUNCS,
+    INPUT_METADATA_PROPERTY_NAMES,
+    INVISIBLE_HOST_ESCAPE_FUNCS,
+    INVISIBLE_HOST_ESCAPE_PROPERTIES,
+    STATE_METADATA_MIRROR,
+    STORAGE_BRIDGE_ESCAPE_FUNCS,
+    STORAGE_METADATA_ACCESSOR_DISPOSITIONS,
+    _StorageOriginRegistry,
+    _WitnessState,
+)

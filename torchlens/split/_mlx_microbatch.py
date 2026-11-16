@@ -164,7 +164,10 @@ def train_mlx_microbatches(
     axes = _boundary_axes(runtime, boundary)
     batch = boundary.metadata.get("runtime_batch_size")
     if type(batch) is not int or batch < 1:
-        raise SplitBoundaryError("Microbatch training requires a positive logical batch.")
+        raise SplitBoundaryError(
+            "Microbatch training requires a positive logical batch.",
+            code=SplitBoundaryError.code,
+        )
     sizes = {min(batch, options.size)}
     if batch % options.size:
         sizes.add(batch % options.size)
@@ -193,4 +196,4 @@ def train_mlx_microbatches(
     )
 
 
-__all__ = ["MlxMicrobatchOptions", "train_mlx_microbatches"]
+__all__ = ("MlxMicrobatchOptions", "train_mlx_microbatches")

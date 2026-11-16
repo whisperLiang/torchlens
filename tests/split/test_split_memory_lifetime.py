@@ -142,6 +142,7 @@ def test_graph_connected_replay_still_computes_input_gradients() -> None:
     runtime.trace.cleanup()
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_cuda_replay_peak_tracks_frontier_not_chain_length() -> None:
     """Allocator peak measures real reclaimed storage, not just dead tensor objects."""
@@ -259,7 +260,7 @@ def test_shape_witness_omits_values_without_changing_retained_trace(
             (
                 int(inputs[0].shape[0]),
                 sum(op.out is not None for op in result),
-                sum(bool(op.has_saved_args) for op in result),
+                sum(bool(op.call.has_saved_args) for op in result),
             )
         )
         return result
@@ -305,8 +306,8 @@ def test_failed_shape_witness_never_recaptures_with_full_values(
     def require_saved_arguments(trace: Any) -> Any:
         """Simulate a witness needing the historical saved-scalar repair path."""
 
-        attempts.append(trace.save_arg_values)
-        if not trace.save_arg_values:
+        attempts.append(trace.options.save_args)
+        if not trace.options.save_args:
             raise SplitUnsupportedError("scalar parent requires saved arguments")
         return normalize(trace)
 

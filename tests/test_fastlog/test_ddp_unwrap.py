@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens.distributed import is_vetted_build
 
 
 class DdpModel(nn.Module):
@@ -25,6 +26,19 @@ class DdpModel(nn.Module):
         """Run the layer."""
 
         return self.linear(x)
+
+
+def _teardown_process_group(created: bool) -> None:
+    """Destroy the group this module created.
+
+    Lazily armed distributed capture needs no manual disarm here: armed state
+    is dormant once no process group is initialized, so it cannot steer later
+    captures in the session, and the conftest autouse fixture disarms whatever
+    a test armed.
+    """
+
+    if created and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 
 @pytest.fixture()
@@ -49,19 +63,27 @@ def process_group(tmp_path: Path) -> Iterator[None]:
             rank=0,
             world_size=1,
         )
-    yield
-    if created and torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()
+    try:
+        yield
+    finally:
+        _teardown_process_group(created)
 
 
-def test_ddp_wrapped_model_records_unwrapped_module(process_group: None) -> None:
-    """This exercises only the unwrapped .module, NOT DDP forward semantics."""
+def _record_under_group(*args: object, **kwargs: object):
+    """Call tl.record, expecting the unvetted-torch disclosure.
 
-    ddp_model = torch.nn.parallel.DistributedDataParallel(DdpModel())
+    Capturing under a genuinely initialized process group lazily arms
+    collective capture; on a census-vetted torch build that is silent, and on
+    an unvetted build (F1, Lead ruling 2026-10-01) it degrades and warns on
+    every capture entry -- the correct, honest product behavior (see
+    test_distributed_boundary_gloo.py::TestUnvettedTorchRefusesArming), not a
+    gap to route around.
+    """
 
-    recording = tl.fastlog.record(ddp_model, torch.ones(1, 2), default_op=True)
-
-    assert len(recording) > 0
+    if is_vetted_build():
+        return tl.record(*args, **kwargs)
+    with pytest.warns(UserWarning, match="uncaptured_collective_op"):
+        return tl.record(*args, **kwargs)
 
 
 def test_ddp_bundle_path_gets_rank_prefix(process_group: None, tmp_path: Path) -> None:
@@ -70,12 +92,37 @@ def test_ddp_bundle_path_gets_rank_prefix(process_group: None, tmp_path: Path) -
     ddp_model = torch.nn.parallel.DistributedDataParallel(DdpModel())
     requested = tmp_path / "bundle.tlfast"
 
-    recording = tl.fastlog.record(
+    recording = _record_under_group(
         ddp_model,
         torch.ones(1, 2),
-        default_op=True,
-        streaming=tl.StreamingOptions(bundle_path=requested, retain_in_memory=False),
+        recording=tl.options.RecordingOptions(default_op=True),
+        storage=tl.options.StorageOptions(path=requested, retain_in_memory=False),
     )
 
-    assert recording.bundle_path == tmp_path / "rank_00" / "bundle.tlfast"
+    assert recording.path == tmp_path / "rank_00" / "bundle.tlfast"
     assert (tmp_path / "rank_00" / "bundle.tlfast" / "manifest.json").exists()
+
+
+@pytest.mark.skipif(
+    not is_vetted_build(),
+    reason="full collective arming requires a census-vetted torch build "
+    "(torchlens.distributed.is_vetted_build() is False here)",
+)
+def test_process_group_teardown_leaves_distributed_capture_dormant(process_group: None) -> None:
+    """A capture under the group arms distributed capture; after teardown it is dormant.
+
+    Regression pin for the session-pollution leak: arming survives
+    ``destroy_process_group`` by design, and every later capture in the
+    process used to run under the completeness dispatch witness. With no group
+    initialized the armed state must not observe captures at all.
+    """
+
+    ddp_model = torch.nn.parallel.DistributedDataParallel(DdpModel())
+    tl.record(ddp_model, torch.ones(1, 2), recording=tl.options.RecordingOptions(default_op=True))
+    assert tl.distributed.is_armed(), "capture under an initialized group should auto-arm"
+
+    torch.distributed.destroy_process_group()
+
+    assert tl.distributed.is_armed(), "arming is process-lifetime"
+    later = tl.trace(DdpModel(), torch.ones(1, 2))
+    assert later._distributed_plane_p is None, "a groupless capture must not run plane-P"

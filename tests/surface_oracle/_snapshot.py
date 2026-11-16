@@ -12,17 +12,19 @@ from typing import Any
 import torch
 
 import torchlens as tl
-from torchlens import constants as tl_constants
-from torchlens.data_classes.backward_pass import BackwardPass
-from torchlens.data_classes.buffer import Buffer
-from torchlens.data_classes.func_call_location import FuncCallLocation
-from torchlens.data_classes.grad_fn import GradFn
-from torchlens.data_classes.grad_fn_call import GradFnCall
-from torchlens.data_classes.layer import Layer
-from torchlens.data_classes.module import Module, ModuleCall
-from torchlens.data_classes.op import Op
-from torchlens.data_classes.param import Param
-from torchlens.data_classes.trace import Trace
+from torchlens import _constants as tl_constants
+from torchlens._data_classes._record_groups import _RecordGroup
+from torchlens._data_classes.backward_pass import BackwardPass
+from torchlens._data_classes.buffer import Buffer
+from torchlens._data_classes.func_call_location import FuncCallLocation
+from torchlens._data_classes.grad_fn import GradFn
+from torchlens._data_classes.grad_fn_call import GradFnCall
+from torchlens._data_classes.layer import Layer
+from torchlens._data_classes.module import Module, ModuleCall
+from torchlens._data_classes.op import Op
+from torchlens._data_classes.param import Param
+from torchlens._data_classes.trace import Trace
+from torchlens._utils._record_group_table import LAYER_STORAGE_ATTRS, OP_STORAGE_ATTRS
 
 SNAPSHOT_VERSION = 1
 
@@ -52,7 +54,7 @@ _MEASURED_NAME_TOKENS = frozenset(
 #: Attributes whose values embed process-global counters (the per-process
 #: trace counter and fork counter). Digit runs are normalized so the golden
 #: does not depend on how many traces ran earlier in the process.
-_COUNTER_NORMALIZED_ATTRIBUTES = frozenset({"trace_label", "state_history"})
+_COUNTER_NORMALIZED_ATTRIBUTES = frozenset({"name", "state_history"})
 
 #: Nested mapping keys treated as measured wherever they appear (runtime
 #: object identities inside structured values such as ``state_history``).
@@ -82,6 +84,11 @@ _FIELD_ORDER_BY_CLASS: dict[type, tuple[str, ...]] = {
 }
 
 _RECORD_CLASSES = tuple(_FIELD_ORDER_BY_CLASS)
+
+#: Persisted field name -> attribute that reads it, where the public spelling
+#: moved into a concern group (``Op.flops_forward`` is read as ``op.cost.flops_forward``;
+#: the field keeps its persisted key in the snapshot).
+_STORAGE_ATTRS_BY_CLASS: dict[type, Any] = {Op: OP_STORAGE_ATTRS, Layer: LAYER_STORAGE_ATTRS}
 
 _MAX_DEPTH = 8
 
@@ -256,6 +263,9 @@ def _normalize_counters_deep(canonical: Any) -> Any:
 def snapshot_object(obj: Any) -> dict[str, Any]:
     """Snapshot the full public surface of one record object.
 
+    A concern-group view (``op.cost``) is recorded by type under its own name,
+    and each of its public members under ``<group>.<member>``.
+
     Parameters
     ----------
     obj:
@@ -268,28 +278,43 @@ def snapshot_object(obj: Any) -> dict[str, Any]:
     """
 
     surface: dict[str, Any] = {}
+    storage = _STORAGE_ATTRS_BY_CLASS.get(type(obj), {})
     for name in public_surface_names(type(obj)):
-        if name in SKIPPED_ATTRIBUTES:
-            surface[name] = f"<skipped: {SKIPPED_ATTRIBUTES[name]}>"
-            continue
-        if _is_measured_name(name):
-            try:
-                getattr(obj, name)
-            except Exception as error:  # noqa: BLE001 - surface truth
-                surface[name] = f"<measured raises {type(error).__name__}>"
-            else:
-                surface[name] = "<measured>"
-            continue
-        try:
-            value = getattr(obj, name)
-        except Exception as error:  # noqa: BLE001 - raising IS the contract
-            surface[name] = f"<raises {type(error).__name__}>"
-            continue
-        canonical_value = canonicalize(value)
-        if name in _COUNTER_NORMALIZED_ATTRIBUTES:
-            canonical_value = _normalize_counters_deep(canonical_value)
-        surface[name] = canonical_value
+        value = _snapshot_member(surface, obj, storage.get(name, name), name)
+        if isinstance(value, _RecordGroup):
+            for member in sorted(n for n in dir(value) if not n.startswith("_")):
+                _snapshot_member(surface, value, member, f"{name}.{member}")
     return surface
+
+
+def _snapshot_member(surface: dict[str, Any], obj: Any, attr: str, key: str) -> Any:
+    """Record ``obj.<attr>`` canonically in ``surface`` under ``key``; return the raw value.
+
+    The raw value is ``None`` when the member was skipped, measured or raised.
+    """
+
+    leaf = key.rsplit(".", 1)[-1]
+    if leaf in SKIPPED_ATTRIBUTES:
+        surface[key] = f"<skipped: {SKIPPED_ATTRIBUTES[leaf]}>"
+        return None
+    if _is_measured_name(leaf):
+        try:
+            getattr(obj, attr)
+        except Exception as error:  # noqa: BLE001 - surface truth
+            surface[key] = f"<measured raises {type(error).__name__}>"
+        else:
+            surface[key] = "<measured>"
+        return None
+    try:
+        value = getattr(obj, attr)
+    except Exception as error:  # noqa: BLE001 - raising IS the contract
+        surface[key] = f"<raises {type(error).__name__}>"
+        return None
+    canonical_value = canonicalize(value)
+    if leaf in _COUNTER_NORMALIZED_ATTRIBUTES:
+        canonical_value = _normalize_counters_deep(canonical_value)
+    surface[key] = canonical_value
+    return value
 
 
 def snapshot_trace_surface(trace: Trace) -> dict[str, Any]:
@@ -311,14 +336,17 @@ def snapshot_trace_surface(trace: Trace) -> dict[str, Any]:
         "trace": snapshot_object(trace),
     }
     families = {
-        "ops": trace.ops,
+        # Every row, keyed by label as ``trace.ops.items()`` was before sumfam
+        # F1: the counted ``trace.ops`` view leaves out input, output and
+        # buffer rows, and the surface oracle snapshots every record.
+        "ops": {op.label: op for op in trace._layer_list},
         "layers": trace.layers,
         "modules": trace.modules,
         "module_calls": trace.module_calls,
         "params": trace.params,
         "buffers": trace.buffers,
-        "grad_fns": trace.grad_fns,
-        "backward_passes": trace.backward_passes,
+        "grad_fns": trace.autograd.grad_fns,
+        "backward_passes": trace.autograd.backward_passes,
     }
     for family_name, accessor in families.items():
         if accessor is None:

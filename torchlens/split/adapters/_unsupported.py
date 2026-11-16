@@ -21,7 +21,9 @@ class UnsupportedSplitAdapter(SplitPolicyMixin):
 
         self.name = name
 
-    def _unsupported(self, capability: str) -> SplitUnsupportedError:
+    def _unsupported(
+        self, capability: str, *, code: str = SplitUnsupportedError.code
+    ) -> SplitUnsupportedError:
         """Build a structured unsupported-capability error."""
 
         return SplitUnsupportedError(
@@ -31,6 +33,7 @@ class UnsupportedSplitAdapter(SplitPolicyMixin):
                 split_point="",
                 reason=f"unsupported split {capability}",
             ),
+            code=code,
         )
 
     def is_tensor(self, value: Any) -> bool:
@@ -61,43 +64,64 @@ class UnsupportedSplitAdapter(SplitPolicyMixin):
         """Raise for unsupported replay tensor operations."""
 
         del value
-        raise self._unsupported("replay")
+        raise self._unsupported(
+            "replay",
+            code=SplitUnsupportedError.code,
+        )
 
     def clone(self, value: Any) -> Any:
         """Raise for unsupported replay tensor operations."""
 
         del value
-        raise self._unsupported("replay")
+        raise self._unsupported(
+            "replay",
+            code=SplitUnsupportedError.code,
+        )
 
     def to_device(self, value: Any, device: Any) -> Any:
         """Raise for unsupported replay tensor operations."""
 
         del value, device
-        raise self._unsupported("replay")
+        raise self._unsupported(
+            "replay",
+            code=SplitUnsupportedError.code,
+        )
 
     def collate(self, values: list[Any]) -> Any:
         """Raise for unsupported boundary cache/collation."""
 
         del values
-        raise self._unsupported("boundary cache")
+        raise self._unsupported(
+            "boundary cache",
+            code=SplitUnsupportedError.code,
+        )
 
     def zeros_like(self, value: Any) -> Any:
         """Raise for unsupported replay tensor operations."""
 
         del value
-        raise self._unsupported("replay")
+        raise self._unsupported(
+            "replay",
+            code=SplitUnsupportedError.code,
+        )
 
     def allclose(self, left: Any, right: Any, *, atol: float, rtol: float) -> bool:
         """Raise for unsupported replay tensor operations."""
 
         del left, right, atol, rtol
-        raise self._unsupported("replay")
+        raise self._unsupported(
+            "replay",
+            code=SplitUnsupportedError.code,
+        )
 
     def build_segments(self, graph: Any, plan: Any, spec: Any) -> SegmentBundle:
         """Raise for unsupported replay segment construction."""
 
         del graph, plan, spec
-        raise self._unsupported("replay")
+        raise self._unsupported(
+            "replay",
+            code=SplitUnsupportedError.code,
+        )
 
 
-__all__ = ["UnsupportedSplitAdapter"]
+__all__ = ("UnsupportedSplitAdapter",)

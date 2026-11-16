@@ -7,9 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from benchmarks._memory import peak_rss_bytes
-from torchlens.validation.consolidated import _rss_high_water_bytes
-
-pytestmark = pytest.mark.smoke
+from torchlens.validation._consolidated import _rss_high_water_bytes
 
 
 @pytest.mark.parametrize("measure", [_rss_high_water_bytes, peak_rss_bytes])

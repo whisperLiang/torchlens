@@ -1,0 +1,396 @@
+"""Direct ``torch.ops.*`` calls inside forward are recorded with sources and validate.
+
+A raw ``torch.ops.aten`` call, a ``torch.library.custom_op`` and an operator a C++
+extension registered with ``TORCH_LIBRARY`` all reach the dispatcher through the
+``torch._ops`` call classes, past every namespace wrapper. TorchLens now records such a
+call as an ordinary op (parents from its tensor arguments, the operator object as the
+replay callable), so the forward graph keeps the edge and validation replays the
+operator. Recording is not an exemption: a source-less tensor handed to a recorded
+operator still fails ``source_provenance``.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import shutil
+import warnings
+from pathlib import Path
+from typing import Any
+
+import pytest
+import torch
+from torch import nn
+
+import torchlens as tl
+from torchlens import _state
+from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
+from torchlens.validation import last_validation_failure
+from torchlens.validation._source_provenance import source_provenance_gaps
+
+_GLOBAL_TABLE = torch.randn(4)
+
+
+_HAS_CUSTOM_OP = hasattr(torch.library, "custom_op")
+
+
+def _validate(model: nn.Module, x: torch.Tensor) -> bool:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return bool(tl.validate(model, x, scope="forward"))
+
+
+def _assert_recorded_and_valid(model: nn.Module, func_name: str) -> None:
+    x = torch.randn(3, 4)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        trace = tl.trace(model, x)
+    assert func_name in [op.func_name for op in trace.ops]
+    assert not [w for w in caught if "no graph/source provenance" in str(w.message)]
+    recorded = next(op for op in trace.ops if op.func_name == func_name)
+    assert recorded.parents, recorded
+    assert not recorded.call.unattributed_tensor_args
+    assert _validate(model, x), last_validation_failure()
+
+
+class _RawAtenTimesOne(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.ops.aten.tanh(self.fc(x)) * 1.0
+
+
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/_torch_ops_calls.py, campaign mutant kills.
+def test_raw_aten_packet_call_is_recorded_and_validates() -> None:
+    """``torch.ops.aten.tanh(x) * 1.0`` used to fail ``bfs_completeness``."""
+
+    _assert_recorded_and_valid(_RawAtenTimesOne(), "tanh")
+
+
+if _HAS_CUSTOM_OP:
+
+    @torch.library.custom_op("tltest_r10::scaled_tanh", mutates_args=())
+    def _scaled_tanh(x: torch.Tensor, scale: float) -> torch.Tensor:
+        # Unpatchable C calls only, like a kernel written in C++: a Python body built
+        # from wrapped torch functions would be captured op by op anyway.
+        vf = torch._C._VariableFunctions
+        return vf.mul(vf.tanh(x), scale)
+
+
+_CPP_SOURCE = """
+#include <torch/library.h>
+#include <ATen/ATen.h>
+
+at::Tensor tl_r10_cube(const at::Tensor& x) { return x * x * x; }
+
+TORCH_LIBRARY(tltest_r10_ext, m) { m.def("cube(Tensor x) -> Tensor"); }
+TORCH_LIBRARY_IMPL(tltest_r10_ext, CPU, m) { m.impl("cube", &tl_r10_cube); }
+"""
+
+
+def _cpp_toolchain_available() -> bool:
+    return shutil.which("c++") is not None and shutil.which("ninja") is not None
+
+
+class _CppExtModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.ops.tltest_r10_ext.cube(self.fc(x)) - x
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not _cpp_toolchain_available(), reason="needs a C++ compiler and ninja")
+def test_cpp_extension_torch_library_op_is_recorded_and_validates(tmp_path: Path) -> None:
+    """A ``load_inline`` extension op registered with ``TORCH_LIBRARY`` is recorded."""
+
+    from torch.utils.cpp_extension import load_inline
+
+    load_inline(
+        name="tltest_r10_ext",
+        cpp_sources=[_CPP_SOURCE],
+        is_python_module=False,
+        build_directory=str(tmp_path),
+    )
+    _assert_recorded_and_valid(_CppExtModel(), "cube")
+
+
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
+def test_recorders_are_wrapped_epoch_scoped() -> None:
+    """``unwrap_torch`` restores the pristine ``torch._ops`` call classes; ``wrap_torch`` re-arms."""
+
+    marker = "__tl_torch_ops_recorder__"
+    unwrap_torch()
+    try:
+        for cls in (torch._ops.OpOverloadPacket, torch._ops.OpOverload):
+            assert not getattr(cls.__dict__["__call__"], marker, False)
+        assert torch.allclose(torch.ops.aten.tanh(torch.zeros(2)), torch.zeros(2))
+    finally:
+        wrap_torch()
+    for cls in (torch._ops.OpOverloadPacket, torch._ops.OpOverload):
+        assert getattr(cls.__dict__["__call__"], marker, False)
+
+
+# --- Boundary review fixes: operators that mutate an argument and return nothing ----
+
+if _HAS_CUSTOM_OP:
+    # Unpatchable C writes go through ``torch._C.TensorBase`` attribute access at call
+    # time: a module global bound to the pristine method would be rebound to its
+    # wrapper by the wrap-time module sweep.
+
+    @torch.library.custom_op("tltest_r11::scale_", mutates_args=("x",))
+    def _scale_(x: torch.Tensor, scale: float) -> None:
+        torch._C.TensorBase.mul_(x, scale)  # an unpatchable C write, like a C++ kernel
+
+    @torch.library.custom_op("tltest_r11::doubled", mutates_args=("x",))
+    def _doubled(x: torch.Tensor) -> None:
+        torch._C.TensorBase.mul_(x, 2.0)
+
+    @torch.library.custom_op("tltest_r11::write_into", mutates_args=("dst",))
+    def _write_into(src: torch.Tensor, dst: torch.Tensor) -> None:
+        torch._C.TensorBase.copy_(dst, src)
+
+    @torch.library.custom_op("tltest_r15::peek_scale_", mutates_args=("x",))
+    def _peek_scale_(x: torch.Tensor, scale: float) -> None:
+        # A wrapped metadata read that logs nothing, like torch 2.7's Python
+        # ``check_aliasing_constraint`` calling ``untyped_storage()`` in every kernel.
+        x.untyped_storage()
+        torch._C.TensorBase.mul_(x, scale)
+
+    @torch.library.custom_op("tltest_r15::body_mul_", mutates_args=("x",))
+    def _body_mul_(x: torch.Tensor) -> None:
+        x.mul_(2.0)  # a wrapped in-place op: the body is captured op by op
+
+    @torch.library.custom_op("tltest_r15::stage_write", mutates_args=("x",))
+    def _stage_write(x: torch.Tensor) -> None:
+        staged = torch.mul(x, 2.0)  # a logged body op that does not write ``x``
+        torch._C.TensorBase.copy_(x, staged)  # the write itself is unpatchable
+
+
+class _MutatingCustomOpModel(nn.Module):
+    def __init__(self, op_name: str) -> None:
+        super().__init__()
+        self.fc = nn.Linear(4, 4)
+        self.op_name = op_name
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.fc(x).clone()
+        if self.op_name == "scale_":
+            _scale_(y, 2.0)
+        elif self.op_name == "doubled":
+            _doubled(y)
+        elif self.op_name == "peek_scale_":
+            _peek_scale_(y, 2.0)
+        elif self.op_name == "body_mul_":
+            _body_mul_(y)
+        elif self.op_name == "stage_write":
+            _stage_write(y)
+        elif self.op_name == "foreach":
+            torch.ops.aten._foreach_mul_.Scalar([y], 2.0)
+        else:
+            _write_into(x * 3.0, y)
+        return y + 1
+
+
+def _unrecorded_mutation_rows(trace: Any) -> list[dict[str, object]]:
+    return [
+        row
+        for row in trace.annotations.get("capture_advisories", [])
+        if row["kind"] == "unrecorded_operator_mutation"
+    ]
+
+
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/_torch_ops_calls.py, campaign mutant kills.
+@pytest.mark.skipif(not _HAS_CUSTOM_OP, reason="torch.library.custom_op needs torch>=2.4")
+def test_receiver_op_reading_metadata_inside_is_still_recorded_in_place() -> None:
+    """A wrapped call that logs nothing inside the operator must not drop the write.
+
+    Torch 2.7's custom-op backend kernel reads ``untyped_storage()`` (a wrapped method)
+    after every call; that nested call cleared the bottom-level barcode, so the in-place
+    record of the already-labelled receiver was skipped and the add read the clone.
+    """
+
+    model = _MutatingCustomOpModel("peek_scale_")
+    _assert_recorded_and_valid(model, "peek_scale_")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trace = tl.trace(model, torch.randn(3, 4))
+    mutation = next(op for op in trace.ops if op.func_name == "peek_scale_")
+    add = next(op for op in trace.ops if op.func_name == "__add__")
+    assert add.parents == (mutation.label.split(":")[0],), add.parents
+    assert not _unrecorded_mutation_rows(trace)
+
+
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/_torch_ops_calls.py, campaign mutant kills.
+@pytest.mark.skipif(not _HAS_CUSTOM_OP, reason="torch.library.custom_op needs torch>=2.4")
+def test_receiver_write_no_logged_op_recorded_fails_validation() -> None:
+    """A body that logs other ops but writes the receiver unpatched is disclosed.
+
+    The logged body op takes the call's bottom-level status, so the in-place record is
+    skipped and the add reads the clone; validation passed that silently before.
+    """
+
+    model = _MutatingCustomOpModel("stage_write")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trace = tl.trace(model, torch.randn(3, 4))
+    rows = _unrecorded_mutation_rows(trace)
+    assert [row for row in rows if "stage_write" in str(row["message"])], rows
+    assert "unrecorded_operator_mutation" in {gap[0] for gap in source_provenance_gaps(trace)}
+    assert not _validate(model, torch.randn(3, 4))
+    failure = last_validation_failure()
+    assert failure is not None
+    assert failure.check_name == "source_provenance", failure
+    assert "unrecorded_operator_mutation" in failure.extra["reasons"], failure
+
+
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
+@pytest.mark.skipif(not _HAS_CUSTOM_OP, reason="torch.library.custom_op needs torch>=2.4")
+@pytest.mark.parametrize("op_name", ["write_into"])
+def test_unrecordable_mutating_operator_fails_validation(op_name: str) -> None:
+    """A write to a non-first or list argument is disclosed, never a silent pass."""
+
+    model = _MutatingCustomOpModel(op_name)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trace = tl.trace(model, torch.randn(3, 4))
+    rows = _unrecorded_mutation_rows(trace)
+    expected = "_foreach_mul_" if op_name == "foreach" else op_name
+    assert [row for row in rows if expected in str(row["message"])], rows
+    gap_reasons = {gap[0] for gap in source_provenance_gaps(trace)}
+    assert "unrecorded_operator_mutation" in gap_reasons, gap_reasons
+    assert not _validate(model, torch.randn(3, 4))
+    failure = last_validation_failure()
+    assert failure is not None
+    if op_name == "write_into":  # the foreach packet fails bfs_completeness first
+        assert failure.check_name == "source_provenance", failure
+        assert "unrecorded_operator_mutation" in failure.extra["reasons"], failure
+
+
+# Kept by shrink-r4 (per-id subset rule): sole coverage of backends/torch/_torch_ops_calls.py, campaign mutant kills.
+@pytest.mark.skipif(not _HAS_CUSTOM_OP, reason="torch.library.custom_op needs torch>=2.4")
+def test_unreadable_schema_none_return_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A None-returning operator whose schema cannot be read is disclosed."""
+
+    from torchlens.backends.torch import _torch_ops_calls
+
+    monkeypatch.setattr(_torch_ops_calls, "_DECORATED_BY_OP", {})
+    # A fabricated unreadable schema is not a real call shape: keep it out of the
+    # ArgSpec usage audit (test_arg_positions), which would see ``scale_`` counted but
+    # never extracted (nothing is logged for a disclosed None return).
+    monkeypatch.setattr(_state, "_collect_usage_stats", False)
+    monkeypatch.setattr(_torch_ops_calls, "_overload_schemas", lambda op: None)
+    model = _MutatingCustomOpModel("scale_")
+    assert not _validate(model, torch.randn(3, 4))
+    failure = last_validation_failure()
+    assert failure is not None
+    assert failure.check_name == "source_provenance", failure
+    assert "unrecorded_operator_mutation" in failure.extra["reasons"], failure
+
+
+# --- Re-review fixes: a write that no return aliases --------------------------------
+
+if _HAS_CUSTOM_OP:
+
+    @torch.library.custom_op("tltest_r13::mut_ret", mutates_args=("x",))
+    def _mut_ret(x: torch.Tensor) -> torch.Tensor:
+        torch._C.TensorBase.mul_(
+            x, 2.0
+        )  # state update, then a fresh output (KV-cache, running stats)
+        return torch._C._VariableFunctions.add(x, 0.0)
+
+    @torch.library.custom_op("tltest_r13::unknown_ret", mutates_args="unknown")
+    def _unknown_ret(x: torch.Tensor) -> torch.Tensor:
+        torch._C.TensorBase.mul_(x, 2.0)
+        return torch._C._VariableFunctions.add(x, 1.0)
+
+    @torch.library.custom_op("tltest_r13::buf_ret", mutates_args=("buf",))
+    def _buf_ret(x: torch.Tensor, buf: torch.Tensor) -> torch.Tensor:
+        torch._C.TensorBase.add_(buf, 1.0)
+        return torch._C._VariableFunctions.mul(x, 2.0)
+
+    _R13_LIB = torch.library.Library("tltest_r13", "FRAGMENT")
+    _R13_LIB.define("inplace(Tensor(a!) x) -> Tensor(a!)")
+
+    def _r13_inplace(x: torch.Tensor) -> torch.Tensor:
+        torch._C.TensorBase.mul_(x, 2.0)
+        return x
+
+    _R13_LIB.impl("inplace", _r13_inplace, "CPU")
+
+
+class _UnreturnedWriteModel(nn.Module):
+    def __init__(self, op_name: str) -> None:
+        super().__init__()
+        self.fc = nn.Linear(4, 4)
+        self.op_name = op_name
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.fc(x).clone()
+        if self.op_name == "mut_ret":
+            return y + _mut_ret(y)
+        if self.op_name == "unknown_ret":
+            return y + _unknown_ret(y)
+        buf = self.fc(x).clone()
+        return _buf_ret(y, buf) + buf
+
+
+# Kept by shrink-r4 (per-id subset rule): sole coverage of campaign mutant kills.
+@pytest.mark.skipif(not _HAS_CUSTOM_OP, reason="torch.library.custom_op needs torch>=2.4")
+def test_unrecorded_write_reader_is_left_to_the_disclosure_only_for_its_inputs() -> None:
+    """The snapshot tripwire leaves a reader of an unrecordably written tensor to
+    ``source_provenance`` only when the disclosed call received that very tensor."""
+
+    from torchlens.validation._core import _op_for_validation_label, _saved_out_payload
+    from torchlens.validation._snapshot_binding import snapshot_binding_explained
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trace = tl.trace(
+            _UnreturnedWriteModel("mut_ret"),
+            torch.randn(3, 4),
+            capture=tl.options.CaptureOptions(save_args=True, save_rng=True),
+        )
+    add = next(op for op in trace.ops if op.func_name == "__add__")
+    parent = _op_for_validation_label(trace, add.call.parent_arg_positions["args"][0])
+    assert parent.func_name == "clone" and not parent.is_inplace
+
+    journal = trace.__dict__["_foreign_departures"]
+
+    def explained(written: frozenset[str]) -> bool:
+        """Run the tripwire on the add's first slot with ``written`` as the disclosed inputs."""
+
+        return snapshot_binding_explained(
+            add,
+            parent,
+            _saved_out_payload,
+            lambda label: _op_for_validation_label(trace, label),
+            dataclasses.replace(journal, unrecorded_writes=set(written)),
+        )
+
+    written = frozenset(journal.unrecorded_writes)
+    assert parent._label_raw in written
+    assert explained(written)
+    assert not explained(frozenset())
+    assert not explained(written - {parent._label_raw})
+
+
+@pytest.mark.skipif(not _HAS_CUSTOM_OP, reason="torch.library.custom_op needs torch>=2.4")
+@pytest.mark.parametrize("op_name", ["mut_ret", "buf_ret"])
+def test_write_no_return_aliases_fails_validation(op_name: str) -> None:
+    """A write beside a fresh return used to validate True with a pre-mutation graph."""
+
+    model = _UnreturnedWriteModel(op_name)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trace = tl.trace(model, torch.randn(3, 4))
+    rows = _unrecorded_mutation_rows(trace)
+    assert [row for row in rows if op_name in str(row["message"])], rows
+    assert not _validate(model, torch.randn(3, 4))
+    failure = last_validation_failure()
+    assert failure is not None
+    assert failure.check_name == "source_provenance", failure
+    assert "unrecorded_operator_mutation" in failure.extra["reasons"], failure

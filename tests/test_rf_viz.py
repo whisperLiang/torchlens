@@ -16,7 +16,7 @@ from torchlens.receptive_field import _rules, node_spec
 from torchlens.receptive_field._errors import AmbiguousInputError, ReceptiveFieldError
 from torchlens.receptive_field._rules import ReceptiveFieldRuleContext, _RuleResult
 from torchlens.receptive_field._types import (
-    GradientReceptiveField,
+    GradReceptiveField,
     GridLayout,
     ReceptiveField,
     ReceptiveFieldAlignment,
@@ -55,7 +55,7 @@ def _descriptor(
         input_op_label="input_1_raw",
         input_shape=shape,
         axes=axes,
-        layout=GridLayout(
+        axis_roles=GridLayout(
             tuple(axis.kind for axis in axes),
             tuple(range(2, rank + 2)),
             "derived",
@@ -75,7 +75,7 @@ def _box(descriptor: ReceptiveField) -> ReceptiveFieldBox:
     return ReceptiveFieldBox(
         op_label="target",
         io_role="input_1",
-        unit=(0, 0, *(3 for _ in descriptor.layout.windowed_axes)),
+        unit=(0, 0, *(3 for _ in descriptor.axis_roles.windowed_axes)),
         axes=tuple(
             ReceptiveFieldBoxAxis(
                 input_axis=index,
@@ -104,7 +104,7 @@ class _View:
     """Minimal T6-compatible view used to exercise the standalone adapter."""
 
     def __init__(
-        self, descriptor: ReceptiveField, gradient_result: GradientReceptiveField | None = None
+        self, descriptor: ReceptiveField, gradient_result: GradReceptiveField | None = None
     ) -> None:
         """Store one descriptor, box, and optional empirical result."""
 
@@ -112,29 +112,29 @@ class _View:
         self._box = _box(descriptor)
         self._gradient = gradient_result
 
-    def at(self, unit: Sequence[int], *, input: Any | None = None) -> ReceptiveFieldBox:
+    def at(self, unit: Sequence[int], *, input_op: Any | None = None) -> ReceptiveFieldBox:
         """Return the configured geometric box."""
 
-        _ = unit, input
+        _ = unit, input_op
         return self._box
 
-    def gradient(
-        self, unit: Sequence[int], *, input: Any | None = None, retain_graph: bool = False
-    ) -> GradientReceptiveField:
+    def probe_grad(
+        self, unit: Sequence[int], *, input_op: Any | None = None, retain_graph: bool = False
+    ) -> GradReceptiveField:
         """Return the configured empirical result."""
 
-        _ = unit, input, retain_graph
+        _ = unit, input_op, retain_graph
         assert self._gradient is not None
         return self._gradient
 
 
-def _gradient(descriptor: ReceptiveField) -> GradientReceptiveField:
+def _gradient(descriptor: ReceptiveField) -> GradReceptiveField:
     """Create a nonuniform full-input gradient payload."""
 
     values = torch.arange(int(torch.tensor(descriptor.input_shape).prod())).reshape(
         descriptor.input_shape
     )
-    return GradientReceptiveField(
+    return GradReceptiveField(
         op_label="target",
         io_role=descriptor.io_role,
         unit=(0,) * len(descriptor.input_shape),
@@ -146,12 +146,11 @@ def _gradient(descriptor: ReceptiveField) -> GradientReceptiveField:
         cross_batch_influence=False,
         atol=0.0,
         rtol=0.0,
-        nonfinite_count=0,
+        num_nonfinite=0,
         warnings=(),
     )
 
 
-@pytest.mark.smoke
 def test_show_1d_strip_and_status_styling() -> None:
     """Render 1-D boxes as strips, with dashed upper bounds distinct from exact boxes."""
 
@@ -164,34 +163,69 @@ def test_show_1d_strip_and_status_styling() -> None:
     assert exact_image.tobytes() != upper_image.tobytes()
 
 
-@pytest.mark.smoke
 def test_show_2d_overlay_with_gradient_and_unknown_honesty() -> None:
     """Blend a 2-D gradient heatmap and never draw an unknown geometric box."""
 
     descriptor = _descriptor(2)
     base = Image.new("RGB", (80, 60), "white")
-    rendered = show(
-        _View(descriptor, _gradient(descriptor)), (0, 0, 3, 3), image=base, gradient=True
-    )
+    rendered = show(_View(descriptor, _gradient(descriptor)), (0, 0, 3, 3), image=base, grad=True)
     assert rendered.tobytes() != base.tobytes()
 
     unknown = _descriptor(2, ReceptiveFieldStatus.UNKNOWN)
     assert show(_View(unknown), (0, 0, 3, 3), image=base).tobytes() == base.tobytes()
 
 
-@pytest.mark.smoke
+def test_show_draws_a_single_pil_input_as_the_base_image() -> None:
+    """A trace captured from one photo keeps a bare PIL image as its input; show() draws it.
+
+    Before the fix the single image was not recognised as a batch of one, so the overlay fell
+    back to a heatmap of the normalized input tensor instead of the photo.
+    """
+
+    from types import SimpleNamespace
+
+    from torchlens.repgeom._node_visuals import _matching_pil_image_batch
+
+    photo = Image.new("RGB", (8, 8), "white")
+    assert _matching_pil_image_batch(photo, 1) == (photo,)
+    assert _matching_pil_image_batch(photo, 2) is None
+    assert _matching_pil_image_batch([photo], 1) == [photo]
+
+    view = _View(_descriptor(2))
+    view._op = SimpleNamespace(source_trace=SimpleNamespace(input=photo))
+    rendered = show(view, (0, 0, 3, 3))
+    assert rendered.size == photo.size
+    pixels = set(rendered.getdata())
+    assert (255, 255, 255) in pixels and len(pixels) > 1  # the photo, with the box drawn on it
+
+    # A raw photo of another size than the model input (resized or cropped by preprocessing)
+    # cannot carry the box; the overlay then draws the preprocessed input tensor as the photo.
+    class _Trace:
+        input = Image.new("RGB", (40, 30), "white")
+        provenance = SimpleNamespace(
+            input_preprocessor=SimpleNamespace(config={"mean": [0.5] * 3, "std": [0.5] * 3})
+        )
+
+        def __getitem__(self, label: str) -> Any:
+            return SimpleNamespace(out=torch.full((1, 3, 8, 8), -1.0))  # de-normalizes to black
+
+    view._op = SimpleNamespace(source_trace=_Trace())
+    rendered = show(view, (0, 0, 3, 3))
+    assert rendered.size == (8, 8)
+    assert (0, 0, 0) in set(rendered.getdata())
+
+
 def test_show_3d_requires_explicit_slice() -> None:
     """Require a plane selection before rendering a 3-D spatial input."""
 
     descriptor = _descriptor(3)
     with pytest.raises(
         ReceptiveFieldError,
-        match=r"3-D receptive-field visualization requires slice=\(axis, index\)\.",
+        match=r"3-D receptive-field visualization requires plane=\(axis, index\)\.",
     ):
         show(_View(descriptor), (0, 0, 3, 3, 3), image=Image.new("RGB", (80, 60)))
 
 
-@pytest.mark.smoke
 def test_show_rejects_ambiguous_input() -> None:
     """Reject multi-input display requests unless the IO role is selected."""
 
@@ -201,7 +235,6 @@ def test_show_rejects_ambiguous_input() -> None:
         show(view, (0, 0, 3, 3), image=Image.new("RGB", (80, 60)))
 
 
-@pytest.mark.smoke
 def test_node_spec_draws_ancestor_cone_with_tooltips(tmp_path: Any) -> None:
     """Render the selected input-to-target cone through the standard node-spec hook."""
 
@@ -216,13 +249,12 @@ def test_node_spec_draws_ancestor_cone_with_tooltips(tmp_path: Any) -> None:
             return context.window(kernel=(3, 3), stride=(1, 1), padding=(0, 0), dilation=(1, 1))
 
         trace = tl.trace(nn.Conv2d(1, 1, 3), torch.ones(1, 1, 8, 8))
-        target = next(op for op in trace.layer_list if op.func_name == "conv2d")
+        target = next(op for op in trace._layer_list if op.func_name == "conv2d")
         output_path = tmp_path / "rf_cone.svg"
         trace.draw(
             node_spec_fn=node_spec(target),
-            vis_fileformat="svg",
-            vis_save_only=True,
-            vis_outpath=str(output_path),
+            file_format="svg",
+            path=str(output_path),
         )
         svg = output_path.read_text(encoding="utf-8")
         assert "RF " in svg
@@ -234,11 +266,11 @@ def test_node_spec_draws_ancestor_cone_with_tooltips(tmp_path: Any) -> None:
 
 
 def test_show_gradient_retain_graph_supports_repeated_probes() -> None:
-    """R81: show(gradient=True) must plumb retain_graph to the empirical probe.
+    """R81: show(grad=True) must plumb retain_graph to the empirical probe.
 
     Without the kwarg the internal gradient call freed the captured autograd
     graph, so the canonical doc sequence -- gradient(retain_graph=True) then
-    repeated show(gradient=True) -- raised a raw RuntimeError ("backward
+    repeated show(grad=True) -- raised a raw RuntimeError ("backward
     through the graph a second time") on the second render.
     """
 
@@ -255,15 +287,175 @@ def test_show_gradient_retain_graph_supports_repeated_probes() -> None:
     armed = tl.trace(
         _Small().eval(),
         torch.randn(1, 1, 12, 12, requires_grad=True),
-        capture=tl.options.CaptureOptions(backward_ready=True),
-        save_mode="reference",
+        capture=tl.options.CaptureOptions(backward_ready=True, save_mode="reference"),
     )
     op = armed["relu_1_2"]
     unit = op.receptive_field.center_unit(batch_index=0)
-    op.receptive_field.gradient(unit, retain_graph=True)
-    first = op.receptive_field.show(unit, gradient=True, retain_graph=True)
-    second = op.receptive_field.show(unit, gradient=True, retain_graph=True)
+    op.receptive_field.probe_grad(unit, retain_graph=True)
+    first = op.receptive_field.show(unit, grad=True, retain_graph=True)
+    second = op.receptive_field.show(unit, grad=True, retain_graph=True)
     assert isinstance(first, Image.Image)
     assert isinstance(second, Image.Image)
     # A final non-retaining probe consumes the graph and still succeeds.
-    op.receptive_field.gradient(unit, retain_graph=False)
+    op.receptive_field.probe_grad(unit, retain_graph=False)
+
+
+class _StemStage(nn.Module):
+    """Conv stem followed by a once-called stage module, like a ResNet ``layer3``."""
+
+    def __init__(self) -> None:
+        """Build the stem convolution and the stage block."""
+
+        super().__init__()
+        self.stem = nn.Conv2d(3, 4, kernel_size=3, padding=1)
+        self.stage = nn.Sequential(nn.Conv2d(4, 4, kernel_size=3, padding=1), nn.ReLU())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the stem, then the stage."""
+
+        return self.stage(torch.relu(self.stem(x)))
+
+
+@pytest.mark.parametrize("as_list", [False, True], ids=["single_image", "list_of_one"])
+def test_show_draws_the_captured_pil_photo_not_the_tensor(as_list: bool) -> None:
+    """``show(unit)`` draws a captured PIL stimulus whether the input was one image or a list.
+
+    An image-path capture stores ``trace.input`` as one PIL image; that must count as a batch
+    of one rather than falling back to the normalized-tensor heatmap.
+    """
+
+    torch.manual_seed(0)
+    trace = tl.trace(_StemStage().eval(), torch.rand(1, 3, 8, 8))
+    photo_color = (12, 200, 34)
+    photo = Image.new("RGB", (8, 8), photo_color)
+    trace.input = [photo] if as_list else photo
+    target = trace.ops["stem"]
+    unit = target.receptive_field.center_unit(batch_index=0)
+
+    rendered = target.receptive_field.show(unit)
+
+    assert rendered.convert("RGB").getpixel((0, 0)) == photo_color
+
+
+_BOX_RGB = (255, 59, 48)
+
+
+@pytest.mark.parametrize("as_list", [False, True], ids=["single_image", "list_of_one"])
+def test_show_replays_the_declared_crop_so_the_box_matches_the_tensor_grid(
+    tmp_path: Any, as_list: bool
+) -> None:
+    """A path-captured photo is resized and cropped as declared before the box is drawn.
+
+    The box lands on exactly the pixels it occupies on a blank image of the model-input size,
+    so the overlay agrees with the tensor the model saw, for one image or a list of images.
+    """
+
+    torchvision_models = pytest.importorskip("torchvision.models")
+    import torchlens.preprocessing
+
+    model = torchlens.preprocessing.attach_authority(
+        _StemStage().eval(), torchvision_models.ResNet18_Weights.IMAGENET1K_V1
+    )
+    photo_color = (12, 200, 34)
+    path = tmp_path / "photo.png"
+    Image.new("RGB", (320, 240), photo_color).save(path)
+    trace = tl.trace(model, str(path))
+    assert isinstance(trace.input, Image.Image)
+    if as_list:
+        trace.input = [trace.input]
+    input_op = next(op for op in trace._layer_list if op.is_input)
+    height, width = (int(side) for side in input_op.out.shape[-2:])
+    assert (width, height) != (320, 240), "the fixture must exercise a resize and crop"
+    target = trace.ops["stem"]
+    unit = target.receptive_field.center_unit(batch_index=0)
+
+    on_grid = target.receptive_field.show(unit, image=Image.new("RGB", (width, height), "white"))
+    on_photo = target.receptive_field.show(unit).convert("RGB")
+
+    assert on_photo.size == on_grid.size == (width, height)
+    grid_pixels = list(on_grid.convert("RGB").getdata())
+    photo_pixels = list(on_photo.getdata())
+    box = [index for index, pixel in enumerate(grid_pixels) if pixel == _BOX_RGB]
+    assert box, "the box must be drawn on the model-input grid"
+    assert all(photo_pixels[index] == _BOX_RGB for index in box)
+    assert on_photo.getpixel((0, 0)) == photo_color
+
+
+def test_show_keeps_the_tensor_rendering_when_the_photo_cannot_align() -> None:
+    """A photo at another size with no declared crop to replay never carries the box."""
+
+    torch.manual_seed(0)
+    trace = tl.trace(_StemStage().eval(), torch.rand(1, 3, 8, 8))
+    photo_color = (12, 200, 34)
+    trace.input = Image.new("RGB", (16, 12), photo_color)
+    target = trace.ops["stem"]
+    unit = target.receptive_field.center_unit(batch_index=0)
+
+    rendered = target.receptive_field.show(unit).convert("RGB")
+
+    assert rendered.size == (8, 8)
+    assert rendered.getpixel((0, 0)) != photo_color
+
+
+def test_show_draws_the_first_seen_image_for_a_list_of_photos_at_another_size() -> None:
+    """A list of photos at another size, with no crop to replay, draws the first image seen.
+
+    That is the first preprocessed image the model saw: not the raw photo, and not another
+    item of the batch.
+    """
+
+    torch.manual_seed(0)
+    first = torch.rand(3, 8, 8)
+    batch = torch.stack([first, 1.0 - first])
+    trace = tl.trace(_StemStage().eval(), batch)
+    photo_colors = [(12, 200, 34), (200, 12, 34)]
+    trace.input = [Image.new("RGB", (16, 12), color) for color in photo_colors]
+    target = trace.ops["stem"]
+    unit = target.receptive_field.center_unit(batch_index=0)
+
+    rendered = target.receptive_field.show(unit).convert("RGB")
+
+    low = first.amin(dim=(1, 2), keepdim=True)
+    high = first.amax(dim=(1, 2), keepdim=True)
+    scaled = ((first - low) / (high - low) * 255.0).round().to(torch.uint8)
+    expected = tuple(int(value) for value in scaled[:, 0, 0])
+    assert rendered.size == (8, 8)
+    assert rendered.getpixel((0, 0)) == expected
+    assert rendered.getpixel((0, 0)) not in photo_colors
+    assert _BOX_RGB in set(rendered.getdata())
+
+
+def test_node_spec_resolves_layer_call_and_module_handles_like_the_op(tmp_path: Any) -> None:
+    """``node_spec`` takes an Op, Layer, ModuleCall or Module and styles the same cone."""
+
+    torch.manual_seed(0)
+    trace = tl.trace(_StemStage().eval(), torch.rand(1, 3, 8, 8))
+    target = trace.ops["stage"]
+    handles = {
+        "layer": trace.layers[target.layer_label],
+        "module_call": trace["stage:1"],
+        "module": trace["stage"],
+    }
+
+    def _dot(handle: Any) -> str:
+        """Render the graph with the node-spec callback built from ``handle``."""
+
+        drawing = trace.draw(
+            node_spec_fn=node_spec(handle), path=str(tmp_path / "rf_cone"), file_format="dot"
+        )
+        return str(drawing.dot)
+
+    expected = _dot(target)
+    assert "#ffd8a8" in expected.lower()
+    for kind, handle in handles.items():
+        assert _dot(handle) == expected, kind
+
+
+def test_node_spec_refuses_a_bare_label_with_the_typed_error() -> None:
+    """A label string carries no trace to resolve against and refuses typed."""
+
+    trace = tl.trace(_StemStage().eval(), torch.rand(1, 3, 8, 8))
+    label = trace.ops["stem"].label
+
+    with pytest.raises(ReceptiveFieldError, match="Graph point must be"):
+        node_spec(label)
