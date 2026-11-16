@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -65,21 +66,24 @@ class MixedGradModel(nn.Module):
         return self.trainable(torch.relu(self.frozen(x)))
 
 
-def _init_process_group(tmp_path: Path) -> bool:
-    """Initialize a local single-rank process group if available."""
+@contextmanager
+def _local_process_group(tmp_path: Path) -> Iterator[None]:
+    """Restore distributed state, destroying only a group created in this scope."""
 
-    if not torch.distributed.is_available():
-        return False
-    if torch.distributed.is_initialized():
-        return True
-    init_file = tmp_path / "ddp_init"
-    torch.distributed.init_process_group(
-        "gloo",
-        init_method=f"file://{init_file}",
-        rank=0,
-        world_size=1,
-    )
-    return True
+    created = not torch.distributed.is_initialized()
+    try:
+        if created:
+            init_file = tmp_path / "ddp_init"
+            torch.distributed.init_process_group(
+                "gloo",
+                init_method=f"file://{init_file}",
+                rank=0,
+                world_size=1,
+            )
+        yield
+    finally:
+        if created and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
 
 
 def _compile_model(model: torch.nn.Module) -> torch.nn.Module:
@@ -115,23 +119,26 @@ def test_autocast_wrapping_slow_keeps_grad() -> None:
 def test_ddp_wrapped_slow_keeps_local_module_grad(tmp_path: Path) -> None:
     """DDP unwrap populates LOCAL .module grads only; this is not DDP sync semantics."""
 
-    if not _init_process_group(tmp_path):
+    if not torch.distributed.is_available():
         pytest.skip("torch.distributed is unavailable")
-    ddp_model = torch.nn.parallel.DistributedDataParallel(nn.Linear(4, 2))
+    initialized_before = torch.distributed.is_initialized()
+    with _local_process_group(tmp_path):
+        ddp_model = torch.nn.parallel.DistributedDataParallel(nn.Linear(4, 2))
 
-    trace = tl.trace(
-        ddp_model,
-        torch.randn(3, 4, requires_grad=True),
-        backward_ready=True,
-        random_seed=0,
-    )
-    saved = trace[trace.output_layers[0]].out
+        trace = tl.trace(
+            ddp_model,
+            torch.randn(3, 4, requires_grad=True),
+            backward_ready=True,
+            random_seed=0,
+        )
+        saved = trace[trace.output_layers[0]].out
 
-    ddp_model.module.zero_grad(set_to_none=True)
-    saved.sum().backward()
+        ddp_model.module.zero_grad(set_to_none=True)
+        saved.sum().backward()
 
-    assert all(param.grad is not None for param in ddp_model.module.parameters())
-    trace.cleanup()
+        assert all(param.grad is not None for param in ddp_model.module.parameters())
+        trace.cleanup()
+    assert torch.distributed.is_initialized() is initialized_before
 
 
 def test_view_reshape_ops_keep_grad() -> None:
