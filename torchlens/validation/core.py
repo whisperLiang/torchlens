@@ -4036,9 +4036,9 @@ def _perturb_selection_parent_values(
 
     if layer.func_name == "nms" and _parent_label_occupies_arg_position(layer, parent_label, 1):
         return nms_score_order_values(parent_values, layer.out)
-    if layer.func_name not in {"__getitem__", "unbind", "unique", "_unique2"}:
-        return None
-    if not _parent_label_occupies_arg_position(layer, parent_label, 0):
+    if layer.func_name not in {"__getitem__", "unbind", "unique", "_unique2"} or not (
+        _parent_label_occupies_arg_position(layer, parent_label, 0)
+    ):
         return None
     if parent_values.dtype == torch.bool:
         return torch.logical_not(parent_values)
