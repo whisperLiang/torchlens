@@ -834,18 +834,8 @@ def test_buffer_versions_use_colon_ranges(tmp_path: Path) -> None:
     assert "buffer_versions" not in dot
 
 
-def test_recurrent_self_loop_merges_in_out_into_one_label_placed_at_its_node(
-    tmp_path: Path,
-) -> None:
-    """A rolled recurrence self-loop merges In/Out into one label beside its node.
-
-    Both ends of a self-loop are one node, so its pass ranges stay one two-line HTML
-    label, ``In`` above ``Out`` for the default bottom-up layout.  It is the loop's
-    tail label, so the post-layout chooser places it beside the node clear of the
-    loop and its neighbours, as it places every rolled pass label; Graphviz's own
-    midpoint spot for a self-loop label crossed nearby edges and nodes in sideways
-    drawings.  Parallel fan-out has no self-edge at all.
-    """
+def test_self_loop_label_order_flips_with_layout_direction(tmp_path: Path) -> None:
+    """Merged self-loop labels stay by their node and follow the layout direction."""
 
     recurrent_trace = _trace(ReusedReluLoop())
     drawn = _render_dot(recurrent_trace, tmp_path, "relu_self_edge", depth=1000)
@@ -860,20 +850,17 @@ def test_recurrent_self_loop_merges_in_out_into_one_label_placed_at_its_node(
     assert "labelangle=" in recurrent_attrs and "minlen" not in recurrent_attrs
     assert "↻" not in recurrent_attrs
 
-    fanout_trace = _trace(ParallelFanout())
-    fanout_dot = _render_dot(fanout_trace, tmp_path, "parallel_fanout", depth=1000)
-    assert _dot_self_edge_attrs(fanout_dot) == []
-
-
-def test_self_loop_label_order_flips_with_layout_direction(tmp_path: Path) -> None:
-    """The self-loop's In/Out order follows flow: In above Out only bottom-up."""
-
-    trace = _trace(ReusedReluLoop())
-    topdown_dot = _render_dot(trace, tmp_path, "relu_topdown", depth=1000, direction="topdown")
+    topdown_dot = _render_dot(
+        recurrent_trace, tmp_path, "relu_topdown", depth=1000, direction="topdown"
+    )
     self_edges = _dot_self_edge_attrs(topdown_dot)
     assert len(self_edges) == 1
     # Top-down flow points down, so Out (tail) is placed above In (head).
     assert _html_label_lines(self_edges[0], "taillabel") == ["Out 1-3", "In 2-4"]
+
+    fanout_trace = _trace(ParallelFanout())
+    fanout_dot = _render_dot(fanout_trace, tmp_path, "parallel_fanout", depth=1000)
+    assert _dot_self_edge_attrs(fanout_dot) == []
 
 
 def test_recurrence_back_edge_puts_out_at_its_tail_and_in_at_its_head(tmp_path: Path) -> None:
