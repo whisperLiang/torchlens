@@ -81,7 +81,7 @@ def test_sdpa_edges_output_and_parameter_gradients(family, r0_capture) -> None:
         captured.sum(), parameters, allow_unused=True, retain_graph=True
     )
     assert len(captured_grads) == len(native_grads)
-    for actual, expected in zip(captured_grads, native_grads):
+    for actual, expected in zip(captured_grads, native_grads, strict=True):
         if expected is None:
             assert actual is None
         else:
