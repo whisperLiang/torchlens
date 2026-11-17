@@ -46,6 +46,15 @@ block's output ``linear`` reads the mutated weight through them.
   llama is 180 (eager) / 144 (sdpa) and qwen2 180 / 144 there, against 183 / 147
   and 186 / 150 on the pinned 5.18.0. The op diff was checked to be exactly that
   rotary block on torch 2.7.1 and 2.14.1 (2026-10-07, next-release CI round).
+  The ten sdpa rows also record transformers 5.23.0: its common SDPA
+  integration adds one output ``reshape`` per call (2 per single-tower
+  fixture, 4 for CLIP, 8 for Whisper). 5.22.0 has no such reshape. This is
+  independent of torch 2.13 vs 2.15; the original 5.18.0 counts and 5.19
+  rotary counts remain strict. ``test_sdpa_output_reshape.py`` checks the
+  SDPA -> reshape -> transpose edges, shape/value identity of the reshape,
+  and exact native-vs-capture outputs and trainable-parameter gradients.
+  The per-model cross-environment measurements and source hashes live in
+  ``sdpa_reshape_provenance.json``.
 - ``variants``: optional list of complete expectation sets (the five fields
   above plus ``recorded_on``) recorded on another transformers band, chosen by
   :func:`expectation_for_fingerprint` when the built model's resolved-config

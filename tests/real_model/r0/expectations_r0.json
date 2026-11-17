@@ -61,6 +61,12 @@
     ]
    },
    "n_ops": 80,
+   "n_ops_by_transformers": [
+    {
+     "min_version": "5.23.0",
+     "n_ops": 82
+    }
+   ],
    "recipes": {
     "embedding": 3,
     "layer_norm": 1
@@ -218,6 +224,12 @@
     ]
    },
    "n_ops": 67,
+   "n_ops_by_transformers": [
+    {
+     "min_version": "5.23.0",
+     "n_ops": 69
+    }
+   ],
    "recipes": {
     "bert_self_attention": 4,
     "embedding": 3,
@@ -435,6 +447,12 @@
     ]
    },
    "n_ops": 148,
+   "n_ops_by_transformers": [
+    {
+     "min_version": "5.23.0",
+     "n_ops": 152
+    }
+   ],
    "recipes": {
     "clip_attention": 4,
     "contrastive_image_head": 1,
@@ -661,6 +679,12 @@
     ]
    },
    "n_ops": 55,
+   "n_ops_by_transformers": [
+    {
+     "min_version": "5.23.0",
+     "n_ops": 57
+    }
+   ],
    "recipes": {
     "distilbert_attention": 2,
     "distilbert_ffn": 2,
@@ -884,6 +908,12 @@
     ]
    },
    "n_ops": 103,
+   "n_ops_by_transformers": [
+    {
+     "min_version": "5.23.0",
+     "n_ops": 105
+    }
+   ],
    "recipes": {
     "embedding": 2,
     "gpt2_attention": 2,
@@ -1168,6 +1198,12 @@
     ]
    },
    "n_ops": 103,
+   "n_ops_by_transformers": [
+    {
+     "min_version": "5.23.0",
+     "n_ops": 105
+    }
+   ],
    "recipes": {
     "embedding": 2,
     "gpt2_attention": 2,
@@ -1483,6 +1519,10 @@
     {
      "min_version": "5.19",
      "n_ops": 144
+    },
+    {
+     "min_version": "5.23.0",
+     "n_ops": 146
     }
    ],
    "recipes": {
@@ -1891,6 +1931,10 @@
     {
      "min_version": "5.19",
      "n_ops": 144
+    },
+    {
+     "min_version": "5.23.0",
+     "n_ops": 146
     }
    ],
    "recipes": {
@@ -2278,6 +2322,12 @@
     ]
    },
    "n_ops": 62,
+   "n_ops_by_transformers": [
+    {
+     "min_version": "5.23.0",
+     "n_ops": 64
+    }
+   ],
    "recipes": {
     "gqa_attention": 2,
     "layer_norm": 5,
@@ -2410,6 +2460,12 @@
     ]
    },
    "n_ops": 251,
+   "n_ops_by_transformers": [
+    {
+     "min_version": "5.23.0",
+     "n_ops": 259
+    }
+   ],
    "recipes": {
     "embedding": 2,
     "layer_norm": 16,

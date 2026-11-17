@@ -13,3 +13,11 @@ env: py3.11-torch2.13.0
 torch: 2.13.0+cu130
 source: 25b9dc9817a8a5740aa031d5e64e8defdbb8b034 (dirty)
 recorded: 2026-09-14T11:19:24.263460+00:00
+---
+generator: tests/test_state_keyset_contract.py
+flag: TORCHLENS_UPDATE_STATE_KEYSET_ORACLE=1
+reason: Nightly 144 py3.11 stale baseline: audited intentional v11 is_edited/short_layer_label/label renames, edits/pass_number, v12 is_constant and columnar concern fields; episode_step/injection_provenance/tl_authored_root persist. Removed ModuleCall strong ownership is replaced by weak trace binding. Actual keys equal the enforced py3.10 baseline. Live/pickle/fork/load edit evidence and current round trips pass; old artifacts retain typed below-floor refusal.
+env: py3.11-torch2.13.0
+torch: 2.13.0+cpu
+source: d84e2b9eeb57855ede92cd7f4d3f41f901fbdc4a (dirty)
+recorded: 2026-11-17T15:22:22.557509+00:00

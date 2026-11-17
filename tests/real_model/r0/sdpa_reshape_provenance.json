@@ -1,0 +1,652 @@
+{
+ "recorded_on": "2026-11-17",
+ "source_commit": "d84e2b9eeb57855ede92cd7f4d3f41f901fbdc4a",
+ "reason": "Nightly 144: upstream Transformers 5.23.0 adds one shape-preserving output reshape to each SDPA call. Strict op counts remain version-conditional; no TorchLens capture or validation tolerance changed.",
+ "environments": {
+  "213-518": {
+   "torch": "2.13.0+cpu",
+   "transformers": "5.18.0",
+   "source_sha256": "cc0ddaf52ca0fb84670154bed07860917f999a8cec047263a145a6be28ab8aad"
+  },
+  "213-523": {
+   "torch": "2.13.0+cpu",
+   "transformers": "5.23.0",
+   "source_sha256": "1825eff3e45a8d88dbbce5bdf3b25be599019f149d435e646ba80c397a029f5d"
+  },
+  "215-518": {
+   "torch": "2.15.0+cpu",
+   "transformers": "5.18.0",
+   "source_sha256": "cc0ddaf52ca0fb84670154bed07860917f999a8cec047263a145a6be28ab8aad"
+  },
+  "215-523": {
+   "torch": "2.15.0+cpu",
+   "transformers": "5.23.0",
+   "source_sha256": "1825eff3e45a8d88dbbce5bdf3b25be599019f149d435e646ba80c397a029f5d"
+  }
+ },
+ "previous_release_source": {
+  "wheel": "transformers-5.22.0-py3-none-any.whl",
+  "sdpa_source_sha256": "ba7f7c4e1ac7a0ec457e5c3035e54d0e0183e5bd20f938784814774c7724a616",
+  "has_output_reshape": false
+ },
+ "method": "Identical baseline state_dict loaded strictly into each environment; deterministic vendored R0 configs and inputs, eval, CPU fp32, one thread. Compare native vs captured primary outputs and all trainable parameter gradients with torch.equal, including unused-gradient None positions. Cross-environment outputs and gradients are also byte-exact for all ten models. The regression test checks SDPA -> reshape -> transpose dependencies and exact shape/value identity.",
+ "verify": "pytest tests/real_model/r0/test_sdpa_output_reshape.py tests/real_model/r0/test_realism_randinit_sweep.py -p no:randomly",
+ "models": {
+  "gpt2": {
+   "n_ops_by_environment": {
+    "213-518": 103,
+    "213-523": 105,
+    "215-518": 103,
+    "215-523": 105
+   },
+   "added_ops_vs_5_18": {
+    "reshape": 2
+   },
+   "removed_ops_vs_5_18": {},
+   "sdpa_calls": 2,
+   "latest_dependencies": [
+    {
+     "sdpa": "scaleddotproductattention_1_31:1",
+     "sdpa_inputs": [
+      "transpose_3_30",
+      "transpose_1_26",
+      "transpose_2_28"
+     ],
+     "consumer": "reshape_1_32:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_1_31"
+     ],
+     "transpose": "transpose_4_33:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_2_72:1",
+     "sdpa_inputs": [
+      "transpose_7_71",
+      "transpose_5_67",
+      "transpose_6_69"
+     ],
+     "consumer": "reshape_3_73:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_2_72"
+     ],
+     "transpose": "transpose_8_74:1"
+    }
+   ],
+   "output_exact_in_all_four_environments": true,
+   "gradients_exact_in_all_four_environments": true,
+   "output_max_abs": 0.0,
+   "gradient_max_abs": 0.0,
+   "trainable_parameter_tensors": 28,
+   "unused_trainable_parameters": 0
+  },
+  "distilgpt2": {
+   "n_ops_by_environment": {
+    "213-518": 103,
+    "213-523": 105,
+    "215-518": 103,
+    "215-523": 105
+   },
+   "added_ops_vs_5_18": {
+    "reshape": 2
+   },
+   "removed_ops_vs_5_18": {},
+   "sdpa_calls": 2,
+   "latest_dependencies": [
+    {
+     "sdpa": "scaleddotproductattention_1_31:1",
+     "sdpa_inputs": [
+      "transpose_3_30",
+      "transpose_1_26",
+      "transpose_2_28"
+     ],
+     "consumer": "reshape_1_32:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_1_31"
+     ],
+     "transpose": "transpose_4_33:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_2_72:1",
+     "sdpa_inputs": [
+      "transpose_7_71",
+      "transpose_5_67",
+      "transpose_6_69"
+     ],
+     "consumer": "reshape_3_73:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_2_72"
+     ],
+     "transpose": "transpose_8_74:1"
+    }
+   ],
+   "output_exact_in_all_four_environments": true,
+   "gradients_exact_in_all_four_environments": true,
+   "output_max_abs": 0.0,
+   "gradient_max_abs": 0.0,
+   "trainable_parameter_tensors": 28,
+   "unused_trainable_parameters": 0
+  },
+  "llama": {
+   "n_ops_by_environment": {
+    "213-518": 147,
+    "213-523": 146,
+    "215-518": 147,
+    "215-523": 146
+   },
+   "added_ops_vs_5_18": {
+    "__mul__": 1,
+    "reshape": 2
+   },
+   "removed_ops_vs_5_18": {
+    "__getitem__": 1,
+    "__matmul__": 1,
+    "expand": 1,
+    "transpose": 1
+   },
+   "sdpa_calls": 2,
+   "latest_dependencies": [
+    {
+     "sdpa": "scaleddotproductattention_1_57:1",
+     "sdpa_inputs": [
+      "add_3_49",
+      "add_4_56",
+      "transpose_3_40"
+     ],
+     "consumer": "reshape_1_58:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_1_57"
+     ],
+     "transpose": "transpose_4_59:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_2_112:1",
+     "sdpa_inputs": [
+      "add_9_104",
+      "add_10_111",
+      "transpose_7_95"
+     ],
+     "consumer": "reshape_3_113:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_2_112"
+     ],
+     "transpose": "transpose_8_114:1"
+    }
+   ],
+   "output_exact_in_all_four_environments": true,
+   "gradients_exact_in_all_four_environments": true,
+   "output_max_abs": 0.0,
+   "gradient_max_abs": 0.0,
+   "trainable_parameter_tensors": 20,
+   "unused_trainable_parameters": 0
+  },
+  "qwen2": {
+   "n_ops_by_environment": {
+    "213-518": 150,
+    "213-523": 146,
+    "215-518": 150,
+    "215-523": 146
+   },
+   "added_ops_vs_5_18": {
+    "__mul__": 1,
+    "reshape": 2
+   },
+   "removed_ops_vs_5_18": {
+    "__getitem__": 1,
+    "__matmul__": 1,
+    "expand": 1,
+    "float": 3,
+    "transpose": 1
+   },
+   "sdpa_calls": 2,
+   "latest_dependencies": [
+    {
+     "sdpa": "scaleddotproductattention_1_57:1",
+     "sdpa_inputs": [
+      "add_3_49",
+      "add_4_56",
+      "transpose_3_40"
+     ],
+     "consumer": "reshape_1_58:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_1_57"
+     ],
+     "transpose": "transpose_4_59:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_2_112:1",
+     "sdpa_inputs": [
+      "add_9_104",
+      "add_10_111",
+      "transpose_7_95"
+     ],
+     "consumer": "reshape_3_113:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_2_112"
+     ],
+     "transpose": "transpose_8_114:1"
+    }
+   ],
+   "output_exact_in_all_four_environments": true,
+   "gradients_exact_in_all_four_environments": true,
+   "output_max_abs": 0.0,
+   "gradient_max_abs": 0.0,
+   "trainable_parameter_tensors": 26,
+   "unused_trainable_parameters": 0
+  },
+  "albert": {
+   "n_ops_by_environment": {
+    "213-518": 80,
+    "213-523": 82,
+    "215-518": 80,
+    "215-523": 82
+   },
+   "added_ops_vs_5_18": {
+    "reshape": 2
+   },
+   "removed_ops_vs_5_18": {},
+   "sdpa_calls": 2,
+   "latest_dependencies": [
+    {
+     "sdpa": "scaleddotproductattention_1_22:1",
+     "sdpa_inputs": [
+      "transpose_1_15:1",
+      "transpose_2_18:1",
+      "transpose_3_21:1"
+     ],
+     "consumer": "reshape_1_23:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_1_22:1"
+     ],
+     "transpose": "transpose_4_24:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_1_22:2",
+     "sdpa_inputs": [
+      "transpose_1_15:2",
+      "transpose_2_18:2",
+      "transpose_3_21:2"
+     ],
+     "consumer": "reshape_1_23:2",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_1_22:2"
+     ],
+     "transpose": "transpose_4_24:2"
+    }
+   ],
+   "output_exact_in_all_four_environments": true,
+   "gradients_exact_in_all_four_environments": true,
+   "output_max_abs": 0.0,
+   "gradient_max_abs": 0.0,
+   "trainable_parameter_tensors": 25,
+   "unused_trainable_parameters": 2
+  },
+  "distilbert": {
+   "n_ops_by_environment": {
+    "213-518": 55,
+    "213-523": 57,
+    "215-518": 55,
+    "215-523": 57
+   },
+   "added_ops_vs_5_18": {
+    "reshape": 2
+   },
+   "removed_ops_vs_5_18": {},
+   "sdpa_calls": 2,
+   "latest_dependencies": [
+    {
+     "sdpa": "scaleddotproductattention_1_16:1",
+     "sdpa_inputs": [
+      "transpose_1_9",
+      "transpose_2_12",
+      "transpose_3_15"
+     ],
+     "consumer": "reshape_1_17:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_1_16"
+     ],
+     "transpose": "transpose_4_18:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_2_40:1",
+     "sdpa_inputs": [
+      "transpose_5_33",
+      "transpose_6_36",
+      "transpose_7_39"
+     ],
+     "consumer": "reshape_3_41:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_2_40"
+     ],
+     "transpose": "transpose_8_42:1"
+    }
+   ],
+   "output_exact_in_all_four_environments": true,
+   "gradients_exact_in_all_four_environments": true,
+   "output_max_abs": 0.0,
+   "gradient_max_abs": 0.0,
+   "trainable_parameter_tensors": 36,
+   "unused_trainable_parameters": 0
+  },
+  "bert": {
+   "n_ops_by_environment": {
+    "213-518": 67,
+    "213-523": 69,
+    "215-518": 67,
+    "215-523": 69
+   },
+   "added_ops_vs_5_18": {
+    "reshape": 2
+   },
+   "removed_ops_vs_5_18": {},
+   "sdpa_calls": 2,
+   "latest_dependencies": [
+    {
+     "sdpa": "scaleddotproductattention_1_21:1",
+     "sdpa_inputs": [
+      "transpose_1_14",
+      "transpose_2_17",
+      "transpose_3_20"
+     ],
+     "consumer": "reshape_1_22:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_1_21"
+     ],
+     "transpose": "transpose_4_23:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_2_46:1",
+     "sdpa_inputs": [
+      "transpose_5_39",
+      "transpose_6_42",
+      "transpose_7_45"
+     ],
+     "consumer": "reshape_3_47:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_2_46"
+     ],
+     "transpose": "transpose_8_48:1"
+    }
+   ],
+   "output_exact_in_all_four_environments": true,
+   "gradients_exact_in_all_four_environments": true,
+   "output_max_abs": 0.0,
+   "gradient_max_abs": 0.0,
+   "trainable_parameter_tensors": 39,
+   "unused_trainable_parameters": 2
+  },
+  "vit": {
+   "n_ops_by_environment": {
+    "213-518": 62,
+    "213-523": 64,
+    "215-518": 62,
+    "215-523": 64
+   },
+   "added_ops_vs_5_18": {
+    "reshape": 2
+   },
+   "removed_ops_vs_5_18": {},
+   "sdpa_calls": 2,
+   "latest_dependencies": [
+    {
+     "sdpa": "scaleddotproductattention_1_18:1",
+     "sdpa_inputs": [
+      "transpose_2_11",
+      "transpose_3_14",
+      "transpose_4_17"
+     ],
+     "consumer": "reshape_1_19:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_1_18"
+     ],
+     "transpose": "transpose_5_20:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_2_43:1",
+     "sdpa_inputs": [
+      "transpose_6_36",
+      "transpose_7_39",
+      "transpose_8_42"
+     ],
+     "consumer": "reshape_3_44:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_2_43"
+     ],
+     "transpose": "transpose_9_45:1"
+    }
+   ],
+   "output_exact_in_all_four_environments": true,
+   "gradients_exact_in_all_four_environments": true,
+   "output_max_abs": 0.0,
+   "gradient_max_abs": 0.0,
+   "trainable_parameter_tensors": 40,
+   "unused_trainable_parameters": 2
+  },
+  "clip": {
+   "n_ops_by_environment": {
+    "213-518": 148,
+    "213-523": 152,
+    "215-518": 148,
+    "215-523": 152
+   },
+   "added_ops_vs_5_18": {
+    "reshape": 4
+   },
+   "removed_ops_vs_5_18": {},
+   "sdpa_calls": 4,
+   "latest_dependencies": [
+    {
+     "sdpa": "scaleddotproductattention_1_20:1",
+     "sdpa_inputs": [
+      "transpose_2_15",
+      "transpose_3_17",
+      "transpose_4_19"
+     ],
+     "consumer": "reshape_1_21:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_1_20"
+     ],
+     "transpose": "transpose_5_22:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_2_45:1",
+     "sdpa_inputs": [
+      "transpose_6_40",
+      "transpose_7_42",
+      "transpose_8_44"
+     ],
+     "consumer": "reshape_3_46:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_2_45"
+     ],
+     "transpose": "transpose_9_47:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_3_78:1",
+     "sdpa_inputs": [
+      "transpose_10_73",
+      "transpose_11_75",
+      "transpose_12_77"
+     ],
+     "consumer": "reshape_5_79:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_3_78"
+     ],
+     "transpose": "transpose_13_80:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_4_103:1",
+     "sdpa_inputs": [
+      "transpose_14_98",
+      "transpose_15_100",
+      "transpose_16_102"
+     ],
+     "consumer": "reshape_7_104:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_4_103"
+     ],
+     "transpose": "transpose_17_105:1"
+    }
+   ],
+   "output_exact_in_all_four_environments": true,
+   "gradients_exact_in_all_four_environments": true,
+   "output_max_abs": 0.0,
+   "gradient_max_abs": 0.0,
+   "trainable_parameter_tensors": 78,
+   "unused_trainable_parameters": 0
+  },
+  "whisper": {
+   "n_ops_by_environment": {
+    "213-518": 251,
+    "213-523": 259,
+    "215-518": 251,
+    "215-523": 259
+   },
+   "added_ops_vs_5_18": {
+    "reshape": 8
+   },
+   "removed_ops_vs_5_18": {},
+   "sdpa_calls": 8,
+   "latest_dependencies": [
+    {
+     "sdpa": "scaleddotproductattention_1_24:1",
+     "sdpa_inputs": [
+      "contiguous_1_15",
+      "contiguous_2_19",
+      "contiguous_3_23"
+     ],
+     "consumer": "reshape_1_25:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_1_24"
+     ],
+     "transpose": "transpose_4_26:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_2_54:1",
+     "sdpa_inputs": [
+      "contiguous_6_45",
+      "contiguous_7_49",
+      "contiguous_8_53"
+     ],
+     "consumer": "reshape_3_55:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_2_54"
+     ],
+     "transpose": "transpose_8_56:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_3_84:1",
+     "sdpa_inputs": [
+      "contiguous_11_75",
+      "contiguous_12_79",
+      "contiguous_13_83"
+     ],
+     "consumer": "reshape_5_85:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_3_84"
+     ],
+     "transpose": "transpose_12_86:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_4_114:1",
+     "sdpa_inputs": [
+      "contiguous_16_105",
+      "contiguous_17_109",
+      "contiguous_18_113"
+     ],
+     "consumer": "reshape_7_115:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_4_114"
+     ],
+     "transpose": "transpose_16_116:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_5_162:1",
+     "sdpa_inputs": [
+      "contiguous_21_153",
+      "contiguous_22_157",
+      "contiguous_23_161"
+     ],
+     "consumer": "reshape_9_163:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_5_162"
+     ],
+     "transpose": "transpose_20_164:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_6_185:1",
+     "sdpa_inputs": [
+      "contiguous_26_176",
+      "contiguous_27_180",
+      "contiguous_28_184"
+     ],
+     "consumer": "reshape_11_186:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_6_185"
+     ],
+     "transpose": "transpose_24_187:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_7_215:1",
+     "sdpa_inputs": [
+      "contiguous_31_206",
+      "contiguous_32_210",
+      "contiguous_33_214"
+     ],
+     "consumer": "reshape_13_216:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_7_215"
+     ],
+     "transpose": "transpose_28_217:1"
+    },
+    {
+     "sdpa": "scaleddotproductattention_8_238:1",
+     "sdpa_inputs": [
+      "contiguous_36_229",
+      "contiguous_37_233",
+      "contiguous_38_237"
+     ],
+     "consumer": "reshape_15_239:1",
+     "consumer_func": "reshape",
+     "consumer_parents": [
+      "scaleddotproductattention_8_238"
+     ],
+     "transpose": "transpose_32_240:1"
+    }
+   ],
+   "output_exact_in_all_four_environments": true,
+   "gradients_exact_in_all_four_environments": true,
+   "output_max_abs": 0.0,
+   "gradient_max_abs": 0.0,
+   "trainable_parameter_tensors": 118,
+   "unused_trainable_parameters": 0
+  }
+ },
+ "rotary_difference": "Llama and Qwen2 already have a separate >=5.19 rotary-embedding count contract. The 5.18 -> 5.23 removed casts/expand/matmul/transpose/getitem and added multiply are that existing upstream change; SDPA itself adds exactly one reshape per call."
+}
