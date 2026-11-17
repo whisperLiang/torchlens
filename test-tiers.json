@@ -1390,13 +1390,13 @@
         "tests/test_run_inputs_staged_spec.py"
       ],
       "torchlens/_data_classes/_state_adapter.py": [
+        "tests/real_model/r0/test_sdpa_output_reshape.py",
         "tests/test_capture_events_parity.py",
         "tests/test_format3_reader_fuzz.py",
-        "tests/test_format3_reader_safety.py",
         "tests/test_io_scrub_policy.py",
-        "tests/test_op_row_release_counters.py",
         "tests/test_perf8_fork_copy.py",
         "tests/test_state_adapter.py",
+        "tests/test_state_keyset_semantics.py",
         "tests/test_tlspec_envelope_state_contract.py"
       ],
       "torchlens/_data_classes/_summary.py": [
@@ -4567,8 +4567,8 @@
         "tests/surface_oracle/test_surface_oracle.py",
         "tests/test_collapse_rolling_suffix_linearity.py",
         "tests/test_indexing_coherence.py",
+        "tests/test_quickstart_image_fixture.py",
         "tests/test_quickstart_ladder.py",
-        "tests/test_quickstart_lazy_acceptance.py",
         "tests/test_quickstart_readme_gate.py",
         "tests/test_quickstart_resolver_matrix.py"
       ],
@@ -5133,9 +5133,9 @@
         "tests/test_capture_outcome_semantic_transients.py",
         "tests/test_lovely_edge_semantics.py",
         "tests/test_rank_render_ir_semantic_goldens.py",
-        "tests/test_registry_facet_snapshot.py",
         "tests/test_selector_semantics_matrix.py",
         "tests/test_semantic_io_a3.py",
+        "tests/test_state_keyset_semantics.py",
         "tests/test_tlspec_runnable_r35_exact_semantics.py"
       ],
       "torchlens/_semantic/_call_subject.py": [
@@ -6164,10 +6164,10 @@
         "tests/test_fp8_guard.py",
         "tests/test_r36_cuda_hygiene.py",
         "tests/test_replay_tolerance_dtype_tripwire.py",
-        "tests/test_save_budget.py",
         "tests/test_stress_refusal_codes.py",
         "tests/test_validation.py",
-        "tests/test_validation_perturbation_units.py"
+        "tests/test_validation_perturbation_units.py",
+        "tests/test_valmem5_saved_value_aliases.py"
       ],
       "torchlens/_utils/_stdlib_denial.py": [
         "tests/test_r23_type_reduce_rce.py",
