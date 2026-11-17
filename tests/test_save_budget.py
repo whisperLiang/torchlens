@@ -43,11 +43,11 @@ from torchlens.recording import _storage_resolver
 def test_host_headroom_without_posix_memory_queries() -> None:
     """Platforms without procfs or sysconf still enforce measured RAM budgets."""
     psutil = pytest.importorskip("psutil")
-    from torchlens import _save_budget
+    from torchlens import _memory_probes
 
     with (
         patch("builtins.open", side_effect=FileNotFoundError),
-        patch.object(_save_budget.os, "sysconf", create=True, side_effect=AttributeError),
+        patch.object(_memory_probes.os, "sysconf", create=True, side_effect=AttributeError),
         patch.object(psutil, "virtual_memory", return_value=SimpleNamespace(available=4096)),
     ):
         assert available_device_bytes(torch.device("cpu")) == 4096

@@ -682,19 +682,16 @@ jobs:
             "torchvision==0.23.0+cpu" \
             numpy
 
-      - name: Prepare adjacent-commit and release-anchor baselines
+      - name: Prepare adjacent-commit and fixed-anchor baselines
         # r7 R30 (opus MED, round-1 carry): the adjacent-commit differential
         # alone is baselined-in by the NEXT commit (regress in C, land D
         # before the nightly, and every future comparison is D-vs-C) and
         # carries no cumulative ceiling (ten sequential 9% regressions pass
-        # ten nightly gates). The release tag is the fixed anchor: it moves
-        # only when a release ships, so slow drift accumulates against it
-        # instead of being re-based away nightly.
+        # ten nightly gates). The latest reachable release tag is the fixed
+        # anchor; tagless forks use the reviewed immutable SHA in
+        # benchmarks/perf_anchor.json. Neither anchor advances nightly.
         run: |
-          git worktree add --detach "${{ runner.temp }}/perf-base" HEAD^
-          anchor="$(git describe --tags --abbrev=0)"
-          echo "release anchor: $anchor"
-          git worktree add --detach "${{ runner.temp }}/perf-anchor" "$anchor"
+          python scripts/prepare_perf_baselines.py --workdir "${{ runner.temp }}"
 
       - name: Interleaved A/B gate against the parent and the release anchor
         # perf_ab alternates parent, anchor and current per cell and per
@@ -722,6 +719,7 @@ jobs:
           name: nightly-perf-gate
           path: |
             ${{ runner.temp }}/perf-ab.json
+            ${{ runner.temp }}/perf-baselines.json
 
   coverage:
     name: Per-package coverage floors (smoke tier)

@@ -23,6 +23,12 @@ end of the smoke job and of each `backend-protocol` leg; nightly and weekly: the
 install lines, markers and floors in lockstep with the protocol shells, the
 pyproject extras and each other.
 
+Nightly's performance gate measures parent/current and fixed-anchor/current.
+The latest reachable release tag anchors cumulative drift; tagless forks use
+the reviewed immutable commit in `benchmarks/perf_anchor.json`. Preparation
+verifies commit and checkout content before creating either worktree and
+uploads `perf-baselines.json` beside the measured A/B report.
+
 ## CI must NEVER auto-commit (locked)
 
 No workflow commits, pushes, tags or bumps a version. Lint is a pure gate: it

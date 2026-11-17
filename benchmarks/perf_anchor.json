@@ -1,0 +1,4 @@
+{
+  "commit": "d84e2b9eeb57855ede92cd7f4d3f41f901fbdc4a",
+  "reason": "Initial fixed baseline for whisperLiang/torchlens, reviewed 2026-11-17: origin advertises no tags (git ls-remote --tags origin, after a full fetch). This is main at Nightly #144, before the nightly repair; it contains the current perf_runner and perf_ab protocols. The commit and all archive content were verified locally. Keep this SHA fixed until a reachable release tag exists; never advance it with HEAD or HEAD^."
+}

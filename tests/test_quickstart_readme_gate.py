@@ -21,7 +21,7 @@ README fences elide their imports, so the gate supplies exactly the declared
 predicate: a screen that prints only structure, shapes, and counts may run on
 any input, but a screen printing a value/label/decode must pin its real input.
 Today's screen prints the ViT's top-3 labels and probabilities, so it runs on
-the README's own ``cat.jpg``, fetched once and pinned by size and sha256.
+the README's own ``cat.jpg``, vendored locally and pinned by size and sha256.
 """
 
 from __future__ import annotations
@@ -32,7 +32,6 @@ import os
 import re
 import subprocess
 import sys
-import urllib.request
 from pathlib import Path
 
 import pytest
@@ -60,9 +59,7 @@ _SCREEN_PRELUDE = "import torchlens as tl\nfrom transformers import ViTForImageC
 #: the README's ``cat.jpg``: Wikimedia Commons "European tabby cat looking away"
 #: (CC0, by Gugalcrom123), pinned by size and sha256.
 _SCREEN_IMAGE_NAME = "cat.jpg"
-_SCREEN_IMAGE_URL = (
-    "https://upload.wikimedia.org/wikipedia/commons/4/43/European_tabby_cat_looking_away.jpg"
-)
+_SCREEN_IMAGE_PATH = _REPO_ROOT / "tests" / "fixtures" / "quickstart" / _SCREEN_IMAGE_NAME
 _SCREEN_IMAGE_BYTES = 1_652_492
 _SCREEN_IMAGE_SHA256 = (
     "7f6a70ce301d8c2260fd81c440bc135262f989d9b4191eda5b4f9eb8b1f1dc8e"  # pragma: allowlist secret
@@ -134,7 +131,7 @@ def _first_readme_python_block() -> str:
 
 
 def _pinned_screen_image() -> bytes:
-    """Return the README's ``cat.jpg``, fetched once into the user cache and checksum-pinned.
+    """Return the vendored README ``cat.jpg`` after verifying its length and checksum.
 
     Returns
     -------
@@ -142,20 +139,12 @@ def _pinned_screen_image() -> bytes:
         The image file, verified against ``_SCREEN_IMAGE_BYTES`` and ``_SCREEN_IMAGE_SHA256``.
     """
 
-    cache_root = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-    cached = cache_root / "torchlens-tests" / _SCREEN_IMAGE_SHA256[:16] / _SCREEN_IMAGE_NAME
-    if not cached.exists():
-        request = urllib.request.Request(
-            _SCREEN_IMAGE_URL, headers={"User-Agent": "torchlens-tests (README first-screen gate)"}
-        )
-        with urllib.request.urlopen(request, timeout=120) as response:  # noqa: S310 - pinned https URL
-            fetched = response.read()
-        cached.parent.mkdir(parents=True, exist_ok=True)
-        cached.write_bytes(fetched)
-    data = cached.read_bytes()
-    assert len(data) == _SCREEN_IMAGE_BYTES, f"{cached}: {len(data)} bytes, not the pinned image"
+    data = _SCREEN_IMAGE_PATH.read_bytes()
+    assert len(data) == _SCREEN_IMAGE_BYTES, (
+        f"{_SCREEN_IMAGE_PATH}: {len(data)} bytes, not the pinned image"
+    )
     assert hashlib.sha256(data).hexdigest() == _SCREEN_IMAGE_SHA256, (
-        f"{cached} is not the pinned README image (sha256 mismatch); delete it to refetch"
+        f"{_SCREEN_IMAGE_PATH} is not the pinned README image (sha256 mismatch)"
     )
     return data
 

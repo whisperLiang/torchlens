@@ -14,8 +14,9 @@ repos:
     hooks:
       - id: check-added-large-files
         # The merged module/test and refusal censuses are generated text,
-        # reviewed through their lockstep checks; keep the 500 KB cap elsewhere.
-        exclude: ^(benchmarks/perf_baselines/.*\.json|tests/test_modelexplorer_assets/worker\.js|images/gallery/(resnet_rdm_bu|vit_head_edit_hires)\.png|test-tiers\.json|tests/oracles/data/numeral_baseline\.tsv|tests/composition_expectations/data/refusal_site_classification\.tsv)$
+        # reviewed through their lockstep checks; the README photo is an unmodified,
+        # checksum-pinned CC0 fixture. Keep the 500 KB cap elsewhere.
+        exclude: ^(benchmarks/perf_baselines/.*\.json|tests/fixtures/quickstart/cat\.jpg|tests/test_modelexplorer_assets/worker\.js|images/gallery/(resnet_rdm_bu|vit_head_edit_hires)\.png|test-tiers\.json|tests/oracles/data/numeral_baseline\.tsv|tests/composition_expectations/data/refusal_site_classification\.tsv)$
   - repo: https://github.com/gitleaks/gitleaks
     rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # v8.30.1 (git sha, not a secret)  # pragma: allowlist secret
     hooks:

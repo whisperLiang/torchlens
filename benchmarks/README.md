@@ -1,6 +1,16 @@
 # TorchLens Benchmarks
 
 This directory contains reproducible benchmark scripts and regression baselines.
+
+The nightly same-runner gate always measures both parent/current (10%) and
+fixed-anchor/current (25%) comparisons through `perf_ab`. The anchor is the
+latest reachable `v*` release tag. For a fork without a release tag,
+`perf_anchor.json` records the reviewed initial full commit SHA and its reason;
+it stays fixed across subsequent commits. `scripts/prepare_perf_baselines.py`
+checks all three commits and their archive contents before creating either
+baseline worktree. CI uploads `perf-baselines.json` with the measured
+`perf-ab.json`, recording the selected SHA and why it was selected. Missing
+anchor content fails preparation; it never removes the cumulative comparison.
 Generated reports stay local and are ignored by Git.
 
 ## Performance benchmark suite

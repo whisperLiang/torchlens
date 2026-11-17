@@ -11,6 +11,7 @@
 | `check_release_major.py` | Release-time hard stop: refuse a major version unless `.github/MAJOR_RELEASE_APPROVED` names it (`release.yml` build job, every pull request and tag) |
 | `check_package_coverage_floors.py` | Per-package coverage-floor gate over a coverage JSON (live nightly gate, `nightly.yml`; floors pinned by `tests/test_coverage_floor_governance.py`) |
 | `normalize_sdist.py` | Deterministic sdist/wheel normalization for reproducible releases (invoked by `build_command` + the nightly double-build gate) |
+| `prepare_perf_baselines.py` | Verifies and creates the nightly parent and fixed-anchor worktrees, with immutable tagless-fork provenance |
 | `render_collapse_reference.py` | Regenerate the collapse reference images |
 | `render_large_graph.py` | Render synthetic large graphs with layout backends |
 | `run_notebooks.py` | Execute every user notebook with nbclient (nightly `notebooks` leg; needs the `test` extra); the `HEAVY_NOTEBOOKS` run alone after the `-j` pool; `--write-outputs` regenerates the stored outputs of the ten-minute tutorial, the learning path, the README-linked notebooks and the Mamba-130m Jacobian lens Colab |
