@@ -374,36 +374,37 @@ def _train_suffix_tf(
         spec=boundary.spec,
         metadata={**boundary.metadata, "suffix_training_roots": tuple(root_tensors)},
     )
-    suffix_vars = _trainable_param_handles(runtime, runtime.plan.suffix_node_ids)
-    suffix_sources = [_tf_gradient_source(var) for var in suffix_vars]
-    with tf.GradientTape(persistent=True) as tape:
-        for root in root_tensors.values():
-            tape.watch(root)
-        for source in suffix_sources:
-            tape.watch(source)
+    suffix_vars = (
+        _trainable_param_handles(runtime, runtime.plan.suffix_node_ids)
+        if optimizer is not None
+        else []
+    )
+    root_count = len(root_tensors)
+    sources = [*root_tensors.values(), *(_tf_gradient_source(var) for var in suffix_vars)]
+    with tf.GradientTape(watch_accessed_variables=False) as tape:
+        tape.watch(sources)
         output = runtime._run_suffix_unchecked(replay_boundary)
         loss = (
             loss_fn(output, targets)
             if loss_fn is not None
             else _default_tf_loss(tf, output, targets)
         )
-    root_values = list(root_tensors.values())
-    root_grads = tape.gradient(loss, root_values) if root_values else []
+    all_grads = tape.gradient(loss, sources) if sources else []
     gradients = {
-        key: grad for key, grad in zip(root_tensors, root_grads, strict=False) if grad is not None
+        key: grad
+        for key, grad in zip(root_tensors, all_grads[:root_count], strict=True)
+        if grad is not None
     }
-    optimizer_applied = False
-    if optimizer is not None and suffix_vars:
-        var_grads = tape.gradient(loss, suffix_sources)
-        pairs = [
-            (grad, var)
-            for grad, var in zip(var_grads, suffix_vars, strict=True)
-            if grad is not None
-        ]
-        if pairs:
-            optimizer.apply_gradients(pairs)
-            optimizer_applied = True
-    return loss, gradients, optimizer_applied
+    if optimizer is None:
+        return loss, gradients, False
+    pairs = [
+        (grad, var)
+        for grad, var in zip(all_grads[root_count:], suffix_vars, strict=True)
+        if grad is not None
+    ]
+    if pairs:
+        optimizer.apply_gradients(pairs)
+    return loss, gradients, bool(pairs)
 
 
 def _is_diff_paddle_tensor(paddle: Any, value: Any) -> bool:
