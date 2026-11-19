@@ -272,6 +272,26 @@ def _default_tf_loss(tf: Any, output: Any, targets: Any) -> Any:
     return tf.reduce_mean(tf.math.squared_difference(output, targets))
 
 
+def _tf_suffix_training_boundary(
+    boundary: ReplayBoundary, tf: Any
+) -> tuple[ReplayBoundary, dict[str, Any]]:
+    """Isolate differentiable boundary roots in transport order."""
+    from .adapters.tf import _is_diff_tf_tensor
+
+    root_tensors = {
+        key: tf.identity(value)
+        for key, value in boundary.tensors.items()
+        if _is_diff_tf_tensor(value, tf)
+    }
+    replay_boundary = ReplayBoundary(
+        backend=boundary.backend,
+        tensors={**boundary.tensors, **root_tensors},
+        spec=boundary.spec,
+        metadata={**boundary.metadata, "suffix_training_roots": tuple(root_tensors)},
+    )
+    return replay_boundary, root_tensors
+
+
 def _train_suffix_tf(
     runtime: Any,
     boundary: ReplayBoundary,
@@ -280,27 +300,12 @@ def _train_suffix_tf(
     optimizer: Any | None = None,
 ) -> tuple[Any, BoundaryGradients, bool]:
     """Train a TensorFlow suffix and return boundary gradients."""
-
     import tensorflow as tf
 
-    from .adapters.tf import _is_diff_tf_tensor, _tf_gradient_source
+    from .adapters.tf import _tf_gradient_source
 
     runtime.validate_boundary(boundary)
-    root_tensors: dict[str, Any] = {}
-    replay_tensors: dict[str, Any] = {}
-    for key, value in boundary.tensors.items():
-        if _is_diff_tf_tensor(value, tf):
-            root = tf.identity(value)
-            root_tensors[key] = root
-            replay_tensors[key] = root
-        else:
-            replay_tensors[key] = value
-    replay_boundary = ReplayBoundary(
-        backend=boundary.backend,
-        tensors=replay_tensors,
-        spec=boundary.spec,
-        metadata={**boundary.metadata, "suffix_training_roots": tuple(root_tensors)},
-    )
+    replay_boundary, root_tensors = _tf_suffix_training_boundary(boundary, tf)
     suffix_vars = (
         runtime.segments.suffix._trainable_variables(runtime.model) if optimizer is not None else []
     )

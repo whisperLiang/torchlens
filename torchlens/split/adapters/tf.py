@@ -124,14 +124,8 @@ class _TfGeneratedSegmentBase:
         self._blueprint = graph._segment_blueprint(("tf", node_ids), self._prepare_blueprint)
 
     def _prepare_blueprint(self) -> _TfReplayBlueprint:
-        """Select and bind this segment's native nodes in capture order."""
-        steps = tuple(
-            (node, self._prepare_tf_inputs(node.target))
-            for node in self.graph.nodes
-            if node.canonical_id in self.node_ids
-            and not node.is_input
-            and not (node.is_output and node.target is None)
-        )
+        """Prepare execution and resource membership for this segment."""
+        steps = self._prepare_execution_steps()
         resources = {
             binding.record.ref_key: binding.record.tensor
             for node, bindings in steps
@@ -139,6 +133,26 @@ class _TfGeneratedSegmentBase:
             for binding in bindings
             if binding.record.source_kind == "resource" and binding.record.ref_key is not None
         }
+        model_resources = self._captured_model_resources()
+        resources.update(model_resources)
+        return _TfReplayBlueprint(
+            steps, tuple(resources.values()), frozenset(resources), frozenset(model_resources)
+        )
+
+    def _prepare_execution_steps(
+        self,
+    ) -> tuple[tuple[SplitTraceNode, tuple[_TfInputBinding, ...]], ...]:
+        """Select and bind this segment's native nodes in capture order."""
+        return tuple(
+            (node, self._prepare_tf_inputs(node.target))
+            for node in self.graph.nodes
+            if node.canonical_id in self.node_ids
+            and not node.is_input
+            and not (node.is_output and node.target is None)
+        )
+
+    def _captured_model_resources(self) -> dict[object, Any]:
+        """Index native resources from this segment's captured parameter records."""
         model_resources: dict[object, Any] = {}
         for node_id in self.node_ids:
             for param in self._node_by_id[node_id].param_refs:
@@ -146,10 +160,7 @@ class _TfGeneratedSegmentBase:
                 key = _tensor_ref_key(resource)
                 if key is not None:
                     model_resources[key] = resource
-        resources.update(model_resources)
-        return _TfReplayBlueprint(
-            steps, tuple(resources.values()), frozenset(resources), frozenset(model_resources)
-        )
+        return model_resources
 
     def _context(self, node: SplitTraceNode, reason: str) -> SplitErrorContext:
         """Build an error context for ``node``."""
@@ -216,29 +227,29 @@ class _TfGeneratedSegmentBase:
         if not isinstance(capture, TFOpCapture) or not capture.inputs:
             return ()
         records = sorted(capture.inputs, key=lambda item: item.input_index)
-        labels = [record.producer_label_raw or record.source_label_raw for record in records]
-        parent_ids = [
-            self._label_to_id.get(label) if label is not None else None for label in labels
-        ]
-        first_id = parent_ids[0]
+        bindings: list[_TfInputBinding] = []
+        for record in records:
+            label = record.producer_label_raw or record.source_label_raw
+            parent_id = self._label_to_id.get(label) if label is not None else None
+            rewrite_shape = (
+                label is None
+                and self.graph.shape_program is not None
+                and _tf_shape_literal_input(capture, record.input_index, record.tensor)
+                and not self._tf_shape_source_is_state(records[0])
+            )
+            bindings.append(_TfInputBinding(record, label, parent_id, rewrite_shape))
+        return tuple(bindings)
+
+    def _tf_shape_source_is_state(self, first_input: TFInputCapture) -> bool:
+        """Keep dimension operands of state-derived values fixed."""
+        label = first_input.producer_label_raw or first_input.source_label_raw
+        first_id = self._label_to_id.get(label) if label is not None else None
         first = self._node_by_id.get(first_id) if first_id is not None else None
-        from_state = first is not None and (
+        return first is not None and (
             first.is_buffer
             or first.is_param_source
             or first.replay_source_policy.startswith("live_param")
             or first.op_type.lower() in {"readvariableop", "varhandleop"}
-        )
-        return tuple(
-            _TfInputBinding(
-                record,
-                label,
-                parent_id,
-                label is None
-                and not from_state
-                and self.graph.shape_program is not None
-                and _tf_shape_literal_input(capture, record.input_index, record.tensor),
-            )
-            for record, label, parent_id in zip(records, labels, parent_ids, strict=True)
         )
 
     def _rewrite_tf_literal_tensor(self, tensor: Any, node: SplitTraceNode) -> Any:
