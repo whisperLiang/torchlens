@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from functools import cached_property
 from hashlib import sha256
@@ -193,6 +193,17 @@ class SplitTraceGraph:
     def _segment_blueprints(self) -> OrderedDict[tuple[Any, ...], Any]:
         """Bound graph-local immutable scheduling metadata; never store client state."""
         return OrderedDict()
+
+    def _segment_blueprint(self, key: tuple[Any, ...], build: Callable[[], Any]) -> Any:
+        """Reuse immutable scheduling metadata within this capture."""
+        cache = self._segment_blueprints
+        if key in cache:
+            cache.move_to_end(key)
+        else:
+            cache[key] = build()
+            if len(cache) > 64:
+                cache.popitem(last=False)
+        return cache[key]
 
     @cached_property
     def node_by_id(self) -> dict[str, SplitTraceNode]:

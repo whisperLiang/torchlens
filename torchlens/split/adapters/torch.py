@@ -451,36 +451,10 @@ class _GeneratedSegmentBase:
                     graph.node_id_by_alias.get(parent, parent)
                     for parent in graph.node_by_id[node_id].parents
                 )
-        key = ("torch", self.segment, node_ids, frozenset(retained_ids))
-        cache = graph._segment_blueprints
-        blueprint = cache.get(key)
-        if blueprint is None:
-            blueprint = _SegmentBlueprint(
-                MappingProxyType(release_schedule(graph, node_ids, frozenset(retained_ids))),
-                self._prepare_execution_steps(),
-                tuple(
-                    (
-                        node,
-                        tuple(
-                            literal
-                            for component in (
-                                *getattr(node.args_template, "args", ()),
-                                *(
-                                    item
-                                    for _name, item in getattr(node.args_template, "kwargs", ())
-                                ),
-                            )
-                            for literal in _state_literals(component)
-                        ),
-                    )
-                    for node in graph.nodes
-                    if node.canonical_id in node_ids and not node.is_input and not node.is_output
-                ),
-            )
-            cache[key] = blueprint
-            if len(cache) > 64:
-                cache.popitem(last=False)
-        cache.move_to_end(key)
+        retained = frozenset(retained_ids)
+        blueprint = graph._segment_blueprint(
+            ("torch", self.segment, node_ids, retained), lambda: self._build_blueprint(retained)
+        )
         self._release_after = blueprint.release_after
         self._execution_steps = blueprint.execution_steps
         self._state_nodes = blueprint.state_nodes
@@ -509,6 +483,28 @@ class _GeneratedSegmentBase:
         )
         self._fast_guard_state_refs: tuple[Any, ...] = ()
         self._fast_guard_certified = self._prepare_fast_guard()
+
+    def _build_blueprint(self, retained_ids: frozenset[str]) -> _SegmentBlueprint:
+        """Prepare call order, releases and state operand locations."""
+        return _SegmentBlueprint(
+            MappingProxyType(release_schedule(self.graph, self.node_ids, retained_ids)),
+            self._prepare_execution_steps(),
+            tuple(
+                (
+                    node,
+                    tuple(
+                        literal
+                        for component in (
+                            *getattr(node.args_template, "args", ()),
+                            *(item for _name, item in getattr(node.args_template, "kwargs", ())),
+                        )
+                        for literal in _state_literals(component)
+                    ),
+                )
+                for node in self.graph.nodes
+                if node.canonical_id in self.node_ids and not node.is_input and not node.is_output
+            ),
+        )
 
     def _initialize_call_guards(self) -> None:
         """Resolve native call identities and dispatch guards once per segment."""

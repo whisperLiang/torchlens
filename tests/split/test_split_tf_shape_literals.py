@@ -17,6 +17,7 @@ from torchlens.split import (
     shape_program,
 )
 from torchlens.split.adapters import tf as tf_adapter
+from torchlens.split.graph import SplitTraceGraph
 
 
 class _Tensor:
@@ -87,13 +88,11 @@ def _segment(monkeypatch: pytest.MonkeyPatch, rewrite: Any) -> Any:
             return value
         return _Tensor(integer=dtype.is_integer, shape=np.asarray(value).shape, payload=value)
 
-    monkeypatch.setattr(tf_adapter, "_tf", lambda: SimpleNamespace(convert_to_tensor=convert))
+    monkeypatch.setattr(
+        tf_adapter, "_tf", lambda: SimpleNamespace(Tensor=_Tensor, convert_to_tensor=convert)
+    )
     segment = tf_adapter._TfGeneratedSegmentBase(
-        graph=SimpleNamespace(
-            node_by_id={},
-            node_id_by_alias={},
-            shape_program=SimpleNamespace(rewrite=rewrite),
-        ),
+        graph=SplitTraceGraph("tf", (), (), (), None, None, SimpleNamespace(rewrite=rewrite)),
         plan=None,
         spec=SplitRequest(GraphPartition(frozenset()), backend="tf"),
         node_ids=frozenset(),
@@ -141,7 +140,7 @@ def test_tf_nonshape_operands_never_read_payloads(
         pytest.fail("A non-shape operand reached the dimension rewriter.")
 
     segment = _segment(monkeypatch, forbidden_rewrite)
-    assert segment._tf_inputs(capture, node, {}) == [tensor]
+    assert segment._tf_inputs(segment._prepare_tf_inputs(capture), node, {}) == [tensor]
     assert tensor.reads == 0
 
 
@@ -167,7 +166,7 @@ def test_tf_shape_operands_remain_readable_and_rewritable(
         return [binding.batch_size, 6]
 
     segment = _segment(monkeypatch, rewrite)
-    rewritten = segment._tf_inputs(capture, node, {})
+    rewritten = segment._tf_inputs(segment._prepare_tf_inputs(capture), node, {})
     assert rewritten[0].payload == [3, 6]
     assert tensor.reads == 2
 

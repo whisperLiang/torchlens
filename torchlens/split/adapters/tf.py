@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any
+from typing import Any, NamedTuple
 
 from torchlens.split.errors import SplitRequestError
 
 from ..._ir.container import rebuild_container_from_spec
-from ...backends.tf.op_callback_capture import TFOpCapture
+from ...backends.tf.op_callback_capture import TFInputCapture, TFOpCapture
 from ...backends.tf.validation import _replay_raw_op
 from .._capture_projection import reorder_container_leaves
 from ..boundary import ReplayBoundary
@@ -77,6 +77,15 @@ def _tf_gradient_source(value: Any) -> Any:
     return value
 
 
+class _TfInputBinding(NamedTuple):
+    """An ordered native operand and its resolved source."""
+
+    record: TFInputCapture
+    parent_label: str | None
+    parent_id: str | None
+    rewrite_shape: bool
+
+
 class _TfGeneratedSegmentBase:
     """Shared TensorFlow raw-op replay helpers."""
 
@@ -97,6 +106,21 @@ class _TfGeneratedSegmentBase:
         self._node_by_id = graph.node_by_id
         self._label_to_id = graph.node_id_by_alias
         self._shape_binding: ShapeBinding | None = None
+        self._execution_steps = graph._segment_blueprint(
+            ("tf", node_ids), self._prepare_execution_steps
+        )
+
+    def _prepare_execution_steps(
+        self,
+    ) -> tuple[tuple[SplitTraceNode, tuple[_TfInputBinding, ...]], ...]:
+        """Select and bind this segment's native nodes in capture order."""
+        return tuple(
+            (node, self._prepare_tf_inputs(node.target))
+            for node in self.graph.nodes
+            if node.canonical_id in self.node_ids
+            and not node.is_input
+            and not (node.is_output and node.target is None)
+        )
 
     def _context(self, node: SplitTraceNode, reason: str) -> SplitErrorContext:
         """Build an error context for ``node``."""
@@ -149,68 +173,53 @@ class _TfGeneratedSegmentBase:
                 handles.append(handle)
         return handles
 
-    def _resolve_parent_value(
-        self,
-        parent_label: str,
-        node: SplitTraceNode,
-        overlay: dict[str, Any],
-    ) -> Any:
-        """Resolve a raw/display/canonical parent label from the replay overlay."""
-
-        parent_id = self._label_to_id.get(parent_label)
-        if parent_id is None or parent_id not in overlay:
-            raise SplitUnsupportedError(
-                f"{node.label!r} references unavailable TensorFlow parent {parent_label!r}.",
-                context=self._context(node, "missing parent value"),
-                code=SplitUnsupportedError.code,
+    def _prepare_tf_inputs(self, capture: Any) -> tuple[_TfInputBinding, ...]:
+        """Resolve callback operand order, parents and shape-literal eligibility."""
+        if not isinstance(capture, TFOpCapture) or not capture.inputs:
+            return ()
+        records = sorted(capture.inputs, key=lambda item: item.input_index)
+        labels = [record.producer_label_raw or record.source_label_raw for record in records]
+        parent_ids = [
+            self._label_to_id.get(label) if label is not None else None for label in labels
+        ]
+        first_id = parent_ids[0]
+        first = self._node_by_id.get(first_id) if first_id is not None else None
+        from_state = first is not None and (
+            first.is_buffer
+            or first.is_param_source
+            or first.replay_source_policy.startswith("live_param")
+            or first.op_type.lower() in {"readvariableop", "varhandleop"}
+        )
+        return tuple(
+            _TfInputBinding(
+                record,
+                label,
+                parent_id,
+                label is None
+                and not from_state
+                and self.graph.shape_program is not None
+                and _tf_shape_literal_input(capture, record.input_index, record.tensor),
             )
-        return overlay[parent_id]
+            for record, label, parent_id in zip(records, labels, parent_ids, strict=True)
+        )
 
-    def _rewrite_tf_literal_tensor(
-        self,
-        value: Any,
-        *,
-        node: SplitTraceNode,
-        input_index: int,
-        overlay: dict[str, Any],
-    ) -> Any:
-        """Rewrite captured TF shape tensors for dynamic-batch replay."""
-
-        tf = _tf()
-        tensor = tf.convert_to_tensor(value)
-        capture = node.target
-        if not _tf_shape_literal_input(capture, input_index, tensor):
-            return tensor
-        if isinstance(capture, TFOpCapture) and capture.inputs:
-            first_input = min(capture.inputs, key=lambda item: item.input_index)
-            parent_label = first_input.producer_label_raw or first_input.source_label_raw
-            parent_id = self._label_to_id.get(parent_label) if parent_label is not None else None
-            parent = self._node_by_id.get(parent_id) if parent_id is not None else None
-            if parent is not None and (
-                parent.is_buffer
-                or parent.is_param_source
-                or parent.replay_source_policy.startswith("live_param")
-                or parent.op_type.lower() in {"readvariableop", "varhandleop"}
-            ):
-                return tensor
-        if self.graph.shape_program is None or self._shape_binding is None:
+    def _rewrite_tf_literal_tensor(self, tensor: Any, node: SplitTraceNode) -> Any:
+        """Rewrite a dimension literal using the current batch binding."""
+        shape_program = self.graph.shape_program
+        if shape_program is None or self._shape_binding is None:
             return tensor
         try:
             payload = tensor.numpy().tolist()
         except Exception:
             return tensor
-        rewritten = self.graph.shape_program.rewrite(
-            node.canonical_id,
-            payload,
-            self._shape_binding,
-        )
+        rewritten = shape_program.rewrite(node.canonical_id, payload, self._shape_binding)
         if rewritten == payload:
             return tensor
-        return tf.convert_to_tensor(rewritten, dtype=tensor.dtype)
+        return _tf().convert_to_tensor(rewritten, dtype=tensor.dtype)
 
     def _tf_inputs(
         self,
-        capture: TFOpCapture,
+        bindings: tuple[_TfInputBinding, ...],
         node: SplitTraceNode,
         overlay: dict[str, Any],
     ) -> list[Any]:
@@ -218,31 +227,35 @@ class _TfGeneratedSegmentBase:
 
         tf = _tf()
         inputs: list[Any] = []
-        for input_record in sorted(capture.inputs, key=lambda item: item.input_index):
-            label = input_record.producer_label_raw or input_record.source_label_raw
+        for record, label, parent_id, rewrite_shape in bindings:
             if label is not None:
-                inputs.append(
-                    tf.convert_to_tensor(self._resolve_parent_value(label, node, overlay))
-                )
-                continue
-            if input_record.tensor is not None:
-                inputs.append(
-                    self._rewrite_tf_literal_tensor(
-                        input_record.tensor,
-                        node=node,
-                        input_index=input_record.input_index,
-                        overlay=overlay,
+                if parent_id is None or parent_id not in overlay:
+                    raise SplitUnsupportedError(
+                        f"{node.label!r} references unavailable TensorFlow parent {label!r}.",
+                        context=self._context(node, "missing parent value"),
+                        code=SplitUnsupportedError.code,
                     )
+                value = overlay[parent_id]
+            elif record.tensor is not None:
+                value = record.tensor
+            else:
+                raise SplitUnsupportedError(
+                    f"{node.label!r} has unresolved TensorFlow input slot {record.input_index}.",
+                    context=self._context(node, "unresolved TF input"),
+                    code=SplitUnsupportedError.code,
                 )
-                continue
-            raise SplitUnsupportedError(
-                f"{node.label!r} has unresolved TensorFlow input slot {input_record.input_index}.",
-                context=self._context(node, "unresolved TF input"),
-                code=SplitUnsupportedError.code,
+            tensor = value if isinstance(value, tf.Tensor) else tf.convert_to_tensor(value)
+            inputs.append(
+                self._rewrite_tf_literal_tensor(tensor, node) if rewrite_shape else tensor
             )
         return inputs
 
-    def _execute_tf_capture(self, node: SplitTraceNode, overlay: dict[str, Any]) -> Any:
+    def _execute_tf_capture(
+        self,
+        node: SplitTraceNode,
+        bindings: tuple[_TfInputBinding, ...],
+        overlay: dict[str, Any],
+    ) -> Any:
         """Execute one captured TensorFlow raw op."""
 
         capture = node.target
@@ -253,7 +266,7 @@ class _TfGeneratedSegmentBase:
                 code=SplitUnsupportedError.code,
             )
         try:
-            output = _replay_raw_op(capture, self._tf_inputs(capture, node, overlay))
+            output = _replay_raw_op(capture, self._tf_inputs(bindings, node, overlay))
         except Exception as exc:
             raise SplitUnsupportedError(
                 f"TensorFlow split replay failed for {node.label!r}: {exc}",
@@ -267,18 +280,12 @@ class _TfGeneratedSegmentBase:
     def _execute_nodes(self, overlay: dict[str, Any]) -> dict[str, Any]:
         """Execute this segment's node set into ``overlay``."""
 
-        for node in self.graph.nodes:
-            if node.canonical_id not in self.node_ids:
-                continue
-            if node.is_input:
-                continue
+        for node, bindings in self._execution_steps:
             if node.target is None and self._is_replay_source_node(node):
-                if node.canonical_id not in overlay and not node.is_output:
+                if node.canonical_id not in overlay:
                     overlay[node.canonical_id] = self._source_value(node)
                 continue
-            if node.is_output and node.target is None:
-                continue
-            overlay[node.canonical_id] = self._execute_tf_capture(node, overlay)
+            overlay[node.canonical_id] = self._execute_tf_capture(node, bindings, overlay)
         return overlay
 
 

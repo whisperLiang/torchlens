@@ -223,10 +223,11 @@ or effective parameter replicas. Every hit checks current state compatibility,
 and materialization inherits current effective values. A combined `repartition()`
 reuses its own state inspection once; it never retains state snapshots in the cache.
 
-Torch segment schedules have a separate 64-entry graph-local LRU. Its immutable
-blueprints contain only call order, last-use release schedules and state argument
-locations. Every materialization creates new SegmentState bindings, execution
-scratch and replica pools. It recomputes frozen-state sharing eligibility from
+Torch and TensorFlow share the same 64-entry graph-local schedule cache. Its
+immutable blueprints describe call order and operand locations. Torch also
+records last-use releases. Every materialization creates fresh execution
+scratch. Torch creates new SegmentState bindings and replica pools.
+Torch recomputes frozen-state sharing eligibility from
 current handles. Blueprints never contain boundary tensors, gradients, optimizer
 state or private mutable replicas. Same-device recuts preserve effective tensor
 identity; necessary device copies use the existing SegmentState migration path.
