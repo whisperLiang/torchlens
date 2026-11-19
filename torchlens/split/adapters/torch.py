@@ -473,9 +473,7 @@ class _GeneratedSegmentBase:
             else SegmentState(adapter=TorchSplitAdapter(), placement=resolved_placement)
         )
         self._fast_guard_state_refs: tuple[Any, ...] = ()
-        self._fast_guard_certified = (
-            not resolved_placement.is_explicit and self._prepare_fast_guard()
-        )
+        self._fast_guard_certified = self._prepare_fast_guard()
 
     def _build_blueprint(self, retained_ids: frozenset[str]) -> _SegmentBlueprint:
         """Prepare call order, releases and state operand locations."""
