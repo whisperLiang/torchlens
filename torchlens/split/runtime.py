@@ -272,20 +272,19 @@ class SplitRuntime(SplitGraph):
     def with_placement(self, plan: PlacementPlan) -> SplitRuntime:
         """Return a runtime at the same split with a different placement.
 
-        The capture, graph, SplitIR, and plan are reused.  Only the segment
-        executables are rebuilt so they can bind state on the requested
-        devices.
+        Reuse the capture and partition and validate the requested placement
+        before rebuilding the segment executables.
         """
 
         require_placement_support(self.adapter, plan, split_point=self.request.boundary)
         request = replace(self.request, placement=plan)
-        plan_partition(self.trace_graph, request)
+        placed_plan = plan_partition(self.trace_graph, request)
         capability_report = self.capability_report
         if self.prefix_program is not None and self.suffix_program is not None:
             capability_report = build_capability_report(
                 self.adapter,
                 self.trace_graph,
-                self.plan,
+                placed_plan,
                 request,
                 prefix_program=self.prefix_program,
                 suffix_program=self.suffix_program,
@@ -293,14 +292,14 @@ class SplitRuntime(SplitGraph):
                 model_profile=self.model_profile,
                 features=request.features.as_dict(),
             )
-        segments = self.adapter.build_segments(self.trace_graph, self.plan, request)
+        segments = self.adapter.build_segments(self.trace_graph, placed_plan, request)
         self._inherit_segment_state(segments, recut=False)
         return SplitRuntime(
             model=self.model,
             trace=self._trace,
             trace_graph=self.trace_graph,
             request=request,
-            plan=self.plan,
+            plan=placed_plan,
             adapter=self.adapter,
             segments=segments,
             capability_report=capability_report,
@@ -330,7 +329,8 @@ class SplitRuntime(SplitGraph):
             snapshots = (
                 self._segment_state_snapshots() if state_snapshots is None else state_snapshots
             )
-            if recut:
+            # A combined repartition already checked the same effective snapshots.
+            if recut and state_snapshots is None:
                 self._validate_recut_prefix_state(
                     previous, snapshots, getattr(segments.suffix, "node_ids", frozenset())
                 )

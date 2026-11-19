@@ -397,6 +397,8 @@ class _SegmentBlueprint:
         tuple[SplitTraceNode, tuple[SplitTraceNode, ...] | None, SplitTraceNode | None], ...
     ]
     state_nodes: tuple[tuple[SplitTraceNode, tuple[LiteralTensor, ...]], ...]
+    shape_rewrite_node_ids: frozenset[str]
+    reshape_node_ids: frozenset[str]
 
 
 def _state_literals(component: Any) -> tuple[LiteralTensor, ...]:
@@ -458,19 +460,8 @@ class _GeneratedSegmentBase:
         self._release_after = blueprint.release_after
         self._execution_steps = blueprint.execution_steps
         self._state_nodes = blueprint.state_nodes
-        shape_program = graph.shape_program
-        self._shape_rewrite_node_ids = (
-            frozenset(shape_program.recipes) if shape_program is not None else frozenset()
-        )
-        self._reshape_node_ids = (
-            frozenset(
-                node.canonical_id
-                for node in graph.nodes
-                if shape_semantic_for_node(node) == "reshape"
-            )
-            if shape_program is not None
-            else frozenset()
-        )
+        self._shape_rewrite_node_ids = blueprint.shape_rewrite_node_ids
+        self._reshape_node_ids = blueprint.reshape_node_ids
         self._empty_param_cursor = _LiveParamCursor([])
         self._initialize_call_guards()
         resolved_placement = (
@@ -482,10 +473,13 @@ class _GeneratedSegmentBase:
             else SegmentState(adapter=TorchSplitAdapter(), placement=resolved_placement)
         )
         self._fast_guard_state_refs: tuple[Any, ...] = ()
-        self._fast_guard_certified = self._prepare_fast_guard()
+        self._fast_guard_certified = (
+            not resolved_placement.is_explicit and self._prepare_fast_guard()
+        )
 
     def _build_blueprint(self, retained_ids: frozenset[str]) -> _SegmentBlueprint:
         """Prepare call order, releases and state operand locations."""
+        shape_program = self.graph.shape_program
         return _SegmentBlueprint(
             MappingProxyType(release_schedule(self.graph, self.node_ids, retained_ids)),
             self._prepare_execution_steps(),
@@ -503,6 +497,18 @@ class _GeneratedSegmentBase:
                 )
                 for node in self.graph.nodes
                 if node.canonical_id in self.node_ids and not node.is_input and not node.is_output
+            ),
+            shape_rewrite_node_ids=(
+                frozenset(shape_program.recipes) if shape_program is not None else frozenset()
+            ),
+            reshape_node_ids=(
+                frozenset(
+                    node_id
+                    for node_id in self.node_ids
+                    if shape_semantic_for_node(self._node_by_id[node_id]) == "reshape"
+                )
+                if shape_program is not None
+                else frozenset()
             ),
         )
 
