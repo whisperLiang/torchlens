@@ -277,12 +277,10 @@ def _dynamic_shape_reasons(
     if shape_program is None:
         return ()
     adapter_reasons = _adapter_policy(adapter, "dynamic_shape_reasons", node, graph, spec)
-    if adapter_reasons:
+    if adapter_reasons or graph.traced_batch_size is not None:
         return adapter_reasons
     func_name = str(getattr(node.target, "op_type", "") or getattr(node.target, "__name__", ""))
-    if not is_batch_shape_sensitive_op(node.op_type, func_name):
-        return ()
-    if graph.traced_batch_size is None:
+    if is_batch_shape_sensitive_op(node.op_type, func_name):
         return ("batch-symbolic replay requested but traced batch size is unavailable",)
     return ()
 

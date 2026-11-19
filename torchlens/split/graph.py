@@ -296,8 +296,29 @@ class SplitTraceGraph:
 
         return {node_id: call for call in self.replay_calls for node_id in call.output_node_ids}
 
-    def _compute_dag(self, *, training: bool, heterogeneous: bool) -> ComputeDAG:
-        """Project existing native calls and dependencies without capture or replay."""
+    @cached_property
+    def _validated_compute_ids(self) -> frozenset[str]:
+        """Index compute values after checking the captured replay arguments."""
+        from .planner import _validate_replay_dependencies
+
+        _validate_replay_dependencies(self)
+        return frozenset(node.canonical_id for node in self.compute_nodes)
+
+    @cached_property
+    def _multi_output_calls(self) -> tuple[ReplayCall, ...]:
+        """Keep only calls for which selecting one output can break atomicity."""
+        return tuple(call for call in self.replay_calls if len(call.output_node_ids) > 1)
+
+    @cached_property
+    def _partition_effect_nodes(self) -> tuple[tuple[SplitTraceNode, bool, bool], ...]:
+        """Retain captured writes and unaudited targets for partition validation."""
+        from .planner import _partition_effect_nodes
+
+        return _partition_effect_nodes(self)
+
+    @cached_property
+    def _compute_dag_topology(self) -> tuple[ComputeDAG, dict[str, str]]:
+        """Project native calls and their data and effect edges once."""
         calls = tuple(
             call
             for call in self.replay_calls
@@ -305,10 +326,7 @@ class SplitTraceGraph:
         )
         owners = {value: call.call_id for call in calls for value in call.output_node_ids}
         effects: set[tuple[str, str]] = set()
-        colocations: tuple[frozenset[str], ...] = ()
         if self.backend == TORCH_BACKEND_NAME:
-            from .planner import _partition_colocations
-
             effects = {
                 (owners[parent], owners[child])
                 for child, parents in self._partition_effect_index.predecessors.items()
@@ -316,16 +334,27 @@ class SplitTraceGraph:
                 for parent in parents
                 if parent in owners and owners[parent] != owners[child]
             }
-            colocations = _partition_colocations(
-                self, owners, training=training, heterogeneous=heterogeneous
-            )
-        return ComputeDAG(
+        dag = ComputeDAG(
             self.graph_shape_hash,
             calls,
             _compute_data_edges(self, owners),
             tuple(sorted(effects)),
-            colocations,
+            (),
         )
+        return dag, owners
+
+    def _compute_dag(self, *, training: bool, heterogeneous: bool) -> ComputeDAG:
+        """Apply placement and training obligations to the captured DAG topology."""
+        dag, owners = self._compute_dag_topology
+        if self.backend == TORCH_BACKEND_NAME:
+            from .planner import _partition_colocations
+
+            colocations = _partition_colocations(
+                self, owners, training=training, heterogeneous=heterogeneous
+            )
+            if colocations:
+                return replace(dag, must_colocate=colocations)
+        return dag
 
 
 def _compute_data_edges(

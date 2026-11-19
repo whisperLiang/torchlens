@@ -48,6 +48,7 @@ def _frontier_node_ids(
     """Return live crossing dependencies from prefix to suffix/output."""
 
     order = graph.order_by_id
+    aliases = graph.node_id_by_alias
     frontier: set[str] = set()
     for node in graph.nodes:
         if node.canonical_id not in suffix_node_ids and not node.is_output:
@@ -61,9 +62,9 @@ def _frontier_node_ids(
             frontier.add(node.canonical_id)
             continue
         for parent in node.parents:
-            parent_node = graph.node_for_label(parent)
-            if parent_node is not None and parent_node.canonical_id in prefix_node_ids:
-                frontier.add(parent_node.canonical_id)
+            parent_id = aliases.get(parent)
+            if parent_id is not None and parent_id in prefix_node_ids:
+                frontier.add(parent_id)
     for node_id in graph.input_node_ids:
         if node_id in suffix_node_ids:
             frontier.add(node_id)
@@ -200,8 +201,7 @@ def _partition_sets(
     if not isinstance(spec.partition, GraphPartition):
         raise TypeError("Partition planning requires a GraphPartition")
     selected = spec.partition.prefix_node_ids
-    compute_ids = {node.canonical_id for node in graph.compute_nodes}
-    unknown = selected - compute_ids
+    unknown = selected - graph._validated_compute_ids
     if unknown:
         raise _partition_refusal(
             graph,
@@ -209,7 +209,7 @@ def _partition_sets(
             "partition_node_invalid",
             f"Partition requires canonical compute-node IDs; invalid IDs: {tuple(sorted(unknown))!r}.",
         )
-    for call in graph.replay_calls:
+    for call in graph._multi_output_calls:
         members = set(call.output_node_ids)
         if selected & members and not members <= selected:
             raise _partition_refusal(
@@ -264,10 +264,12 @@ def _validate_partition_dependencies(
 ) -> None:
     """Reject unresolved edges and dependencies from suffix into prefix."""
 
+    aliases = graph.node_id_by_alias
     for node in graph.nodes:
+        is_prefix = node.canonical_id in prefix
         for parent in node.parents:
-            parent_node = graph.node_for_label(parent)
-            if parent_node is None:
+            parent_id = aliases.get(parent)
+            if parent_id is None:
                 raise _partition_refusal(
                     graph,
                     spec,
@@ -275,12 +277,12 @@ def _validate_partition_dependencies(
                     f"Cannot resolve dependency {parent!r} of {node.canonical_id!r}.",
                     node,
                 )
-            if node.canonical_id in prefix and parent_node.canonical_id not in prefix:
+            if is_prefix and parent_id not in prefix:
                 raise _partition_refusal(
                     graph,
                     spec,
                     "partition_reverse_dependency",
-                    f"Suffix node {parent_node.canonical_id!r} feeds prefix node "
+                    f"Suffix node {parent_id!r} feeds prefix node "
                     f"{node.canonical_id!r}; include its compute ancestors in the prefix.",
                     node,
                 )
@@ -775,25 +777,24 @@ def _validate_partition_effects(
     example when a profiler cannot isolate arbitrary alias relationships).
     """
 
+    checks = graph._partition_effect_nodes
     proof = None
     certified: set[str] = set()
     if graph.backend == TORCH_BACKEND_NAME and prefix_node_ids is not None:
         _validate_effect_order(graph, spec, prefix_node_ids)
-        proof = _MutationProof(
-            prefix_node_ids,
-            _torch_mutation_targets(),
-            _ordered_partition_nodes(graph, prefix_node_ids),
-            certified,
-            spec.trainable,
-            spec.placement.is_heterogeneous,
-        )
-    for node in graph.compute_nodes:
-        # Native multi-output calls keep their argument recipe on the owning
-        # output. Every sibling has the same effects and must use that recipe.
-        call = graph.replay_call_by_output_id[node.canonical_id]
-        owner = graph.node_by_id[call.output_node_ids[0]]
-        arguments = _partition_call_arguments(owner)
-        if _node_mutates(node, *arguments):
+        if checks:
+            proof = _MutationProof(
+                prefix_node_ids,
+                _torch_mutation_targets(),
+                _ordered_partition_nodes(graph, prefix_node_ids),
+                certified,
+                spec.trainable,
+                spec.placement.is_heterogeneous,
+            )
+    for node, mutates, target_supported in checks:
+        if mutates:
+            call = graph.replay_call_by_output_id[node.canonical_id]
+            arguments = _partition_call_arguments(graph.node_by_id[call.output_node_ids[0]])
             if _certify_partition_write(graph, node, arguments, proof, prefix_node_ids):
                 certified.add(node.canonical_id)
             else:
@@ -806,7 +807,14 @@ def _validate_partition_effects(
                     "or use an out-of-place graph.",
                     node,
                 )
-        _validate_partition_target(graph, spec, node)
+        if not target_supported:
+            raise _partition_refusal(
+                graph,
+                spec,
+                "partition_custom_effects_unproven",
+                f"Partition cannot certify side effects of custom target at {node.canonical_id!r}.",
+                node,
+            )
     return frozenset(certified)
 
 
@@ -853,28 +861,32 @@ def _certify_mlx_buffer_write(
     return len(_ordered_partition_nodes(graph, prefix)) == len(graph.compute_nodes)
 
 
-def _validate_partition_target(
-    graph: SplitTraceGraph, spec: SplitRequest, node: SplitTraceNode
-) -> None:
-    """Keep custom Torch effects outside the certified native target inventory."""
+def _partition_effect_nodes(
+    graph: SplitTraceGraph,
+) -> tuple[tuple[SplitTraceNode, bool, bool], ...]:
+    """Classify capture facts while leaving write certification to each partition."""
+    checks = []
+    for node in graph.compute_nodes:
+        # Sibling outputs share the owning output's native argument recipe.
+        call = graph.replay_call_by_output_id[node.canonical_id]
+        owner = graph.node_by_id[call.output_node_ids[0]]
+        mutates = _node_mutates(node, *_partition_call_arguments(owner))
+        target_supported = graph.backend != TORCH_BACKEND_NAME or _is_native_partition_target(node)
+        if mutates or not target_supported:
+            checks.append((node, mutates, target_supported))
+    return tuple(checks)
 
-    if graph.backend != TORCH_BACKEND_NAME or node.target is None:
-        return
+
+def _is_native_partition_target(node: SplitTraceNode) -> bool:
+    """Recognize the captured native Torch targets allowed by the planner."""
     from .._utils.display import identity
 
-    if node.target is identity:
-        return
+    if node.target is None or node.target is identity:
+        return True
     module = str(getattr(node.target, "__module__", "") or "")
     owner = getattr(node.target, "__objclass__", None)
     owner_module = str(getattr(owner, "__module__", "") or "")
-    if not any(name == "torch" or name.startswith("torch.") for name in (module, owner_module)):
-        raise _partition_refusal(
-            graph,
-            spec,
-            "partition_custom_effects_unproven",
-            f"Partition cannot certify side effects of custom target at {node.canonical_id!r}.",
-            node,
-        )
+    return any(name == "torch" or name.startswith("torch.") for name in (module, owner_module))
 
 
 def _partition_call_arguments(node: SplitTraceNode) -> tuple[tuple[Any, ...], dict[str, Any]]:
@@ -994,7 +1006,6 @@ def _validate_boundary_state_aliases(
 def plan_partition(graph: SplitTraceGraph, spec: SplitRequest) -> SplitPlan:
     """Validate a canonical partition and derive its unique live frontier."""
 
-    _validate_replay_dependencies(graph)
     prefix_node_ids, suffix_node_ids = _partition_sets(graph, spec)
     ordered_mutations = _validate_partition_effects(graph, spec, prefix_node_ids=prefix_node_ids)
     boundary_node_ids = _frontier_node_ids(
