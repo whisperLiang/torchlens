@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pytest
 from dag_helpers import call_ids, close_call_ids
+from test_split_planner import _node as _planner_node
 
 from torchlens.backends.tf.op_callback_capture import TFInputCapture, TFOpCapture
 from torchlens.split import (
@@ -17,7 +19,7 @@ from torchlens.split import (
     shape_program,
 )
 from torchlens.split.adapters import tf as tf_adapter
-from torchlens.split.graph import SplitTraceGraph
+from torchlens.split.graph import SplitTraceGraph, SplitTraceNode
 
 
 class _Tensor:
@@ -78,7 +80,9 @@ def _node(capture: Any) -> Any:
     )
 
 
-def _segment(monkeypatch: pytest.MonkeyPatch, rewrite: Any) -> Any:
+def _segment(
+    monkeypatch: pytest.MonkeyPatch, rewrite: Any, nodes: tuple[SplitTraceNode, ...] = ()
+) -> Any:
     """Build the real input-replay adapter around a metadata-only TF stand-in."""
 
     def convert(value: Any, dtype: Any = None) -> _Tensor:
@@ -92,7 +96,7 @@ def _segment(monkeypatch: pytest.MonkeyPatch, rewrite: Any) -> Any:
         tf_adapter, "_tf", lambda: SimpleNamespace(Tensor=_Tensor, convert_to_tensor=convert)
     )
     segment = tf_adapter._TfGeneratedSegmentBase(
-        graph=SplitTraceGraph("tf", (), (), (), None, None, SimpleNamespace(rewrite=rewrite)),
+        graph=SplitTraceGraph("tf", nodes, (), (), None, None, SimpleNamespace(rewrite=rewrite)),
         plan=None,
         spec=SplitRequest(GraphPartition(frozenset()), backend="tf"),
         node_ids=frozenset(),
@@ -169,6 +173,39 @@ def test_tf_shape_operands_remain_readable_and_rewritable(
     rewritten = segment._tf_inputs(segment._prepare_tf_inputs(capture), node, {})
     assert rewritten[0].payload == [3, 6]
     assert tensor.reads == 2
+
+
+@pytest.mark.parametrize(
+    "source_fields",
+    [
+        {"is_buffer": True},
+        {"is_param_source": True},
+        {"replay_source_policy": "live_param_derived"},
+        {"op_type": "readvariableop"},
+    ],
+)
+def test_tf_state_shape_literals_keep_the_captured_dimensions(
+    monkeypatch: pytest.MonkeyPatch, source_fields: dict[str, Any]
+) -> None:
+    """Batch rewrites must not resize a native resource or other state value."""
+
+    source_node = replace(_planner_node("source", raw_index=1), **source_fields)
+    data = _Tensor(integer=False, shape=(6,))
+    shape = _Tensor(integer=True, shape=(2,), payload=[1, 6])
+    capture = _capture("Reshape", 1, shape)
+    source = TFInputCapture(0, None, "resource", source_node.raw_label, data, None)
+    capture = replace(capture, inputs=(*capture.inputs, source))
+
+    def forbidden_rewrite(*args: Any) -> Any:
+        """Reject a rewrite of this state operand's dimensions."""
+        pytest.fail("Captured state dimensions cannot depend on the runtime batch.")
+
+    segment = _segment(monkeypatch, forbidden_rewrite, (source_node,))
+    inputs = segment._tf_inputs(
+        segment._prepare_tf_inputs(capture), _node(capture), {source_node.canonical_id: data}
+    )
+    assert inputs == [data, shape]
+    assert shape.reads == 0
 
 
 def test_shape_literal_suffix_scan_is_linear(monkeypatch: pytest.MonkeyPatch) -> None:

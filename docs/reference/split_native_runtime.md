@@ -239,7 +239,7 @@ graph. Retrace any caller-owned `tf.function` when its variable bindings or
 trainability change.
 
 Graph costs have a separate eight-entry batch/rule-revision bound. `clear_analysis_cache()` clears
-both caches for the lineage; `analysis_cache_info()` exposes hit/miss counts,
+partition and graph-cost analyses for the lineage. `analysis_cache_info()` exposes hit/miss counts,
 current size and capacity. Caller mutations to returned boundary dictionaries or
 capability reports do not poison later cache hits. Replacing the normalized
 graph detaches that runtime's caches from its siblings, so costs from the replacement

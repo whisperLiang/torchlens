@@ -88,7 +88,9 @@ def test_tf_module_split_training_optimizer_step_matches_full_step() -> None:
 
 
 @pytest.mark.parametrize("update", [False, True])
-def test_tf_suffix_joint_gradients_keep_sparse_and_disconnected_sources(update: bool) -> None:
+def test_tf_suffix_joint_gradients_keep_sparse_and_disconnected_sources(
+    update: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Traverse the loss once and apply only connected suffix variable gradients."""
 
     tf = pytest.importorskip("tensorflow")
@@ -106,7 +108,7 @@ def test_tf_suffix_joint_gradients_keep_sparse_and_disconnected_sources(update: 
             """Return both branches while the loss consumes only the first."""
             return (
                 tf.nn.relu(x) + tf.gather(self.embedding.read_value(), indices),
-                tf.math.tanh(x) * self.unused,
+                tf.math.tanh(x) * self.unused.read_value(),
             )
 
     model = Branches()
@@ -134,18 +136,20 @@ def test_tf_suffix_joint_gradients_keep_sparse_and_disconnected_sources(update: 
         tape.watch(hidden)
         expected_loss = objective((hidden + tf.gather(model.embedding, indices), None), target)
     expected_root_grad, expected_var_grad = tape.gradient(expected_loss, [hidden, model.embedding])
-    traversals: list[None] = []
+    loss_variable = tf.Variable(1.0, dtype=tf.float64)
 
-    @tf.custom_gradient
-    def count_traversal(value: Any) -> tuple[Any, Any]:
-        """Observe an eager backward traversal without replacing GradientTape."""
+    def loss_with_external_variable(output: tuple[Any, Any], y: Any) -> Any:
+        """Read a loss-owned variable outside the segment's optimizer scope."""
+        return objective(output, y) + tf.square(loss_variable - 1.0)
 
-        def backward(grad: Any) -> Any:
-            """Pass the gradient through and count the traversal."""
-            traversals.append(None)
-            return grad
+    queries: list[tuple[int, set[object]]] = []
+    native_gradient = tf.GradientTape.gradient
 
-        return value, backward
+    def observe_gradient(tape: Any, loss: Any, sources: list[Any]) -> Any:
+        """Record the eager request while leaving its differentiation to TensorFlow."""
+        grads = native_gradient(tape, loss, sources)
+        queries.append((len(sources), {variable.ref() for variable in tape.watched_variables()}))
+        return grads
 
     class RecordingSGD(tf.keras.optimizers.SGD):
         """Assert the native optimizer receives the original sparse gradient."""
@@ -163,13 +167,15 @@ def test_tf_suffix_joint_gradients_keep_sparse_and_disconnected_sources(update: 
         expected_weights -= tf.cast(0.05, tf.float64) * tf.convert_to_tensor(expected_var_grad)
     boundary = runtime.run_training_prefix(x, indices)
     assert sum(value.dtype.is_floating for value in boundary.tensors.values()) == 2
+    monkeypatch.setattr(tf.GradientTape, "gradient", observe_gradient)
     result = runtime.train_suffix_result(
         boundary,
         target,
-        loss_fn=lambda output, y: count_traversal(objective(output, y)),
+        loss_fn=loss_with_external_variable,
         optimizer=optimizer,
     )
-    assert len(traversals) == 1
+    expected_watched = {model.embedding.ref(), model.unused.ref()} if update else set()
+    assert queries == [(2 + len(expected_watched), expected_watched)]
     assert result.optimizer_applied is update
     if optimizer is not None:
         assert int(optimizer.iterations) == 1
