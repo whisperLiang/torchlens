@@ -230,7 +230,13 @@ scratch. Torch creates new SegmentState bindings and replica pools.
 Torch recomputes frozen-state sharing eligibility from
 current handles. Blueprints never contain boundary tensors, gradients, optimizer
 state or private mutable replicas. Same-device recuts preserve effective tensor
-identity; necessary device copies use the existing SegmentState migration path.
+identity. Necessary device copies use the existing SegmentState migration path.
+
+TensorFlow training selects variables by captured resource identity and current
+trainability. Eager optimizer steps respect changes to Keras layer trainability.
+If a tracked variable object is replaced with a new resource, prepare a new
+graph. Retrace any caller-owned `tf.function` when its variable bindings or
+trainability change.
 
 Graph costs have a separate eight-entry batch/rule-revision bound. `clear_analysis_cache()` clears
 both caches for the lineage; `analysis_cache_info()` exposes hit/miss counts,

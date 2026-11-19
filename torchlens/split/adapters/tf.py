@@ -8,6 +8,7 @@ from typing import Any, NamedTuple
 from torchlens.split.errors import SplitRequestError
 
 from ..._ir.container import rebuild_container_from_spec
+from ...backends.tf._tensor_probe import _tensor_ref_key
 from ...backends.tf.op_callback_capture import TFInputCapture, TFOpCapture
 from ...backends.tf.validation import _replay_raw_op
 from .._capture_projection import reorder_container_leaves
@@ -86,6 +87,20 @@ class _TfInputBinding(NamedTuple):
     rewrite_shape: bool
 
 
+class _TfReplayBlueprint(NamedTuple):
+    """Immutable operand bindings and the captured resource identities they read."""
+
+    steps: tuple[tuple[SplitTraceNode, tuple[_TfInputBinding, ...]], ...]
+    resources: tuple[Any, ...]
+    resource_keys: frozenset[object]
+    model_resource_keys: frozenset[object]
+
+
+def _tf_variable_resource(variable: Any) -> Any:
+    """Get the native resource tensor behind a TensorFlow or Keras variable."""
+    return getattr(_tf_gradient_source(variable), "handle", None)
+
+
 class _TfGeneratedSegmentBase:
     """Shared TensorFlow raw-op replay helpers."""
 
@@ -106,20 +121,34 @@ class _TfGeneratedSegmentBase:
         self._node_by_id = graph.node_by_id
         self._label_to_id = graph.node_id_by_alias
         self._shape_binding: ShapeBinding | None = None
-        self._execution_steps = graph._segment_blueprint(
-            ("tf", node_ids), self._prepare_execution_steps
-        )
+        self._blueprint = graph._segment_blueprint(("tf", node_ids), self._prepare_blueprint)
 
-    def _prepare_execution_steps(
-        self,
-    ) -> tuple[tuple[SplitTraceNode, tuple[_TfInputBinding, ...]], ...]:
+    def _prepare_blueprint(self) -> _TfReplayBlueprint:
         """Select and bind this segment's native nodes in capture order."""
-        return tuple(
+        steps = tuple(
             (node, self._prepare_tf_inputs(node.target))
             for node in self.graph.nodes
             if node.canonical_id in self.node_ids
             and not node.is_input
             and not (node.is_output and node.target is None)
+        )
+        resources = {
+            binding.record.ref_key: binding.record.tensor
+            for node, bindings in steps
+            if isinstance(node.target, TFOpCapture) and node.target.op_type == "ReadVariableOp"
+            for binding in bindings
+            if binding.record.source_kind == "resource" and binding.record.ref_key is not None
+        }
+        model_resources: dict[object, Any] = {}
+        for node_id in self.node_ids:
+            for param in self._node_by_id[node_id].param_refs:
+                resource = _tf_variable_resource(_param_ref_handle(param))
+                key = _tensor_ref_key(resource)
+                if key is not None:
+                    model_resources[key] = resource
+        resources.update(model_resources)
+        return _TfReplayBlueprint(
+            steps, tuple(resources.values()), frozenset(resources), frozenset(model_resources)
         )
 
     def _context(self, node: SplitTraceNode, reason: str) -> SplitErrorContext:
@@ -154,24 +183,33 @@ class _TfGeneratedSegmentBase:
             )
         return _tf().convert_to_tensor(value)
 
-    def _trainable_param_handles(self, node_ids: frozenset[str]) -> list[Any]:
-        """Return unique live trainable parameter handles used by ``node_ids``."""
-
-        handles: list[Any] = []
-        seen: set[int] = set()
-        for node_id in node_ids:
-            node = self._node_by_id.get(node_id)
-            if node is None:
-                continue
-            for param in node.param_refs:
-                if not getattr(param, "is_trainable", False):
-                    continue
-                handle = _param_ref_handle(param)
-                if handle is None or id(handle) in seen:
-                    continue
-                seen.add(id(handle))
-                handles.append(handle)
-        return handles
+    def _trainable_variables(self, model: Any) -> list[Any]:
+        """Bind segment resources against the model's current trainability."""
+        blueprint = self._blueprint
+        if not blueprint.resource_keys:
+            return []
+        bindings: dict[object, Any] = {}
+        for variable in getattr(model, "trainable_variables", ()) or ():
+            key = _tensor_ref_key(_tf_variable_resource(variable))
+            if key in blueprint.resource_keys:
+                bindings.setdefault(key, variable)
+        missing = blueprint.model_resource_keys - bindings.keys()
+        if missing:
+            attached = {
+                _tensor_ref_key(_tf_variable_resource(variable))
+                for variable in getattr(model, "variables", ()) or ()
+            }
+            if missing - attached:
+                raise SplitUnsupportedError(
+                    "TensorFlow model resources changed since capture; prepare a new split graph.",
+                    context=SplitErrorContext(
+                        backend="tf",
+                        split_point=self.spec.boundary,
+                        reason="captured TensorFlow variable replaced",
+                    ),
+                    code=SplitUnsupportedError.code,
+                )
+        return list(bindings.values())
 
     def _prepare_tf_inputs(self, capture: Any) -> tuple[_TfInputBinding, ...]:
         """Resolve callback operand order, parents and shape-literal eligibility."""
@@ -280,7 +318,7 @@ class _TfGeneratedSegmentBase:
     def _execute_nodes(self, overlay: dict[str, Any]) -> dict[str, Any]:
         """Execute this segment's node set into ``overlay``."""
 
-        for node, bindings in self._execution_steps:
+        for node, bindings in self._blueprint.steps:
             if node.target is None and self._is_replay_source_node(node):
                 if node.canonical_id not in overlay:
                     overlay[node.canonical_id] = self._source_value(node)
@@ -336,8 +374,7 @@ class TfGeneratedPrefix(_TfGeneratedSegmentBase):
                 for value in input_leaves:
                     if _is_diff_tf_tensor(value, tf):
                         tape.watch(value)
-                for value in self._trainable_param_handles(self.plan.prefix_node_ids):
-                    tape.watch(_tf_gradient_source(value))
+                tape.watch(self._blueprint.resources)
                 overlay = dict(zip(self.graph.input_node_ids, input_leaves))
                 self._execute_nodes(overlay)
         boundary_tensors: dict[str, Any] = {}

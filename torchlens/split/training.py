@@ -164,79 +164,6 @@ def _default_loss(torch: Any, output: Any, targets: Any) -> Any:
     return torch.nn.functional.mse_loss(output, targets)
 
 
-def _trainable_param_handles(runtime: Any, node_ids: frozenset[str]) -> list[Any]:
-    """Return unique live trainable parameter handles used by split nodes."""
-
-    handles: list[Any] = []
-    seen: set[int] = set()
-    for node_id in node_ids:
-        node = runtime.trace_graph.node_by_id.get(node_id)
-        if node is None:
-            continue
-        for param in node.param_refs:
-            if not getattr(param, "is_trainable", False):
-                continue
-            handle = getattr(param, "_param_ref", None)
-            if handle is None:
-                handle = getattr(param, "handle", None)
-            if handle is None or id(handle) in seen:
-                continue
-            seen.add(id(handle))
-            handles.append(handle)
-    if getattr(runtime.adapter, "name", None) == "tf":
-        _extend_tf_resource_param_handles(runtime, node_ids, handles, seen)
-    return handles
-
-
-def _tf_resource_name(handle: Any) -> str | None:
-    """Extract TensorFlow eager resource-handle name from its stable repr."""
-
-    text = repr(handle)
-    marker = 'ResourceHandle(name="'
-    start = text.find(marker)
-    if start < 0:
-        return None
-    start += len(marker)
-    end = text.find('"', start)
-    if end < 0:
-        return None
-    return text[start:end]
-
-
-def _extend_tf_resource_param_handles(
-    runtime: Any,
-    node_ids: frozenset[str],
-    handles: list[Any],
-    seen: set[int],
-) -> None:
-    """Add TensorFlow variables referenced by raw ``ReadVariableOp`` resource handles."""
-
-    variables = tuple(getattr(runtime.model, "trainable_variables", ()) or ())
-    variables_by_resource = {
-        resource_name: variable
-        for variable in variables
-        if (resource_name := _tf_resource_name(getattr(variable, "handle", None))) is not None
-    }
-    if not variables_by_resource:
-        return
-    for node_id in node_ids:
-        node = runtime.trace_graph.node_by_id.get(node_id)
-        capture = getattr(node, "target", None)
-        if node is None or getattr(capture, "op_type", None) != "ReadVariableOp":
-            continue
-        for input_record in getattr(capture, "inputs", ()):
-            if getattr(input_record, "source_kind", None) != "resource":
-                continue
-            resource_name = _tf_resource_name(getattr(input_record, "tensor", None))
-            if resource_name is None:
-                continue
-            variable = variables_by_resource.get(resource_name)
-            if variable is None or id(variable) in seen:
-                continue
-            seen.add(id(variable))
-            handles.append(variable)
-
-
 @dataclass(frozen=True)
 class _TorchSuffixOptions:
     """Objective, optimizer and optional measurement isolation for one suffix step."""
@@ -375,9 +302,7 @@ def _train_suffix_tf(
         metadata={**boundary.metadata, "suffix_training_roots": tuple(root_tensors)},
     )
     suffix_vars = (
-        _trainable_param_handles(runtime, runtime.plan.suffix_node_ids)
-        if optimizer is not None
-        else []
+        runtime.segments.suffix._trainable_variables(runtime.model) if optimizer is not None else []
     )
     root_count = len(root_tensors)
     sources = [*root_tensors.values(), *(_tf_gradient_source(var) for var in suffix_vars)]
@@ -1063,7 +988,7 @@ def _backward_prefix_tf(
             output_grads.append(grad)
     if not targets:
         return {}
-    sources = _trainable_param_handles(runtime, runtime.plan.prefix_node_ids)
+    sources = runtime.segments.training_prefix._trainable_variables(runtime.model)
     gradient_sources = [_tf_gradient_source(source) for source in sources]
     if not gradient_sources:
         return {}

@@ -301,6 +301,56 @@ def test_tf_integer_boundary_supports_suffix_updates_without_root_gradients() ->
     assert int(optimizer.iterations) == 1
     assert float(model.scale) == pytest.approx(1.0)
 
+    old_scale = model.scale
+    model.scale = tf.Variable(3.0, dtype=tf.float64)
+    with pytest.raises(SplitUnsupportedError, match="prepare a new split graph"):
+        runtime.train_suffix_result(boundary, target, optimizer=optimizer)
+    assert float(old_scale) == pytest.approx(1.0)
+
+    refreshed = prepare_graph(model, x, backend="tf", features=SplitFeatures(training=True))
+    recaptured = refreshed.materialize(refreshed.analyze(refreshed.compute_dag().to_partition(())))
+    assert recaptured.train_suffix_result(
+        recaptured.run_training_prefix(x), target, optimizer=tf.keras.optimizers.SGD(0.1)
+    ).optimizer_applied
+    assert float(model.scale) == pytest.approx(1.5)
+
+
+def test_tf_training_binds_shared_variables_once_and_respects_live_freeze() -> None:
+    """Repartition preserves live weights and selects only currently trainable variables."""
+
+    tf = pytest.importorskip("tensorflow")
+    inputs = tf.keras.Input((2,), dtype=tf.float64)
+    frozen = tf.keras.layers.Dense(2, dtype=tf.float64, kernel_initializer="ones")
+    shared = tf.keras.layers.Dense(2, dtype=tf.float64, kernel_initializer="ones")
+    model = tf.keras.Model(inputs, shared(shared(frozen(inputs))))
+    x = tf.constant([[1.0, -0.5]], dtype=tf.float64)
+    graph = prepare_graph(model, x, backend="tf", features=SplitFeatures(training=True))
+    dag = graph.compute_dag()
+    runtime = graph.materialize(graph.analyze(dag.to_partition(c.call_id for c in dag.nodes)))
+    runtime = runtime.repartition(dag.to_partition(()))
+    frozen.trainable = False
+    expected_frozen = frozen.get_weights()
+    optimizer = tf.keras.optimizers.SGD(0.01)
+
+    with tf.GradientTape() as tape:
+        loss = tf.reduce_mean(tf.square(model(x)))
+    expected_shared = [
+        variable.numpy() - 0.01 * grad.numpy()
+        for variable, grad in zip(
+            shared.trainable_variables, tape.gradient(loss, shared.trainable_variables), strict=True
+        )
+    ]
+    result = runtime.train_suffix_result(
+        runtime.run_training_prefix(x), tf.zeros_like(model(x)), optimizer=optimizer
+    )
+
+    assert result.optimizer_applied
+    assert int(optimizer.iterations) == 1
+    for actual, expected in zip(frozen.get_weights(), expected_frozen, strict=True):
+        np.testing.assert_array_equal(actual, expected)
+    for actual, expected in zip(shared.get_weights(), expected_shared, strict=True):
+        np.testing.assert_allclose(actual, expected, atol=1e-8, rtol=1e-7)
+
 
 def test_tf_training_boundary_cache_strips_gradient_tape(tmp_path) -> None:
     """TensorFlow training boundaries save as suffix-only cache payloads."""
