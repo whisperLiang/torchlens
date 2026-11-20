@@ -232,6 +232,15 @@ current handles. Blueprints never contain boundary tensors, gradients, optimizer
 state or private mutable replicas. Same-device recuts preserve effective tensor
 identity. Necessary device copies use the existing SegmentState migration path.
 
+TensorFlow preflight checks the captured op types against the native replay
+registry. Both pooling ops use their own TensorFlow signatures. An equal-size
+TensorFlow `Split` runs once per segment execution. Its outputs keep separate
+value IDs, and the partition keeps the entire call on one side. TensorFlow
+forward replay validation compares and perturbs each saved output by its slot.
+Materialization refuses incomplete or invalid output slots with
+`split_unsupported`. Replay uses the same error code if the native result
+has a different number of outputs than capture recorded.
+
 TensorFlow training selects variables by captured resource identity and current
 trainability. Eager optimizer steps respect changes to Keras layer trainability.
 If a tracked variable object is replaced with a new resource, prepare a new

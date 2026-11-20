@@ -1124,6 +1124,13 @@
       ],
       "why": "visualization: per-test line coverage; these files execute 99 body lines between them, the static list executed 85"
     },
+    "torchlens/backends/tf/_raw_op_replay.py": {
+      "tests": [
+        "tests/backends/test_tf_validation.py",
+        "tests/split/test_split_native_backends_replay.py"
+      ],
+      "why": "Exercises TensorFlow native pooling signatures, Split output slots, and perturbation failures."
+    },
     "torchlens/backends/torch/_aten_capture.py": {
       "tests": [
         "tests/test_aten_profile.py",
@@ -1951,6 +1958,14 @@
         "tests/test_recording_raw_metadata.py"
       ],
       "why": "record: per-test line coverage; these files execute 381 body lines between them, the static list executed 180"
+    },
+    "torchlens/split/adapters/tf.py": {
+      "tests": [
+        "tests/split/test_split_compute_dag.py",
+        "tests/split/test_split_native_backends_replay.py",
+        "tests/split/test_split_tf_training.py"
+      ],
+      "why": "Exercises TensorFlow call scheduling, raw-op admission and replay, and gradient transport across both Split outputs."
     },
     "torchlens/validation/__init__.py": {
       "tests": [

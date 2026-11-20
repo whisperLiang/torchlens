@@ -19,6 +19,73 @@ def _assert_tf_close(tf: Any, left: Any, right: Any) -> None:
     assert bool(tf.reduce_all(tf.abs(left - right) < 1e-5).numpy())
 
 
+@pytest.mark.parametrize("device", ["CPU:0", "GPU:0"])
+def test_tf_split_training_backpropagates_both_outputs(device: str) -> None:
+    """Compare FP64 boundary, input, and parameter gradients with native TensorFlow."""
+
+    tf = pytest.importorskip("tensorflow")
+    if device.startswith("GPU") and not tf.config.list_logical_devices("GPU"):
+        pytest.skip("TensorFlow GPU unavailable")
+
+    class ScaleAndSplit(tf.Module):
+        """Scale the input before dividing it between two differentiable branches."""
+
+        def __init__(self) -> None:
+            """Initialize one trainable parameter in the prefix."""
+
+            super().__init__()
+            self.scale = tf.Variable(1.5, dtype=tf.float64)
+
+        def __call__(self, inputs: Any) -> tuple[Any, Any]:
+            """Keep both native outputs connected to the loss."""
+
+            left, right = tf.split(inputs * self.scale.read_value(), 2, axis=-1)
+            return tf.identity(tf.math.sin(left)), tf.math.tanh(right)
+
+    def objective(outputs: tuple[Any, Any], targets: Any) -> Any:
+        """Give the two branches different cotangents."""
+
+        left, right = outputs
+        return tf.reduce_mean(tf.square(left - targets) + 2.0 * tf.square(right - targets))
+
+    with tf.device(f"/{device}"):
+        model = ScaleAndSplit()
+        inputs = tf.reshape(tf.range(1, 17, dtype=tf.float64) / 20.0, (4, 4))
+        graph = prepare_graph(
+            model, inputs[:1], backend="tf", features=SplitFeatures(training=True)
+        )
+        dag = graph.compute_dag()
+        (split,) = [call for call in dag.nodes if len(call.output_node_ids) == 2]
+        partition = dag.to_partition(close_call_ids(dag, frozenset({split.call_id})))
+        runtime = graph.materialize(graph.analyze(partition))
+        model.scale.assign(1.25)
+
+        for batch in (1, 2, 3, 4):
+            x = inputs[:batch]
+            target = tf.zeros((batch, 2), dtype=tf.float64)
+            with tf.GradientTape() as native_tape:
+                native_tape.watch(x)
+                left, right = tf.split(x * model.scale.read_value(), 2, axis=-1)
+                expected_loss = objective((tf.math.sin(left), tf.math.tanh(right)), target)
+            expected = native_tape.gradient(expected_loss, [left, right, x, model.scale])
+
+            boundary = runtime.run_training_prefix(x)
+            assert all(device in boundary.tensors[key].device for key in split.output_node_ids)
+            result = runtime.train_suffix_result(boundary, target, loss_fn=objective)
+            parameter_grads = runtime.backward_prefix(boundary, result.boundary_grads)
+            with tf.GradientTape() as replay_tape:
+                replay_tape.watch(x)
+                replay_loss = objective(runtime.run_suffix(runtime.run_training_prefix(x)), target)
+            actual = [result.boundary_grads[key] for key in split.output_node_ids]
+            actual.extend((replay_tape.gradient(replay_loss, x), parameter_grads[model.scale.name]))
+            for actual_value, expected_value in zip(
+                [result.loss, *actual], [expected_loss, *expected], strict=True
+            ):
+                np.testing.assert_allclose(
+                    actual_value.numpy(), expected_value.numpy(), atol=1e-8, rtol=1e-7
+                )
+
+
 def test_tf_module_split_training_optimizer_step_matches_full_step() -> None:
     """TensorFlow split training should replay live variable reads for optimizers."""
 

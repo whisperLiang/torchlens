@@ -240,6 +240,30 @@ def test_tf_same_shape_relus_are_disambiguated_by_stream_position() -> None:
     )
 
 
+def test_tf_split_siblings_get_their_own_intermediate_gradients() -> None:
+    """Distinguish output slots even though the siblings share one call identity."""
+
+    def model(value: Any) -> Any:
+        """Consume both equal-shaped outputs with different cotangents."""
+
+        left, right = tf.split(value, 2, axis=-1)
+        return tf.reduce_sum(left * 2.0 + right * 3.0)
+
+    trace = tl.trace(
+        model,
+        tf.ones((2, 4), dtype=tf.float64),
+        backend="tf",
+        capture=tl.options.CaptureOptions(
+            grad_options=GradOptions(intermediate_grads=True, max_intermediate_grads=16)
+        ),
+    )
+    left, right = [op for op in trace._layer_list if op.func_name == "Split"]
+    assert left.call.call_id == right.call.call_id
+    records = trace.autograd.intermediate_derived_grads
+    _assert_close(records[left.label].grad, np.full((2, 2), 2.0))
+    _assert_close(records[right.label].grad, np.full((2, 2), 3.0))
+
+
 def test_tf_duplicate_trace_signature_group_is_ambiguous() -> None:
     """A duplicate signature group should be detectable and skipped by attach logic."""
 

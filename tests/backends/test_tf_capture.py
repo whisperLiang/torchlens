@@ -363,3 +363,21 @@ def test_tf_static_funcgraph_trace_saves_and_loads(tmp_path: Any) -> None:
 
     assert loaded.provenance.backend == "tf"
     assert len(loaded._layer_list) == len(trace._layer_list)
+
+
+def test_tf_static_funcgraph_keeps_native_output_slots() -> None:
+    """Static TensorFlow import also groups the outputs of one native operation."""
+
+    @tf.function(autograph=False)
+    def compiled(value: Any) -> tuple[Any, Any]:
+        """Return both parts of a compiled split."""
+
+        left, right = tf.split(value, 2, axis=-1)
+        return left, right
+
+    trace = tl.trace(compiled, tf.ones((2, 4)), backend="tf")
+    outputs = [op for op in trace._layer_list if op.func_name == "Split"]
+    assert len(outputs) == 2
+    assert len({op.call.call_id for op in outputs}) == 1
+    assert len({op.raw_index for op in outputs}) == 2
+    assert [op.multi_output_index for op in outputs] == [0, 1]

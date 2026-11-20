@@ -8,9 +8,14 @@ from typing import Any, NamedTuple
 from torchlens.split.errors import SplitRequestError
 
 from ..._ir.container import rebuild_container_from_spec
+from ...backends.tf._raw_op_replay import (
+    _raw_op_dispatch,
+    _replay_outputs,
+    _replay_raw_op,
+    _select_replay_output,
+)
 from ...backends.tf._tensor_probe import _tensor_ref_key
 from ...backends.tf.op_callback_capture import TFInputCapture, TFOpCapture
-from ...backends.tf.validation import _replay_raw_op
 from .._capture_projection import reorder_container_leaves
 from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
@@ -87,10 +92,13 @@ class _TfInputBinding(NamedTuple):
     rewrite_shape: bool
 
 
+_TfReplayStep = tuple[SplitTraceNode, tuple[_TfInputBinding, ...], tuple[str, ...]]
+
+
 class _TfReplayBlueprint(NamedTuple):
     """Immutable operand bindings and the captured resource identities they read."""
 
-    steps: tuple[tuple[SplitTraceNode, tuple[_TfInputBinding, ...]], ...]
+    steps: tuple[_TfReplayStep, ...]
     resources: tuple[Any, ...]
     resource_keys: frozenset[object]
     model_resource_keys: frozenset[object]
@@ -128,7 +136,7 @@ class _TfGeneratedSegmentBase:
         steps = self._prepare_execution_steps()
         resources = {
             binding.record.ref_key: binding.record.tensor
-            for node, bindings in steps
+            for node, bindings, _outputs in steps
             if isinstance(node.target, TFOpCapture) and node.target.op_type == "ReadVariableOp"
             for binding in bindings
             if binding.record.source_kind == "resource" and binding.record.ref_key is not None
@@ -139,17 +147,46 @@ class _TfGeneratedSegmentBase:
             steps, tuple(resources.values()), frozenset(resources), frozenset(model_resources)
         )
 
-    def _prepare_execution_steps(
-        self,
-    ) -> tuple[tuple[SplitTraceNode, tuple[_TfInputBinding, ...]], ...]:
-        """Select and bind this segment's native nodes in capture order."""
+    def _prepare_execution_steps(self) -> tuple[_TfReplayStep, ...]:
+        """Lower calls in capture order, with only their leader in the schedule."""
+
+        grouped: dict[str, tuple[str, ...]] = {}
+        siblings: set[str] = set()
+        for call in self.graph._multi_output_calls:
+            outputs = call.output_node_ids
+            if self.node_ids.isdisjoint(outputs):
+                continue
+            leader, *followers = outputs
+            grouped[leader] = self._prepare_call_outputs(outputs)
+            siblings.update(followers)
+        scheduled = self.node_ids - siblings if siblings else self.node_ids
         return tuple(
-            (node, self._prepare_tf_inputs(node.target))
+            (node, self._prepare_tf_inputs(node.target), grouped.get(node.canonical_id, ()))
             for node in self.graph.nodes
-            if node.canonical_id in self.node_ids
+            if node.canonical_id in scheduled
             and not node.is_input
             and not (node.is_output and node.target is None)
         )
+
+    def _prepare_call_outputs(self, members: tuple[str, ...]) -> tuple[str, ...]:
+        """Validate one group's membership and bind its canonical values by slot."""
+
+        leader = self._node_by_id[members[0]]
+        captures = [self._node_by_id[member].target for member in members]
+        slots = {
+            capture.output_index: member
+            for capture, member in zip(captures, members, strict=True)
+            if isinstance(capture, TFOpCapture)
+            and capture.op_type == getattr(leader.target, "op_type", None)
+            and capture._output_count == len(members)
+        }
+        if not self.node_ids.issuperset(members) or slots.keys() != set(range(len(members))):
+            raise SplitUnsupportedError(
+                f"{leader.label!r} has incomplete or invalid TensorFlow call outputs.",
+                context=self._context(leader, "invalid TF call outputs"),
+                code=SplitUnsupportedError.code,
+            )
+        return tuple(slots[index] for index in range(len(members)))
 
     def _captured_model_resources(self) -> dict[object, Any]:
         """Index native resources from this segment's captured parameter records."""
@@ -303,9 +340,10 @@ class _TfGeneratedSegmentBase:
         self,
         node: SplitTraceNode,
         bindings: tuple[_TfInputBinding, ...],
+        output_ids: tuple[str, ...],
         overlay: dict[str, Any],
-    ) -> Any:
-        """Execute one captured TensorFlow raw op."""
+    ) -> None:
+        """Execute one native op and publish its outputs to the current overlay."""
 
         capture = node.target
         if not isinstance(capture, TFOpCapture):
@@ -316,25 +354,28 @@ class _TfGeneratedSegmentBase:
             )
         try:
             output = _replay_raw_op(capture, self._tf_inputs(bindings, node, overlay))
+            if output_ids:
+                overlay.update(zip(output_ids, _replay_outputs(capture, output), strict=True))
+            else:
+                if capture._output_count != 1:
+                    raise ValueError(f"{capture.op_type} is missing sibling outputs")
+                overlay[node.canonical_id] = _select_replay_output(capture, output)
         except Exception as exc:
             raise SplitUnsupportedError(
                 f"TensorFlow split replay failed for {node.label!r}: {exc}",
                 context=self._context(node, "TF raw-op replay failed"),
                 code=SplitUnsupportedError.code,
             ) from exc
-        if isinstance(output, (tuple, list)):
-            return output[capture.output_index]
-        return output
 
     def _execute_nodes(self, overlay: dict[str, Any]) -> dict[str, Any]:
         """Execute this segment's node set into ``overlay``."""
 
-        for node, bindings in self._blueprint.steps:
+        for node, bindings, output_ids in self._blueprint.steps:
             if node.target is None and self._is_replay_source_node(node):
                 if node.canonical_id not in overlay:
                     overlay[node.canonical_id] = self._source_value(node)
                 continue
-            overlay[node.canonical_id] = self._execute_tf_capture(node, bindings, overlay)
+            self._execute_tf_capture(node, bindings, output_ids, overlay)
         return overlay
 
 
@@ -489,6 +530,16 @@ class TfSplitAdapter(SplitPolicyMixin):
     supports_boundary_cache = True
     supports_state_placement = False
     native_target_types = frozenset({"TFOpCapture"})
+
+    def target_support_reasons(
+        self, node: SplitTraceNode, graph: SplitTraceGraph
+    ) -> tuple[str, ...]:
+        """Require a registered raw-op executor for a captured TensorFlow call."""
+
+        capture = node.target
+        if isinstance(capture, TFOpCapture) and capture.op_type not in _raw_op_dispatch():
+            return (f"TensorFlow raw op {capture.op_type!r} has no replay implementation",)
+        return super().target_support_reasons(node, graph)
 
     def is_tensor(self, value: Any) -> bool:
         """Return whether ``value`` is a TensorFlow tensor."""

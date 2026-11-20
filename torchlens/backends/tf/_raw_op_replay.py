@@ -1,14 +1,10 @@
-"""Raw-op replay kernels for TensorFlow validation.
-
-The dispatcher :func:`_replay_raw_op` re-executes one captured raw op from
-its rebuilt callback inputs; the ``_replay_*`` kernels below hold the ops
-whose attrs need decoding. Split out of :mod:`.validation` for the file cap;
-the replay rules themselves are unchanged.
-"""
+"""Raw-op replay kernels shared by TensorFlow validation and Split Runtime."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from functools import cache
+from types import MappingProxyType
 from typing import Any
 
 from ... import _state
@@ -28,7 +24,7 @@ def _replay_raw_op(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
     Returns
     -------
     Any
-        Replayed TensorFlow output tensor.
+        Native TensorFlow output tensor or ordered output sequence.
     """
 
     replay = _raw_op_dispatch().get(capture.op_type)
@@ -38,12 +34,13 @@ def _replay_raw_op(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
         return replay(capture, inputs)
 
 
-def _raw_op_dispatch() -> dict[str, Callable[[TFOpCapture, Sequence[Any]], Any]]:
-    """Return the raw-op replay table keyed by TensorFlow op type."""
+@cache
+def _raw_op_dispatch() -> Mapping[str, Callable[[TFOpCapture, Sequence[Any]], Any]]:
+    """Return the read-only native replay table keyed by TensorFlow op type."""
 
-    return {
+    table: dict[str, Callable[[TFOpCapture, Sequence[Any]], Any]] = {
         "AddV2": lambda item, args: _raw(item).AddV2(x=args[0], y=args[1]),
-        "AvgPool": _replay_pool,
+        "AvgPool": _replay_avg_pool,
         "BatchMatMulV2": _replay_batch_matmul_v2,
         "BiasAdd": _replay_bias_add,
         "BroadcastTo": lambda item, args: _raw(item).BroadcastTo(input=args[0], shape=args[1]),
@@ -81,7 +78,7 @@ def _raw_op_dispatch() -> dict[str, Callable[[TFOpCapture, Sequence[Any]], Any]]
         "Slice": lambda item, args: _raw(item).Slice(input=args[0], begin=args[1], size=args[2]),
         "Sum": lambda item, args: _replay_reduction(item, args, "Sum"),
         "Tile": lambda item, args: _raw(item).Tile(input=args[0], multiples=args[1]),
-        "MaxPool": _replay_pool,
+        "MaxPool": _replay_max_pool,
         "Mean": _replay_mean,
         "Mul": lambda item, args: _raw(item).Mul(x=args[0], y=args[1]),
         "Neg": lambda item, args: _raw(item).Neg(x=args[0]),
@@ -92,11 +89,9 @@ def _raw_op_dispatch() -> dict[str, Callable[[TFOpCapture, Sequence[Any]], Any]]
         "Reshape": lambda item, args: _raw(item).Reshape(tensor=args[0], shape=args[1]),
         "Rsqrt": lambda item, args: _raw(item).Rsqrt(x=args[0]),
         "Softmax": lambda item, args: _raw(item).Softmax(logits=args[0]),
+        "Split": _replay_split,
         "Sqrt": lambda item, args: _raw(item).Sqrt(x=args[0]),
-        "SquaredDifference": lambda item, args: _raw(item).SquaredDifference(
-            x=args[0],
-            y=args[1],
-        ),
+        "SquaredDifference": lambda item, args: _raw(item).SquaredDifference(x=args[0], y=args[1]),
         "Sub": lambda item, args: _raw(item).Sub(x=args[0], y=args[1]),
         "Squeeze": lambda item, args: _raw(item).Squeeze(
             input=args[0],
@@ -105,6 +100,33 @@ def _raw_op_dispatch() -> dict[str, Callable[[TFOpCapture, Sequence[Any]], Any]]
         "Tanh": lambda item, args: _raw(item).Tanh(x=args[0]),
         "Transpose": lambda item, args: _raw(item).Transpose(x=args[0], perm=args[1]),
     }
+    return MappingProxyType(table)
+
+
+def _replay_outputs(capture: TFOpCapture, result: Any) -> Sequence[Any]:
+    """Check the native result against the captured output count."""
+
+    outputs = result if isinstance(result, (tuple, list)) else (result,)
+    if len(outputs) != capture._output_count:
+        raise ValueError(
+            f"{capture.op_type} expects {capture._output_count} outputs, got {len(outputs)}"
+        )
+    return outputs
+
+
+def _select_replay_output(capture: TFOpCapture, result: Any) -> Any:
+    """Read one captured slot from a single native replay result."""
+
+    if (
+        capture._output_count == 1
+        and capture.output_index == 0
+        and not isinstance(result, (tuple, list))
+    ):
+        return result
+    outputs = _replay_outputs(capture, result)
+    if not 0 <= capture.output_index < len(outputs):
+        raise ValueError(f"{capture.op_type} has invalid output index {capture.output_index}")
+    return outputs[capture.output_index]
 
 
 def _raw(_capture: TFOpCapture) -> Any:
@@ -386,30 +408,38 @@ def _replay_mean(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
     )
 
 
-def _replay_pool(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay ``MaxPool`` or ``AvgPool``.
+def _pool_attrs(capture: TFOpCapture) -> dict[str, Any]:
+    """Decode the attributes shared by native average and max pooling."""
 
-    Parameters
-    ----------
-    capture
-        Callback capture.
-    inputs
-        Rebuilt inputs.
+    return {
+        "ksize": list(capture.attrs["ksize"]),
+        "strides": list(capture.attrs["strides"]),
+        "padding": _attr_str(capture.attrs["padding"]),
+        "data_format": _attr_str(capture.attrs.get("data_format", "NHWC")),
+    }
 
-    Returns
-    -------
-    Any
-        Replayed output.
-    """
 
-    raw_op = getattr(_raw(capture), capture.op_type)
-    return raw_op(
+def _replay_avg_pool(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
+    """Replay average pooling with its native value operand."""
+
+    return _raw(capture).AvgPool(value=inputs[0], **_pool_attrs(capture))
+
+
+def _replay_split(capture: TFOpCapture, inputs: Sequence[Any]) -> list[Any]:
+    """Split the runtime value along the captured axis in native output order."""
+
+    return _raw(capture).Split(
+        axis=inputs[0], value=inputs[1], num_split=int(capture.attrs["num_split"])
+    )
+
+
+def _replay_max_pool(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
+    """Replay max pooling, including any explicit spatial padding."""
+
+    return _raw(capture).MaxPool(
         input=inputs[0],
-        ksize=list(capture.attrs["ksize"]),
-        strides=list(capture.attrs["strides"]),
-        padding=_attr_str(capture.attrs["padding"]),
         explicit_paddings=list(capture.attrs.get("explicit_paddings", [])),
-        data_format=_attr_str(capture.attrs.get("data_format", "NHWC")),
+        **_pool_attrs(capture),
     )
 
 

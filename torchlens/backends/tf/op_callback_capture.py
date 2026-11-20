@@ -145,6 +145,10 @@ class TFOpCapture:
         Recorded callback input slots.
     output_tensor
         Live TensorFlow output tensor for this output slot.
+    _output_count
+        Number of native outputs in the recorded invocation.
+    _call_id
+        Native callback identity shared with sibling output records.
     """
 
     label_raw: str
@@ -153,6 +157,8 @@ class TFOpCapture:
     output_index: int
     inputs: tuple[TFInputCapture, ...]
     output_tensor: Any
+    _output_count: int = 1
+    _call_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -329,11 +335,6 @@ class TFEagerCaptureSession:
             Optional operation name.
         graph
             Callback graph object. Eager callbacks pass ``None``.
-
-        Returns
-        -------
-        None
-            Mutates capture state.
         """
 
         if graph is not None:
@@ -347,13 +348,17 @@ class TFEagerCaptureSession:
         output_tensors = tuple(output for output in outputs if _is_tf_tensor(output, self.tf))
         if not output_tensors:
             return
-        labels = self.events.reserve_label_block(op_type_text.lower(), len(output_tensors))
+        output_count = len(output_tensors)
+        labels = self.events.reserve_label_block(op_type_text.lower(), output_count)
+        call_id = labels[0].raw_index
+        raw_attrs = _attrs_to_raw_dict(attrs)
         for output_index, (label, output) in enumerate(zip(labels, output_tensors, strict=True)):
             record_context = self._record_context(
                 label=label,
                 op_type_text=op_type_text,
                 output=output,
                 output_index=output_index,
+                call_id=call_id,
                 parents=parents,
             )
             save_payload = self._should_save_payload(record_context)
@@ -362,11 +367,20 @@ class TFEagerCaptureSession:
                 label_raw=label.label_raw,
                 save_payload=save_payload,
             )
+            op_capture = TFOpCapture(
+                label_raw=label.label_raw,
+                op_type=op_type_text,
+                attrs=raw_attrs,
+                output_index=output_index,
+                inputs=input_captures,
+                output_tensor=output,
+                _output_count=output_count,
+                _call_id=call_id,
+            )
             event = self._event_for_output(
-                op_type_text=op_type_text,
+                capture=op_capture,
                 op_name=op_name,
                 attrs=attrs,
-                output_index=output_index,
                 tensor_ref=tensor_ref,
                 label=label,
                 parents=parents,
@@ -376,14 +390,6 @@ class TFEagerCaptureSession:
                 record_context=record_context,
             )
             self.events.append(event)
-            op_capture = TFOpCapture(
-                label_raw=label.label_raw,
-                op_type=op_type_text,
-                attrs=_attrs_to_raw_dict(attrs),
-                output_index=output_index,
-                inputs=input_captures,
-                output_tensor=output,
-            )
             self.op_captures.append(op_capture)
             if self.output_tap is not None:
                 self.output_tap(
@@ -399,10 +405,9 @@ class TFEagerCaptureSession:
     def _event_for_output(
         self,
         *,
-        op_type_text: str,
+        capture: TFOpCapture,
         op_name: str | None,
         attrs: tuple[Any, ...] | dict[str, Any],
-        output_index: int,
         tensor_ref: TensorRef,
         label: Any,
         parents: tuple[ParentEdge, ...],
@@ -415,14 +420,12 @@ class TFEagerCaptureSession:
 
         Parameters
         ----------
-        op_type_text
-            Normalized TensorFlow op type.
+        capture
+            Native call and output slot.
         op_name
             Optional TensorFlow op name.
         attrs
             Raw callback attrs.
-        output_index
-            Index within the callback outputs.
         tensor_ref
             Captured output tensor reference.
         label
@@ -444,6 +447,7 @@ class TFEagerCaptureSession:
             Event ready for ``materialize_from_events``.
         """
 
+        multi_output = capture._output_count > 1
         modules = tuple((frame.address, frame.call_index) for frame in self.module_stack)
         annotations: dict[str, object] = {
             "_tl_annotations": {
@@ -465,9 +469,9 @@ class TFEagerCaptureSession:
             construction_done=True,
             function=FunctionCallRef(
                 func=None,
-                func_name=op_type_text,
-                func_qualname=op_type_text,
-                func_call_id=label.raw_index,
+                func_name=capture.op_type,
+                func_qualname=capture.op_type,
+                func_call_id=capture._call_id,
                 code_context=(),
                 func_duration=None,
                 flops_forward=None,
@@ -482,7 +486,7 @@ class TFEagerCaptureSession:
                 non_tensor_kwargs=(),
                 func_non_tensor_args=(),
                 is_inplace=False,
-                func_config=(("tf_op_name", op_name), ("output_index", output_index)),
+                func_config=(("tf_op_name", op_name), ("output_index", capture.output_index)),
             ),
             output=OutputRef(
                 tensor=tensor_ref,
@@ -492,8 +496,8 @@ class TFEagerCaptureSession:
                 activation_transform=None,
                 detach_saved_activations=False,
                 visualizer_path=None,
-                multi_output_index=output_index if output_index else None,
-                in_multi_output=output_index > 0,
+                multi_output_index=capture.output_index if multi_output else None,
+                in_multi_output=multi_output,
                 container_path=(),
                 container_spec=None,
                 child_versions=(),
@@ -531,7 +535,7 @@ class TFEagerCaptureSession:
             pass_index=1,
             grad_fn_class_qualname=None,
             grad_fn_handle=None,
-            equivalence_class=op_type_text.lower(),
+            equivalence_class=label.layer_type,
             is_transform=False,
             transform_kind=None,
             transform_chain=(),
@@ -544,7 +548,7 @@ class TFEagerCaptureSession:
             internal_source_ancestors=frozenset(),
             input_ancestors=frozenset(),
             root_ancestors=frozenset(),
-            func_call_id=label.raw_index,
+            func_call_id=capture._call_id,
             is_bottom_level=True,
             is_scalar_bool=_is_scalar_bool_tensor_ref(tensor_ref),
             bool_value=_bool_value(tensor_ref.payload),
@@ -564,8 +568,9 @@ class TFEagerCaptureSession:
         output: Any,
         output_index: int,
         parents: tuple[ParentEdge, ...],
+        call_id: int | None = None,
     ) -> RecordContext:
-        """Build a static selector context for one TensorFlow output.
+        """Build the ``save=`` selector context for one TensorFlow output.
 
         Parameters
         ----------
@@ -579,11 +584,8 @@ class TFEagerCaptureSession:
             Index within the callback outputs.
         parents
             Parent producer edges.
-
-        Returns
-        -------
-        RecordContext
-            Context accepted by unified ``save=`` selectors.
+        call_id
+            Shared native identity, defaulting to the label for a source.
         """
 
         module_frames = tuple(
@@ -594,6 +596,9 @@ class TFEagerCaptureSession:
             }
             for frame in self.module_stack
         )
+        parent_labels = tuple(parent.parent_label_raw for parent in parents)
+        shape = _shape_tuple(output)
+        dtype = str(getattr(output, "dtype", ""))
         return RecordContext(
             kind="op",
             label=label.label,
@@ -611,10 +616,10 @@ class TFEagerCaptureSession:
             module_stack=module_frames,
             recent_events=(),
             recent_ops=(),
-            parent_labels=tuple(parent.parent_label_raw for parent in parents),
+            parent_labels=parent_labels,
             input_output_address=None,
-            shape=_shape_tuple(output),
-            dtype=DtypeRef(backend="tf", name=str(getattr(output, "dtype", ""))),
+            shape=shape,
+            dtype=DtypeRef(backend="tf", name=dtype),
             tensor_device=device_ref_from_tf_device(getattr(output, "device", "")),
             tensor_requires_grad=None,
             output_index=output_index,
@@ -623,12 +628,11 @@ class TFEagerCaptureSession:
             sample_id=None,
             label_raw=label.label_raw,
             label_prefix=label.layer_type,
-            func_call_id=label.raw_index,
-            parent_labels_raw=tuple(parent.parent_label_raw for parent in parents),
+            func_call_id=label.raw_index if call_id is None else call_id,
+            parent_labels_raw=parent_labels,
             is_output_parent=False,
             backend_requires_isolation=False,
-            is_scalar_bool=_shape_tuple(output) == ()
-            and "bool" in str(getattr(output, "dtype", "")),
+            is_scalar_bool=shape == () and "bool" in dtype,
             bool_value=None,
         )
 
@@ -891,13 +895,7 @@ class TFEagerCaptureSession:
         return label.label_raw
 
     def _register_input_sources(self) -> None:
-        """Register public TensorFlow tensor inputs before capture starts.
-
-        Returns
-        -------
-        None
-            Populates source maps.
-        """
+        """Register public TensorFlow tensor inputs before capture starts."""
 
         for tensor in _iter_tf_tensors((self.args, self.kwargs), self.tf):
             ref_key = _tensor_ref_key(tensor)

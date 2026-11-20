@@ -112,19 +112,22 @@ class TFIntermediateSignature:
     Parameters
     ----------
     func_call_id
-        Stable callback-stream raw index.
+        Identity of the native call in the callback stream.
     op_name
         Captured TensorFlow operation type.
     parent_labels
         Raw labels of tensor parents.
     module_stack
         Module-call stack labels such as ``"encoder:1"``.
+    _output_index
+        Slot within the native call's output block.
     """
 
     func_call_id: int
     op_name: str
     parent_labels: tuple[str, ...]
     module_stack: tuple[str, ...]
+    _output_index: int = 0
 
 
 @dataclass(frozen=True)
@@ -348,22 +351,19 @@ def _records_for_intermediate_tf_grads(
     """
 
     replay_values = [capture.output_tensor for capture, _stack in candidates]
-    replay_grads: Sequence[Any | None]
-    if replay_values:
-        replay_grads = tape.gradient(
-            loss,
-            replay_values,
-            unconnected_gradients=tf.UnconnectedGradients.NONE,
-        )
-    else:
-        replay_grads = ()
+    replay_grads: Sequence[Any | None] = (
+        tape.gradient(loss, replay_values, unconnected_gradients=tf.UnconnectedGradients.NONE)
+        if replay_values
+        else ()
+    )
     replay_groups: dict[TFIntermediateSignature, list[TFIntermediateCandidate]] = defaultdict(list)
     for (capture, module_stack), grad in zip(candidates, replay_grads, strict=True):
         signature = TFIntermediateSignature(
-            func_call_id=_capture_raw_index(capture.label_raw),
+            func_call_id=capture._call_id,
             op_name=capture.op_type,
             parent_labels=_capture_parent_labels(capture),
             module_stack=module_stack,
+            _output_index=capture.output_index,
         )
         replay_groups[signature].append(
             TFIntermediateCandidate(
@@ -401,7 +401,7 @@ def _records_for_intermediate_tf_grads(
                 "loss_id": _callable_identity(grad_options.loss_fn),
                 "save_predicate_id": "trace.saved_ops",
                 "status": "exact",
-                "match_key": "func_call_id+op_type+parents+module_stack",
+                "match_key": "func_call_id+output_index+op_type+parents+module_stack",
                 "max_intermediate_grads": grad_options.max_intermediate_grads,
             },
         )
@@ -431,27 +431,7 @@ def _tf_trace_intermediate_signatures(
     """
 
     groups: dict[TFIntermediateSignature, list[Any]] = defaultdict(list)
-    # Replay-side signatures speak RAW label space (capture input records).
-    # Recurrence grouping rewrites ``op.parents`` to final labels -- the
-    # pass-qualified ``op.label`` for a multi-pass referenced layer, but the
-    # BARE ``op.layer_label`` (torch parity) for a single-pass one -- so
-    # parents are resolved back to raw space before signature construction.
-    # Both final spellings must resolve: the pass-qualified key always, and
-    # the bare key too for single-pass ops (unambiguous there; omitted for
-    # multi-pass ops, where the bare label would collide across passes and
-    # ``op.parents`` never uses it anyway). Without this every grouped
-    # intermediate would silently fail to match its replay candidate.
-    final_to_raw: dict[str, str] = {}
-    for op in trace._layer_list:
-        raw_label = getattr(op, "_label_raw", None)
-        if not isinstance(raw_label, str):
-            continue
-        label = getattr(op, "label", None)
-        if isinstance(label, str):
-            final_to_raw[label] = raw_label
-        layer_label = getattr(op, "layer_label", None)
-        if isinstance(layer_label, str) and int(getattr(op, "num_passes", 1)) == 1:
-            final_to_raw[layer_label] = raw_label
+    final_to_raw = _tf_raw_parent_aliases(trace)
     for op in trace._layer_list:
         if bool(getattr(op, "is_input", False)) or not bool(
             getattr(op, "has_saved_activation", False)
@@ -469,28 +449,27 @@ def _tf_trace_intermediate_signatures(
                 )
             ),
             module_stack=tuple(str(module) for module in getattr(op, "modules", ())),
+            _output_index=int(op.multi_output_index or 0),
         )
         groups[signature].append(op)
     return groups
 
 
-def _capture_raw_index(label_raw: str) -> int:
-    """Return the callback-stream raw index encoded in a raw label.
+def _tf_raw_parent_aliases(trace: Trace) -> dict[str, str]:
+    """Map pass-qualified labels and unambiguous bare labels to capture labels."""
 
-    Parameters
-    ----------
-    label_raw
-        Raw label such as ``"relu_1_6_raw"``.
-
-    Returns
-    -------
-    int
-        Raw stream index, or ``0`` when unparseable.
-    """
-
-    stem = label_raw[: -len("_raw")] if label_raw.endswith("_raw") else label_raw
-    _prefix, _sep, index_text = stem.rpartition("_")
-    return int(index_text) if index_text.isdigit() else 0
+    final_to_raw: dict[str, str] = {}
+    for op in trace._layer_list:
+        raw_label = getattr(op, "_label_raw", None)
+        if not isinstance(raw_label, str):
+            continue
+        label = getattr(op, "label", None)
+        if isinstance(label, str):
+            final_to_raw[label] = raw_label
+        layer_label = getattr(op, "layer_label", None)
+        if isinstance(layer_label, str) and int(getattr(op, "num_passes", 1)) == 1:
+            final_to_raw[layer_label] = raw_label
+    return final_to_raw
 
 
 def _capture_parent_labels(capture: TFOpCapture) -> tuple[str, ...]:

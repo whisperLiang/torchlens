@@ -13,7 +13,7 @@ from ..._validation_status import ValidationReplaySource, ValidationStatus
 from .._constants import CONSTANT_PARENT_PAYLOAD_REASON, CONSTANT_PRODUCER_LEAF_REASON
 from .._invariants import run_metadata_invariants
 from .._validation_shared import float_replay_tolerances, ops_by_label as _ops_by_label
-from ._raw_op_replay import _import_tensorflow, _replay_raw_op
+from ._raw_op_replay import _import_tensorflow, _replay_raw_op, _select_replay_output
 from .op_callback_capture import TFOpCapture
 
 TFOpClass = Literal[
@@ -68,6 +68,7 @@ _PURE_REPLAY_ALLOWLIST = frozenset(
         "Sin",
         "Slice",
         "Softmax",
+        "Split",
         "Sqrt",
         "SquaredDifference",
         "Sub",
@@ -793,14 +794,15 @@ def _replay_and_perturb_op(
     Returns
     -------
     str
-        ``replay_match`` when replay matches and at least one parent
-        perturbation changes the output when value parents exist; else the
-        reason it did not (``replay_mismatch`` or ``perturbation_insensitive``).
+        ``replay_match`` for an equal replay that responds to perturbation when
+        value parents exist, or the failure reason.
     """
 
+    if capture.output_index != (op.multi_output_index or 0):
+        return _REASON_REPLAY_MISMATCH
     try:
         inputs = _rebuild_inputs(capture, ops_by_label, replacements={})
-        replayed = _replay_raw_op(capture, inputs)
+        replayed = _select_replay_output(capture, _replay_raw_op(capture, inputs))
         saved = _saved_payload(op)
         if not _payloads_close(replayed, saved):
             return _REASON_REPLAY_MISMATCH
@@ -907,10 +909,8 @@ def _parent_perturbations_change_output(
         for candidate in _perturb_candidates(tf, original):
             attempted = True
             try:
-                replayed = _replay_raw_op(
-                    capture,
-                    _rebuild_inputs(capture, ops_by_label, replacements={label: candidate}),
-                )
+                inputs = _rebuild_inputs(capture, ops_by_label, replacements={label: candidate})
+                replayed = _select_replay_output(capture, _replay_raw_op(capture, inputs))
             except Exception:
                 continue
             if not _payloads_close(replayed, saved_output):

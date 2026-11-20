@@ -137,6 +137,57 @@ def _result(trace: Any) -> Any:
     return getattr(trace, "_tf_validation_result", None)
 
 
+def test_tf_validation_replays_every_split_output_and_perturbs_its_parent() -> None:
+    """Both Split outputs must be independently compared and depend on their input."""
+
+    x = tf.constant([[1.0, 2.0, 10.0, 20.0]], dtype=tf.float64)
+    trace = tl.trace(lambda value: tf.split(value, 2, axis=-1), x, backend="tf")
+
+    assert _validate(trace) is True
+    assert _result(trace).replayed_histogram["Split"] == 2
+
+
+@pytest.mark.parametrize(
+    "invalid_replay", ["index", "duplicate", "missing", "extra", "order", "frozen"]
+)
+def test_tf_validation_rejects_invalid_split_outputs(
+    invalid_replay: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Expose a bad slot, output count, order or input-independent result."""
+
+    values = [1.0, 2.0, 1.0, 2.0] if invalid_replay == "duplicate" else [1.0, 2.0, 10.0, 20.0]
+    x = tf.constant([values], dtype=tf.float64)
+    trace = tl.trace(lambda value: tf.split(value, 2, axis=-1), x, backend="tf")
+    captures = trace._tf_op_captures
+    if invalid_replay in {"index", "duplicate"}:
+        wrong_slot = 0 if invalid_replay == "duplicate" else -1
+        trace._tf_op_captures = tuple(
+            replace(capture, output_index=wrong_slot) if capture.output_index == 1 else capture
+            for capture in captures
+        )
+    else:
+        native_split = tf.raw_ops.Split
+        captured_outputs = native_split(axis=-1, value=x, num_split=2)
+
+        def replay(**kwargs: Any) -> list[Any]:
+            """Corrupt only the native replay so capture still provides the oracle."""
+
+            outputs = native_split(**kwargs)
+            if invalid_replay == "missing":
+                return outputs[:1]
+            if invalid_replay == "extra":
+                return [*outputs, outputs[0]]
+            if invalid_replay == "order":
+                return outputs[::-1]
+            return [outputs[0], captured_outputs[1]]
+
+        monkeypatch.setattr(tf.raw_ops, "Split", replay)
+
+    assert _validate(trace) is False
+    reason = "perturbation_insensitive" if invalid_replay == "frozen" else "replay_mismatch"
+    assert any(f":Split:{reason}" in failure for failure in _failures(trace))
+
+
 def test_tf_validation_fails_when_interior_callback_record_is_dropped() -> None:
     """Dropping an interior op capture leaves a consumed producer unproven."""
 

@@ -47,8 +47,10 @@ tests/split/test_split_compact_runtime.py	torch.testing.assert_close(runtime.rep
 tests/split/test_split_compact_runtime.py	torch.testing.assert_close(runtime.replay(inputs), expected)	SplitRuntime.replay
 tests/split/test_split_compact_runtime.py	torch.testing.assert_close(runtime.replay(inputs), model(inputs))	SplitRuntime.replay
 tests/split/test_split_compact_runtime.py	torch.testing.assert_close(runtime.replay(x), model(x))	SplitRuntime.replay
+tests/split/test_split_compute_dag.py	actual = runtime.replay(inputs[:batch])	SplitRuntime.replay
 tests/split/test_split_compute_dag.py	branch_graph.materialize(analysis).replay(torch.ones(2, 4)),	SplitRuntime.replay
 tests/split/test_split_compute_dag.py	graph.materialize(graph.analyze(partition)).replay(inputs), LocalMutation()(inputs)	SplitRuntime.replay
+tests/split/test_split_compute_dag.py	runtime.replay(inputs)	SplitRuntime.replay
 tests/split/test_split_compute_dag.py	runtime.replay(torch.ones(2, 4), torch.zeros(2, 4)),	SplitRuntime.replay
 tests/split/test_split_compute_dag.py	torch.testing.assert_close(graph.materialize(graph.analyze(partition)).replay(x), Chunks()(x))	SplitRuntime.replay
 tests/split/test_split_compute_dag.py	torch.testing.assert_close(runtime.replay(inputs), Anchors()(inputs))	SplitRuntime.replay
@@ -88,6 +90,7 @@ tests/split/test_split_mlx_stateful.py	_close(runtime.replay(_input()), referenc
 tests/split/test_split_mlx_training.py	_assert_close(migrated.replay(x), reference(x))	SplitRuntime.replay
 tests/split/test_split_mlx_training.py	_assert_close(recut.replay(x), reference(x))	SplitRuntime.replay
 tests/split/test_split_mlx_training.py	_assert_close(runtime.replay(x), reference(x))	SplitRuntime.replay
+tests/split/test_split_native_backends_replay.py	actual = runtime.replay(inputs)	SplitRuntime.replay
 tests/split/test_split_native_backends_replay.py	actual = runtime.replay(replay_x)	SplitRuntime.replay
 tests/split/test_split_native_backends_replay.py	assert _flatten_numbers(runtime.replay(replay_x).tolist()) == pytest.approx(	SplitRuntime.replay
 tests/split/test_split_native_backends_replay.py	assert bool(jnp.allclose(runtime.replay(replay_x), model(replay_x)))	SplitRuntime.replay

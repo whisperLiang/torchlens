@@ -115,6 +115,123 @@ def test_multioutput_call_is_atomic_and_keeps_each_tensor_value() -> None:
         dag.to_partition([chunk.output_node_ids[0]])
 
 
+def test_tf_split_calls_are_atomic_across_repartition(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two sequential Split calls keep distinct values and run once each on either side."""
+
+    tf = pytest.importorskip("tensorflow")
+
+    def model(value: object) -> tuple[object, object, object]:
+        """Feed one split into another and retain the independent right branch."""
+
+        left, right = tf.split(value, 2, axis=-1)
+        first, second = tf.split(left, 2, axis=1)
+        return first + second, second * 3.0, right + 2.0
+
+    with tf.device("/CPU:0"):
+        inputs = tf.reshape(tf.range(32, dtype=tf.float64), (4, 8))
+        graph = prepare_graph(model, inputs[:1], backend="tf")
+        dag = graph.compute_dag()
+        nodes = graph.trace_graph.node_by_id
+        splits = [call for call in dag.nodes if nodes[call.output_node_ids[0]].op_type == "split"]
+        assert len(splits) == 2
+        assert all(len(call.output_node_ids) == 2 for call in splits)
+        assert len({value_id for call in splits for value_id in call.output_node_ids}) == 4
+        assert len({call.func_call_id for call in graph.trace_graph.replay_calls}) == len(dag.nodes)
+        for call in splits:
+            captures = [nodes[node_id] for node_id in call.output_node_ids]
+            assert [node.target.output_index for node in captures] == [0, 1]
+            assert len({node.func_call_id for node in captures}) == 1
+        prefix = dag.to_partition([splits[0].call_id])
+        assert prefix == GraphPartition(frozenset(splits[0].output_node_ids))
+        assert {
+            value for producer, _, value in dag.data_edges if producer == splits[0].call_id
+        } == set(splits[0].output_node_ids)
+        with pytest.raises(SplitUnsupportedError) as caught:
+            graph.analyze(GraphPartition(frozenset(splits[0].output_node_ids[:1])))
+        assert caught.value.context.reason == "partition_call_split"
+
+        native_split = tf.raw_ops.Split
+        calls = []
+
+        def count_split(**kwargs: object) -> object:
+            """Count native execution without replacing its outputs or gradients."""
+
+            calls.append(kwargs["num_split"])
+            return native_split(**kwargs)
+
+        monkeypatch.setattr(tf.raw_ops, "Split", count_split)
+        empty = dag.to_partition(())
+        both = dag.to_partition([call.call_id for call in splits])
+        runtime = graph.materialize(graph.analyze(empty))
+        for batch, partition in enumerate((empty, prefix, both, empty), start=1):
+            runtime = runtime.repartition(partition)
+            calls.clear()
+            actual = runtime.replay(inputs[:batch])
+            assert calls == [2, 2]
+            for result, expected in zip(actual, model(inputs[:batch]), strict=True):
+                tf.debugging.assert_equal(result, expected)
+
+
+@pytest.mark.parametrize("extra_output", [False, True])
+def test_tf_split_rejects_changed_native_output_count(
+    extra_output: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuse missing or surplus outputs rather than using a partial result."""
+
+    tf = pytest.importorskip("tensorflow")
+
+    def model(value: object) -> tuple[object, ...]:
+        """Expose both outputs of the affected operation."""
+
+        return tuple(tf.split(value, 2, axis=-1))
+
+    with tf.device("/CPU:0"):
+        inputs = tf.ones((1, 4), dtype=tf.float64)
+        graph = prepare_graph(model, inputs, backend="tf")
+        partition = graph.compute_dag().to_partition(())
+        runtime = graph.materialize(graph.analyze(partition))
+        native_split = tf.raw_ops.Split
+
+        def change_count(**kwargs: object) -> list[object]:
+            """Keep native values but return the wrong number of slots."""
+
+            outputs = native_split(**kwargs)
+            return [*outputs, outputs[0]] if extra_output else outputs[:1]
+
+        monkeypatch.setattr(tf.raw_ops, "Split", change_count)
+        with pytest.raises(SplitUnsupportedError, match="expects 2 outputs"):
+            runtime.replay(inputs)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("output_index", -1),
+        ("output_index", 0),
+        ("output_index", 2),
+        ("_output_count", 1),
+        ("op_type", "Sin"),
+    ],
+)
+def test_tf_split_rejects_invalid_captured_outputs(field: str, value: int | str) -> None:
+    """Refuse inconsistent sibling metadata before building the execution schedule."""
+
+    tf = pytest.importorskip("tensorflow")
+    inputs = tf.ones((1, 4), dtype=tf.float64)
+    graph = prepare_graph(lambda value: tf.split(value, 2, axis=-1), inputs, backend="tf")
+    trace_graph = graph.trace_graph
+    nodes = tuple(
+        replace(node, target=replace(node.target, **{field: value}))
+        if node.op_type == "split" and node.target.output_index == 1
+        else node
+        for node in trace_graph.nodes
+    )
+    graph.trace_graph = replace(trace_graph, nodes=nodes)
+    partition = graph.compute_dag().to_partition(())
+    with pytest.raises(SplitUnsupportedError, match="invalid TensorFlow call outputs"):
+        graph.materialize(graph.analyze(partition))
+
+
 def test_sources_are_excluded_but_real_state_reads_remain() -> None:
     """Parameter/buffer provenance stays available without becoming compute vertices."""
 

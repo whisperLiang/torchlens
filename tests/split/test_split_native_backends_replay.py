@@ -133,6 +133,134 @@ def test_tf_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
     assert bool(tf.reduce_all(tf.abs(runtime.run_suffix(loaded) - model(x)) < 1e-5).numpy())
 
 
+@pytest.mark.parametrize(("axis", "parts"), [(-1, 2), (1, 3)])
+def test_tf_native_split_replays_each_output_in_order(axis: int, parts: int) -> None:
+    """Compare every division output and a fan-out consumer at four batch sizes."""
+
+    tf = pytest.importorskip("tensorflow")
+
+    def model(value: Any) -> tuple[Any, ...]:
+        """Use all outputs and consume the first one again."""
+
+        divided = tf.split(value, parts, axis=axis)
+        return (*divided, divided[0] + divided[-1])
+
+    with tf.device("/CPU:0"):
+        values = tf.reshape(tf.range(48, dtype=tf.float64), (4, 12))
+        graph = prepare_graph(model, values[:1], backend="tf")
+        runtime = graph.materialize(graph.analyze(graph.compute_dag().to_partition(())))
+        compiled_replay = tf.function(runtime.replay, autograph=False)
+        for batch in (1, 2, 3, 4):
+            inputs = values[:batch]
+            expected = model(inputs)
+            for replay in (runtime.replay, compiled_replay):
+                for result, reference in zip(replay(inputs), expected, strict=True):
+                    assert result.dtype == reference.dtype
+                    tf.debugging.assert_equal(result, reference)
+
+
+def test_tf_split_analysis_refuses_an_unregistered_raw_op() -> None:
+    """Report an unsupported operation during Analyze, not during replay."""
+
+    tf = pytest.importorskip("tensorflow")
+
+    def model(value: Any) -> Any:
+        """TensorFlow lowers this unequal split to SplitV, not Split."""
+
+        return tf.split(value, [1, 3], axis=-1)
+
+    with tf.device("/CPU:0"):
+        inputs = tf.ones((1, 4), dtype=tf.float64)
+        graph = prepare_graph(model, inputs, backend="tf")
+        with pytest.raises(SplitUnsupportedError, match="SplitV") as caught:
+            graph.analyze(graph.compute_dag().to_partition(()))
+        assert caught.value.context.reason == "split preflight rejected"
+
+
+@pytest.mark.parametrize(
+    ("pool_type", "padding"),
+    [
+        ("avg_pool", "SAME"),
+        ("avg_pool", "VALID"),
+        ("max_pool", "SAME"),
+        ("max_pool", "VALID"),
+        ("max_pool", "EXPLICIT"),
+    ],
+)
+def test_tf_pooling_replays_native_arguments(pool_type: str, padding: str) -> None:
+    """Keep the native pooling signature and padding on both sides of a cut."""
+
+    tf = pytest.importorskip("tensorflow")
+    op = getattr(tf.nn, pool_type)
+
+    def model(value: Any) -> Any:
+        """Pool ordered values, then consume the result in a separate call."""
+
+        mode: Any = padding
+        if padding == "EXPLICIT":
+            mode = [[0, 0], [0, 1], [1, 0], [0, 0]]
+        return op(value, 2, 2, mode, data_format="NHWC") + 0.5
+
+    with tf.device("/CPU:0"):
+        values = tf.reshape(tf.range(160, dtype=tf.float64), (4, 4, 5, 2))
+        graph = prepare_graph(model, values[:1], backend="tf")
+        dag = graph.compute_dag()
+        raw_name = "AvgPool" if pool_type == "avg_pool" else "MaxPool"
+        prefix_ids = close_call_ids(dag, call_ids(graph, ops=frozenset({raw_name.lower()})))
+        assert prefix_ids
+        runtime = graph.materialize(graph.analyze(dag.to_partition(())))
+        for partition in (dag.to_partition(()), dag.to_partition(prefix_ids)):
+            runtime = runtime.repartition(partition)
+            for batch in (1, 2, 3, 4):
+                inputs = values[:batch]
+                actual = runtime.replay(inputs)
+                assert actual.dtype == inputs.dtype
+                tf.debugging.assert_equal(actual, model(inputs))
+
+
+@pytest.mark.parametrize(("raw_name", "input_name"), [("AvgPool", "value"), ("MaxPool", "input")])
+def test_tf_pooling_replays_nchw(
+    raw_name: str, input_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check the NCHW kernel on GPU and the exact ABI on CPU."""
+
+    tf = pytest.importorskip("tensorflow")
+    from torchlens.backends.tf._raw_op_replay import _replay_raw_op
+    from torchlens.backends.tf.op_callback_capture import TFOpCapture
+
+    native = getattr(tf.raw_ops, raw_name)
+    attrs = {
+        "ksize": [1, 1, 2, 2],
+        "strides": [1, 1, 2, 2],
+        "padding": "VALID",
+        "data_format": "NCHW",
+    }
+    capture = TFOpCapture("", raw_name, attrs, 0, (), None)
+    gpu = bool(tf.config.list_logical_devices("GPU"))
+    nhwc = {"data_format": "NHWC", "ksize": [1, 2, 2, 1], "strides": [1, 2, 2, 1]}
+
+    def replay_on_cpu(**kwargs: Any) -> Any:
+        """Check NCHW arguments before substituting the equivalent NHWC kernel."""
+
+        assert {name: kwargs[name] for name in attrs} == attrs
+        kwargs[input_name] = tf.transpose(kwargs[input_name], (0, 2, 3, 1))
+        return tf.transpose(native(**(kwargs | nhwc)), (0, 3, 1, 2))
+
+    if not gpu:
+        monkeypatch.setattr(tf.raw_ops, raw_name, replay_on_cpu)
+    device = "/GPU:0" if gpu else "/CPU:0"
+    with tf.device(device):
+        values = tf.reshape(tf.range(160, dtype=tf.float32), (4, 2, 4, 5))
+        for batch in (1, 2, 3, 4):
+            inputs = values[:batch]
+            reference = native(
+                **{input_name: tf.transpose(inputs, (0, 2, 3, 1)), "padding": "VALID", **nhwc}
+            )
+            actual = _replay_raw_op(capture, [inputs])
+            assert device[1:] in actual.device
+            tf.debugging.assert_equal(actual, tf.transpose(reference, (0, 3, 1, 2)))
+
+
 def test_tf_gpu_kernel_after_torch_optimizer() -> None:
     """Torch training must not corrupt TensorFlow's subsequent LLVM GPU compilation."""
 

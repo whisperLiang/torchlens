@@ -666,7 +666,6 @@ def _selected_fetch_names(
                 raw_index=0,
                 type_index=0,
                 op_type=op.type,
-                op_name=op.name,
                 output=output,
                 output_index=output_index,
                 parents=(),
@@ -819,13 +818,7 @@ class _StaticEventBuilder:
         self.source_labels: set[str] = set()
 
     def emit(self) -> None:
-        """Emit all graph operations in topological graph order.
-
-        Returns
-        -------
-        None
-            Mutates builder state.
-        """
+        """Emit all graph operations in topological graph order."""
 
         input_value_by_name = dict(zip(self.input_names, self.input_values, strict=False))
         for op in self.graph.get_operations():
@@ -846,11 +839,6 @@ class _StaticEventBuilder:
             Placeholder operation.
         value
             Runtime feed value.
-
-        Returns
-        -------
-        None
-            Mutates event state.
         """
 
         label = self.events.reserve_label("input")
@@ -859,16 +847,15 @@ class _StaticEventBuilder:
         tensor_ref = _tensor_ref_for_symbolic(output, label.label_raw, payload)
         event = _base_event(
             label=label,
+            call_id=label.raw_index,
             kind="source",
             layer_type="input",
             func_name="input",
             op_name=op.name,
             output=tensor_ref,
-            output_index=0,
             parents=(),
             parent_positions={"args": {}, "kwargs": {}},
             edge_uses=(),
-            modules=(),
             module_stack=(),
             save_payload=True,
             annotations={"tf_static_op_name": op.name, "tf_static_op_type": op.type},
@@ -895,11 +882,6 @@ class _StaticEventBuilder:
         ----------
         op
             TensorFlow control-flow operation.
-
-        Returns
-        -------
-        None
-            Mutates event state.
         """
 
         trace_annotations = {
@@ -913,6 +895,9 @@ class _StaticEventBuilder:
         }
         parents, parent_positions, edge_uses, inputs = self._parents_for_op(op)
         labels = self.events.reserve_label_block("tf_region", max(1, len(op.outputs)))
+        call_id = labels[0].raw_index
+        attrs = _node_attrs(op)
+        module_stack = _module_frames_from_name(op.name)
         for output_index, label in enumerate(labels):
             output = op.outputs[output_index] if output_index < len(op.outputs) else None
             tensor_ref = _tensor_ref_for_symbolic(
@@ -927,14 +912,12 @@ class _StaticEventBuilder:
                 func_name=f"region:{op.type}",
                 op_name=op.name,
                 output=tensor_ref,
-                output_index=output_index,
+                multi_output_index=output_index if len(labels) > 1 else None,
+                call_id=call_id,
                 parents=parents,
                 parent_positions=parent_positions,
                 edge_uses=edge_uses,
-                modules=tuple(
-                    (frame.address, frame.call_index) for frame in _module_frames_from_name(op.name)
-                ),
-                module_stack=_module_frames_from_name(op.name),
+                module_stack=module_stack,
                 save_payload=False,
                 annotations=trace_annotations,
                 equivalence_class=f"tf:region:{op.type}:{op.name}",
@@ -947,10 +930,12 @@ class _StaticEventBuilder:
                 TFOpCapture(
                     label_raw=label.label_raw,
                     op_type=op.type,
-                    attrs=_node_attrs(op),
+                    attrs=attrs,
                     output_index=output_index,
                     inputs=inputs,
                     output_tensor=None,
+                    _output_count=len(labels),
+                    _call_id=call_id,
                 )
             )
             self.region_labels.append(label.label_raw)
@@ -965,11 +950,6 @@ class _StaticEventBuilder:
         ----------
         op
             TensorFlow graph operation.
-
-        Returns
-        -------
-        None
-            Mutates event state.
         """
 
         parents, parent_positions, edge_uses, inputs = self._parents_for_op(op)
@@ -977,8 +957,9 @@ class _StaticEventBuilder:
         if not outputs:
             return
         labels = self.events.reserve_label_block(op.type.lower(), len(outputs))
+        call_id = labels[0].raw_index
         module_stack = _module_frames_from_name(op.name)
-        modules = tuple((frame.address, frame.call_index) for frame in module_stack)
+        attrs = _node_attrs(op)
         self.op_type_counts[op.type] += 1
         for output_index, (label, output) in enumerate(zip(labels, outputs, strict=True)):
             record_context = _record_context_for_symbolic(
@@ -986,9 +967,9 @@ class _StaticEventBuilder:
                 raw_index=label.raw_index,
                 type_index=label.type_index,
                 op_type=op.type,
-                op_name=op.name,
                 output=output,
                 output_index=output_index,
+                call_id=call_id,
                 parents=parents,
                 modules=module_stack,
             )
@@ -997,7 +978,7 @@ class _StaticEventBuilder:
             annotations = {
                 "tf_static_op_name": op.name,
                 "tf_static_op_type": op.type,
-                "tf_static_attrs": {key: repr(value) for key, value in _node_attrs(op).items()},
+                "tf_static_attrs": {key: repr(value) for key, value in attrs.items()},
             }
             event = _base_event(
                 label=label,
@@ -1006,11 +987,11 @@ class _StaticEventBuilder:
                 func_name=op.type,
                 op_name=op.name,
                 output=_tensor_ref_for_symbolic(output, label.label_raw, payload),
-                output_index=output_index,
+                multi_output_index=output_index if len(outputs) > 1 else None,
+                call_id=call_id,
                 parents=parents,
                 parent_positions=parent_positions,
                 edge_uses=edge_uses,
-                modules=modules,
                 module_stack=module_stack,
                 save_payload=save_payload,
                 annotations=annotations,
@@ -1024,10 +1005,12 @@ class _StaticEventBuilder:
                 TFOpCapture(
                     label_raw=label.label_raw,
                     op_type=op.type,
-                    attrs=_node_attrs(op),
+                    attrs=attrs,
                     output_index=output_index,
                     inputs=inputs,
                     output_tensor=payload,
+                    _output_count=len(outputs),
+                    _call_id=call_id,
                 )
             )
             self.producer_by_tensor_name[output.name] = label.label_raw
@@ -1146,6 +1129,7 @@ def _capture_opaque_graph_region(
     }
     event = _base_event(
         label=label,
+        call_id=label.raw_index,
         kind="op",
         layer_type="tf_region",
         func_name="region:FuncGraph",
@@ -1161,11 +1145,9 @@ def _capture_opaque_graph_region(
             blob_ref=None,
             backend_handle_id=None,
         ),
-        output_index=0,
         parents=(),
         parent_positions={"args": {}, "kwargs": {}},
         edge_uses=(),
-        modules=(),
         module_stack=(),
         save_payload=False,
         annotations=annotations,
@@ -1192,16 +1174,15 @@ def _capture_opaque_graph_region(
 def _base_event(
     *,
     label: Any,
+    call_id: int,
     kind: str,
     layer_type: str,
     func_name: str,
     op_name: str | None,
     output: TensorRef,
-    output_index: int,
     parents: tuple[ParentEdge, ...],
     parent_positions: dict[str, dict[Any, str]],
     edge_uses: tuple[object, ...],
-    modules: tuple[tuple[str, int], ...],
     module_stack: tuple[ModuleFrame, ...],
     save_payload: bool,
     annotations: dict[str, object],
@@ -1209,6 +1190,7 @@ def _base_event(
     is_output_parent: bool,
     predicate_matched: bool,
     record_context: RecordContext | None,
+    multi_output_index: int | None = None,
 ) -> OpEvent:
     """Build a TorchLens event for static TensorFlow capture.
 
@@ -1216,6 +1198,8 @@ def _base_event(
     ----------
     label
         Reserved raw label.
+    call_id
+        Native operation identity.
     kind
         Event kind.
     layer_type
@@ -1226,16 +1210,12 @@ def _base_event(
         TensorFlow graph operation name.
     output
         Output tensor metadata.
-    output_index
-        Output index within the TensorFlow op.
     parents
         Parent edges.
     parent_positions
         Parent position mapping.
     edge_uses
         Edge-use records.
-    modules
-        Module call tuples.
     module_stack
         Module frames.
     save_payload
@@ -1250,6 +1230,8 @@ def _base_event(
         Whether selective save matched this output.
     record_context
         Selector context.
+    multi_output_index
+        Slot within a multi-output call, including the first slot at zero.
 
     Returns
     -------
@@ -1273,7 +1255,7 @@ def _base_event(
             func=None,
             func_name=func_name,
             func_qualname=func_name,
-            func_call_id=label.raw_index,
+            func_call_id=call_id,
             code_context=(),
             func_duration=None,
             flops_forward=None,
@@ -1288,7 +1270,7 @@ def _base_event(
             non_tensor_kwargs=(),
             func_non_tensor_args=(),
             is_inplace=False,
-            func_config=(("tf_op_name", op_name), ("output_index", output_index)),
+            func_config=(("tf_op_name", op_name), ("output_index", multi_output_index or 0)),
         ),
         output=OutputRef(
             tensor=output,
@@ -1298,8 +1280,8 @@ def _base_event(
             activation_transform=None,
             detach_saved_activations=False,
             visualizer_path=None,
-            multi_output_index=output_index if output_index else None,
-            in_multi_output=output_index > 0,
+            multi_output_index=multi_output_index,
+            in_multi_output=multi_output_index is not None,
             container_path=(),
             container_spec=None,
             child_versions=(),
@@ -1317,7 +1299,7 @@ def _base_event(
         params=(),
         parent_params=(),
         module_stack=module_stack,
-        modules=modules,
+        modules=tuple((frame.address, frame.call_index) for frame in module_stack),
         backend_semantics=BackendSemantics(
             backend_grad_handle=None,
             grad_fn_class_name=None,
@@ -1350,7 +1332,7 @@ def _base_event(
         internal_source_ancestors=frozenset(),
         input_ancestors=frozenset(),
         root_ancestors=frozenset(),
-        func_call_id=label.raw_index,
+        func_call_id=call_id,
         is_bottom_level=True,
         is_scalar_bool=output.shape == () and output.dtype is not None and "bool" in output.dtype,
         bool_value=_bool_value(output.payload),
@@ -1369,11 +1351,11 @@ def _record_context_for_symbolic(
     raw_index: int,
     type_index: int,
     op_type: str,
-    op_name: str,
     output: Any,
     output_index: int,
     parents: tuple[ParentEdge, ...],
     modules: tuple[ModuleFrame, ...],
+    call_id: int | None = None,
 ) -> RecordContext:
     """Build a static selector context for a graph tensor.
 
@@ -1387,8 +1369,6 @@ def _record_context_for_symbolic(
         Per-type index.
     op_type
         TensorFlow op type.
-    op_name
-        TensorFlow op name.
     output
         Symbolic output tensor.
     output_index
@@ -1397,11 +1377,8 @@ def _record_context_for_symbolic(
         Parent edges.
     modules
         Module frames.
-
-    Returns
-    -------
-    RecordContext
-        Selector context.
+    call_id
+        Native operation identity, when known in the callback stream.
     """
 
     module_frames = tuple(
@@ -1412,6 +1389,9 @@ def _record_context_for_symbolic(
         }
         for frame in modules
     )
+    parent_labels = tuple(parent.parent_label_raw for parent in parents)
+    shape = _shape_tuple(output)
+    dtype = str(getattr(output, "dtype", ""))
     return RecordContext(
         kind="op",
         label=label_raw,
@@ -1429,10 +1409,10 @@ def _record_context_for_symbolic(
         module_stack=module_frames,
         recent_events=(),
         recent_ops=(),
-        parent_labels=tuple(parent.parent_label_raw for parent in parents),
+        parent_labels=parent_labels,
         input_output_address=None,
-        shape=_shape_tuple(output),
-        dtype=DtypeRef(backend="tf", name=str(getattr(output, "dtype", ""))),
+        shape=shape,
+        dtype=DtypeRef(backend="tf", name=dtype),
         # Static FuncGraph import has no runtime placement; unknown stays None
         # (an empty DeviceRef would be malformed under the metadata invariant).
         tensor_device=None,
@@ -1443,11 +1423,11 @@ def _record_context_for_symbolic(
         sample_id=None,
         label_raw=label_raw,
         label_prefix=op_type.lower(),
-        func_call_id=raw_index,
-        parent_labels_raw=tuple(parent.parent_label_raw for parent in parents),
+        func_call_id=raw_index if call_id is None else call_id,
+        parent_labels_raw=parent_labels,
         is_output_parent=False,
         backend_requires_isolation=False,
-        is_scalar_bool=_shape_tuple(output) == () and "bool" in str(getattr(output, "dtype", "")),
+        is_scalar_bool=shape == () and "bool" in dtype,
         bool_value=None,
     )
 
