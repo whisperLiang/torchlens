@@ -121,8 +121,9 @@ def _is_materializable_uop(uop: Any) -> bool:
     """Return whether a UOp can be saved as a tinygrad Tensor payload.
 
     A structural test: nothing is realized here (realize-once capture takes
-    every payload from one later evaluation). The UOp must give a tinygrad
-    Tensor with a shape and a dtype that has a host format. The host-only
+    every payload from one later evaluation). Device-less UOps are graph
+    metadata; wrapping one would probe tinygrad's default device. A payload
+    must have a device, a shape and a dtype with a host format. The host-only
     ``NPY`` device holds numpy-backed buffers and has no renderer: its buffers
     are readable, but a view over one (a ``RESHAPE`` before the copy to the
     compute device) has no value of its own until copied, so it is not a
@@ -142,6 +143,8 @@ def _is_materializable_uop(uop: Any) -> bool:
     try:
         from tinygrad import Tensor
 
+        if uop.device is None:
+            return False
         tensor = Tensor(uop)
         tuple(tensor.shape)
         device = str(tensor.device)

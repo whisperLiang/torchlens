@@ -95,6 +95,12 @@ For native crashes, conflicting cuDNN binaries, or MLX CPU compiler errors, foll
 the [backend recovery recipes](../../docs/reference/split_runtime_acceptance.md#recovering-native-backend-environments)
 before rerunning the same numerical tests.
 
+CPU tinygrad capture must not auto-select a default accelerator when inspecting
+device-less shape operands. Otherwise tinygrad's CUDA probe can leave a private
+context current for the next PyTorch test in the same process. Keep the mixed
+suite in one process to exercise backend coexistence; explicit tinygrad GPU
+model tests already use the backend subprocess helper.
+
 For a reproducible model-package setup with Torch 2.10, install these versions
 alongside the required native backend runtimes:
 

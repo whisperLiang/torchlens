@@ -13,6 +13,38 @@ from torchlens.split import prepare_graph
 from torchlens.split.errors import SplitBoundaryError
 
 
+def test_tinygrad_explicit_cpu_capture_does_not_select_default_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capture CPU shape metadata without probing the host's accelerators."""
+
+    tinygrad = pytest.importorskip("tinygrad")
+    Tensor = tinygrad.Tensor
+    weight = Tensor.ones(4, 6, device="CPU").realize()
+    sample = Tensor.ones(2, 6, device="CPU").realize()
+    default_lookups: list[str] = []
+
+    def default_device(_device: Any) -> str:
+        """Observe a default lookup without actually probing native devices."""
+
+        default_lookups.append("CPU")
+        return "CPU"
+
+    def model(value: Any) -> Any:
+        """Use a native operation with device-less shape operands."""
+
+        return (value @ weight.T).relu()
+
+    monkeypatch.setattr(type(tinygrad.Device), "DEFAULT", property(default_device))
+    graph = prepare_graph(model, sample, backend="tinygrad")
+    runtime = graph.materialize(graph.analyze(graph.compute_dag().to_partition([])))
+    output = runtime.replay(sample).realize()
+
+    assert output.device == "CPU"
+    np.testing.assert_array_equal(output.numpy(), np.full((2, 4), 6.0))
+    assert not default_lookups
+
+
 def test_tinygrad_fixed_batch_skips_dynamic_uop_rewrite() -> None:
     """Captured batch reuses fixed UOps; changed batch uses audited shape recipes."""
 

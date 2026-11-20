@@ -274,10 +274,8 @@ _PYTHON_INVENTORIES: dict[str, tuple[str, ...] | None] = {
     "mod_nested_residual": (
         "input",
         "const",
-        "const",
         "reshape",
         "expand",
-        "const",
         "reshape",
         "expand",
         "buffer",

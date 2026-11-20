@@ -184,6 +184,7 @@ tests/split/test_split_tinygrad_shape_binding.py	actual = runtime.replay(x).real
 tests/split/test_split_tinygrad_shape_binding.py	np.testing.assert_allclose(runtime.replay(dynamic).numpy(), model(dynamic).numpy())	SplitRuntime.replay
 tests/split/test_split_tinygrad_shape_binding.py	np.testing.assert_allclose(runtime.replay(fixed).numpy(), model(fixed).numpy())	SplitRuntime.replay
 tests/split/test_split_tinygrad_shape_binding.py	np.testing.assert_allclose(selected.replay(x).numpy(), expected)	SplitRuntime.replay
+tests/split/test_split_tinygrad_shape_binding.py	output = runtime.replay(sample).realize()	SplitRuntime.replay
 tests/split/test_split_tinygrad_shape_binding.py	"runtime.replay(Tensor.ones(1, 5, 4, device=""CPU"").realize())"	SplitRuntime.replay
 tests/split/test_split_torch_dynamic_shape.py	actual = runtime.replay(value)	SplitRuntime.replay
 tests/split/test_split_torch_dynamic_shape.py	actual_concat, actual_slice = runtime.replay(value)	SplitRuntime.replay
