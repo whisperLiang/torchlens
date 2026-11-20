@@ -2142,10 +2142,11 @@ counterpart (a primitive notified before the window, an asyncio loop run, a modu
 the C `SimpleQueue.get`) is UNATTRIBUTED. Disclosed foreign reads are promoted to monitor
 uncertainty (`foreign_thread_read_joined:<channel>` + `owner_thread_waited:<primitive>`) iff the
 universe had at least one unhooked or unattributed wait. A join whose every counterpart is hooked
-(the owner waiting on its OWN in-window workers) promotes nothing -- those workers' touches
-ceiling directly -- and a producer-side `Queue.put` block, a non-blocking `Semaphore.acquire`
-probe, or a wait initiated by a TorchLens-owned frame (the async disk writer's backpressure) is
-not a join. The verdict is UNCERTAIN, not a `channels` ceiling: the monitor observed a join and a
+(the owner waiting on its OWN in-window workers) promotes nothing because those workers' touches
+ceiling directly. Excluded from wait attribution are the standard `Thread.start` implementation's
+`Event.wait` on the same thread's `_started` event, producer-side `Queue.put` blocks, non-blocking
+`Semaphore.acquire` probes, and waits initiated by TorchLens (the async disk writer's
+backpressure). The verdict is UNCERTAIN, not a `channels` ceiling: the monitor observed a join and a
 touch but cannot attribute the value flow. Consequences: a benign background thread the capture
 NEVER synchronizes with in-window never ceilings; a background thread that touches a monitored
 channel and that the owner waits on in-window (a handshake `Event` after a clock read, a

@@ -16,6 +16,7 @@ import sys as _sys_module
 import threading as _threading_module
 import weakref
 from dataclasses import dataclass
+from types import FrameType
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -267,6 +268,7 @@ _SYNC_STDLIB_TOPS: frozenset[str] = frozenset(
     {"threading", "queue", "concurrent", "asyncio", "multiprocessing", "selectors", "_thread"}
 )
 _INITIATOR_WALK_LIMIT = 64
+_THREAD_START_CODE = getattr(_threading_module.Thread.start, "__code__", None)
 
 
 def owner_sync_code_marks() -> dict[int, tuple[str, str]]:
@@ -500,16 +502,6 @@ def _torchlens_initiated(monitor: host_nondeterminism_monitor, initiator: Any) -
         return False
 
 
-def _probe_only_acquire(display: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
-    """A non-blocking ``Semaphore.acquire`` returns only a bool and can carry no value."""
-
-    if display != "threading.Semaphore.acquire":
-        return False
-    blocking = args[0] if args else kwargs.get("blocking", True)
-    timeout = args[1] if len(args) > 1 else kwargs.get("timeout")
-    return blocking is False or timeout == 0
-
-
 def _resolve_counterparts(
     session: _OwnerSyncSession, receiver: Any, condition_path: tuple[str, ...] | None
 ) -> set[int] | None:
@@ -546,6 +538,35 @@ class OwnerWait:
     kwargs: dict[str, Any] | None = None
 
 
+def _is_thread_start_handshake(caller: object, event: object) -> bool:
+    """Identify the stdlib Thread.start wait on the thread's bootstrap Event."""
+
+    if (
+        not isinstance(caller, FrameType)
+        or caller.f_code is not _THREAD_START_CODE
+        or caller.f_globals is not _threading_module.__dict__
+    ):
+        return False
+    thread = caller.f_locals.get("self")
+    return (
+        isinstance(thread, _threading_module.Thread) and getattr(thread, "_started", None) is event
+    )
+
+
+def _is_startup_wait_or_probe(wait: OwnerWait) -> bool:
+    """Recognize the stdlib startup handshake and non-blocking semaphore probes."""
+
+    if wait.display == "threading.Event.wait":
+        # CPython signals _started before the new thread can register via its profile hook.
+        return _is_thread_start_handshake(wait.caller_frame, wait.receiver)
+    if wait.display != "threading.Semaphore.acquire":
+        return False
+    args, kwargs = wait.args, wait.kwargs or {}
+    blocking = args[0] if args else kwargs.get("blocking", True)
+    timeout = args[1] if len(args) > 1 else kwargs.get("timeout")
+    return blocking is False or timeout == 0
+
+
 def classify_owner_wait(session: _OwnerSyncSession, wait: OwnerWait) -> None:
     """Attribute one completed owner-thread wait to its counterpart thread(s).
 
@@ -553,16 +574,15 @@ def classify_owner_wait(session: _OwnerSyncSession, wait: OwnerWait) -> None:
     ``owner_unhooked_joins`` when any counterpart is outside the capture's thread
     universe, or in ``owner_unattributed_waits`` when no counterpart resolves. Runs for
     the owner AND in-window hooked threads (a relay through a hooked worker must not
-    launder a foreign value into a hooked-only join). A wait initiated by a TorchLens-owned frame (the async disk writer's backpressure block), a
-    producer-side ``Queue.put`` block, or a non-blocking semaphore probe is not a join.
+    launder a foreign value into a hooked-only join). Excludes the stdlib thread startup
+    handshake, TorchLens-initiated backpressure, producer-side ``Queue.put`` blocks,
+    and non-blocking semaphore probes.
     """
 
     monitor = session.monitor
     display = wait.display
     initiator, producer_wait = _wait_initiator(wait.caller_frame)
-    if producer_wait or _torchlens_initiated(monitor, initiator):
-        return
-    if _probe_only_acquire(display, wait.args, wait.kwargs or {}):
+    if producer_wait or _torchlens_initiated(monitor, initiator) or _is_startup_wait_or_probe(wait):
         return
     result = monitor.result
     result.owner_thread_waits.add(display)

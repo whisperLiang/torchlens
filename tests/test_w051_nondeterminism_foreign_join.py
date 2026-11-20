@@ -35,6 +35,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -101,6 +102,19 @@ def running_loop() -> Any:
 
 def _uncertain_reasons(result: Any, prefix: str) -> set[str]:
     return {reason for reason in result.uncertain_detail if reason.startswith(prefix)}
+
+
+def _monitor_diagnostics(result: _rng_channels.HostRngMonitorResult) -> str:
+    """Show the wait classification and channel evidence behind a monitor verdict."""
+
+    return (
+        f"uncertain_detail={result.uncertain_detail}\n"
+        f"owner_thread_waits={sorted(result.owner_thread_waits)}\n"
+        f"owner_unhooked_joins={sorted(result.owner_unhooked_joins)}\n"
+        f"owner_unattributed_waits={sorted(result.owner_unattributed_waits)}\n"
+        f"foreign_thread_reads={sorted(result.foreign_thread_reads)}\n"
+        f"channels={sorted(result.channels)}"
+    )
 
 
 # ---- 2.16 malicious topologies FAIL -----------------------------------------------------
@@ -219,15 +233,15 @@ def test_relay_through_in_window_worker_is_not_laundered(warm_pool: ThreadPoolEx
 
 
 def test_event_handshake_with_reading_thread_is_a_join() -> None:
-    """A pre-existing thread that reads the clock and then signals an Event the owner
-    blocks on is indistinguishable from value feed-in: the owner's wait resolves to the
-    unhooked setter and the capture settles uncertain."""
+    """An Event carrying a pre-existing thread's RNG draw and clock read is a join."""
 
     start, done = threading.Event(), threading.Event()
+    generator = random.Random(7)
+    values: list[float] = []
 
     def _reader() -> None:
         start.wait(timeout=30)
-        time.time()
+        values.extend((time.time(), generator.random()))
         done.set()
 
     reader = threading.Thread(target=_reader, name="w051-reader", daemon=True)
@@ -236,11 +250,15 @@ def test_event_handshake_with_reading_thread_is_a_join() -> None:
         with host_nondeterminism_monitor(_LinearNoBias()) as result:
             start.set()
             assert done.wait(timeout=30)
+            _, draw = values
+            assert 0 <= draw < 1
     finally:
+        start.set()
         reader.join(timeout=30)
     assert result.uncertain
     assert "threading.Event.wait" in result.owner_unhooked_joins
     assert "foreign_thread_read_joined:time.time" in result.uncertain_detail
+    assert "foreign_thread_read_joined:_random.Random.random" in result.uncertain_detail
 
 
 def test_queue_get_from_preexisting_producer_is_a_join() -> None:
@@ -400,11 +418,144 @@ def test_join_on_own_in_window_worker_promotes_nothing() -> None:
     finally:
         stop.set()
         flusher.join(timeout=30)
-    assert not result.uncertain
+    assert not result.uncertain, _monitor_diagnostics(result)
     assert "threading.Thread.join" in result.owner_thread_waits
     assert not result.owner_unhooked_joins
     assert not result.owner_unattributed_waits
     assert "time.time" in result.foreign_thread_reads
+
+
+def test_thread_start_handshake_before_profile_registration_is_not_a_join(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finish Thread.start while its worker is paused before installing the profile hook."""
+
+    stop = threading.Event()
+
+    def flush() -> None:
+        while not stop.is_set():
+            time.time()
+
+    flusher = threading.Thread(target=flush, name="w051-start-race-flusher")
+    owner_waiting, release_worker, worker_ran = (threading.Event() for _ in range(3))
+    worker = threading.Thread(target=worker_ran.set, name="w051-start-race-worker")
+    started = worker._started
+    set_started = started.set
+    release_condition = started._cond._release_save
+
+    def release_start_condition() -> Any:
+        """Signal when start's Event.wait reaches its blocking Condition.wait."""
+
+        owner_waiting.set()
+        return release_condition()
+
+    def pause_bootstrap_after_started() -> None:
+        """Set the real startup flag, then suspend bootstrap before it can install the hook."""
+
+        owner_waiting.wait(timeout=30)
+        set_started()
+        release_worker.wait(timeout=30)
+
+    monkeypatch.setattr(started._cond, "_release_save", release_start_condition)
+    monkeypatch.setattr(started, "set", pause_bootstrap_after_started)
+    monitor = host_nondeterminism_monitor(_LinearNoBias())
+    flusher.start()
+    try:
+        with monitor as result:
+            _spin_until(lambda: "time.time" in result.foreign_thread_reads)
+            worker.start()
+            assert owner_waiting.is_set()
+            assert worker.ident is not None
+            assert worker.ident not in monitor._in_window_thread_idents
+            release_worker.set()
+            worker.join(timeout=30)
+            assert worker_ran.is_set()
+            assert worker.ident in monitor._in_window_thread_idents
+    finally:
+        owner_waiting.set()
+        release_worker.set()
+        stop.set()
+        if worker.ident is not None:
+            worker.join(timeout=30)
+        flusher.join(timeout=30)
+        assert not worker.is_alive()
+        assert not flusher.is_alive()
+
+    diagnostics = _monitor_diagnostics(result)
+    assert not result.uncertain, diagnostics
+    assert result.owner_thread_waits == {"threading.Thread.join"}, diagnostics
+    assert not result.owner_unhooked_joins, diagnostics
+    assert not result.owner_unattributed_waits, diagnostics
+    assert "time.time" in result.foreign_thread_reads
+
+
+@pytest.mark.parametrize("wrapped", [True, False], ids=["wrapped-start", "subclass-start"])
+def test_user_start_wait_on_started_event_still_joins_foreign_reader(
+    monkeypatch: pytest.MonkeyPatch, wrapped: bool
+) -> None:
+    """User start code that waits on its own _started Event can receive foreign data."""
+
+    start_thread = threading.Thread.start
+    ready = threading.Event()
+    values: list[float] = []
+
+    @wraps(start_thread)
+    def start_with_clock(thread: threading.Thread) -> None:
+        if thread is worker:
+            assert thread._started.wait(timeout=30)
+            assert len(values) == 1
+            assert "threading.Event.wait" in result.owner_unhooked_joins
+            thread._started.clear()
+        start_thread(thread)
+
+    class Worker(threading.Thread):
+        """Thread subclass with a user synchronization in start."""
+
+        start = start_with_clock
+
+    worker = threading.Thread() if wrapped else Worker()
+
+    def read_clock() -> None:
+        ready.wait(timeout=30)
+        values.append(time.time())
+        worker._started.set()
+
+    reader = threading.Thread(target=read_clock, name="w051-user-start-reader")
+    reader.start()
+    try:
+        if wrapped:
+            monkeypatch.setattr(threading.Thread, "start", start_with_clock)
+        with host_nondeterminism_monitor(_LinearNoBias()) as result:
+            ready.set()
+            worker.start()
+            worker.join(timeout=30)
+    finally:
+        ready.set()
+        reader.join(timeout=30)
+        if worker.ident is not None:
+            worker.join(timeout=30)
+        assert not reader.is_alive()
+        assert not worker.is_alive()
+
+    diagnostics = _monitor_diagnostics(result)
+    assert result.uncertain, diagnostics
+    assert "owner_thread_waited:threading.Event.wait" in result.uncertain_detail, diagnostics
+    assert "foreign_thread_read_joined:time.time" in result.uncertain_detail, diagnostics
+
+
+def test_started_event_wait_with_unknown_caller_still_counts() -> None:
+    """A wait with an unidentifiable caller retains unattributed wait evidence."""
+
+    monitor = host_nondeterminism_monitor(_LinearNoBias())
+    started = threading.Thread()._started
+    with monitor as result:
+        _rng_channels.classify_owner_wait(
+            monitor._owner_sync_session,
+            _rng_channels.OwnerWait("threading.Event.wait", started, ("_cond",), None),
+        )
+    diagnostics = _monitor_diagnostics(result)
+    assert result.owner_thread_waits == {"threading.Event.wait"}, diagnostics
+    assert result.owner_unattributed_waits == {"threading.Event.wait"}, diagnostics
 
 
 def test_torchlens_initiated_waits_are_not_joins() -> None:
