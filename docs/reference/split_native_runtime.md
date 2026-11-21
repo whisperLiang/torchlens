@@ -232,6 +232,11 @@ current handles. Blueprints never contain boundary tensors, gradients, optimizer
 state or private mutable replicas. Same-device recuts preserve effective tensor
 identity. Necessary device copies use the existing SegmentState migration path.
 
+PyTorch and TensorFlow training runtimes support explicit optimizer history
+transfer after a recut. Plan and export the old optimizers at a step boundary,
+call `repartition()`, and restore fresh optimizers for the effective target
+bindings. See [optimizer state migration](split_state_migration.md).
+
 TensorFlow analysis checks native input slots, static attributes and output
 groups against the replay registry. Replay and validation use the same
 `tf.raw_ops` signatures. The graph blueprint retains prepared calls across

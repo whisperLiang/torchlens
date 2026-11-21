@@ -1,18 +1,20 @@
 # Effective split state bindings
 
-`SplitRuntime.state_bindings()` exposes the effective executed Torch state as
-read-only mappings from stable state ID to owner (`prefix` or `suffix`) to live
-tensor. It includes parameters, running buffers and anonymous literal sources.
-The IDs and owners correspond to `parameter_ownership()`.
+`SplitRuntime.state_bindings()` exposes effective executed PyTorch and TensorFlow
+state as read-only mappings from stable state ID to owner (`prefix` or `suffix`)
+to live native tensors or variables. It includes used parameters and buffers,
+plus anonymous Torch replay literals. The IDs and owners correspond to
+`parameter_ownership()`.
 
 Calling it settles lazy segment state. It does not step optimizers, clear
 gradients, copy values into the source model, or promise that the source model
 contains updates made by owned replicas on another device. Consumers must
 deduplicate tied aliases and must not combine diverged owner values silently.
 
-`parameter_bindings()` keeps its existing parameter-only contract for external
-optimizers. Both methods currently require the Torch split adapter; other
-backends raise the existing typed state-ownership refusal.
+`parameter_bindings()` exposes parameters for external optimizers. TensorFlow
+joins captured resource reads to the active variables used by native training.
+See [optimizer state migration](split_state_migration.md) for transferring
+optimizer history during a recut.
 
 For independent prefix/suffix executors, use
 `local = runtime.bind_boundary_state(received_boundary)` before suffix training.

@@ -27,6 +27,13 @@ the partition description. Definitions and field contracts live in the
 [glossary](../../reference/glossary.md) and
 [native runtime reference](../../reference/split_native_runtime.md).
 
+`SplitRuntime.plan_optimizer_state_migration`, `SplitRuntime.export_optimizer_state`, and
+`SplitRuntime.restore_optimizer_state` are the native optimizer migration entry points.
+`tl.split` exports `OptimizerStateAdapter`, `OptimizerStateMigration`, `OptimizerStateMigrationPlan`,
+`OptimizerStateSnapshot`, `OptimizerStateTensor`, and `OptimizerStateMigrationResult`.
+`tl.split.optimizers` also exposes `OptimizerState`, `OptimizerFactory`,
+`register_optimizer_adapter`, and `get_optimizer_adapter`.
+
 ### ATen profile INDEX
 
 The ATen execution profile is recorded by the public switch `CaptureOptions(aten_ops=True)`

@@ -31,6 +31,14 @@ from .ir import (
     StateIR,
     ValueIR,
 )
+from .optimizers import (
+    OptimizerStateAdapter,
+    OptimizerStateMigration,
+    OptimizerStateMigrationPlan,
+    OptimizerStateMigrationResult,
+    OptimizerStateSnapshot,
+    OptimizerStateTensor,
+)
 from .ownership import ParameterOwnership, StateMigration, StateMigrationPlan
 from .profiles import (
     checkpoint_cache_path,
@@ -66,6 +74,12 @@ __all__ = (
     "GraphPartition",
     "GraphProfile",
     "NodeCostFeatures",
+    "OptimizerStateAdapter",
+    "OptimizerStateMigration",
+    "OptimizerStateMigrationPlan",
+    "OptimizerStateMigrationResult",
+    "OptimizerStateSnapshot",
+    "OptimizerStateTensor",
     "ParameterCostFeatures",
     "ParameterOwnership",
     "StateMigration",

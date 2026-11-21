@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from .errors import SplitErrorContext, SplitUnsupportedError
 from .ir import GraphPartition
-from .state import SegmentState
+from .placement import PlacementPlan, SegmentName
+from .planner import SplitPlan
+
+if TYPE_CHECKING:
+    from .runtime import SplitRuntime
 
 StateKind = Literal["parameter", "buffer", "literal"]
 
@@ -98,152 +103,92 @@ class StateMigrationPlan:
         return not self.unsupported_reasons
 
 
-def _require_torch(runtime: Any) -> None:
-    """Refuse backends without the effective-state binding protocol."""
+@dataclass(frozen=True)
+class _StateSource:
+    """One backend-proven set of live bindings for a named state source."""
 
-    if runtime.adapter.name != "torch":
-        raise SplitUnsupportedError(
-            "Stable state ownership currently requires the Torch split adapter.",
-            context=SplitErrorContext(
-                backend=runtime.adapter.name,
-                split_point=runtime.request.boundary,
-                reason="state_ownership_unsupported",
-            ),
-            code=SplitUnsupportedError.code,
-        )
+    state_id: str
+    kind: StateKind
+    aliases: tuple[str, ...]
+    node_ids: frozenset[str]
+    bindings: Mapping[str, Any]
+    trainable: bool
 
 
-def _named_sources(runtime: Any) -> dict[int, tuple[StateKind, tuple[str, ...], Any]]:
-    """Map transient source identities to stable model names and tied aliases."""
+def _refuse_ownership(runtime: SplitRuntime, reason: str, message: str) -> NoReturn:
+    """Report a missing or ambiguous live-state binding."""
 
-    from ._torch_compact import live_buffer_value
-
-    sources: dict[int, tuple[StateKind, tuple[str, ...], Any]] = {}
-    for kind, method in (("parameter", "named_parameters"), ("buffer", "named_buffers")):
-        getter = getattr(runtime.model, method, None)
-        if not callable(getter):
-            continue
-        for name, value in getter(remove_duplicate=False):
-            prior = sources.get(id(value))
-            aliases = (name,) if prior is None else tuple(sorted({*prior[1], name}))
-            sources[id(value)] = (kind, aliases, value)  # type: ignore[assignment]
-
-    # Full Buffer records and compact handles use different internal source
-    # identities. Both resolve to the same public qualified model name.
-    captured = []
-    for ref in _captured_buffers(runtime):
-        handle = live_buffer_value(ref)
-        if handle is None:
-            continue
-        address = getattr(ref, "address", "")
-        prior = sources.get(id(handle))
-        if address:
-            aliases = (address,) if prior is None else tuple(sorted({*prior[1], address}))
-            sources[id(handle)] = ("buffer" if prior is None else prior[0], aliases, handle)
-        captured.append((ref, handle))
-    for ref, handle in captured:
-        named = sources.get(id(handle))
-        if named is not None:
-            sources[getattr(ref, "source_id", id(ref))] = named
-    return sources
-
-
-def _captured_buffers(runtime: Any) -> list[Any]:
-    """Collect direct and parameter-module buffer references from the normalized graph."""
-
-    refs = []
-    for node in runtime.trace_graph.nodes:
-        refs.extend(node.buffer_refs)
-        for parameter in node.param_refs:
-            try:
-                module = getattr(parameter, "module", None)
-            except (AttributeError, KeyError):
-                module = None
-            refs.extend((getattr(module, "buffers", None) or {}).values())
-    return refs
-
-
-def _node_id(occurrence: str) -> str:
-    """Remove the state-occurrence suffix without stripping an op's pass index."""
-
-    if ":literal:" in occurrence:
-        return occurrence.rsplit(":literal:", 1)[0]
-    return occurrence.removesuffix(":source")
+    raise SplitUnsupportedError(
+        message,
+        context=SplitErrorContext(
+            backend=runtime.adapter.name, split_point=runtime.request.boundary, reason=reason
+        ),
+        code=SplitUnsupportedError.code,
+    )
 
 
 def _inventory(
-    runtime: Any, snapshots: dict[str, dict[str, Any]]
-) -> tuple[tuple[ParameterOwnership, ...], dict[str, dict[str, Any]]]:
-    """Project settled effective bindings into immutable metadata and live mappings."""
+    runtime: SplitRuntime, snapshots: dict[str, dict[str, Any]]
+) -> tuple[tuple[ParameterOwnership, ...], dict[str, Mapping[str, Any]]]:
+    """Project adapter sources into immutable rows and effective owner bindings."""
 
-    named = _named_sources(runtime)
-    raw: dict[int, dict[str, Any]] = {}
-    prefix = "training_prefix" if runtime.request.trainable else "prefix"
-    for public, internal in (("prefix", prefix), ("suffix", "suffix")):
-        segment = getattr(runtime.segments, internal)
-        state = getattr(segment, "_state", None)
-        if not isinstance(state, SegmentState):
-            continue
-        entries = {id(entry.value): entry for entry in state.entries()}
-        for occurrence, value in snapshots.get(internal, {}).items():
-            entry = entries.get(id(value))
-            if entry is None:
-                continue
-            item = raw.setdefault(
-                entry.source_id,
-                {"occurrences": set(), "bindings": {}, "trainable": False},
-            )
-            item["occurrences"].add(occurrence)
-            item["bindings"][public] = value
-            item["trainable"] |= entry.trainable
-
-    grouped: dict[str, dict[str, Any]] = {}
-    for source_id, item in raw.items():
-        source = named.get(source_id)
-        kind: StateKind = "literal" if source is None else source[0]
-        aliases = () if source is None else source[1]
-        identity = min(item["occurrences"]) if source is None else aliases[0]
-        state_id = f"{kind}:{identity}"
-        row = grouped.setdefault(
-            state_id,
-            {"kind": kind, "aliases": aliases, "nodes": set(), "bindings": {}, "trainable": False},
+    sources = getattr(runtime.adapter, "state_sources", None)
+    if sources is None:
+        _refuse_ownership(
+            runtime,
+            "state_ownership_unsupported",
+            "Stable state ownership is unavailable for this split adapter.",
         )
-        row["nodes"].update(_node_id(key) for key in item["occurrences"])
-        row["bindings"].update(item["bindings"])
-        row["trainable"] |= item["trainable"]
-
     rows = []
     bindings = {}
-    for state_id, item in sorted(grouped.items()):
-        values = item["bindings"]
+    for source in sorted(sources(runtime, snapshots), key=lambda source: source.state_id):
+        if source.state_id in bindings:
+            _refuse_ownership(
+                runtime,
+                "state_identity_conflict",
+                f"Distinct runtime resources have state ID {source.state_id!r}.",
+            )
+        values = source.bindings
         value = next(iter(values.values()))
         owners = tuple(sorted(values))
         rows.append(
             ParameterOwnership(
-                state_id=state_id,
+                state_id=source.state_id,
                 graph_id=runtime.trace_graph.graph_shape_hash,
-                kind=item["kind"],
-                aliases=item["aliases"],
-                node_ids=tuple(sorted(item["nodes"])),
+                kind=source.kind,
+                aliases=source.aliases,
+                node_ids=tuple(sorted(source.node_ids)),
                 owners=owners,
-                devices=tuple((owner, str(values[owner].device)) for owner in owners),
+                devices=tuple(
+                    (owner, str(runtime.adapter.device_of(values[owner]))) for owner in owners
+                ),
                 shape=tuple(value.shape),
                 dtype=str(value.dtype),
-                trainable=item["trainable"],
-                optimizer_managed=item["trainable"],
+                trainable=source.trainable,
+                optimizer_managed=source.trainable,
             )
         )
-        bindings[state_id] = values
+        bindings[source.state_id] = values
     return tuple(rows), bindings
 
 
-def parameter_ownership(runtime: Any) -> tuple[ParameterOwnership, ...]:
+@contextmanager
+def _inspect_state(
+    runtime: SplitRuntime,
+) -> Iterator[tuple[tuple[ParameterOwnership, ...], dict[str, Mapping[str, Any]]]]:
+    """Read effective bindings while restoring any temporary lazy state."""
+
+    with runtime._temporary_segment_state_snapshots() as snapshots:
+        yield _inventory(runtime, snapshots)
+
+
+def parameter_ownership(runtime: SplitRuntime) -> tuple[ParameterOwnership, ...]:
     """Describe current executed state without retaining tensors or changing lazy bindings.
 
     Parameters
     ----------
     runtime:
-        Prepared Torch runtime whose current effective state is inspected.
+        Prepared split runtime whose current effective state is inspected.
 
     Returns
     -------
@@ -252,19 +197,17 @@ def parameter_ownership(runtime: Any) -> tuple[ParameterOwnership, ...]:
         Model state unused by the captured execution is absent.
     """
 
-    _require_torch(runtime)
-    with runtime._temporary_segment_state_snapshots() as snapshots:
-        rows, _bindings = _inventory(runtime, snapshots)
+    with _inspect_state(runtime) as (rows, _bindings):
         return rows
 
 
-def state_bindings(runtime: Any) -> Mapping[str, Mapping[str, Any]]:
+def state_bindings(runtime: SplitRuntime) -> Mapping[str, Mapping[str, Any]]:
     """Bind stable state IDs to effective parameter, buffer and literal tensors.
 
     Parameters
     ----------
     runtime:
-        Torch runtime whose lazy segment state is settled before inspection.
+        Split runtime whose lazy segment state is settled before inspection.
 
     Returns
     -------
@@ -273,20 +216,19 @@ def state_bindings(runtime: Any) -> Mapping[str, Mapping[str, Any]]:
         ``parameter_bindings``, this includes non-trainable buffers and literals.
         No gradient, optimizer or source-model value is changed.
     """
-    _require_torch(runtime)
     _rows, bindings = _inventory(runtime, runtime._segment_state_snapshots())
     return MappingProxyType(
         {state_id: MappingProxyType(values) for state_id, values in bindings.items()}
     )
 
 
-def parameter_bindings(runtime: Any) -> Mapping[str, Mapping[str, Any]]:
+def parameter_bindings(runtime: SplitRuntime) -> Mapping[str, Mapping[str, Any]]:
     """Bind current parameters and expose stable IDs for caller-owned optimizers.
 
     Parameters
     ----------
     runtime:
-        Torch runtime to bind. Unlike metadata inspection, this settles lazy
+        Split runtime to bind. Unlike metadata inspection, this settles lazy
         state so returned tensors are the exact objects subsequent replay uses.
 
     Returns
@@ -298,7 +240,6 @@ def parameter_bindings(runtime: Any) -> Mapping[str, Mapping[str, Any]]:
         No gradient is cleared and no optimizer operation is performed.
     """
 
-    _require_torch(runtime)
     rows, bindings = _inventory(runtime, runtime._segment_state_snapshots())
     return MappingProxyType(
         {
@@ -309,13 +250,13 @@ def parameter_bindings(runtime: Any) -> Mapping[str, Mapping[str, Any]]:
     )
 
 
-def plan_state_migration(runtime: Any, partition: GraphPartition) -> StateMigrationPlan:
+def plan_state_migration(runtime: SplitRuntime, partition: GraphPartition) -> StateMigrationPlan:
     """Describe state movement and optimizer reassociation without constructing segments.
 
     Parameters
     ----------
     runtime:
-        Source Torch runtime with current effective state.
+        Source split runtime with current effective state.
     partition:
         A legal canonical compute-node partition.
 
@@ -328,85 +269,117 @@ def plan_state_migration(runtime: Any, partition: GraphPartition) -> StateMigrat
         observations of current state, not authorization to merge later changes.
     """
 
-    _require_torch(runtime)
     analysis = runtime.analyze(partition)
-    with runtime._temporary_segment_state_snapshots() as snapshots:
-        rows, bindings = _inventory(runtime, snapshots)
-        migrations = []
-        unsupported: set[str] = set()
-        for row in rows:
-            owners = tuple(
-                owner
-                for owner, nodes in (
-                    ("prefix", analysis.plan.prefix_node_ids),
-                    ("suffix", analysis.plan.suffix_node_ids),
-                )
-                if nodes.intersection(row.node_ids)
+    with _inspect_state(runtime) as (rows, bindings):
+        migrations = tuple(
+            _state_transition(
+                runtime, analysis.request.placement, analysis.plan, row, bindings[row.state_id]
             )
-            values = bindings[row.state_id]
-            source_devices = {str(value.device) for value in values.values()}
-            destinations = tuple(
-                (
-                    owner,
-                    str(
-                        runtime.adapter.normalize_device(
-                            analysis.request.placement.for_segment(owner).device
-                        )
-                    )
-                    if analysis.request.placement.for_segment(owner).is_explicit
-                    else str(next(iter(values.values())).device),
-                )
-                for owner in owners
-            )
-            moved = owners != row.owners or destinations != row.devices
-            copied = any(device not in source_devices for _owner, device in destinations)
-            ambiguous = (
-                row.trainable and moved and len({id(value) for value in values.values()}) > 1
-            )
-            cross_device_shared = (
-                runtime.request.trainable
-                and row.trainable
-                and len({device for _owner, device in destinations}) > 1
-            )
-            diagnostics = (
-                ("shared_optimizer_state_ambiguous",)
-                if ambiguous
-                else ("shared_trainable_cross_device",)
-                if cross_device_shared
-                else ()
-            )
-            unsupported.update(diagnostics)
-            action: Literal["none", "keep", "reassociate", "copy_and_reassociate", "unsupported"]
-            if not row.trainable:
-                action = "none"
-            elif diagnostics:
-                action = "unsupported"
-            elif copied:
-                action = "copy_and_reassociate"
-            elif moved:
-                action = "reassociate"
-            else:
-                action = "keep"
-            migrations.append(
-                StateMigration(
-                    state_id=row.state_id,
-                    kind=row.kind,
-                    from_owners=row.owners,
-                    to_owners=owners,
-                    source_devices=row.devices,
-                    destination_devices=destinations,
-                    identity_preserved=None if diagnostics else not copied,
-                    optimizer_action=action,
-                    diagnostics=diagnostics,
-                )
-            )
+            for row in rows
+        )
         return StateMigrationPlan(
             graph_id=runtime.trace_graph.graph_shape_hash,
             source_partition=runtime.request.boundary,
             target_partition=analysis.request.boundary,
-            entries=tuple(migrations),
-            unsupported_reasons=tuple(sorted(unsupported)),
+            entries=migrations,
+            unsupported_reasons=tuple(
+                sorted({reason for row in migrations for reason in row.diagnostics})
+            ),
         )
+
+
+def _destination_devices(
+    runtime: SplitRuntime, placement: PlacementPlan, owners: tuple[SegmentName, ...], source: str
+) -> tuple[tuple[str, str], ...]:
+    """Resolve each target's declared placement with the original device as fallback."""
+
+    devices = []
+    for owner in owners:
+        target = placement.for_segment(owner)
+        device = (
+            str(getattr(runtime.adapter, "normalize_device")(target.device))
+            if target.is_explicit
+            else source
+        )
+        devices.append((owner, device))
+    return tuple(devices)
+
+
+def _optimizer_diagnostics(
+    row: ParameterOwnership,
+    values: Mapping[str, Any],
+    devices: set[str],
+    *,
+    moved: bool,
+    training: bool,
+) -> tuple[str, ...]:
+    """Refuse a reassignment when independently owned trainable state is ambiguous."""
+
+    if not row.trainable:
+        return ()
+    if moved and len(values) > 1 and values["prefix"] is not values["suffix"]:
+        return ("shared_optimizer_state_ambiguous",)
+    if training and len(devices) > 1:
+        return ("shared_trainable_cross_device",)
+    return ()
+
+
+def _state_transition(
+    runtime: SplitRuntime,
+    placement: PlacementPlan,
+    plan: SplitPlan,
+    row: ParameterOwnership,
+    values: Mapping[str, Any],
+) -> StateMigration:
+    """Describe one parameter, buffer, or literal's effective binding after a recut."""
+
+    owners = _owners_for_nodes(plan, row.node_ids)
+    destinations = _destination_devices(runtime, placement, owners, row.devices[0][1])
+    source_devices = {device for _, device in row.devices}
+    target_devices = {device for _, device in destinations}
+    moved = owners != row.owners or destinations != row.devices
+    copied = bool(target_devices - source_devices)
+    diagnostics = _optimizer_diagnostics(
+        row,
+        values,
+        target_devices,
+        moved=moved,
+        training=runtime.request.trainable,
+    )
+    action: Literal["none", "keep", "reassociate", "copy_and_reassociate", "unsupported"]
+    if not row.trainable:
+        action = "none"
+    elif diagnostics:
+        action = "unsupported"
+    elif copied:
+        action = "copy_and_reassociate"
+    elif moved:
+        action = "reassociate"
+    else:
+        action = "keep"
+    return StateMigration(
+        state_id=row.state_id,
+        kind=row.kind,
+        from_owners=row.owners,
+        to_owners=owners,
+        source_devices=row.devices,
+        destination_devices=destinations,
+        identity_preserved=None if diagnostics else not copied,
+        optimizer_action=action,
+        diagnostics=diagnostics,
+    )
+
+
+def _owners_for_nodes(
+    plan: SplitPlan, node_ids: tuple[str, ...] | frozenset[str]
+) -> tuple[SegmentName, ...]:
+    """Return the sides executing a source's recorded occurrences."""
+
+    segments: tuple[tuple[SegmentName, frozenset[str]], ...] = (
+        ("prefix", plan.prefix_node_ids),
+        ("suffix", plan.suffix_node_ids),
+    )
+    return tuple(owner for owner, nodes in segments if nodes.intersection(node_ids))
 
 
 __all__ = (

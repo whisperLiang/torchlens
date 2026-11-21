@@ -734,6 +734,8 @@ _PUBLIC_REGISTRATION_STATE = frozenset(
         # derived Split cost profiles when the one upstream rule registry changes.
         ("torchlens/_capture/flops.py", "_rule_revision"),
         ("torchlens/split/profiles.py", "_PROFILES"),
+        # Explicit backend optimizer adapter registrations last for the process.
+        ("torchlens/split/optimizers/registry.py", "_CUSTOM"),
         # tl.errors.quiet(*codes): the codes and the quiet-all flag in force; a
         # ``with`` block restores the prior values on exit, a bare call lasts the session.
         ("torchlens/errors/_base.py", "_QUIET_CODES"),

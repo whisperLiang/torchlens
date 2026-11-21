@@ -5448,12 +5448,12 @@
         "tests/test_utility_validation_runner_regressions.py"
       ],
       "torchlens/_state.py": [
+        "tests/split/test_split_state_dedup.py",
         "tests/test_global_state_inventory.py",
         "tests/test_model_state_hygiene.py",
         "tests/test_rerun_state_snapshot_sharing.py",
         "tests/test_state_access_ratchet.py",
         "tests/test_state_hygiene_oracles.py",
-        "tests/test_tlspec_runnable_r63_state_metadata.py",
         "tests/test_tlspec_runnable_r65_state_metadata_parity.py",
         "tests/test_wrap_state_compat.py"
       ],
@@ -14749,7 +14749,7 @@
         "tests/split/test_split_factory_placement.py",
         "tests/split/test_split_input_aliases.py",
         "tests/split/test_split_memory_lifetime.py",
-        "tests/split/test_split_ownership.py"
+        "tests/split/test_split_torch_replay.py"
       ],
       "torchlens/split/_torch_liveness.py": [
         "tests/split/test_split_canonical_batch.py",
@@ -14814,18 +14814,33 @@
       "torchlens/split/adapters/_mlx_state.py": [
         "tests/split/test_split_mlx_state_io.py"
       ],
+      "torchlens/split/adapters/_tf_ownership.py": [
+        "tests/split/test_split_canonical_batch.py",
+        "tests/split/test_split_tf_ownership.py",
+        "tests/split/test_split_tf_shape_literals.py"
+      ],
+      "torchlens/split/adapters/_torch_ownership.py": [
+        "tests/split/test_split_batch_probe.py",
+        "tests/split/test_split_canonical_batch.py",
+        "tests/split/test_split_factory_placement.py",
+        "tests/split/test_split_input_aliases.py",
+        "tests/split/test_split_memory_lifetime.py",
+        "tests/split/test_split_state_dedup.py",
+        "tests/split/test_split_torch_replay.py",
+        "tests/split/test_split_torch_state.py"
+      ],
       "torchlens/split/adapters/_unsupported.py": [
         "tests/split/test_split_batch_polymorphism.py"
       ],
       "torchlens/split/adapters/base.py": [
         "tests/split/test_split_cache_security.py",
         "tests/split/test_split_canonical_batch.py",
-        "tests/split/test_split_compute_dag.py",
         "tests/split/test_split_empty_boundary.py",
         "tests/split/test_split_input_aliases.py",
         "tests/split/test_split_phase1_lifetime.py",
-        "tests/split/test_split_tf_shape_literals.py",
-        "tests/split/test_split_torch_replay.py"
+        "tests/split/test_split_state_dedup.py",
+        "tests/split/test_split_state_migration.py",
+        "tests/split/test_split_tf_shape_literals.py"
       ],
       "torchlens/split/adapters/jax.py": [
         "tests/split/test_split_canonical_batch.py",
@@ -14849,6 +14864,7 @@
         "tests/split/test_split_compute_dag.py",
         "tests/split/test_split_microbatch_contract.py",
         "tests/split/test_split_native_backends_replay.py",
+        "tests/split/test_split_tf_optimizer_adapter.py",
         "tests/split/test_split_tf_shape_literals.py",
         "tests/split/test_split_tf_training.py"
       ],
@@ -14990,12 +15006,58 @@
         "tests/split/test_split_tf_shape_literals.py",
         "tests/split/test_split_unbatched.py"
       ],
-      "torchlens/split/ownership.py": [
+      "torchlens/split/optimizers/__init__.py": [
+        "tests/split/test_split_optimizer_protocol.py",
+        "tests/split/test_split_tf_optimizer_adapter.py",
+        "tests/split/test_split_tf_optimizer_migration.py",
+        "tests/split/test_split_tf_optimizer_refusals.py",
+        "tests/split/test_split_tf_optimizer_trajectory.py",
+        "tests/split/test_split_torch_optimizer_migration.py",
+        "tests/test_collapse_optimizer.py",
+        "tests/test_optimizer_step_hook_binding.py"
+      ],
+      "torchlens/split/optimizers/_migration.py": [
+        "tests/split/test_split_api_surface.py",
+        "tests/split/test_split_memory_cuda.py",
+        "tests/split/test_split_partition_cross_device.py",
+        "tests/test_migration_pages_executed.py",
+        "tests/test_migrations.py"
+      ],
+      "torchlens/split/optimizers/base.py": [
         "tests/split/test_split_api_surface.py",
         "tests/split/test_split_graph_partition.py",
+        "tests/split/test_split_optimizer_protocol.py",
+        "tests/split/test_split_partition_cross_device.py",
+        "tests/split/test_split_tf_optimizer_adapter.py",
+        "tests/split/test_split_tf_optimizer_refusals.py",
+        "tests/split/test_split_tf_optimizer_trajectory.py",
+        "tests/split/test_split_tf_shape_literals.py"
+      ],
+      "torchlens/split/optimizers/registry.py": [
+        "tests/split/test_split_optimizer_protocol.py",
+        "tests/split/test_split_tf_optimizer_adapter.py",
+        "tests/split/test_split_tf_optimizer_refusals.py",
+        "tests/split/test_split_tf_optimizer_trajectory.py"
+      ],
+      "torchlens/split/optimizers/tensorflow.py": [
+        "tests/split/test_split_optimizer_protocol.py",
+        "tests/split/test_split_tf_optimizer_adapter.py",
+        "tests/split/test_split_tf_optimizer_migration.py",
+        "tests/split/test_split_tf_optimizer_refusals.py",
+        "tests/split/test_split_tf_optimizer_trajectory.py",
+        "tests/split/test_split_torch_optimizer_migration.py",
+        "tests/test_collapse_optimizer.py",
+        "tests/test_optimizer_step_hook_binding.py"
+      ],
+      "torchlens/split/optimizers/torch.py": [
+        "tests/split/test_split_torch_optimizer_migration.py"
+      ],
+      "torchlens/split/ownership.py": [
+        "tests/split/test_split_api_surface.py",
         "tests/split/test_split_ownership.py",
         "tests/split/test_split_partition_buffer_gradients.py",
         "tests/split/test_split_partition_cross_device.py",
+        "tests/split/test_split_tf_ownership.py",
         "tests/split/test_split_tf_shape_literals.py",
         "tests/test_perf_ownership.py",
         "tests/test_trace_attr_ownership.py"
@@ -15064,11 +15126,11 @@
         "tests/split/test_split_api_surface.py",
         "tests/split/test_split_compact_runtime.py",
         "tests/split/test_split_compute_dag.py",
-        "tests/split/test_split_mlx_training.py",
         "tests/split/test_split_native_backends_replay.py",
         "tests/split/test_split_partition_cross_device.py",
         "tests/split/test_split_partition_runtime.py",
-        "tests/split/test_split_profile_runtime.py"
+        "tests/split/test_split_profile_runtime.py",
+        "tests/split/test_split_state_dedup.py"
       ],
       "torchlens/split/shape.py": [
         "tests/split/test_split_boundary.py",
@@ -15270,7 +15332,7 @@
         "tests/test_repr_fix_contracts.py"
       ],
       "torchlens/stats/_trajectory.py": [
-        "tests/real_model/r1/test_mikit_factored_gpt2_small.py",
+        "tests/split/test_split_tf_optimizer_trajectory.py",
         "tests/test_circ1_component_graph.py",
         "tests/test_circ2_edge_scores.py",
         "tests/test_circ3_multi_receiver_patch.py",
@@ -16655,6 +16717,7 @@
         "torchlens/receptive_field/_rules.py": "registry-callsites",
         "torchlens/report/_registry.py": "registry-name",
         "torchlens/schemas/*": "schema-json",
+        "torchlens/split/optimizers/registry.py": "registry-name",
         "torchlens/transforms/_registry.py": "registry-name",
         "torchlens/validation/_exemption_schema.py": "schema-name"
       }

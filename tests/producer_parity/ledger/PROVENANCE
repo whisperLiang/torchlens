@@ -5963,3 +5963,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cpu
 source: 4a6b9f7024c4a7828419d5b947518ca8a1cf32bf
 recorded: 2026-11-21T11:20:23+08:00
+---
+generator: producer_parity/test_ledger.py (full closure)
+flag: TORCHLENS_REFRESH_PRODUCER_LEDGER=1
+reason: Record shared Split ownership and optimizer state reads in the producer census.
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 45adb4efe0686dd44a0232566762feaaae87ef74 (dirty)
+recorded: 2026-11-21T17:35:43.451770+00:00

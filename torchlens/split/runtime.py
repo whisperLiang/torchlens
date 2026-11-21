@@ -26,14 +26,27 @@ from .ir import (
     SplitModelProfile,
     SplitRequest,
 )
+from .optimizers import _migration
 from .placement import PlacementPlan, move_tree, require_placement_support
 from .planner import SplitPlan, plan_partition
 from .program import ReplayProgram, SplitCapabilityReport, build_capability_report
-from .state import SegmentState, StateEntry, _StateReplicaPool
+from .state import (
+    SegmentState,
+    StateEntry,
+    _inherit_segment_bindings,
+    _inherited_segment_entries,
+    _StateReplicaPool,
+)
 from .validation import nested_allclose
 
 if TYPE_CHECKING:
     from .boundary_layout import BoundaryLayout
+    from .optimizers import (
+        OptimizerFactory,
+        OptimizerStateMigrationPlan,
+        OptimizerStateMigrationResult,
+        OptimizerStateSnapshot,
+    )
     from .ownership import ParameterOwnership, StateMigrationPlan
     from .profiling import SplitProfile
 
@@ -196,7 +209,7 @@ class SplitRuntime(SplitGraph):
         -------
         Mapping[str, Mapping[str, Any]]
             Read-only owner bindings for the complete executed state inventory.
-            Torch only; settles lazy state without changing source-model values.
+            Available for Torch and TensorFlow; settles lazy effective state.
         """
         from .ownership import state_bindings
 
@@ -256,6 +269,90 @@ class SplitRuntime(SplitGraph):
         from .ownership import plan_state_migration
 
         return plan_state_migration(self, partition)
+
+    def plan_optimizer_state_migration(
+        self, partition: GraphPartition, *, optimizers: Mapping[str, Any]
+    ) -> OptimizerStateMigrationPlan:
+        """Inspect a proposed recut and its external optimizer history.
+
+        Parameters
+        ----------
+        partition:
+            Target graph partition to analyze.
+        optimizers:
+            Current native optimizers keyed by nonempty segment owner.
+
+        Examples
+        --------
+        >>> g = tl.split.prepare_graph(nn.Linear(3, 2), torch.ones(2, 3),
+        ...     features=tl.split.SplitFeatures(training=True))
+        >>> cut = g.compute_dag().to_partition(())
+        >>> source = g.materialize(g.analyze(cut))
+        >>> opts = {'suffix': torch.optim.Adam(source.model.parameters())}
+        >>> source.plan_optimizer_state_migration(cut, optimizers=opts).supported
+        True
+        """
+
+        return _migration._plan_optimizer_state_migration(self, partition, optimizers)
+
+    def export_optimizer_state(
+        self, *, optimizers: Mapping[str, Any], plan: OptimizerStateMigrationPlan
+    ) -> OptimizerStateSnapshot:
+        """Copy validated optimizer history to an independent CPU snapshot.
+
+        Parameters
+        ----------
+        optimizers:
+            Source optimizers with the same ownership and state as at planning.
+        plan:
+            Supported result of :meth:`plan_optimizer_state_migration`.
+
+        Examples
+        --------
+        >>> g = tl.split.prepare_graph(nn.Linear(3, 2), torch.ones(2, 3),
+        ...     features=tl.split.SplitFeatures(training=True))
+        >>> cut = g.compute_dag().to_partition(())
+        >>> source = g.materialize(g.analyze(cut))
+        >>> opts = {'suffix': torch.optim.Adam(source.model.parameters())}
+        >>> plan = source.plan_optimizer_state_migration(cut, optimizers=opts)
+        >>> source.export_optimizer_state(optimizers=opts, plan=plan).backend
+        'torch'
+        """
+
+        return _migration._export_optimizer_state(self, optimizers, plan)
+
+    def restore_optimizer_state(
+        self,
+        snapshot: OptimizerStateSnapshot,
+        *,
+        optimizer_factories: Mapping[str, OptimizerFactory] | None = None,
+    ) -> OptimizerStateMigrationResult:
+        """Restore an optimizer snapshot into fresh native training optimizers.
+
+        Parameters
+        ----------
+        snapshot:
+            Validated source snapshot targeting this runtime's graph and partition.
+        optimizer_factories:
+            Optional owner-to-constructor mapping. Each constructor receives
+            target variables by stable ID and a copy of the verified config.
+            It must construct a fresh optimizer and treat the variables as read-only.
+
+        Examples
+        --------
+        >>> g = tl.split.prepare_graph(nn.Linear(3, 2), torch.ones(2, 3),
+        ...     features=tl.split.SplitFeatures(training=True))
+        >>> cut = g.compute_dag().to_partition(())
+        >>> source = g.materialize(g.analyze(cut))
+        >>> opts = {'suffix': torch.optim.Adam(source.model.parameters())}
+        >>> plan = source.plan_optimizer_state_migration(cut, optimizers=opts)
+        >>> snapshot = source.export_optimizer_state(optimizers=opts, plan=plan)
+        >>> result = source.repartition(cut).restore_optimizer_state(snapshot)
+        >>> result.optimizers['suffix'] is opts['suffix']
+        False
+        """
+
+        return _migration._restore_optimizer_state(self, snapshot, optimizer_factories)
 
     def repartition(self, partition: GraphPartition) -> SplitRuntime:
         """Materialize another DAG partition using the current effective training state."""
@@ -320,55 +417,7 @@ class SplitRuntime(SplitGraph):
     ) -> None:
         """Rebind current effective state, selecting origins by executed node identity."""
 
-        previous = {
-            "prefix": self.segments.prefix,
-            "training_prefix": self.segments.training_prefix,
-            "suffix": self.segments.suffix,
-        }
-        with pause_logging():
-            snapshots = (
-                self._segment_state_snapshots() if state_snapshots is None else state_snapshots
-            )
-            # A combined repartition already checked the same effective snapshots.
-            if recut and state_snapshots is None:
-                self._validate_recut_prefix_state(
-                    previous, snapshots, getattr(segments.suffix, "node_ids", frozenset())
-                )
-            seen: set[int] = set()
-            for name in previous:
-                target = getattr(segments, name)
-                state = getattr(target, "_state", None)
-                if not isinstance(state, SegmentState) or id(state) in seen:
-                    continue
-                seen.add(id(state))
-                origins: tuple[str, ...] = (name,)
-                if recut:
-                    origins = (
-                        ("training_prefix", "suffix")
-                        if name == "training_prefix"
-                        else ("prefix", "suffix")
-                    )
-                state.inherit_entries(
-                    _inherited_segment_entries(previous, snapshots, target.node_ids, origins, recut)
-                )
-            # Settle migration now, including a typed refusal for incompatible
-            # replicas of a tied value that the new cut would have to coalesce.
-            settled: set[tuple[int, frozenset[str], bool]] = set()
-            for name in previous:
-                target = getattr(segments, name)
-                getter = getattr(target, "bound_state_values", None)
-                if callable(getter):
-                    key: tuple[int, frozenset[str], bool] = (
-                        id(getattr(target, "_state", target)),
-                        getattr(target, "node_ids", frozenset()),
-                        getattr(target, "use_live_param_sources", False),
-                    )
-                    if key not in settled:
-                        getter()
-                        settled.add(key)
-            inheritor = getattr(self.adapter, "inherit_runtime_state", None)
-            if callable(inheritor):
-                inheritor(self, segments)
+        _inherit_segment_bindings(self, segments, recut=recut, state_snapshots=state_snapshots)
 
     def _segment_state_snapshots(self) -> dict[str, dict[str, Any]]:
         """Bind current effective state once without building new segments."""
@@ -391,14 +440,17 @@ class SplitRuntime(SplitGraph):
         return snapshots
 
     @contextmanager
-    def _temporary_segment_state_snapshots(self) -> Iterator[dict[str, dict[str, Any]]]:
+    def _temporary_segment_state_snapshots(
+        self, *, keep_on_success: bool = False
+    ) -> Iterator[dict[str, dict[str, Any]]]:
         """Inspect prospective bindings without freezing this runtime's lazy state.
 
         Yields
         ------
         dict[str, dict[str, Any]]
             Effective state by segment and replay occurrence. Temporary lazy
-            bindings and replica-cache additions are restored on exit.
+            bindings and replica-cache additions are restored on exit unless
+            successful construction commits them as optimizer bindings.
         """
 
         saved_entries: dict[int, tuple[SegmentState, dict[int, StateEntry]]] = {}
@@ -412,15 +464,18 @@ class SplitRuntime(SplitGraph):
                 pool = state._replica_pool
                 if pool is not None and id(pool) not in saved_pools:
                     saved_pools[id(pool)] = (pool, dict(pool._replicas))
+        succeeded = False
         try:
             yield self._segment_state_snapshots()
+            succeeded = True
         finally:
-            for state, entries in saved_entries.values():
-                state._entries.clear()
-                state._entries.update(entries)
-            for pool, replicas in saved_pools.values():
-                pool._replicas.clear()
-                pool._replicas.update(replicas)
+            if not (succeeded and keep_on_success):
+                for state, entries in saved_entries.values():
+                    state._entries.clear()
+                    state._entries.update(entries)
+                for pool, replicas in saved_pools.values():
+                    pool._replicas.clear()
+                    pool._replicas.update(replicas)
 
     def _validate_recut_state_for_plan(
         self,
@@ -914,26 +969,3 @@ class SplitRuntime(SplitGraph):
 
 
 __all__ = ("SplitRuntime",)
-
-
-def _inherited_segment_entries(
-    previous: dict[str, Any],
-    snapshots: dict[str, dict[str, Any]],
-    target_node_ids: frozenset[str],
-    origins: tuple[str, ...],
-    recut: bool,
-) -> list[StateEntry]:
-    """Select existing entries consumed by the target's executed node identities."""
-
-    inherited: list[StateEntry] = []
-    for origin in origins:
-        old_state = getattr(previous[origin], "_state", None)
-        if not isinstance(old_state, SegmentState):
-            continue
-        used_values = {
-            id(value)
-            for key, value in snapshots.get(origin, {}).items()
-            if not recut or key.removesuffix(":source").rsplit(":literal:", 1)[0] in target_node_ids
-        }
-        inherited.extend(entry for entry in old_state.entries() if id(entry.value) in used_values)
-    return inherited

@@ -17,10 +17,15 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
+from .._state import pause_logging
 from .errors import SplitErrorContext, SplitUnsupportedError
 from .placement import DevicePlacement
+
+if TYPE_CHECKING:
+    from .adapters.base import SegmentBundle
+    from .runtime import SplitRuntime
 
 StateOwnership = Literal["referenced", "owned"]
 
@@ -353,3 +358,86 @@ def _normalize_device_text(text: str) -> str:
 
 
 __all__ = ("SegmentState", "StateEntry", "StateOwnership")
+
+
+def _inherit_segment_bindings(
+    runtime: SplitRuntime,
+    segments: SegmentBundle,
+    *,
+    recut: bool,
+    state_snapshots: dict[str, dict[str, Any]] | None,
+) -> None:
+    """Stage and settle inherited model-state bindings before publishing segments."""
+
+    previous = {
+        "prefix": runtime.segments.prefix,
+        "training_prefix": runtime.segments.training_prefix,
+        "suffix": runtime.segments.suffix,
+    }
+    with pause_logging():
+        snapshots = (
+            runtime._segment_state_snapshots() if state_snapshots is None else state_snapshots
+        )
+        # A combined repartition already checked the same effective snapshots.
+        if recut and state_snapshots is None:
+            runtime._validate_recut_prefix_state(
+                previous, snapshots, getattr(segments.suffix, "node_ids", frozenset())
+            )
+        seen: set[int] = set()
+        for name in previous:
+            target = getattr(segments, name)
+            state = getattr(target, "_state", None)
+            if not isinstance(state, SegmentState) or id(state) in seen:
+                continue
+            seen.add(id(state))
+            origins: tuple[str, ...] = (name,)
+            if recut:
+                origins = (
+                    ("training_prefix", "suffix")
+                    if name == "training_prefix"
+                    else ("prefix", "suffix")
+                )
+            state.inherit_entries(
+                _inherited_segment_entries(previous, snapshots, target.node_ids, origins, recut)
+            )
+        # Settle migration now, including a typed refusal for incompatible
+        # replicas of a tied value that the new cut would have to coalesce.
+        settled: set[tuple[int, frozenset[str], bool]] = set()
+        for name in previous:
+            target = getattr(segments, name)
+            getter = getattr(target, "bound_state_values", None)
+            if callable(getter):
+                key: tuple[int, frozenset[str], bool] = (
+                    id(getattr(target, "_state", target)),
+                    getattr(target, "node_ids", frozenset()),
+                    getattr(target, "use_live_param_sources", False),
+                )
+                if key not in settled:
+                    getter()
+                    settled.add(key)
+        inheritor = getattr(runtime.adapter, "inherit_runtime_state", None)
+        if callable(inheritor):
+            inheritor(runtime, segments)
+
+
+def _inherited_segment_entries(
+    previous: dict[str, Any],
+    snapshots: dict[str, dict[str, Any]],
+    target_node_ids: frozenset[str],
+    origins: tuple[str, ...],
+    recut: bool,
+) -> list[StateEntry]:
+    """Select existing entries consumed by the target's executed node identities."""
+
+    inherited: list[StateEntry] = []
+    for origin in origins:
+        old_state = getattr(previous[origin], "_state", None)
+        if not isinstance(old_state, SegmentState):
+            continue
+        used_values = {
+            id(value)
+            for key, value in snapshots.get(origin, {}).items()
+            if not recut or key.removesuffix(":source").rsplit(":literal:", 1)[0] in target_node_ids
+        }
+        inherited.extend(entry for entry in old_state.entries() if id(entry.value) in used_values)
+    return inherited

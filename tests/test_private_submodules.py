@@ -48,6 +48,8 @@ TAUGHT = frozenset(
         "torchlens.split.graph",
         "torchlens.split.graph_profile",
         "torchlens.split.ir",
+        # The optimizer migration extension API teaches this package path.
+        "torchlens.split.optimizers",
         "torchlens.split.ownership",
         "torchlens.split.pipeline",
         "torchlens.split.placement",

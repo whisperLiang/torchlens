@@ -2203,3 +2203,12 @@ namespace. Use `prepare_graph`, `compute_dag`, `graph_profile`, `analyze` and
 `python examples/split_upstream3.py` for B=1/2/4/8, live parameters and a recut.
 External cost estimators use `torchlens.split.flops`; it delegates to the same
 capture formulas and rule registry that `graph_profile()` uses.
+
+`SplitRuntime.plan_optimizer_state_migration(partition, optimizers=optimizers)` returns an
+`OptimizerStateMigrationPlan` with `OptimizerStateMigration` entries. A supported plan permits
+`SplitRuntime.export_optimizer_state(optimizers=optimizers, plan=plan)` to produce an
+`OptimizerStateSnapshot` with `OptimizerStateTensor` payloads. Recut, then call
+`SplitRuntime.restore_optimizer_state(snapshot, optimizer_factories=factories)` on the target
+runtime to obtain an `OptimizerStateMigrationResult`. `OptimizerStateAdapter` plugins from
+`torchlens.split.optimizers` exchange `OptimizerState` records. See
+`docs/reference/split_state_migration.md` for runnable Torch and TensorFlow examples.

@@ -51,6 +51,10 @@ class TensorOps(Protocol):
         """Return the runtime dtype name."""
         ...
 
+    def device_of(self, value: Any) -> Any:
+        """Return the native device for a live binding."""
+        ...
+
     def requires_grad(self, value: Any) -> bool | None:
         """Return whether ``value`` participates in autograd."""
         ...

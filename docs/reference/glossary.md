@@ -410,10 +410,39 @@ are not exported by `torchlens.split`.
   `rule_revision()` changes when rules change, so a scheduler can invalidate its costs.
 
 **ParameterOwnership / StateMigrationPlan**
-: Stable named state identities, segment owners and recut changes, exposed by
+: Stable named PyTorch and TensorFlow state identities, segment owners and recut changes, exposed by
   `parameter_ownership()` and `plan_state_migration()`. `parameter_bindings()` maps those identities
   to effective tensors for caller-owned optimizers. Migration planning does not move state or
   step/reset an optimizer.
+
+**OptimizerStateMigration / OptimizerStateMigrationPlan**
+: An external optimizer transition on a captured training graph. `SplitRuntime.plan_optimizer_state_migration`
+  takes a target `partition` and source `optimizers`. The plan carries `backend`, `graph_id`,
+  `source_partition`, `target_partition`, `entries`, `unsupported_reasons` and `supported`. Every
+  `OptimizerStateMigration` names a `state_id`, `source_optimizer`, `target_optimizer`, `action` and
+  `slot_names`. Actions are `keep`, `transfer`, `initialize` and `unsupported`.
+
+**OptimizerStateSnapshot / OptimizerStateTensor / OptimizerState**
+: The immutable CPU handoff from `SplitRuntime.export_optimizer_state`, given `optimizers` and a
+  supported `plan`. `OptimizerStateSnapshot` has `schema_version`, `backend`, `graph_id`,
+  `source_partition`, `target_partition`, `entries`, `optimizers`, `adapter_names`, `parameter_specs`
+  and `checksum`. Each `OptimizerState` holds `optimizer_type`, `config`, `global_state`,
+  `expected_slots` and `slots`. `OptimizerStateTensor` has `state_id`, `slot_name`, `shape`, `dtype`,
+  `payload` and `checksum`. `OptimizerStateTensor.from_array` copies canonical CPU data for a slot.
+
+**OptimizerStateMigrationResult**
+: Fresh native `optimizers`, stable IDs of `restored_parameters`, counts of `restored_slots` and
+  `initialized_slots`, and a `migration_summary` of actions. `SplitRuntime.restore_optimizer_state`
+  validates a `snapshot` before reconstructing it. `optimizer_factories` provides constructors for
+  target owners that need one.
+
+**OptimizerStateAdapter / OptimizerFactory**
+: The optimizer plugin protocol in `torchlens.split.optimizers` with a unique `name`, a `supports`
+  predicate, `export_state`, `merge_config`, `validate_restore`, `build_optimizer` and `restore_state`.
+  `register_optimizer_adapter` adds a backend adapter and `get_optimizer_adapter` resolves a native
+  optimizer to its unique provider. An `OptimizerFactory` takes target parameters by stable ID and
+  verified configuration and builds a fresh optimizer. See the
+  [split optimizer migration reference](split_state_migration.md).
 
 **SplitFeatures**
 : The requested replay, training, boundary-cache, batch-axis, cross-device, and live-parameter

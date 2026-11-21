@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from types import MappingProxyType
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from torchlens.split.errors import SplitRequestError
 
@@ -28,6 +28,10 @@ from ..ir import SplitRequest
 from ..planner import SplitPlan
 from ..shape_program import ShapeBinding, _tf_shape_literal_input
 from .base import SegmentBundle, SplitPolicyMixin, boundary_overlay
+
+if TYPE_CHECKING:
+    from ..ownership import _StateSource
+    from ..runtime import SplitRuntime
 
 
 def _flatten_tensor_leaves(value: Any, tf: Any) -> list[Any]:
@@ -224,6 +228,8 @@ class _TfGeneratedSegmentBase:
 
     def _prepare_blueprint(self) -> _TfReplayBlueprint:
         """Prepare execution and resource membership for this segment."""
+        from ._tf_ownership import _tf_state_index
+
         steps = self._prepare_execution_steps()
         resources = {
             binding.record.ref_key: binding.record.tensor
@@ -232,10 +238,12 @@ class _TfGeneratedSegmentBase:
             for binding in bindings
             if binding.record.source_kind == "resource" and binding.record.ref_key is not None
         }
-        model_resources = self._captured_model_resources()
-        resources.update(model_resources)
+        resource_keys = frozenset(resources)
         return _TfReplayBlueprint(
-            steps, tuple(resources.values()), frozenset(resources), frozenset(model_resources)
+            steps,
+            tuple(resources.values()),
+            resource_keys,
+            resource_keys & _tf_state_index(self.graph).names.keys(),
         )
 
     def _prepare_execution_steps(self) -> tuple[_TfReplayStep, ...]:
@@ -275,17 +283,6 @@ class _TfGeneratedSegmentBase:
             context=self._context(node, reason),
             code=SplitUnsupportedError.code,
         )
-
-    def _captured_model_resources(self) -> dict[object, Any]:
-        """Index native resources from this segment's captured parameter records."""
-        model_resources: dict[object, Any] = {}
-        for node_id in self.node_ids:
-            for param in self._node_by_id[node_id].param_refs:
-                resource = _tf_variable_resource(_param_ref_handle(param))
-                key = _tensor_ref_key(resource)
-                if key is not None:
-                    model_resources[key] = resource
-        return model_resources
 
     def _context(self, node: SplitTraceNode, reason: str) -> SplitErrorContext:
         """Build an error context for ``node``."""
@@ -581,6 +578,20 @@ class TfSplitAdapter(SplitPolicyMixin):
     supports_boundary_cache = True
     supports_state_placement = False
     native_target_types = frozenset({"TFOpCapture"})
+
+    def state_sources(
+        self, runtime: SplitRuntime, snapshots: dict[str, dict[str, Any]]
+    ) -> Iterator[_StateSource]:
+        """Resolve captured resources to current TensorFlow model variables."""
+
+        from ._tf_ownership import _tf_state_sources
+
+        return _tf_state_sources(runtime)
+
+    def device_of(self, value: Any) -> Any:
+        """Read placement from the TensorFlow variable behind a Keras wrapper."""
+
+        return getattr(_tf_gradient_source(value), "device", None)
 
     def target_support_reasons(
         self, node: SplitTraceNode, graph: SplitTraceGraph

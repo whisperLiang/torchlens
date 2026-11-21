@@ -34,6 +34,7 @@ from ..placement import DevicePlacement, SegmentName
 from ..planner import SplitPlan
 from ..shape_program import ShapeBinding, shape_semantic_for_node
 from ..state import SegmentState, _StateReplicaPool
+from ._torch_ownership import _torch_state_sources
 from .base import SegmentBundle, SplitPolicyMixin, boundary_overlay
 
 
@@ -1297,6 +1298,8 @@ class TorchSplitAdapter(SplitPolicyMixin):
     supports_state_placement = True
     allow_callable_target = True
     native_state_replay = True
+
+    state_sources = staticmethod(_torch_state_sources)
 
     def is_tensor(self, value: Any) -> bool:
         """Return whether ``value`` is a torch tensor."""

@@ -333,6 +333,7 @@ nav:
       - reference/split_runtime_acceptance.md
       - reference/split_runtime_repairs.md
       - reference/split_state_bindings.md
+      - reference/split_state_migration.md
       - Backends:
           - backends/jax.md
           - backends/mlx.md

@@ -73,6 +73,7 @@ DOC_FILE_GROUPS: dict[str, tuple[str, ...]] = {
         "migration/split_3_x.md",
         "reference/split_memory.md",
         "reference/split_native_runtime.md",
+        "reference/split_state_migration.md",
     ),
     "reference_views": (
         "reference/attribution.md",
@@ -136,6 +137,8 @@ def _doc_block_params(group: str) -> list[object]:
         marks = (
             (pytest.mark.heavy,) if ("torch.compile" in code or "frames_compiled" in code) else ()
         )
+        if file_name == "reference/split_state_migration.md" and "import tensorflow" in code:
+            marks += (pytest.mark.tf_backend,)
         params.append(pytest.param(file_name, block_index, code, marks=marks))
     return params
 

@@ -796,3 +796,7 @@ pages:
     section: reference
     publish: true
     note: native Split Runtime reference
+  - path: reference/split_state_migration.md
+    section: reference
+    publish: true
+    note: Split Runtime optimizer state migration
