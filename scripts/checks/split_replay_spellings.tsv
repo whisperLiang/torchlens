@@ -54,6 +54,8 @@ tests/split/test_split_compute_dag.py	runtime.replay(inputs)	SplitRuntime.replay
 tests/split/test_split_compute_dag.py	runtime.replay(torch.ones(2, 4), torch.zeros(2, 4)),	SplitRuntime.replay
 tests/split/test_split_compute_dag.py	torch.testing.assert_close(graph.materialize(graph.analyze(partition)).replay(x), Chunks()(x))	SplitRuntime.replay
 tests/split/test_split_compute_dag.py	torch.testing.assert_close(runtime.replay(inputs), Anchors()(inputs))	SplitRuntime.replay
+tests/split/test_split_compute_dag.py	tf.debugging.assert_equal(runtime.replay(inputs[:batch]), model(inputs[:batch]))	SplitRuntime.replay
+tests/split/test_split_compute_dag.py	tf.debugging.assert_equal(runtime.replay(left, right), tf.subtract(left, right))	SplitRuntime.replay
 tests/split/test_split_dataclass_inputs.py	np.testing.assert_allclose(runtime.replay(params, x), model(params, x), atol=1e-6)	SplitRuntime.replay
 tests/split/test_split_dynamic_operands.py	torch.testing.assert_close(runtime.replay(x.detach()), expected.detach())	SplitRuntime.replay
 tests/split/test_split_factory_placement.py	output = runtime.replay(x)	SplitRuntime.replay
@@ -101,6 +103,7 @@ tests/split/test_split_native_backends_replay.py	output = runtime.replay(replay_
 tests/split/test_split_native_backends_replay.py	output = runtime.replay(x)	SplitRuntime.replay
 tests/split/test_split_native_backends_replay.py	runtime.replay(tinygrad.Tensor.ones(2, 3, 2).realize())	SplitRuntime.replay
 tests/split/test_split_native_backends_replay.py	runtime.replay(tinygrad.Tensor.ones(2, 4, 2).realize())	SplitRuntime.replay
+tests/split/test_split_native_backends_replay.py	tf.debugging.assert_equal(runtime.replay(inputs), expected)	SplitRuntime.replay
 tests/split/test_split_optional_backends.py	replayed = runtime.replay(x)	SplitRuntime.replay
 tests/split/test_split_output_contract.py	runtime.replay(x)	SplitRuntime.replay
 tests/split/test_split_paddle_cuda_context.py	runtime.replay(x)	SplitRuntime.replay
@@ -179,9 +182,13 @@ tests/split/test_split_task_coverage.py	_nested_allclose(runtime.replay(x), mode
 tests/split/test_split_task_coverage.py	replayed = runtime.replay(x)	SplitRuntime.replay
 tests/split/test_split_task_coverage.py	"split_out = runtime.replay(ids, input_kwargs={""attention_mask"": mask})"	SplitRuntime.replay
 tests/split/test_split_task_coverage.py	split_out = runtime.replay(x)	SplitRuntime.replay
+tests/split/test_split_tf_native_contract.py	_assert_slots(tf, runtime.replay(inputs), expected)	SplitRuntime.replay
+tests/split/test_split_tf_native_contract.py	runtime.replay(x)	SplitRuntime.replay
 tests/split/test_split_tf_residual.py	tf.debugging.assert_equal(runtime.replay(value), model(value))	SplitRuntime.replay
 tests/split/test_split_tf_residual.py	tf.debugging.assert_near(runtime.replay(x), model(x))	SplitRuntime.replay
 tests/split/test_split_tf_shape_literals.py	actual = runtime.replay(values)	SplitRuntime.replay
+tests/split/test_split_tf_training.py	assert_close(runtime.replay(x), expected)	SplitRuntime.replay
+tests/split/test_split_tf_training.py	assert_close(runtime.replay(x), reference(x))	SplitRuntime.replay
 tests/split/test_split_tinygrad_functions.py	np.testing.assert_allclose(runtime.replay(replay_input).numpy(), 4 * np.maximum(values, 0))	SplitRuntime.replay
 tests/split/test_split_tinygrad_shape_binding.py	actual = runtime.replay(x).realize()	SplitRuntime.replay
 tests/split/test_split_tinygrad_shape_binding.py	np.testing.assert_allclose(runtime.replay(dynamic).numpy(), model(dynamic).numpy())	SplitRuntime.replay

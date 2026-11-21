@@ -228,7 +228,9 @@ def test_tf_conv_avg_pool_split_training_matches_native(device: str) -> None:
             assert grads.keys() == {weight.path for weight in model.trainable_variables}
             for weight, grad in zip(model.trainable_variables, native_grads, strict=True):
                 assert_close(grads[weight.path], grad)
-            reference_opt.apply_gradients(zip(native_grads, reference.trainable_variables))
+            reference_opt.apply_gradients(
+                zip(native_grads, reference.trainable_variables, strict=True)
+            )
             for actual, expected_weight in zip(model.weights, reference.weights, strict=True):
                 assert_close(actual, expected_weight)
             assert_close(runtime.replay(x), reference(x))
@@ -392,7 +394,9 @@ def test_tf_keras_split_training_matches_native_trajectory(
             with tf.GradientTape() as tape:
                 reference_loss = tf.reduce_mean(tf.math.squared_difference(reference(x), y))
             variables = reference.trainable_variables
-            reference_opt.apply_gradients(zip(tape.gradient(reference_loss, variables), variables))
+            reference_opt.apply_gradients(
+                zip(tape.gradient(reference_loss, variables), variables, strict=True)
+            )
 
             boundary = runtime.run_training_prefix(x)
             if compiled:

@@ -228,7 +228,7 @@ def validate_tf_trace_detailed(trace: Any) -> TFValidationResult:
                 )
             continue
         outcome = _value_outcome(
-            label, op_type, ops_by_label, captures_by_label, multi_output_calls, replayed_slots
+            op_type, captures_by_label.get(label), ops_by_label, multi_output_calls, replayed_slots
         )
         if outcome == _REASON_NO_FUNCTION:
             pure_unverified_histogram[op_type] += 1
@@ -260,19 +260,18 @@ def validate_tf_trace_detailed(trace: Any) -> TFValidationResult:
 
 
 def _value_outcome(
-    label: str,
     op_type: str,
+    capture: TFOpCapture | None,
     ops_by_label: Mapping[str, Any],
-    captures_by_label: Mapping[str, TFOpCapture],
     multi_output_calls: Mapping[int, list[TFOpCapture]],
     replayed_slots: dict[str, str],
 ) -> str:
     """Use the native policy and share the result among sibling output records."""
 
     spec = _NATIVE_OP_SPECS.get(op_type)
-    capture = captures_by_label.get(label)
     if spec is None or spec.validation != "perturb" or capture is None:
         return _REASON_NO_FUNCTION
+    label = capture.label_raw
     if capture._output_count <= 1:
         return _replay_and_perturb_call((capture,), ops_by_label)[label]
     if label not in replayed_slots:
@@ -780,21 +779,21 @@ def _replay_and_perturb_call(
         with tf.device(device) if device else nullcontext(), _pause_tf_replay():
             inputs, parent_slots = _rebuild_inputs(tf, records, ops_by_label)
             outputs = native._outputs(native._execute(inputs))
-            return _compare_slots(tf, native, inputs, parent_slots, captures, outputs, ops_by_label)
+            outcomes, matched = _compare_slots(tf, captures, outputs, ops_by_label)
+            for index in _insensitive_slots(tf, native, inputs, parent_slots, matched):
+                outcomes[captures[index].label_raw] = _REASON_PERTURBATION
+            return outcomes
     except Exception:
         return dict.fromkeys((capture.label_raw for capture in captures), _REASON_REPLAY_MISMATCH)
 
 
 def _compare_slots(
     tf: Any,
-    native: _PreparedNativeCall,
-    inputs: list[Any],
-    parent_slots: Mapping[str, list[int]],
     captures: Sequence[TFOpCapture],
     outputs: Sequence[Any],
     ops_by_label: Mapping[str, Any],
-) -> dict[str, str]:
-    """Compare each saved slot and require each match to respond to perturbation."""
+) -> tuple[dict[str, str], dict[int, Any]]:
+    """Compare each saved slot and retain the matches for perturbation."""
 
     outcomes: dict[str, str] = {}
     matched: dict[int, Any] = {}
@@ -803,16 +802,13 @@ def _compare_slots(
         try:
             saved = _saved_payload(op)
             matches = _slot_matches(tf, capture, op, replayed, saved)
-        except Exception:
+        except (AttributeError, RuntimeError, TypeError, ValueError):
             matches = False
         if matches:
             matched[capture.output_index] = saved
         outcomes[capture.label_raw] = _REASON_REPLAYED if matches else _REASON_REPLAY_MISMATCH
 
-    insensitive = _insensitive_slots(tf, native, inputs, parent_slots, matched)
-    for index in insensitive:
-        outcomes[captures[index].label_raw] = _REASON_PERTURBATION
-    return outcomes
+    return outcomes, matched
 
 
 def _slot_matches(tf: Any, capture: TFOpCapture, op: Any, replayed: Any, saved: Any) -> bool:
