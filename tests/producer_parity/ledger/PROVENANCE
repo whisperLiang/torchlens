@@ -5939,3 +5939,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cpu
 source: a96e97cdee3a4dcb8f611beba72a0a05a53a7adb (dirty)
 recorded: 2026-11-20T08:34:13.561425+00:00
+---
+generator: scripts/regen_ledgers.py (producer static half)
+flag: none (deterministic ledger step)
+reason: Refresh the static producer census for TensorFlow native attribute kinds and validation read sites.
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: b83d674dcca5e4c26b7f9350e5c15053bc33d5c6
+recorded: 2026-11-21T11:02:49+08:00
