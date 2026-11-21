@@ -177,6 +177,57 @@ def test_tf_split_analysis_refuses_an_unregistered_raw_op() -> None:
         assert caught.value.context.reason == "split preflight rejected"
 
 
+@pytest.mark.parametrize("layout", ["omitted", None, "NHWC", b"NHWC"])
+def test_tf_avg_pool_preserves_native_default_layout(layout: str | bytes | None) -> None:
+    """Replay the real callback defaults and bytes through validation and Split."""
+
+    tf = pytest.importorskip("tensorflow")
+    from torchlens import trace
+    from torchlens.backends.tf.validation import validate_tf_trace_detailed
+
+    def model(value: Any) -> Any:
+        if isinstance(layout, bytes):
+            return tf.raw_ops.AvgPool(
+                value=value,
+                ksize=[1, 2, 2, 1],
+                strides=[1, 2, 2, 1],
+                padding=b"VALID",
+                data_format=layout,
+            )
+        kwargs = {} if layout == "omitted" else {"data_format": layout}
+        return tf.nn.avg_pool(value, ksize=2, strides=2, padding="VALID", **kwargs)
+
+    with tf.device("/CPU:0"):
+        inputs = tf.reshape(tf.range(40, dtype=tf.float32), (1, 4, 5, 2))
+        expected = model(inputs)
+        result = validate_tf_trace_detailed(trace(model, inputs, backend="tf"))
+        assert result.failures == ()
+        assert result.replayed_histogram["AvgPool"] == 1
+        graph = prepare_graph(model, inputs, backend="tf")
+        runtime = graph.materialize(graph.analyze(graph.compute_dag().to_partition(())))
+        tf.debugging.assert_equal(runtime.replay(inputs), expected)
+
+
+def test_tf_avg_pool_refuses_unknown_native_layout() -> None:
+    """Do not treat a nonempty invalid layout as the omitted default."""
+
+    tf = pytest.importorskip("tensorflow")
+    from torchlens import trace
+
+    def model(value: Any) -> Any:
+        return tf.nn.avg_pool(value, ksize=2, strides=2, padding="VALID", data_format="WRONG")
+
+    with tf.device("/CPU:0"):
+        inputs = tf.ones((1, 4, 5, 2), dtype=tf.float32)
+        for run in (
+            model,
+            lambda x: trace(model, x, backend="tf"),
+            lambda x: prepare_graph(model, x, backend="tf"),
+        ):
+            with pytest.raises(tf.errors.InvalidArgumentError, match="WRONG"):
+                run(inputs)
+
+
 @pytest.mark.parametrize(
     ("pool_type", "padding"),
     [

@@ -411,11 +411,12 @@ def _replay_mean(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
 def _pool_attrs(capture: TFOpCapture) -> dict[str, Any]:
     """Decode the attributes shared by native average and max pooling."""
 
+    layout = capture.attrs.get("data_format")
     return {
         "ksize": list(capture.attrs["ksize"]),
         "strides": list(capture.attrs["strides"]),
         "padding": _attr_str(capture.attrs["padding"]),
-        "data_format": _attr_str(capture.attrs.get("data_format", "NHWC")),
+        "data_format": "NHWC" if layout is None else _attr_str(layout),
     }
 
 
