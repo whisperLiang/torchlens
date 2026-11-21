@@ -327,6 +327,27 @@ def test_tf_analyze_refuses_invalid_native_input_slots(duplicate: bool) -> None:
         graph.analyze(graph.compute_dag().to_partition(()))
 
 
+def test_tf_replay_binds_captured_operands_by_native_position() -> None:
+    """Rebuild distinct left and right tensors from their recorded native slots."""
+
+    tf = pytest.importorskip("tensorflow")
+    left = tf.constant([[1.0, -2.0]], dtype=tf.float64)
+    right = tf.constant([[0.25, 3.0]], dtype=tf.float64)
+    graph = prepare_graph(tf.subtract, (left, right), backend="tf")
+    trace_graph = graph.trace_graph
+    graph.trace_graph = replace(
+        trace_graph,
+        nodes=tuple(
+            replace(node, target=replace(node.target, inputs=node.target.inputs[::-1]))
+            if node.op_type == "sub"
+            else node
+            for node in trace_graph.nodes
+        ),
+    )
+    runtime = graph.materialize(graph.analyze(graph.compute_dag().to_partition(())))
+    tf.debugging.assert_equal(runtime.replay(left, right), tf.subtract(left, right))
+
+
 @pytest.mark.parametrize(("field", "value"), [("_output_count", 2), ("output_index", 1)])
 def test_tf_analyze_checks_a_single_native_output(field: str, value: int) -> None:
     """Reject invalid count and out-of-range slots even for a one-output op."""

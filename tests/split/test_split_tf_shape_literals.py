@@ -81,7 +81,11 @@ def _node(capture: Any) -> Any:
 
 
 def _segment(
-    monkeypatch: pytest.MonkeyPatch, rewrite: Any, nodes: tuple[SplitTraceNode, ...] = ()
+    monkeypatch: pytest.MonkeyPatch,
+    rewrite: Any,
+    nodes: tuple[SplitTraceNode, ...] = (),
+    *,
+    has_recipe: bool = True,
 ) -> Any:
     """Build the real input-replay adapter around a metadata-only TF stand-in."""
 
@@ -95,14 +99,25 @@ def _segment(
     monkeypatch.setattr(
         tf_adapter, "_tf", lambda: SimpleNamespace(Tensor=_Tensor, convert_to_tensor=convert)
     )
-    segment = tf_adapter._TfGeneratedSegmentBase(
-        graph=SplitTraceGraph("tf", nodes, (), (), None, None, SimpleNamespace(rewrite=rewrite)),
+    recipes = {"value:1": (SimpleNamespace(argument=None),)} if has_recipe else {}
+    return tf_adapter._TfGeneratedSegmentBase(
+        graph=SplitTraceGraph(
+            "tf", nodes, (), (), None, None, SimpleNamespace(rewrite=rewrite, recipes=recipes)
+        ),
         plan=None,
         spec=SplitRequest(GraphPartition(frozenset()), backend="tf"),
         node_ids=frozenset(),
     )
-    segment._shape_binding = shape_program.ShapeBinding({"B": 3}, {})
-    return segment
+
+
+def _replay_inputs(segment: Any, node: Any, overlay: dict[str, Any]) -> list[Any]:
+    """Prepare the captured input slots, then bind them for a single replay."""
+
+    capture = node.target
+    records = tuple(sorted(capture.inputs, key=lambda record: record.input_index))
+    operands = tf_adapter._prepare_tf_inputs(segment.graph, node, capture, records)
+    binding = shape_program.ShapeBinding({"B": 3}, {})
+    return segment._tf_inputs(tf_adapter._tf(), operands, node, overlay, binding)
 
 
 @pytest.mark.parametrize(
@@ -144,7 +159,7 @@ def test_tf_nonshape_operands_never_read_payloads(
         pytest.fail("A non-shape operand reached the dimension rewriter.")
 
     segment = _segment(monkeypatch, forbidden_rewrite)
-    assert segment._tf_inputs(segment._prepare_tf_inputs(capture), node, {}) == [tensor]
+    assert _replay_inputs(segment, node, {}) == [tensor]
     assert tensor.reads == 0
 
 
@@ -170,9 +185,25 @@ def test_tf_shape_operands_remain_readable_and_rewritable(
         return [binding.batch_size, 6]
 
     segment = _segment(monkeypatch, rewrite)
-    rewritten = segment._tf_inputs(segment._prepare_tf_inputs(capture), node, {})
+    rewritten = _replay_inputs(segment, node, {})
     assert rewritten[0].payload == [3, 6]
     assert tensor.reads == 2
+
+
+def test_tf_literal_without_batch_recipe_never_reads_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fixed shape vector can go directly to the native wrapper."""
+
+    shape = _Tensor(integer=True, shape=(2,), payload=[1, 6])
+
+    def forbidden_rewrite(*args: Any) -> Any:
+        pytest.fail("A fixed shape operand reached the dimension rewriter.")
+
+    segment = _segment(monkeypatch, forbidden_rewrite, has_recipe=False)
+    node = _node(_capture("Reshape", 1, shape))
+    assert _replay_inputs(segment, node, {}) == [shape]
+    assert shape.reads == 0
 
 
 @pytest.mark.parametrize(
@@ -201,9 +232,7 @@ def test_tf_state_shape_literals_keep_the_captured_dimensions(
         pytest.fail("Captured state dimensions cannot depend on the runtime batch.")
 
     segment = _segment(monkeypatch, forbidden_rewrite, (source_node,))
-    inputs = segment._tf_inputs(
-        segment._prepare_tf_inputs(capture), _node(capture), {source_node.canonical_id: data}
-    )
+    inputs = _replay_inputs(segment, _node(capture), {source_node.canonical_id: data})
     assert inputs == [data, shape]
     assert shape.reads == 0
 
