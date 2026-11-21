@@ -1349,7 +1349,7 @@ torchlens/split/batching.py::resolve_batch_spec	87
 torchlens/split/boundary.py::ReplayBoundary.validate	109
 torchlens/split/boundary_layout.py::build_boundary_layout	80
 torchlens/split/context.py::SplitGraph._analyze_partition	90
-torchlens/split/graph.py	1013
+torchlens/split/graph.py	1002
 torchlens/split/graph.py::_repair_missing_scalar_parent_refs	83
 torchlens/split/graph.py::split_graph_from_trace	73
 torchlens/split/graph_profile.py::build_graph_profile	100
@@ -1362,7 +1362,7 @@ torchlens/split/pipeline.py::_probe_batch_replay	137
 torchlens/split/pipeline.py::_torch_capture_state	86
 torchlens/split/pipeline.py::capture_canonical_model	73
 torchlens/split/pipeline.py::normalize_to_split_ir	86
-torchlens/split/planner.py	1033
+torchlens/split/planner.py	1024
 torchlens/split/planner.py::_certify_local_write	93
 torchlens/split/planner.py::_torch_mutation_targets	87
 torchlens/split/program.py::_feature_evidence	102

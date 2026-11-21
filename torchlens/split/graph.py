@@ -22,6 +22,8 @@ from ..backends.registry import (
 )
 from ..intervention._types import CapturedArgTemplate, LiteralTensor, LiteralValue, ParentRef
 from ._capture_projection import (
+    _attach_capture_targets,
+    _captures_by_raw_label,
     _paddle_capture_parameter_refs,
     capture_batch_size,
     paddle_call_metadata,
@@ -445,11 +447,7 @@ def _attach_paddle_capture_templates(
 ) -> list[SplitTraceNode]:
     """Attach native Paddle call metadata to every emitted value."""
 
-    captures = {
-        str(getattr(capture, "label_raw")): capture
-        for capture in trace._paddle_op_captures or ()
-        if getattr(capture, "label_raw", None) is not None
-    }
+    captures = _captures_by_raw_label(trace._paddle_op_captures or ())
     if not captures:
         return nodes
     params_by_id: dict[int, Any] = {}
@@ -496,42 +494,18 @@ def _attach_jax_captures(trace: Any, nodes: list[SplitTraceNode]) -> list[SplitT
 
     raw_by_index = trace._jax_capture_index_to_raw_op_label or {}
     captures = {
-        str(raw_by_index.get(getattr(capture, "index"))): capture
+        str(label): capture
         for capture in getattr(trace, "jax_ordered_captures", ()) or ()
-        if raw_by_index.get(getattr(capture, "index", None)) is not None
+        if (label := raw_by_index.get(getattr(capture, "index", None))) is not None
     }
-    if not captures:
-        return nodes
-    return [
-        replace(
-            node,
-            target=captures.get(str(getattr(node.op, "_label_raw", node.raw_label or ""))),
-        )
-        if str(getattr(node.op, "_label_raw", node.raw_label or "")) in captures
-        else node
-        for node in nodes
-    ]
+    return _attach_capture_targets(nodes, captures)
 
 
 def _attach_tinygrad_captures(trace: Any, nodes: list[SplitTraceNode]) -> list[SplitTraceNode]:
     """Attach tinygrad UOp captures to their split graph nodes."""
 
-    captures = {
-        str(getattr(capture, "label_raw")): capture
-        for capture in getattr(trace, "tinygrad_uop_captures", ()) or ()
-        if getattr(capture, "label_raw", None) is not None
-    }
-    if not captures:
-        return nodes
-    return [
-        replace(
-            node,
-            target=captures.get(str(getattr(node.op, "_label_raw", node.raw_label or ""))),
-        )
-        if str(getattr(node.op, "_label_raw", node.raw_label or "")) in captures
-        else node
-        for node in nodes
-    ]
+    captures = _captures_by_raw_label(getattr(trace, "tinygrad_uop_captures", ()) or ())
+    return _attach_capture_targets(nodes, captures)
 
 
 def _attach_preview_output_occurrences(
@@ -589,22 +563,7 @@ def _attach_mlx_captures(trace: Any, nodes: list[SplitTraceNode]) -> list[SplitT
 def _attach_tf_captures(trace: Any, nodes: list[SplitTraceNode]) -> list[SplitTraceNode]:
     """Attach TensorFlow op-callback captures to their split graph nodes."""
 
-    captures = {
-        str(getattr(capture, "label_raw")): capture
-        for capture in trace._tf_op_captures or ()
-        if getattr(capture, "label_raw", None) is not None
-    }
-    if not captures:
-        return nodes
-    return [
-        replace(
-            node,
-            target=captures.get(str(getattr(node.op, "_label_raw", node.raw_label or ""))),
-        )
-        if str(getattr(node.op, "_label_raw", node.raw_label or "")) in captures
-        else node
-        for node in nodes
-    ]
+    return _attach_capture_targets(nodes, _captures_by_raw_label(trace._tf_op_captures or ()))
 
 
 _MISSING_SAVED_VALUE = object()

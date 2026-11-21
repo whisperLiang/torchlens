@@ -5955,3 +5955,11 @@ env: py3.10-torch2.13.0
 torch: 2.13.0+cpu
 source: 0c8a34115e524963e470329904836930976d195c
 recorded: 2026-11-21T11:13:12+08:00
+---
+generator: scripts/regen_ledgers.py (producer static half)
+flag: none (deterministic ledger step)
+reason: Consolidate native sidecar label reads into the shared Split capture projection.
+env: py3.10-torch2.13.0
+torch: 2.13.0+cpu
+source: 4a6b9f7024c4a7828419d5b947518ca8a1cf32bf
+recorded: 2026-11-21T11:20:23+08:00

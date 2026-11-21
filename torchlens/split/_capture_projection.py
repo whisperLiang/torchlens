@@ -7,8 +7,8 @@ It neither emulates a Trace nor captures or executes model code.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from .._ir.container import (
@@ -131,6 +131,31 @@ def project_op(op: Op, *, backend: str, traced_batch_size: int | None) -> SplitT
         captured_forward_flops=None if forward_flops is None else int(forward_flops),
         captured_backward_flops=None if backward_flops is None else int(backward_flops),
     )
+
+
+def _captures_by_raw_label(captures: Iterable[Any]) -> dict[str, Any]:
+    """Index native captures that carry an upstream raw operation label."""
+
+    return {
+        str(label): capture
+        for capture in captures
+        if (label := getattr(capture, "label_raw", None)) is not None
+    }
+
+
+def _attach_capture_targets(
+    nodes: list[SplitTraceNode], captures: dict[str, Any]
+) -> list[SplitTraceNode]:
+    """Attach each sidecar to the projected nodes with its raw operation label."""
+
+    if not captures:
+        return nodes
+    updated = []
+    for node in nodes:
+        label = str(getattr(node.op, "_label_raw", node.raw_label or ""))
+        capture = captures.get(label)
+        updated.append(replace(node, target=capture) if capture is not None else node)
+    return updated
 
 
 def _leaf_paths(spec: ContainerSpec, prefix: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:

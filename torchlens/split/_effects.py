@@ -38,6 +38,26 @@ class _EffectIndex:
     source_writes: frozenset[str]
 
 
+def _ordered_partition_nodes(graph: SplitTraceGraph, prefix: frozenset[str]) -> frozenset[str]:
+    """Find calls whose order relative to every other call survives the partition.
+
+    A prefix write must precede every suffix call; a suffix write must follow
+    every prefix call. Only the leading prefix and trailing suffix runs qualify.
+    Compute those runs once instead of scanning the graph for each write.
+    """
+
+    ordered: set[str] = set()
+    for node in graph.compute_nodes:
+        if node.canonical_id not in prefix:
+            break
+        ordered.add(node.canonical_id)
+    for node in reversed(graph.compute_nodes):
+        if node.canonical_id in prefix:
+            break
+        ordered.add(node.canonical_id)
+    return frozenset(ordered)
+
+
 def _literal_tensors(value: Any) -> tuple[LiteralTensor, ...]:
     """Visit native template tensors in the executor's occurrence order."""
     if isinstance(value, LiteralTensor):

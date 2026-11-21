@@ -10,6 +10,16 @@ from typing import Any
 
 from ..backends.registry import MLX_BACKEND_NAME, PADDLE_BACKEND_NAME, TORCH_BACKEND_NAME
 from ..intervention._types import CapturedArgTemplate, LiteralTensor, LiteralValue
+from ._effects import (
+    _alias_conflict_category,
+    _boundary_state_aliases,
+    _effect_inversions,
+    _ordered_partition_nodes,
+    _partition_diagnostic,
+    _source_alias_conflict,
+    _source_values,
+    _write_operands,
+)
 from .errors import SplitErrorContext, SplitRequestError, SplitUnsupportedError
 from .frontier import (
     boundary_key_for_node,
@@ -181,8 +191,6 @@ def _partition_refusal(
         code=SplitUnsupportedError.code,
     )
     if graph.backend == TORCH_BACKEND_NAME and isinstance(spec.partition, GraphPartition):
-        from ._effects import _partition_diagnostic
-
         error._partition_diagnostic = _partition_diagnostic(graph, spec, reason, node)
     return error
 
@@ -668,7 +676,6 @@ def _partition_colocations(
     those modes. Source-state ordering, unknown alias provenance, ordered
     integer writes and backend capabilities still require ``plan_partition``.
     """
-    from ._effects import _write_operands
 
     targets = _torch_mutation_targets()
     index = graph._partition_effect_index
@@ -705,36 +712,10 @@ def _partition_colocations(
     return tuple(sorted(groups, key=lambda group: tuple(sorted(group))))
 
 
-def _ordered_partition_nodes(graph: SplitTraceGraph, prefix: frozenset[str]) -> frozenset[str]:
-    """Find calls whose order relative to every other call survives the partition.
-
-    A prefix write must precede every suffix call; a suffix write must follow
-    every prefix call. Only the leading prefix and trailing suffix runs qualify.
-    Compute those runs once instead of scanning the graph for each write.
-    """
-
-    ordered: set[str] = set()
-    for node in graph.compute_nodes:
-        if node.canonical_id not in prefix:
-            break
-        ordered.add(node.canonical_id)
-    for node in reversed(graph.compute_nodes):
-        if node.canonical_id in prefix:
-            break
-        ordered.add(node.canonical_id)
-    return frozenset(ordered)
-
-
 def _validate_effect_order(
     graph: SplitTraceGraph, spec: SplitRequest, prefix: frozenset[str]
 ) -> None:
     """Reject effect inversions and unproven aliasing between mutable state sources."""
-    from ._effects import (
-        _alias_conflict_category,
-        _effect_inversions,
-        _source_alias_conflict,
-        _source_values,
-    )
 
     inversions = _effect_inversions(graph, prefix)
     if inversions:
@@ -983,7 +964,6 @@ def _validate_boundary_state_aliases(
     """Refuse activation aliases outside the mutable-buffer boundary contract."""
     if graph.backend != TORCH_BACKEND_NAME:
         return
-    from ._effects import _boundary_state_aliases
 
     aliases = _boundary_state_aliases(graph, boundary, suffix)
     if aliases:
