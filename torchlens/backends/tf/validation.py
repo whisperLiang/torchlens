@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
@@ -13,8 +14,15 @@ from ..._validation_status import ValidationReplaySource, ValidationStatus
 from .._constants import CONSTANT_PARENT_PAYLOAD_REASON, CONSTANT_PRODUCER_LEAF_REASON
 from .._invariants import run_metadata_invariants
 from .._validation_shared import float_replay_tolerances, ops_by_label as _ops_by_label
-from ._raw_op_replay import _import_tensorflow, _replay_raw_op, _select_replay_output
-from .op_callback_capture import TFOpCapture
+from ._native_op_specs import _NATIVE_OP_SPECS
+from ._raw_op_replay import (
+    _import_tensorflow,
+    _native_output_slots,
+    _pause_tf_replay,
+    _prepare_native_call,
+    _PreparedNativeCall,
+)
+from .op_callback_capture import TFInputCapture, TFOpCapture
 
 TFOpClass = Literal[
     "value",
@@ -25,60 +33,6 @@ TFOpClass = Literal[
     "effect-denied",
     "control-region",
 ]
-
-_PURE_REPLAY_ALLOWLIST = frozenset(
-    {
-        "AddV2",
-        "AvgPool",
-        "BatchMatMulV2",
-        "BiasAdd",
-        "BroadcastTo",
-        "Cast",
-        "ConcatV2",
-        "Conv2D",
-        "DepthwiseConv2dNative",
-        "Einsum",
-        "Elu",
-        "Erf",
-        "Erfc",
-        "Exp",
-        "ExpandDims",
-        "Fill",
-        "GatherV2",
-        "Greater",
-        "Less",
-        "Log",
-        "MatMul",
-        "Maximum",
-        "MaxPool",
-        "Mean",
-        "Minimum",
-        "Mul",
-        "Neg",
-        "Pad",
-        "Pow",
-        "Prod",
-        "RealDiv",
-        "Relu",
-        "Relu6",
-        "Reshape",
-        "Rsqrt",
-        "SelectV2",
-        "Sigmoid",
-        "Sin",
-        "Slice",
-        "Softmax",
-        "Split",
-        "Sqrt",
-        "SquaredDifference",
-        "Sub",
-        "Sum",
-        "Squeeze",
-        "Tanh",
-        "Tile",
-        "Transpose",
-    }
-)
 
 #: Literal producers (SPEC section 2, rule 2): ops whose every input is a host literal or
 #: shape, so the op has no graph parents and its output is a constant of the forward.
@@ -99,27 +53,29 @@ _REASON_UNCLASSIFIED = "op_unclassified"
 _REASON_INCONSISTENT = "capture_inconsistent"
 _REASON_CONSTANT_LEAF = CONSTANT_PRODUCER_LEAF_REASON
 _REASON_CONSTANT_PERTURB = CONSTANT_PARENT_PAYLOAD_REASON
-_VALUE_OPS = _PURE_REPLAY_ALLOWLIST | frozenset({"Gelu", "Pack"})
-_STRUCTURAL_VALUE_OPS = frozenset({"Shape", "Size", "Rank", "StridedSlice"})
-_ANNOTATION_OPS = frozenset({"Identity", "StopGradient"})
-_PURE_RESOURCE_READ_OPS = frozenset({"ReadVariableOp"})
-_SOURCE_OPS = frozenset({"Const", "Placeholder", "constant"})
-_EFFECT_DENIED_OPS = frozenset(
-    {
-        "Assert",
-        "AssignAddVariableOp",
-        "AssignSubVariableOp",
-        "DestroyResourceOp",
-        "NoOp",
-        "PrintV2",
-        "RandomStandardNormal",
-        "StatefulPartitionedCall",
-    }
-)
-_CONTROL_REGION_OPS = frozenset(
-    {"If", "StatelessIf", "While", "StatelessWhile", "Case", "Switch", "Merge"}
-    | {"StatefulPartitionedCall"}
-)
+_UNREGISTERED_CLASSES: Mapping[str, TFOpClass] = {
+    "Const": "source",
+    "Placeholder": "source",
+    "constant": "source",
+    "Size": "structural-value",
+    "Rank": "structural-value",
+    "Gelu": "value",
+    "If": "control-region",
+    "StatelessIf": "control-region",
+    "While": "control-region",
+    "StatelessWhile": "control-region",
+    "Case": "control-region",
+    "Switch": "control-region",
+    "Merge": "control-region",
+    "StatefulPartitionedCall": "control-region",
+    "Assert": "effect-denied",
+    "AssignAddVariableOp": "effect-denied",
+    "AssignSubVariableOp": "effect-denied",
+    "DestroyResourceOp": "effect-denied",
+    "NoOp": "effect-denied",
+    "PrintV2": "effect-denied",
+    "RandomStandardNormal": "effect-denied",
+}
 
 
 @dataclass(frozen=True)
@@ -251,43 +207,37 @@ def validate_tf_trace_detailed(trace: Any) -> TFValidationResult:
     if failures:
         return _structural_failure_result(failures, classes, ops_by_label)
 
-    replayed_count = 0
-    pure_unverified_count = 0
-    effect_region_count = 0
     decisions_list: list[Mapping[str, Any]] = []
     unverified_reasons: Counter[str] = Counter()
     exempted_reasons: Counter[str] = Counter()
-    for label, op in ops_by_label.items():
-        if label != getattr(op, "_label_raw", None):
-            continue
+    multi_output_calls = _multi_output_captures(captures_by_label)
+    replayed_slots: dict[str, str] = {}
+    for label, op in _raw_label_items(ops_by_label):
         op_class = classes[label]
         op_type = str(getattr(op, "func_name", ""))
         op_label = str(getattr(op, "label", label))
         if op_class == "source":
-            if op_type == "constant":
-                _record_constant_leaf(op_label, decisions_list, exempted_reasons)
+            _record_source_decisions(op_label, op_type, decisions_list, exempted_reasons)
             continue
         if op_class != "value":
             if op_class in {"pure-resource-read", "effect-denied", "control-region"}:
-                effect_region_count += 1
                 effect_region_histogram[op_type] += 1
                 unverified_reasons[_REASON_EFFECT] += 1
                 decisions_list.append(
                     _decision(op_label, op_type, "replay", "unverified", _REASON_EFFECT)
                 )
             continue
-        capture = captures_by_label.get(label)
-        if op_type not in _PURE_REPLAY_ALLOWLIST or capture is None:
-            pure_unverified_count += 1
+        outcome = _value_outcome(
+            label, op_type, ops_by_label, captures_by_label, multi_output_calls, replayed_slots
+        )
+        if outcome == _REASON_NO_FUNCTION:
             pure_unverified_histogram[op_type] += 1
             unverified_reasons[_REASON_NO_FUNCTION] += 1
             decisions_list.append(
                 _decision(op_label, op_type, "replay", "unverified", _REASON_NO_FUNCTION)
             )
             continue
-        outcome = _replay_and_perturb_op(op=op, capture=capture, ops_by_label=ops_by_label)
         if outcome == _REASON_REPLAYED:
-            replayed_count += 1
             replayed_histogram[op_type] += 1
             decisions_list.append(_decision(op_label, op_type, "replay", "validated", outcome))
             continue
@@ -297,9 +247,9 @@ def validate_tf_trace_detailed(trace: Any) -> TFValidationResult:
 
     return _detailed_result(
         counts=TFValidationCounts(
-            replayed_node_count=replayed_count,
-            pure_unverified_node_count=pure_unverified_count,
-            effect_region_node_count=effect_region_count,
+            replayed_node_count=sum(replayed_histogram.values()),
+            pure_unverified_node_count=sum(pure_unverified_histogram.values()),
+            effect_region_node_count=sum(effect_region_histogram.values()),
             failed_node_count=len(failures),
         ),
         failures=failures,
@@ -309,11 +259,48 @@ def validate_tf_trace_detailed(trace: Any) -> TFValidationResult:
     )
 
 
-def _record_constant_leaf(
-    op_label: str, decisions_list: list[Mapping[str, Any]], exempted_reasons: Counter[str]
+def _value_outcome(
+    label: str,
+    op_type: str,
+    ops_by_label: Mapping[str, Any],
+    captures_by_label: Mapping[str, TFOpCapture],
+    multi_output_calls: Mapping[int, list[TFOpCapture]],
+    replayed_slots: dict[str, str],
+) -> str:
+    """Use the native policy and share the result among sibling output records."""
+
+    spec = _NATIVE_OP_SPECS.get(op_type)
+    capture = captures_by_label.get(label)
+    if spec is None or spec.validation != "perturb" or capture is None:
+        return _REASON_NO_FUNCTION
+    if capture._output_count <= 1:
+        return _replay_and_perturb_call((capture,), ops_by_label)[label]
+    if label not in replayed_slots:
+        siblings = multi_output_calls[capture._call_id]
+        replayed_slots.update(_replay_and_perturb_call(siblings, ops_by_label))
+    return replayed_slots[label]
+
+
+def _raw_label_items(ops_by_label: Mapping[str, Any]) -> Iterator[tuple[str, Any]]:
+    """Visit each operation once in the sidecar's raw label space."""
+
+    return (
+        (label, op)
+        for label, op in ops_by_label.items()
+        if label == getattr(op, "_label_raw", None)
+    )
+
+
+def _record_source_decisions(
+    op_label: str,
+    op_type: str,
+    decisions_list: list[Mapping[str, Any]],
+    exempted_reasons: Counter[str],
 ) -> None:
     """Record a closure constant as an exempted leaf (constants rule item 3)."""
 
+    if op_type != "constant":
+        return
     # Constants rule item 3: a closure constant is a leaf whose
     # saved payload is the record; nothing upstream to perturb.
     decisions_list.extend(_constant_leaf_decisions(op_label))
@@ -523,7 +510,9 @@ def replay_allowlist() -> tuple[str, ...]:
         Sorted replayable TensorFlow op types.
     """
 
-    return tuple(sorted(_PURE_REPLAY_ALLOWLIST))
+    return tuple(
+        sorted(name for name, spec in _NATIVE_OP_SPECS.items() if spec.validation == "perturb")
+    )
 
 
 def _validate_classification(
@@ -552,9 +541,7 @@ def _validate_classification(
         Mutates ``classes`` and ``failures``.
     """
 
-    for label, op in ops_by_label.items():
-        if label != getattr(op, "_label_raw", None):
-            continue
+    for label, op in _raw_label_items(ops_by_label):
         op_type = str(getattr(op, "func_name", ""))
         if label in init_labels and not _is_literal_producer(op):
             failures.append(f"initializer_contamination:{label}:{op_type}")
@@ -653,23 +640,12 @@ def _classify_op(op: Any) -> TFOpClass | None:
     op_type = str(getattr(op, "func_name", ""))
     if bool(getattr(op, "is_input", False)) or op_type == "input":
         return "source"
-    if op_type in _SOURCE_OPS:
-        return "source"
-    if op_type in _PURE_RESOURCE_READ_OPS:
-        return "pure-resource-read"
-    if op_type in _STRUCTURAL_VALUE_OPS:
-        return "structural-value"
-    if op_type in _ANNOTATION_OPS:
-        return "annotation"
-    if op_type.startswith("__inference_") or op_type.startswith("region:"):
+    if op_type.startswith(("__inference_", "region:")):
         return "control-region"
-    if op_type in _CONTROL_REGION_OPS:
-        return "control-region"
-    if op_type in _EFFECT_DENIED_OPS:
-        return "effect-denied"
-    if op_type in _VALUE_OPS:
-        return "value"
-    return None
+    spec = _NATIVE_OP_SPECS.get(op_type)
+    if spec is None:
+        return _UNREGISTERED_CLASSES.get(op_type)
+    return "value" if spec.validation == "perturb" else spec.validation
 
 
 def _validate_self_consistency(
@@ -774,148 +750,131 @@ def _source_labels(ops_by_label: Mapping[str, Any]) -> set[str]:
     return source_labels
 
 
-def _replay_and_perturb_op(
-    *,
-    op: Any,
-    capture: TFOpCapture,
-    ops_by_label: Mapping[str, Any],
-) -> str:
-    """Replay one pure TensorFlow op and run the parent perturbation tripwire.
+def _multi_output_captures(
+    captures_by_label: Mapping[str, TFOpCapture],
+) -> dict[int, list[TFOpCapture]]:
+    """Index sibling output captures by their shared native invocation."""
 
-    Parameters
-    ----------
-    op
-        Materialized TorchLens op.
-    capture
-        Callback capture for ``op``.
-    ops_by_label
-        Materialized ops keyed by raw and public labels.
+    groups: dict[int, list[TFOpCapture]] = {}
+    for capture in captures_by_label.values():
+        if capture._output_count > 1:
+            groups.setdefault(capture._call_id, []).append(capture)
+    return groups
 
-    Returns
-    -------
-    str
-        ``replay_match`` for an equal replay that responds to perturbation when
-        value parents exist, or the failure reason.
-    """
 
-    if capture.output_index != (op.multi_output_index or 0):
-        return _REASON_REPLAY_MISMATCH
+def _replay_and_perturb_call(
+    captures: Sequence[TFOpCapture], ops_by_label: Mapping[str, Any]
+) -> dict[str, str]:
+    """Validate every output slot using one native call per input set."""
+
     try:
-        inputs = _rebuild_inputs(capture, ops_by_label, replacements={})
-        replayed = _select_replay_output(capture, _replay_raw_op(capture, inputs))
-        saved = _saved_payload(op)
-        if not _payloads_close(replayed, saved):
-            return _REASON_REPLAY_MISMATCH
-        if _parent_perturbations_change_output(
-            capture=capture,
-            ops_by_label=ops_by_label,
-            saved_output=saved,
-        ):
-            return _REASON_REPLAYED
-        return _REASON_PERTURBATION
+        if len(captures) > 1:
+            captures = tuple(captures[index] for index in _native_output_slots(captures))
+        capture = captures[0]
+        tf = _import_tensorflow()
+        native, records = _prepare_native_call(tf, capture)
+        if native.output_count != len(captures):
+            raise ValueError(f"{capture.op_type} has incomplete TensorFlow call outputs")
+        captured_tensor = capture.output_tensor
+        device = captured_tensor.device if isinstance(captured_tensor, tf.Tensor) else None
+        with tf.device(device) if device else nullcontext(), _pause_tf_replay():
+            inputs, parent_slots = _rebuild_inputs(tf, records, ops_by_label)
+            outputs = native._outputs(native._execute(inputs))
+            return _compare_slots(tf, native, inputs, parent_slots, captures, outputs, ops_by_label)
     except Exception:
-        return _REASON_REPLAY_MISMATCH
+        return dict.fromkeys((capture.label_raw for capture in captures), _REASON_REPLAY_MISMATCH)
+
+
+def _compare_slots(
+    tf: Any,
+    native: _PreparedNativeCall,
+    inputs: list[Any],
+    parent_slots: Mapping[str, list[int]],
+    captures: Sequence[TFOpCapture],
+    outputs: Sequence[Any],
+    ops_by_label: Mapping[str, Any],
+) -> dict[str, str]:
+    """Compare each saved slot and require each match to respond to perturbation."""
+
+    outcomes: dict[str, str] = {}
+    matched: dict[int, Any] = {}
+    for capture, replayed in zip(captures, outputs, strict=True):
+        op = ops_by_label[capture.label_raw]
+        try:
+            saved = _saved_payload(op)
+            matches = _slot_matches(tf, capture, op, replayed, saved)
+        except Exception:
+            matches = False
+        if matches:
+            matched[capture.output_index] = saved
+        outcomes[capture.label_raw] = _REASON_REPLAYED if matches else _REASON_REPLAY_MISMATCH
+
+    insensitive = _insensitive_slots(tf, native, inputs, parent_slots, matched)
+    for index in insensitive:
+        outcomes[captures[index].label_raw] = _REASON_PERTURBATION
+    return outcomes
+
+
+def _slot_matches(tf: Any, capture: TFOpCapture, op: Any, replayed: Any, saved: Any) -> bool:
+    """Compare the slot's capture provenance, native placement and saved payload."""
+
+    if (capture.op_type, capture.output_index) != (op.func_name, op.multi_output_index or 0):
+        return False
+    original = capture.output_tensor
+    if isinstance(original, tf.Tensor) and original.device != replayed.device:
+        return False
+    return _payloads_close(replayed, saved)
 
 
 def _rebuild_inputs(
-    capture: TFOpCapture,
-    ops_by_label: Mapping[str, Any],
-    replacements: Mapping[str, Any],
-) -> list[Any]:
-    """Rebuild callback inputs from recorded parents and typed sources.
+    tf: Any, records: tuple[TFInputCapture, ...], ops_by_label: Mapping[str, Any]
+) -> tuple[list[Any], dict[str, list[int]]]:
+    """Bind saved inputs and index all slots substituted together for each parent."""
 
-    Parameters
-    ----------
-    capture
-        Callback capture to rebuild.
-    ops_by_label
-        Materialized ops keyed by raw and public labels.
-    replacements
-        Optional replacement tensors keyed by raw producer/source label.
-
-    Returns
-    -------
-    list[Any]
-        TensorFlow tensors in callback input order.
-    """
-
-    tf = _import_tensorflow()
     inputs: list[Any] = []
-    for input_record in sorted(capture.inputs, key=lambda item: item.input_index):
-        label = input_record.producer_label_raw or input_record.source_label_raw
-        if label is not None and label in replacements:
-            inputs.append(replacements[label])
-            continue
-        if input_record.producer_label_raw is not None:
-            parent = ops_by_label.get(input_record.producer_label_raw)
-            if parent is None:
-                raise LookupError(input_record.producer_label_raw)
-            inputs.append(_to_tf_tensor(tf, _saved_payload(parent)))
-            continue
-        if input_record.source_label_raw is not None:
-            source = ops_by_label.get(input_record.source_label_raw)
-            if source is None:
-                raise LookupError(input_record.source_label_raw)
-            inputs.append(_to_tf_tensor(tf, _saved_payload(source)))
-            continue
-        if input_record.source_kind is not None:
-            inputs.append(_to_tf_tensor(tf, _tensor_to_numpy(input_record.tensor)))
-            continue
-        raise LookupError(f"unresolved input {capture.label_raw}:{input_record.input_index}")
-    return inputs
+    parent_slots: dict[str, list[int]] = {}
+    for record in records:
+        label = record.producer_label_raw or record.source_label_raw
+        if label is not None:
+            parent_slots.setdefault(label, []).append(record.input_index)
+            payload = _saved_payload(ops_by_label[label])
+        elif record.source_kind is not None:
+            payload = _tensor_to_numpy(record.tensor)
+        else:
+            raise LookupError(f"unresolved input {record.input_index}")
+        inputs.append(tf.convert_to_tensor(payload))
+    return inputs, parent_slots
 
 
-def _parent_perturbations_change_output(
-    *,
-    capture: TFOpCapture,
-    ops_by_label: Mapping[str, Any],
-    saved_output: Any,
-) -> bool:
-    """Return whether parent perturbation changes a replayed output.
+def _insensitive_slots(
+    tf: Any,
+    native: _PreparedNativeCall,
+    inputs: list[Any],
+    parent_slots: Mapping[str, list[int]],
+    saved_outputs: Mapping[int, Any],
+) -> set[int]:
+    """Find the slots unchanged by every applicable parent substitution."""
 
-    Parameters
-    ----------
-    capture
-        Callback capture to perturb.
-    ops_by_label
-        Materialized ops keyed by raw and public labels.
-    saved_output
-        Recorded output payload.
-
-    Returns
-    -------
-    bool
-        True when at least one value parent perturbation changes output. Ops
-        with no recorded value parents are accepted only when no perturbation is
-        possible by construction.
-    """
-
-    parent_labels = tuple(
-        dict.fromkeys(
-            label
-            for item in capture.inputs
-            if (label := (item.producer_label_raw or item.source_label_raw)) is not None
-        )
-    )
-    if not parent_labels:
-        return True
+    pending = set(saved_outputs)
     attempted = False
-    tf = _import_tensorflow()
-    for label in parent_labels:
-        parent = ops_by_label.get(label)
-        if parent is None:
-            return False
-        original = _to_tf_tensor(tf, _saved_payload(parent))
-        for candidate in _perturb_candidates(tf, original):
+    for slots in parent_slots.values():
+        if not pending:
+            break
+        for replacement in _perturb_candidates(tf, inputs[slots[0]]):
             attempted = True
+            modified = inputs.copy()
+            for index in slots:
+                modified[index] = replacement
             try:
-                inputs = _rebuild_inputs(capture, ops_by_label, replacements={label: candidate})
-                replayed = _select_replay_output(capture, _replay_raw_op(capture, inputs))
+                outputs = native._outputs(native._execute(modified))
             except Exception:
                 continue
-            if not _payloads_close(replayed, saved_output):
-                return True
-    return not attempted
+            pending = {
+                index for index in pending if _payloads_close(outputs[index], saved_outputs[index])
+            }
+            if not pending:
+                return pending
+    return pending if attempted else set()
 
 
 def _perturb_candidates(tf: Any, tensor: Any) -> tuple[Any, ...]:
@@ -1006,25 +965,6 @@ def _tensor_to_numpy(value: Any) -> np.ndarray:
     if callable(numpy_method):
         value = numpy_method()
     return np.asarray(value)
-
-
-def _to_tf_tensor(tf: Any, value: Any) -> Any:
-    """Convert a payload to a TensorFlow tensor.
-
-    Parameters
-    ----------
-    tf
-        Imported TensorFlow module.
-    value
-        Payload value.
-
-    Returns
-    -------
-    Any
-        TensorFlow tensor.
-    """
-
-    return tf.convert_to_tensor(value)
 
 
 def _saved_payload(op: Any) -> Any:

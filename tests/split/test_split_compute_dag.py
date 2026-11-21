@@ -189,7 +189,6 @@ def test_tf_split_rejects_changed_native_output_count(
         inputs = tf.ones((1, 4), dtype=tf.float64)
         graph = prepare_graph(model, inputs, backend="tf")
         partition = graph.compute_dag().to_partition(())
-        runtime = graph.materialize(graph.analyze(partition))
         native_split = tf.raw_ops.Split
 
         def change_count(**kwargs: object) -> list[object]:
@@ -199,6 +198,7 @@ def test_tf_split_rejects_changed_native_output_count(
             return [*outputs, outputs[0]] if extra_output else outputs[:1]
 
         monkeypatch.setattr(tf.raw_ops, "Split", change_count)
+        runtime = graph.materialize(graph.analyze(partition))
         with pytest.raises(SplitUnsupportedError, match="expects 2 outputs"):
             runtime.replay(inputs)
 
@@ -211,6 +211,7 @@ def test_tf_split_rejects_changed_native_output_count(
         ("output_index", 2),
         ("_output_count", 1),
         ("op_type", "Sin"),
+        ("_call_id", -1),
     ],
 )
 def test_tf_split_rejects_invalid_captured_outputs(field: str, value: int | str) -> None:
@@ -228,8 +229,123 @@ def test_tf_split_rejects_invalid_captured_outputs(field: str, value: int | str)
     )
     graph.trace_graph = replace(trace_graph, nodes=nodes)
     partition = graph.compute_dag().to_partition(())
+    with pytest.raises(SplitUnsupportedError, match="invalid TensorFlow call outputs") as error:
+        graph.analyze(partition)
+    assert error.value.context.reason == "split preflight rejected"
+
+
+def test_tf_repartition_reuses_prepared_calls_for_nonsequential_cut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Move a later independent call into the prefix and replay four batch sizes."""
+
+    tf = pytest.importorskip("tensorflow")
+
+    def model(value: object) -> object:
+        left = tf.sin(value)
+        right = tf.multiply(value, value)
+        return tf.tanh(left) + tf.nn.relu(right)
+
+    with tf.device("/CPU:0"):
+        inputs = tf.reshape(tf.range(16, dtype=tf.float64) / 7.0, (4, 4))
+        graph = prepare_graph(model, inputs[:1], backend="tf")
+        dag = graph.compute_dag()
+        empty = dag.to_partition(())
+        complete = dag.to_partition(call.call_id for call in dag.nodes)
+        runtime = graph.materialize(graph.analyze(empty))
+        order = [
+            graph.trace_graph.node_by_id[call.output_node_ids[0]].op_type for call in dag.nodes
+        ]
+        assert order.index("sin") < order.index("mul")
+        independent = dag.to_partition((dag.nodes[order.index("mul")].call_id,))
+
+        def unexpectedly_rebound(**kwargs: object) -> object:
+            raise AssertionError("native Mul should have been bound during preparation")
+
+        monkeypatch.setattr(tf.raw_ops, "Mul", unexpectedly_rebound)
+        for batch, cut in enumerate((independent, complete, empty, independent), 1):
+            runtime = runtime.repartition(cut)
+            tf.debugging.assert_equal(runtime.replay(inputs[:batch]), model(inputs[:batch]))
+
+
+@pytest.mark.parametrize(
+    ("attrs", "error"),
+    [
+        (None, "required attribute 'strides' is missing"),
+        ({"padding": None}, "required attribute 'padding' is None"),
+        ({"data_format": "WRONG"}, "invalid attribute data_format"),
+        ({"data_format": ""}, "invalid attribute data_format"),
+        ({"data_format": b"\xff"}, "invalid attribute data_format"),
+        ({"ksize": [1, 2.5, 2, 1]}, "expected an integer"),
+        ({"strides": [1, 2, 1]}, "expected at least 4 entries"),
+    ],
+)
+def test_tf_analyze_refuses_invalid_native_attributes(
+    attrs: dict[str, object] | None, error: str
+) -> None:
+    """Report a malformed recorded AvgPool before the replay schedule is built."""
+
+    tf = pytest.importorskip("tensorflow")
+    values = tf.ones((1, 4, 4, 2), dtype=tf.float64)
+    graph = prepare_graph(lambda x: tf.nn.avg_pool(x, 2, 2, "VALID"), values, backend="tf")
+    nodes = tuple(
+        replace(
+            node,
+            target=replace(
+                node.target,
+                attrs={"ksize": [1, 2, 2, 1]} if attrs is None else node.target.attrs | attrs,
+            ),
+        )
+        if node.op_type == "avgpool"
+        else node
+        for node in graph.trace_graph.nodes
+    )
+    graph.trace_graph = replace(graph.trace_graph, nodes=nodes)
+    with pytest.raises(SplitUnsupportedError, match=error) as caught:
+        graph.analyze(graph.compute_dag().to_partition(()))
+    assert caught.value.context.reason == "split preflight rejected"
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_tf_analyze_refuses_invalid_native_input_slots(duplicate: bool) -> None:
+    """Reject missing and duplicate operands even if other graph edges still agree."""
+
+    tf = pytest.importorskip("tensorflow")
+    values = tf.ones((1, 4), dtype=tf.float64)
+    graph = prepare_graph(lambda x: x + x, values, backend="tf")
+    trace_graph = graph.trace_graph
+    nodes = []
+    for node in trace_graph.nodes:
+        if node.op_type == "addv2":
+            first, _ = node.target.inputs
+            operands = (first, first) if duplicate else (first,)
+            node = replace(node, target=replace(node.target, inputs=operands))
+        nodes.append(node)
+    graph.trace_graph = replace(trace_graph, nodes=tuple(nodes))
+    match = "invalid TensorFlow input slots" if duplicate else "expects 2 inputs, got 1"
+    with pytest.raises(SplitUnsupportedError, match=match):
+        graph.analyze(graph.compute_dag().to_partition(()))
+
+
+@pytest.mark.parametrize(("field", "value"), [("_output_count", 2), ("output_index", 1)])
+def test_tf_analyze_checks_a_single_native_output(field: str, value: int) -> None:
+    """Reject invalid count and out-of-range slots even for a one-output op."""
+
+    tf = pytest.importorskip("tensorflow")
+    inputs = tf.constant([[1.0, -2.0]], dtype=tf.float64)
+    graph = prepare_graph(tf.nn.relu, inputs, backend="tf")
+    trace_graph = graph.trace_graph
+    graph.trace_graph = replace(
+        trace_graph,
+        nodes=tuple(
+            replace(node, target=replace(node.target, **{field: value}))
+            if node.op_type == "relu"
+            else node
+            for node in trace_graph.nodes
+        ),
+    )
     with pytest.raises(SplitUnsupportedError, match="invalid TensorFlow call outputs"):
-        graph.materialize(graph.analyze(partition))
+        graph.analyze(graph.compute_dag().to_partition(()))
 
 
 def test_sources_are_excluded_but_real_state_reads_remain() -> None:

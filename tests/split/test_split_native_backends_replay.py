@@ -238,7 +238,11 @@ def test_tf_avg_pool_refuses_unknown_native_layout() -> None:
         ("max_pool", "EXPLICIT"),
     ],
 )
-def test_tf_pooling_replays_native_arguments(pool_type: str, padding: str) -> None:
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize(("ksize", "strides"), [(2, 2), ((2, 3), (1, 2))])
+def test_tf_pooling_replays_native_arguments(
+    pool_type: str, padding: str, dtype: str, ksize: Any, strides: Any
+) -> None:
     """Keep the native pooling signature and padding on both sides of a cut."""
 
     tf = pytest.importorskip("tensorflow")
@@ -250,10 +254,10 @@ def test_tf_pooling_replays_native_arguments(pool_type: str, padding: str) -> No
         mode: Any = padding
         if padding == "EXPLICIT":
             mode = [[0, 0], [0, 1], [1, 0], [0, 0]]
-        return op(value, 2, 2, mode, data_format="NHWC") + 0.5
+        return op(value, ksize, strides, mode, data_format="NHWC") + 0.5
 
     with tf.device("/CPU:0"):
-        values = tf.reshape(tf.range(160, dtype=tf.float64), (4, 4, 5, 2))
+        values = tf.reshape(tf.range(160, dtype=tf.as_dtype(dtype)), (4, 4, 5, 2))
         graph = prepare_graph(model, values[:1], backend="tf")
         dag = graph.compute_dag()
         raw_name = "AvgPool" if pool_type == "avg_pool" else "MaxPool"
@@ -270,14 +274,15 @@ def test_tf_pooling_replays_native_arguments(pool_type: str, padding: str) -> No
 
 
 @pytest.mark.parametrize(("raw_name", "input_name"), [("AvgPool", "value"), ("MaxPool", "input")])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_tf_pooling_replays_nchw(
-    raw_name: str, input_name: str, monkeypatch: pytest.MonkeyPatch
+    raw_name: str, input_name: str, dtype: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Check the NCHW kernel on GPU and the exact ABI on CPU."""
 
     tf = pytest.importorskip("tensorflow")
-    from torchlens.backends.tf._raw_op_replay import _replay_raw_op
-    from torchlens.backends.tf.op_callback_capture import TFOpCapture
+    from torchlens.backends.tf._raw_op_replay import _pause_tf_replay, _prepare_native_call
+    from torchlens.backends.tf.op_callback_capture import TFInputCapture, TFOpCapture
 
     native = getattr(tf.raw_ops, raw_name)
     attrs = {
@@ -286,14 +291,16 @@ def test_tf_pooling_replays_nchw(
         "padding": "VALID",
         "data_format": "NCHW",
     }
-    capture = TFOpCapture("", raw_name, attrs, 0, (), None)
     gpu = bool(tf.config.list_logical_devices("GPU"))
     nhwc = {"data_format": "NHWC", "ksize": [1, 2, 2, 1], "strides": [1, 2, 2, 1]}
 
     def replay_on_cpu(**kwargs: Any) -> Any:
         """Check NCHW arguments before substituting the equivalent NHWC kernel."""
 
-        assert {name: kwargs[name] for name in attrs} == attrs
+        for name in ("ksize", "strides"):
+            assert tuple(kwargs[name]) == tuple(attrs[name])
+        assert kwargs["data_format"] == attrs["data_format"]
+        assert kwargs["padding"] == attrs["padding"]
         kwargs[input_name] = tf.transpose(kwargs[input_name], (0, 2, 3, 1))
         return tf.transpose(native(**(kwargs | nhwc)), (0, 3, 1, 2))
 
@@ -301,13 +308,29 @@ def test_tf_pooling_replays_nchw(
         monkeypatch.setattr(tf.raw_ops, raw_name, replay_on_cpu)
     device = "/GPU:0" if gpu else "/CPU:0"
     with tf.device(device):
-        values = tf.reshape(tf.range(160, dtype=tf.float32), (4, 2, 4, 5))
+        values = tf.reshape(tf.range(160, dtype=tf.as_dtype(dtype)), (4, 2, 4, 5))
+        if gpu:
+
+            def model(x: Any) -> Any:
+                return native(**{input_name: x, **attrs})
+
+            graph = prepare_graph(model, values[:1], backend="tf")
+            dag = graph.compute_dag()
+            runtime = graph.materialize(graph.analyze(dag.to_partition(())))
+        else:
+            record = TFInputCapture(0, None, "constant", None, values, None)
+            capture = TFOpCapture("", raw_name, attrs, 0, (record,), None)
+            call, _ = _prepare_native_call(tf, capture)
         for batch in (1, 2, 3, 4):
             inputs = values[:batch]
             reference = native(
                 **{input_name: tf.transpose(inputs, (0, 2, 3, 1)), "padding": "VALID", **nhwc}
             )
-            actual = _replay_raw_op(capture, [inputs])
+            if gpu:
+                actual = runtime.replay(inputs)
+            else:
+                with _pause_tf_replay():
+                    actual = call._execute([inputs])
             assert device[1:] in actual.device
             tf.debugging.assert_equal(actual, tf.transpose(reference, (0, 3, 1, 2)))
 

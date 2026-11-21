@@ -1,533 +1,224 @@
-"""Raw-op replay kernels shared by TensorFlow validation and Split Runtime."""
+"""Prepare and execute one recorded TensorFlow native call."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from functools import cache
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from functools import partial
+from numbers import Integral
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ... import _state
-from .op_callback_capture import TFOpCapture
+from ._native_op_specs import _MISSING, _NATIVE_OP_SPECS, _AttrRule, _NativeOpSpec
+
+if TYPE_CHECKING:
+    from .op_callback_capture import TFInputCapture, TFOpCapture
+
+_TF_REPLAY_PAUSED = ContextVar("torchlens_tf_replay_paused", default=False)
 
 
-def _replay_raw_op(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay one TensorFlow raw op from rebuilt callback inputs.
+@contextmanager
+def _pause_tf_replay() -> Iterator[None]:
+    """Suppress TorchLens capture while running its own native replay."""
 
-    Parameters
-    ----------
-    capture
-        Callback capture containing op type and attrs.
-    inputs
-        Rebuilt TensorFlow inputs.
-
-    Returns
-    -------
-    Any
-        Native TensorFlow output tensor or ordered output sequence.
-    """
-
-    replay = _raw_op_dispatch().get(capture.op_type)
-    if replay is None:
-        raise ValueError(f"op is not raw-op replayable: {capture.op_type}")
-    with _state.pause_logging():
-        return replay(capture, inputs)
+    token = _TF_REPLAY_PAUSED.set(True)
+    try:
+        with _state.pause_logging():
+            yield
+    finally:
+        _TF_REPLAY_PAUSED.reset(token)
 
 
-@cache
-def _raw_op_dispatch() -> Mapping[str, Callable[[TFOpCapture, Sequence[Any]], Any]]:
-    """Return the read-only native replay table keyed by TensorFlow op type."""
+@dataclass(frozen=True, slots=True)
+class _PreparedNativeCall:
+    """Bound TensorFlow wrapper and static attributes for one captured call."""
 
-    table: dict[str, Callable[[TFOpCapture, Sequence[Any]], Any]] = {
-        "AddV2": lambda item, args: _raw(item).AddV2(x=args[0], y=args[1]),
-        "AvgPool": _replay_avg_pool,
-        "BatchMatMulV2": _replay_batch_matmul_v2,
-        "BiasAdd": _replay_bias_add,
-        "BroadcastTo": lambda item, args: _raw(item).BroadcastTo(input=args[0], shape=args[1]),
-        "Cast": _replay_cast,
-        "ConcatV2": _replay_concat_v2,
-        "Conv2D": _replay_conv2d,
-        "DepthwiseConv2dNative": _replay_depthwise_conv2d,
-        "Einsum": _replay_einsum,
-        "Elu": lambda item, args: _raw(item).Elu(features=args[0]),
-        "Erf": lambda item, args: _raw(item).Erf(x=args[0]),
-        "Erfc": lambda item, args: _raw(item).Erfc(x=args[0]),
-        "Exp": lambda item, args: _raw(item).Exp(x=args[0]),
-        "ExpandDims": lambda item, args: _raw(item).ExpandDims(input=args[0], axis=args[1]),
-        "Fill": lambda item, args: _raw(item).Fill(dims=args[0], value=args[1]),
-        "GatherV2": _replay_gather_v2,
-        "Greater": lambda item, args: _raw(item).Greater(x=args[0], y=args[1]),
-        "Less": lambda item, args: _raw(item).Less(x=args[0], y=args[1]),
-        "Log": lambda item, args: _raw(item).Log(x=args[0]),
-        "Identity": lambda item, args: _raw(item).Identity(input=args[0]),
-        "Pack": _replay_pack,
-        "ReadVariableOp": lambda item, args: _raw(item).ReadVariableOp(
-            resource=args[0], dtype=item.attrs["dtype"]
-        ),
-        "Shape": _replay_shape,
-        "StopGradient": lambda item, args: _raw(item).StopGradient(input=args[0]),
-        "StridedSlice": _replay_strided_slice,
-        "MatMul": _replay_matmul,
-        "Maximum": lambda item, args: _raw(item).Maximum(x=args[0], y=args[1]),
-        "Minimum": lambda item, args: _raw(item).Minimum(x=args[0], y=args[1]),
-        "Pow": lambda item, args: _raw(item).Pow(x=args[0], y=args[1]),
-        "Prod": lambda item, args: _replay_reduction(item, args, "Prod"),
-        "SelectV2": lambda item, args: _raw(item).SelectV2(condition=args[0], t=args[1], e=args[2]),
-        "Sigmoid": lambda item, args: _raw(item).Sigmoid(x=args[0]),
-        "Sin": lambda item, args: _raw(item).Sin(x=args[0]),
-        "Slice": lambda item, args: _raw(item).Slice(input=args[0], begin=args[1], size=args[2]),
-        "Sum": lambda item, args: _replay_reduction(item, args, "Sum"),
-        "Tile": lambda item, args: _raw(item).Tile(input=args[0], multiples=args[1]),
-        "MaxPool": _replay_max_pool,
-        "Mean": _replay_mean,
-        "Mul": lambda item, args: _raw(item).Mul(x=args[0], y=args[1]),
-        "Neg": lambda item, args: _raw(item).Neg(x=args[0]),
-        "Pad": lambda item, args: _raw(item).Pad(input=args[0], paddings=args[1]),
-        "RealDiv": lambda item, args: _raw(item).RealDiv(x=args[0], y=args[1]),
-        "Relu": lambda item, args: _raw(item).Relu(features=args[0]),
-        "Relu6": lambda item, args: _raw(item).Relu6(features=args[0]),
-        "Reshape": lambda item, args: _raw(item).Reshape(tensor=args[0], shape=args[1]),
-        "Rsqrt": lambda item, args: _raw(item).Rsqrt(x=args[0]),
-        "Softmax": lambda item, args: _raw(item).Softmax(logits=args[0]),
-        "Split": _replay_split,
-        "Sqrt": lambda item, args: _raw(item).Sqrt(x=args[0]),
-        "SquaredDifference": lambda item, args: _raw(item).SquaredDifference(x=args[0], y=args[1]),
-        "Sub": lambda item, args: _raw(item).Sub(x=args[0], y=args[1]),
-        "Squeeze": lambda item, args: _raw(item).Squeeze(
-            input=args[0],
-            axis=_optional_int_list(item.attrs.get("squeeze_dims")),
-        ),
-        "Tanh": lambda item, args: _raw(item).Tanh(x=args[0]),
-        "Transpose": lambda item, args: _raw(item).Transpose(x=args[0], perm=args[1]),
-    }
-    return MappingProxyType(table)
+    op_type: str
+    raw_fn: Callable[..., Any]
+    input_names: tuple[str, ...]
+    list_input_count: int
+    output_count: int
+
+    def _execute(self, inputs: Sequence[Any]) -> Any:
+        """Bind runtime tensors by the prepared ABI inside a replay scope."""
+
+        if self.list_input_count:
+            count = self.list_input_count
+            inputs = (inputs[:count], *inputs[count:])
+        return self.raw_fn(**dict(zip(self.input_names, inputs, strict=True)))
+
+    def _outputs(self, result: Any) -> Sequence[Any]:
+        """Check the native output count and return its ordered slots."""
+
+        outputs = result if isinstance(result, (tuple, list)) else (result,)
+        if len(outputs) != self.output_count:
+            raise ValueError(
+                f"{self.op_type} expects {self.output_count} outputs, got {len(outputs)}"
+            )
+        return outputs
 
 
-def _replay_outputs(capture: TFOpCapture, result: Any) -> Sequence[Any]:
-    """Check the native result against the captured output count."""
+def _prepare_native_call(
+    tf: Any, capture: TFOpCapture
+) -> tuple[_PreparedNativeCall, tuple[TFInputCapture, ...]]:
+    """Check recorded inputs, attributes and output slots and bind the native wrapper."""
 
-    outputs = result if isinstance(result, (tuple, list)) else (result,)
-    if len(outputs) != capture._output_count:
+    spec = _NATIVE_OP_SPECS.get(capture.op_type)
+    raw_fn = getattr(tf.raw_ops, capture.op_type, None)
+    if spec is None or not callable(raw_fn):
+        raise ValueError(f"TensorFlow raw op {capture.op_type!r} has no replay implementation")
+    ordered_inputs = _ordered_inputs(capture)
+    list_count = _list_input_count(spec, capture, len(ordered_inputs))
+    attrs = _native_attrs(tf, capture, spec)
+    count = attrs[spec.output_count_attr] if spec.output_count_attr else 1
+    if capture._output_count != count or not 0 <= capture.output_index < count:
         raise ValueError(
-            f"{capture.op_type} expects {capture._output_count} outputs, got {len(outputs)}"
+            f"{capture.op_type} has invalid TensorFlow call outputs: "
+            f"expected {count}, recorded {capture._output_count}, slot {capture.output_index}"
         )
-    return outputs
-
-
-def _select_replay_output(capture: TFOpCapture, result: Any) -> Any:
-    """Read one captured slot from a single native replay result."""
-
-    if (
-        capture._output_count == 1
-        and capture.output_index == 0
-        and not isinstance(result, (tuple, list))
-    ):
-        return result
-    outputs = _replay_outputs(capture, result)
-    if not 0 <= capture.output_index < len(outputs):
-        raise ValueError(f"{capture.op_type} has invalid output index {capture.output_index}")
-    return outputs[capture.output_index]
-
-
-def _raw(_capture: TFOpCapture) -> Any:
-    """Return TensorFlow raw ops module.
-
-    Parameters
-    ----------
-    _capture
-        Unused capture, accepted for dispatch lambdas.
-
-    Returns
-    -------
-    Any
-        ``tf.raw_ops``.
-    """
-
-    return _import_tensorflow().raw_ops
-
-
-def _replay_batch_matmul_v2(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay ``BatchMatMulV2``.
-
-    Parameters
-    ----------
-    capture
-        Callback capture.
-    inputs
-        Rebuilt inputs.
-
-    Returns
-    -------
-    Any
-        Replayed output.
-    """
-
-    return _raw(capture).BatchMatMulV2(
-        x=inputs[0],
-        y=inputs[1],
-        adj_x=bool(capture.attrs.get("adj_x", False)),
-        adj_y=bool(capture.attrs.get("adj_y", False)),
+    if attrs:
+        raw_fn = partial(raw_fn, **attrs)
+    return (
+        _PreparedNativeCall(capture.op_type, raw_fn, spec.inputs, list_count, count),
+        ordered_inputs,
     )
 
 
-def _replay_bias_add(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay ``BiasAdd``.
-
-    Parameters
-    ----------
-    capture
-        Callback capture.
-    inputs
-        Rebuilt inputs.
-
-    Returns
-    -------
-    Any
-        Replayed output.
-    """
-
-    data_format = capture.attrs.get("data_format")
-    kwargs = {} if data_format is None else {"data_format": _attr_str(data_format)}
-    return _raw(capture).BiasAdd(value=inputs[0], bias=inputs[1], **kwargs)
-
-
-def _replay_cast(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay ``Cast``.
-
-    Parameters
-    ----------
-    capture
-        Callback capture.
-    inputs
-        Rebuilt inputs.
-
-    Returns
-    -------
-    Any
-        Replayed output.
-    """
-
-    return _raw(capture).Cast(
-        x=inputs[0],
-        DstT=capture.attrs["DstT"],
-        Truncate=bool(capture.attrs.get("Truncate", False)),
-    )
-
-
-def _replay_concat_v2(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay ``ConcatV2``.
-
-    Parameters
-    ----------
-    capture
-        Callback capture.
-    inputs
-        Rebuilt inputs.
-
-    Returns
-    -------
-    Any
-        Replayed output.
-    """
-
-    del capture
-    return _import_tensorflow().raw_ops.ConcatV2(values=list(inputs[:-1]), axis=inputs[-1])
-
-
-def _replay_conv2d(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay ``Conv2D``.
-
-    Parameters
-    ----------
-    capture
-        Callback capture.
-    inputs
-        Rebuilt inputs.
-
-    Returns
-    -------
-    Any
-        Replayed output.
-    """
-
-    return _raw(capture).Conv2D(
-        input=inputs[0],
-        filter=inputs[1],
-        strides=list(capture.attrs["strides"]),
-        padding=_attr_str(capture.attrs["padding"]),
-        explicit_paddings=list(capture.attrs.get("explicit_paddings", [])),
-        data_format=_attr_str(capture.attrs.get("data_format", "NHWC")),
-        dilations=list(capture.attrs.get("dilations", [1, 1, 1, 1])),
-        use_cudnn_on_gpu=bool(capture.attrs.get("use_cudnn_on_gpu", True)),
-    )
-
-
-def _replay_depthwise_conv2d(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay ``DepthwiseConv2dNative``.
-
-    Parameters
-    ----------
-    capture
-        Callback capture.
-    inputs
-        Rebuilt inputs.
-
-    Returns
-    -------
-    Any
-        Replayed output.
-    """
-
-    # ``tf.nn.depthwise_conv2d`` records unset attrs as ``None``.
-    return _raw(capture).DepthwiseConv2dNative(
-        input=inputs[0],
-        filter=inputs[1],
-        strides=list(capture.attrs["strides"]),
-        padding=_attr_str(capture.attrs["padding"]),
-        explicit_paddings=list(capture.attrs.get("explicit_paddings") or []),
-        data_format=_attr_str(capture.attrs.get("data_format") or "NHWC"),
-        dilations=list(capture.attrs.get("dilations") or [1, 1, 1, 1]),
-    )
-
-
-def _replay_einsum(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay ``Einsum``.
-
-    Parameters
-    ----------
-    capture
-        Callback capture.
-    inputs
-        Rebuilt inputs.
-
-    Returns
-    -------
-    Any
-        Replayed output.
-    """
-
-    return _raw(capture).Einsum(
-        inputs=list(inputs),
-        equation=_attr_str(capture.attrs["equation"]),
-    )
-
-
-def _replay_matmul(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay ``MatMul``.
-
-    Parameters
-    ----------
-    capture
-        Callback capture.
-    inputs
-        Rebuilt inputs.
-
-    Returns
-    -------
-    Any
-        Replayed output.
-    """
-
-    return _raw(capture).MatMul(
-        a=inputs[0],
-        b=inputs[1],
-        transpose_a=bool(capture.attrs.get("transpose_a", False)),
-        transpose_b=bool(capture.attrs.get("transpose_b", False)),
-    )
-
-
-def _replay_reduction(capture: TFOpCapture, inputs: Sequence[Any], op_name: str) -> Any:
-    """Replay ``Sum`` or ``Prod`` (same raw-op signature as ``Mean``).
-
-    Parameters
-    ----------
-    capture
-        Callback capture.
-    inputs
-        Rebuilt inputs.
-    op_name
-        ``"Sum"`` or ``"Prod"``.
-
-    Returns
-    -------
-    Any
-        Replayed output.
-    """
-
-    return getattr(_raw(capture), op_name)(
-        input=inputs[0],
-        axis=inputs[1],
-        keep_dims=bool(capture.attrs.get("keep_dims", False)),
-    )
-
-
-def _replay_gather_v2(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay ``GatherV2`` (``tf.gather``; an embedding lookup).
-
-    Parameters
-    ----------
-    capture
-        Callback capture.
-    inputs
-        Rebuilt inputs: params, indices and axis.
-
-    Returns
-    -------
-    Any
-        Replayed output.
-    """
-
-    return _raw(capture).GatherV2(
-        params=inputs[0],
-        indices=inputs[1],
-        axis=inputs[2],
-        batch_dims=int(capture.attrs.get("batch_dims", 0)),
-    )
-
-
-def _replay_mean(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay ``Mean``.
-
-    Parameters
-    ----------
-    capture
-        Callback capture.
-    inputs
-        Rebuilt inputs.
-
-    Returns
-    -------
-    Any
-        Replayed output.
-    """
-
-    return _raw(capture).Mean(
-        input=inputs[0],
-        axis=inputs[1],
-        keep_dims=bool(capture.attrs.get("keep_dims", False)),
-    )
-
-
-def _pool_attrs(capture: TFOpCapture) -> dict[str, Any]:
-    """Decode the attributes shared by native average and max pooling."""
-
-    layout = capture.attrs.get("data_format")
-    return {
-        "ksize": list(capture.attrs["ksize"]),
-        "strides": list(capture.attrs["strides"]),
-        "padding": _attr_str(capture.attrs["padding"]),
-        "data_format": "NHWC" if layout is None else _attr_str(layout),
-    }
-
-
-def _replay_avg_pool(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay average pooling with its native value operand."""
-
-    return _raw(capture).AvgPool(value=inputs[0], **_pool_attrs(capture))
-
-
-def _replay_split(capture: TFOpCapture, inputs: Sequence[Any]) -> list[Any]:
-    """Split the runtime value along the captured axis in native output order."""
-
-    return _raw(capture).Split(
-        axis=inputs[0], value=inputs[1], num_split=int(capture.attrs["num_split"])
-    )
-
-
-def _replay_max_pool(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay max pooling, including any explicit spatial padding."""
-
-    return _raw(capture).MaxPool(
-        input=inputs[0],
-        explicit_paddings=list(capture.attrs.get("explicit_paddings", [])),
-        **_pool_attrs(capture),
-    )
-
-
-def _attr_str(value: Any) -> str:
-    """Return a TensorFlow string attr as text.
-
-    Parameters
-    ----------
-    value
-        TensorFlow callback attr value.
-
-    Returns
-    -------
-    str
-        Decoded text attr.
-    """
+def _ordered_inputs(capture: TFOpCapture) -> tuple[TFInputCapture, ...]:
+    """Bind callback operands by index and reject duplicate or missing slots."""
+
+    if all(item.input_index == index for index, item in enumerate(capture.inputs)):
+        return capture.inputs
+    ordered = tuple(sorted(capture.inputs, key=lambda item: item.input_index))
+    if any(item.input_index != index for index, item in enumerate(ordered)):
+        raise ValueError(f"{capture.op_type} has invalid TensorFlow input slots")
+    return ordered
+
+
+def _list_input_count(spec: _NativeOpSpec, capture: TFOpCapture, count: int) -> int:
+    """Validate the flattened input arity and determine any list binding size."""
+
+    if not spec.min_list_inputs:
+        if count != len(spec.inputs):
+            raise ValueError(f"{capture.op_type} expects {len(spec.inputs)} inputs, got {count}")
+        return 0
+    list_count = count - len(spec.inputs) + 1
+    if list_count < spec.min_list_inputs:
+        min_count = len(spec.inputs) + spec.min_list_inputs - 1
+        raise ValueError(f"{capture.op_type} expects at least {min_count} inputs, got {count}")
+    if "N" in capture.attrs and _as_int(capture.attrs["N"]) != list_count:
+        raise ValueError(f"{capture.op_type} has inconsistent TensorFlow list input count")
+    return list_count
+
+
+def _native_attrs(tf: Any, capture: TFOpCapture, spec: _NativeOpSpec) -> dict[str, Any]:
+    """Decode specified attributes and leave optional defaults to the native wrapper."""
+
+    attrs: dict[str, Any] = {}
+    for rule in spec.attrs:
+        raw = _captured_attr(capture.attrs, rule)
+        if raw is _MISSING or raw is None:
+            if rule.default is _MISSING:
+                problem = "is missing" if raw is _MISSING else "is None"
+                raise ValueError(f"{capture.op_type} required attribute {rule.name!r} {problem}")
+            continue
+        try:
+            value = _normalize_attr(tf, rule, raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{capture.op_type} invalid attribute {rule.name}={raw!r}: {exc}"
+            ) from exc
+        if value != rule.default:
+            attrs[rule.name] = value
+    return attrs
+
+
+def _captured_attr(attrs: Mapping[str, Any], rule: _AttrRule) -> Any:
+    """Resolve callback aliases before default handling."""
+
+    for name in rule.capture_names or (rule.name,):
+        if name in attrs:
+            return attrs[name]
+    return _MISSING
+
+
+def _normalize_attr(tf: Any, rule: _AttrRule, raw: Any) -> Any:
+    """Return one native attribute in the wrapper's supported Python form."""
+
+    if rule.kind == "dtype":
+        value = tf.dtypes.as_dtype(raw).base_dtype
+    else:
+        value = _ATTR_CONVERTERS[rule.kind](raw)
+    if rule.choices and getattr(value, "name", value) not in rule.choices:
+        raise ValueError(f"expected one of {rule.choices}")
+    if rule.min_items and len(value) < rule.min_items:
+        raise ValueError(f"expected at least {rule.min_items} entries")
+    return value
+
+
+def _as_int(value: Any) -> int:
+    """Accept Python and NumPy integral attributes with no lossy coercion."""
+
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError("expected an integer")
+    return int(value)
+
+
+def _as_ints(value: Any) -> tuple[int, ...]:
+    """Freeze a native integer list without rewriting its values."""
+
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("expected an integer list")
+    return tuple(_as_int(item) for item in value)
+
+
+def _as_bool(value: Any) -> bool:
+    """Require a native Boolean attribute."""
+
+    if not isinstance(value, bool):
+        raise TypeError("expected a bool")
+    return value
+
+
+def _as_text(value: Any) -> str:
+    """Decode native text and reject non-text values."""
 
     if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return str(value)
+        return value.decode("utf-8")
+    if not isinstance(value, str):
+        raise TypeError("expected a string or UTF-8 bytes")
+    return value
 
 
-def _optional_int_list(value: Any) -> list[int]:
-    """Return a TensorFlow optional int-list attr.
+_ATTR_CONVERTERS = MappingProxyType(
+    {"str": _as_text, "int": _as_int, "bool": _as_bool, "ints": _as_ints}
+)
 
-    Parameters
-    ----------
-    value
-        Callback attr value.
 
-    Returns
-    -------
-    list[int]
-        Empty list for omitted attrs, otherwise the integer list.
-    """
+def _native_output_slots(captures: Sequence[TFOpCapture]) -> tuple[int, ...]:
+    """Return the position of each slot in one complete native invocation."""
 
-    if value is None:
-        return []
-    return [int(item) for item in value]
+    leader = captures[0]
+    count = len(captures)
+    slots = {item.output_index: index for index, item in enumerate(captures)}
+    if slots.keys() != set(range(count)) or any(
+        item._call_id != leader._call_id
+        or item.op_type != leader.op_type
+        or item._output_count != count
+        or item.inputs is not leader.inputs
+        or item.attrs is not leader.attrs
+        for item in captures
+    ):
+        raise ValueError(f"{leader.op_type} has incomplete or invalid TensorFlow call outputs")
+    return tuple(slots[index] for index in range(count))
 
 
 def _import_tensorflow() -> Any:
-    """Import TensorFlow lazily.
-
-    Returns
-    -------
-    Any
-        Imported TensorFlow module.
-    """
+    """Import TensorFlow only when preparing or replaying a TensorFlow capture."""
 
     import tensorflow as tf
 
     return tf
-
-
-def _replay_pack(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay ``Pack``."""
-
-    return _raw(capture).Pack(
-        values=list(inputs),
-        axis=int(capture.attrs.get("axis", 0)),
-    )
-
-
-def _replay_shape(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay ``Shape``."""
-
-    attrs = capture.attrs
-    kwargs = {}
-    if "out_type" in attrs:
-        kwargs["out_type"] = attrs["out_type"]
-    if "out_type_enum" in attrs:
-        kwargs["out_type"] = attrs["out_type_enum"]
-    return _raw(capture).Shape(input=inputs[0], **kwargs)
-
-
-def _replay_strided_slice(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
-    """Replay ``StridedSlice``."""
-
-    return _raw(capture).StridedSlice(
-        input=inputs[0],
-        begin=inputs[1],
-        end=inputs[2],
-        strides=inputs[3],
-        begin_mask=int(capture.attrs.get("begin_mask", 0)),
-        end_mask=int(capture.attrs.get("end_mask", 0)),
-        ellipsis_mask=int(capture.attrs.get("ellipsis_mask", 0)),
-        new_axis_mask=int(capture.attrs.get("new_axis_mask", 0)),
-        shrink_axis_mask=int(capture.attrs.get("shrink_axis_mask", 0)),
-    )

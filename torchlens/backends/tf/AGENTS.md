@@ -55,8 +55,15 @@ TensorFlow preview backend. It fills the backend protocol (`maturity="preview"`,
   builds Param records from module variables.
 
 ## validation.py
-- `validate_tf_trace()` / `validate_tf_trace_detailed()` replay and perturb ops
-  against the `replay_allowlist()` of per-op-type replayers.
+- `validate_tf_trace()` / `validate_tf_trace_detailed()` replay and perturb the
+  ops selected by the validation policies in `_native_op_specs.py`. Each native
+  input set is executed once, with every saved output slot checked independently.
+
+## Native replay
+- `_native_op_specs.py` records the Python `tf.raw_ops` ABI and validation policy.
+- `_raw_op_replay.py` checks callback slots, normalizes static attributes and
+  binds the native callable for both validation and TensorFlow Split. The Split
+  graph reuses prepared calls through its existing blueprint cache.
 
 ## _tf_compat.py
 - `HAS_TF_OP_CALLBACKS` probe; `mark_tf_capability_missing()` and

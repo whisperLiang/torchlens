@@ -22,6 +22,7 @@ from ..._ir.predicate import RecordContext
 from ..._ir.refs import DtypeRef, TensorRef
 from ..._ir.semantics import BackendSemantics, CapturePolicy
 from ...recording._types import CaptureSpec
+from ._raw_op_replay import _TF_REPLAY_PAUSED
 from ._tensor_probe import (
     _bool_value,
     _classify_source_tensor,
@@ -337,7 +338,7 @@ class TFEagerCaptureSession:
             Callback graph object. Eager callbacks pass ``None``.
         """
 
-        if graph is not None:
+        if graph is not None or _TF_REPLAY_PAUSED.get():
             return
         op_type_text = _normalize_op_type(op_type)
         self.op_type_counts[op_type_text] += 1
