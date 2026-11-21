@@ -154,6 +154,86 @@ def test_tf_module_split_training_optimizer_step_matches_full_step() -> None:
             _assert_tf_close(tf, left, right)
 
 
+@pytest.mark.parametrize("device", ["CPU:0", "GPU:0"])
+def test_tf_conv_avg_pool_split_training_matches_native(device: str) -> None:
+    """Compare live gradients and optimizer steps across the pooling boundary."""
+
+    tf = pytest.importorskip("tensorflow")
+    if device.startswith("GPU") and not tf.config.list_logical_devices("GPU"):
+        pytest.skip("TensorFlow GPU unavailable")
+
+    class RecordingOptimizer:
+        def __init__(self) -> None:
+            self.sgd = tf.keras.optimizers.SGD(0.01)
+            self.gradients: dict[str, Any] = {}
+
+        def apply_gradients(self, pairs: list[tuple[Any, Any]]) -> None:
+            self.gradients = {var.path: grad for grad, var in pairs}
+            self.sgd.apply_gradients(pairs)
+
+    with tf.device(f"/{device}"):
+        model = tf.keras.Sequential(
+            [
+                tf.keras.Input((4, 4, 2), dtype=tf.float64),
+                tf.keras.layers.Conv2D(2, 3, padding="same", dtype=tf.float64, name="stem"),
+                tf.keras.layers.ReLU(dtype=tf.float64),
+                tf.keras.layers.AveragePooling2D(pool_size=2, dtype=tf.float64),
+                tf.keras.layers.Flatten(dtype=tf.float64),
+                tf.keras.layers.Dense(3, dtype=tf.float64, name="head"),
+            ]
+        )
+        initial = [np.linspace(-0.2, 0.3, w.size).reshape(w.shape) for w in model.get_weights()]
+        model.set_weights(initial)
+        reference = tf.keras.models.clone_model(model)
+        reference.set_weights(initial)
+        values = tf.reshape(tf.range(128, dtype=tf.float64) / 128.0, (4, 4, 4, 2))
+        graph = prepare_graph(
+            model, values[:1], backend="tf", features=SplitFeatures(training=True)
+        )
+        dag = graph.compute_dag()
+        prefix = close_call_ids(dag, call_ids(graph, ops=frozenset({"avgpool"})))
+        assert prefix
+        runtime = graph.materialize(graph.analyze(dag.to_partition(prefix)))
+        prefix_opt, suffix_opt = RecordingOptimizer(), RecordingOptimizer()
+        reference_opt = tf.keras.optimizers.SGD(0.01)
+
+        def assert_close(actual: Any, expected: Any) -> None:
+            np.testing.assert_allclose(actual.numpy(), expected.numpy(), atol=1e-8, rtol=1e-7)
+
+        for batch in (1, 2, 3, 4):
+            x = values[:batch]
+            y = tf.ones((batch, 3), dtype=tf.float64)
+            with tf.GradientTape() as tape:
+                hidden = x
+                for layer in reference.layers[:3]:
+                    hidden = layer(hidden)
+                expected = hidden
+                for layer in reference.layers[3:]:
+                    expected = layer(expected)
+                native_loss = tf.reduce_mean(tf.math.squared_difference(expected, y))
+            root, *native_grads = tape.gradient(
+                native_loss, [hidden, *reference.trainable_variables]
+            )
+
+            assert_close(runtime.replay(x), expected)
+            boundary = runtime.run_training_prefix(x)
+            (key,) = boundary.tensors
+            assert device in boundary.tensors[key].device
+            assert_close(boundary.tensors[key], hidden)
+            result = runtime.train_suffix_result(boundary, y, optimizer=suffix_opt)
+            assert_close(result.loss, native_loss)
+            assert_close(result.boundary_grads[key], root)
+            runtime.backward_prefix(boundary, result.boundary_grads, optimizer=prefix_opt)
+            grads = prefix_opt.gradients | suffix_opt.gradients
+            assert grads.keys() == {weight.path for weight in model.trainable_variables}
+            for weight, grad in zip(model.trainable_variables, native_grads, strict=True):
+                assert_close(grads[weight.path], grad)
+            reference_opt.apply_gradients(zip(native_grads, reference.trainable_variables))
+            for actual, expected_weight in zip(model.weights, reference.weights, strict=True):
+                assert_close(actual, expected_weight)
+            assert_close(runtime.replay(x), reference(x))
+
+
 @pytest.mark.parametrize("update", [False, True])
 def test_tf_suffix_joint_gradients_keep_sparse_and_disconnected_sources(
     update: bool, monkeypatch: pytest.MonkeyPatch

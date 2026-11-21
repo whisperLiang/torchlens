@@ -147,6 +147,26 @@ def test_tf_validation_replays_every_split_output_and_perturbs_its_parent() -> N
     assert _result(trace).replayed_histogram["Split"] == 2
 
 
+def test_tf_validation_executes_split_once_per_input_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Share native execution while still validating both outputs independently."""
+
+    inputs = tf.constant([[1.0, 2.0, 10.0, 20.0]], dtype=tf.float64)
+    trace = tl.trace(lambda x: tf.split(x, 2, axis=-1), inputs, backend="tf")
+    native = tf.raw_ops.Split
+    attempts = []
+
+    def count_split(**kwargs: Any) -> Any:
+        attempts.append(kwargs["value"].numpy().tolist())
+        return native(**kwargs)
+
+    monkeypatch.setattr(tf.raw_ops, "Split", count_split)
+    assert _validate(trace) is True
+    assert _result(trace).replayed_histogram["Split"] == 2
+    assert len(attempts) == 2
+    assert attempts[0] == inputs.numpy().tolist()
+    assert attempts[1] != attempts[0]
+
+
 @pytest.mark.parametrize(
     "invalid_replay", ["index", "duplicate", "missing", "extra", "order", "frozen"]
 )
