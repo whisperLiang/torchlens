@@ -10,13 +10,17 @@ phase-local peaks.
 from __future__ import annotations
 
 import gc
+import sys
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
 from torch import nn
 
+from benchmarks import perf_runner
 from benchmarks.artifact_size import artifact_size_bytes
 from benchmarks.perf_gate import compare_gate_payloads, normalize_gate_payload
 from benchmarks.perf_runner import (
@@ -369,6 +373,26 @@ def test_run_memory_reports_phase_local_peaks() -> None:
     assert metrics["phase_rss_high_water_delta_mb"] >= 0.0
     if metrics.get("uss_delta_mb_memory_pass") is not None:
         assert metrics["uss_peak_delta_mb_memory_pass"] >= metrics["uss_delta_mb_memory_pass"]
+
+
+@pytest.mark.parametrize(("reset", "expected_mb"), [(True, 128), (False, 4)])
+def test_run_memory_uses_a_live_rss_sample_for_the_scoped_peak(
+    monkeypatch: pytest.MonkeyPatch, reset: bool, expected_mb: int
+) -> None:
+    mib = 2**20
+    baseline = SimpleNamespace(rss=256 * mib, uss=256 * mib)
+    process = SimpleNamespace(memory_info=lambda: baseline, memory_full_info=lambda: baseline)
+    monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(Process=lambda: process))
+    kernel_reads = iter((256 * 1024, 260 * 1024))
+    sampler = SimpleNamespace(rss_peak=384 * mib, uss_peak=0)
+    monkeypatch.setattr(perf_runner, "_reset_rss_high_water", lambda: reset)
+    monkeypatch.setattr(perf_runner, "_read_rss_high_water", lambda: next(kernel_reads))
+    monkeypatch.setattr(perf_runner, "_ConcurrentPeakSampler", lambda process: nullcontext(sampler))
+
+    metrics = _run_memory(lambda: None, "cpu", memory_runs=1)
+
+    assert metrics["rss_high_water_phase_local"] is reset
+    assert metrics["phase_rss_high_water_delta_mb"] == expected_mb
 
 
 # ``serial``: the phase-local peak is the process RSS high-water mark. The

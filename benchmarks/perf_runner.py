@@ -739,6 +739,27 @@ class _ConcurrentPeakSampler:
             self._stop.wait(0.001)
 
 
+def _rss_pass_metrics(
+    high_water_before_kib: int,
+    baseline_rss: int | None,
+    sampled_rss_peak: int,
+    *,
+    scoped: bool,
+) -> dict[str, float]:
+    """Report kernel and sampled RSS growth over the baselines for one pass."""
+
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    phase_delta_mb = max(_read_rss_high_water() - high_water_before_kib, 0) / 1024
+    metrics = {"process_high_water_rss_mb": usage.ru_maxrss / 1024}
+    if baseline_rss is not None:
+        sampled_delta_mb = max(sampled_rss_peak - baseline_rss, 0) / 2**20
+        metrics["sampled_rss_peak_delta_mb"] = sampled_delta_mb
+        if scoped:
+            phase_delta_mb = max(phase_delta_mb, sampled_delta_mb)
+    metrics["phase_rss_high_water_delta_mb"] = phase_delta_mb
+    return metrics
+
+
 def _run_memory(fn: OperationFn, device: str, memory_runs: int) -> dict[str, Any]:
     """Run a separate memory pass.
 
@@ -760,9 +781,9 @@ def _run_memory(fn: OperationFn, device: str, memory_runs: int) -> dict[str, Any
         counts the objects), so memory the process held only as garbage is
         not in the baseline and cannot be released mid-phase. The RSS high-water mark
         is reset before the loop where the platform allows
-        (``rss_high_water_phase_local`` reports which semantics apply), and
-        a concurrent sampler thread polls RSS/USS during the runs, so an
-        allocate-touch-free transient registers instead of reading ``0.0``.
+        (``rss_high_water_phase_local`` reports which semantics apply).
+        A concurrent sampler polls RSS and USS during the runs. Its RSS peak
+        can raise the phase-local estimate when the kernel mark lags.
         End-state deltas stay separately named (``uss_delta_mb_memory_pass``,
         ``final_uss_mb``).
     """
@@ -782,7 +803,7 @@ def _run_memory(fn: OperationFn, device: str, memory_runs: int) -> dict[str, Any
         metrics["baseline_uss_mb"] = baseline_uss / 1024 / 1024
     except ImportError:
         process = None
-        baseline_uss = None
+        baseline_uss = 0
         metrics["uss_delta_mb_memory_pass"] = None
         metrics["uss_peak_delta_mb_memory_pass"] = None
         metrics["uss_skip_reason"] = "psutil unavailable"
@@ -797,22 +818,18 @@ def _run_memory(fn: OperationFn, device: str, memory_runs: int) -> dict[str, Any
     with _ConcurrentPeakSampler(process) as sampler:
         for _ in range(memory_runs):
             fn()
-            if process is not None and peak_uss is not None:
+            if process is not None:
                 peak_uss = max(peak_uss, process.memory_full_info().uss)
         _sync(device)
-    if process is not None and baseline_uss is not None and peak_uss is not None:
+    if process is not None:
         final_uss = process.memory_full_info().uss
         peak_uss = max(peak_uss, final_uss, sampler.uss_peak)
         metrics["final_uss_mb"] = final_uss / 1024 / 1024
         metrics["uss_delta_mb_memory_pass"] = (final_uss - baseline_uss) / 1024 / 1024
         metrics["uss_peak_delta_mb_memory_pass"] = (peak_uss - baseline_uss) / 1024 / 1024
-    if process is not None and baseline_rss is not None:
-        sampled_rss_peak = max(sampler.rss_peak, baseline_rss)
-        metrics["sampled_rss_peak_delta_mb"] = (sampled_rss_peak - baseline_rss) / 1024 / 1024
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    metrics["process_high_water_rss_mb"] = usage.ru_maxrss / 1024
-    phase_rss_delta_kib = max(_read_rss_high_water() - rss_high_water_before, 0)
-    metrics["phase_rss_high_water_delta_mb"] = phase_rss_delta_kib / 1024
+    metrics.update(
+        _rss_pass_metrics(rss_high_water_before, baseline_rss, sampler.rss_peak, scoped=rss_reset)
+    )
     if device == "cuda":
         metrics["max_allocated_mb"] = torch.cuda.max_memory_allocated() / 1024 / 1024
         metrics["max_reserved_mb"] = torch.cuda.max_memory_reserved() / 1024 / 1024
