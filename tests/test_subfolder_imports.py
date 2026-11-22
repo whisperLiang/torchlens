@@ -5,58 +5,9 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import sys
-from collections.abc import Callable, Iterator
-from types import ModuleType
+from collections.abc import Callable
 
 import pytest
-
-_MISSING = object()
-
-
-def _is_under(loaded_name: str, module_name: str) -> bool:
-    """Return whether ``loaded_name`` is ``module_name`` or one of its children."""
-
-    return loaded_name == module_name or loaded_name.startswith(f"{module_name}.")
-
-
-@pytest.fixture
-def drop_module() -> Iterator[Callable[[str], None]]:
-    """Drop a module and its children for a fresh import; restore both at teardown.
-
-    The fresh import rebinds the parent package's attribute and leaves a second
-    copy of every child in ``sys.modules``. Without the restore, a later test
-    holding the original (``from torchlens.neuro import _brainpipe`` at
-    collection) sees ``tl.neuro`` resolve through the copy, so the result
-    depends on test order.
-    """
-
-    saved_modules = dict(sys.modules)
-    dropped: list[str] = []
-    parent_attrs: list[tuple[ModuleType, str, object]] = []
-
-    def _drop(module_name: str) -> None:
-        dropped.append(module_name)
-        for loaded_name in list(sys.modules):
-            if not _is_under(loaded_name, module_name):
-                continue
-            parent_name, _, leaf = loaded_name.rpartition(".")
-            parent = sys.modules.get(parent_name)
-            if parent is not None:
-                parent_attrs.append((parent, leaf, vars(parent).get(leaf, _MISSING)))
-            del sys.modules[loaded_name]
-
-    yield _drop
-    for loaded_name in list(sys.modules):
-        if any(_is_under(loaded_name, name) for name in dropped):
-            del sys.modules[loaded_name]
-    for loaded_name, module in saved_modules.items():
-        if any(_is_under(loaded_name, name) for name in dropped):
-            sys.modules[loaded_name] = module
-    for parent, leaf, value in reversed(parent_attrs):
-        if value is _MISSING:
-            vars(parent).pop(leaf, None)
-        else:
-            setattr(parent, leaf, value)
 
 
 def test_notebook_attribute_access_reports_missing_dependency(

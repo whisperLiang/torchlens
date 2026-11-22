@@ -33,6 +33,7 @@ from __future__ import annotations
 import io
 import pickle
 import sys
+from collections.abc import Callable
 
 import pytest
 import torch
@@ -79,17 +80,19 @@ def _global_only_pickle(module: str, name: str) -> bytes:
     )
 
 
-def _drop_foreign_modules() -> None:
-    """Remove appliance third-party deps from ``sys.modules`` so the test is honest."""
+@pytest.fixture
+def unloaded_appliances(drop_module: Callable[[str], None]) -> None:
+    """Start with unloaded appliances and their optional dependencies."""
 
-    for foreign in ("rsatoolbox", "brainscore_core", "IPython", "jupyter_client"):
-        for loaded in list(sys.modules):
-            if loaded == foreign or loaded.startswith(f"{foreign}."):
-                del sys.modules[loaded]
-    for tl_appliance in ("torchlens.neuro", "torchlens.report._notebook"):
-        for loaded in list(sys.modules):
-            if loaded == tl_appliance or loaded.startswith(f"{tl_appliance}."):
-                del sys.modules[loaded]
+    for module_name in (
+        "torchlens.neuro",
+        "torchlens.report._notebook",
+        "rsatoolbox",
+        "brainscore_core",
+        "IPython",
+        "jupyter_client",
+    ):
+        drop_module(module_name)
 
 
 # --------------------------------------------------------------------------- #
@@ -104,6 +107,7 @@ def _drop_foreign_modules() -> None:
         "torchlens.neuro",
     ],
 )
+@pytest.mark.usefixtures("unloaded_appliances")
 def test_safe_unpickler_defers_appliance_module_without_importing(appliance_module: str) -> None:
     """A GLOBAL naming an appliance module is load-tolerated without ever importing it.
 
@@ -114,7 +118,6 @@ def test_safe_unpickler_defers_appliance_module_without_importing(appliance_modu
     actually calling the placeholder fails closed.
     """
 
-    _drop_foreign_modules()
     payload = _global_only_pickle(appliance_module, "__name__")
     resolved = SafeBundleUnpickler(io.BytesIO(payload)).load()
 
@@ -137,12 +140,12 @@ def test_safe_unpickler_defers_appliance_module_without_importing(appliance_modu
         "torchlens.neuro",
     ],
 )
+@pytest.mark.usefixtures("unloaded_appliances")
 def test_safe_unpickler_admits_appliance_module_only_under_explicit_trust(
     appliance_module: str,
 ) -> None:
     """Explicit trust opt-in still permits importing an appliance module (least-privilege escape hatch)."""
 
-    _drop_foreign_modules()
     payload = _global_only_pickle(appliance_module, "__name__")
     resolved = SafeBundleUnpickler(
         io.BytesIO(payload), allowed_custom_callable_modules={appliance_module}
@@ -163,10 +166,10 @@ def test_safe_unpickler_admits_appliance_module_only_under_explicit_trust(
         "torchlens.neuro",
     ],
 )
+@pytest.mark.usefixtures("unloaded_appliances")
 def test_resolver_denies_appliance_module_by_name(appliance_module: str) -> None:
     """A custom key naming an appliance module is denied by default, no import."""
 
-    _drop_foreign_modules()
     key = FunctionRegistryKey(
         "custom", "anything", "function", import_path=f"{appliance_module}:anything"
     )
@@ -179,10 +182,10 @@ def test_resolver_denies_appliance_module_by_name(appliance_module: str) -> None
     assert "jupyter_client" not in sys.modules
 
 
+@pytest.mark.usefixtures("unloaded_appliances")
 def test_resolver_admits_appliance_module_only_under_explicit_trust() -> None:
     """Explicit trust opt-in still permits importing an appliance module."""
 
-    _drop_foreign_modules()
     key = FunctionRegistryKey(
         "custom", "anything", "function", import_path="torchlens.neuro:anything"
     )

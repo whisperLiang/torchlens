@@ -1,8 +1,4 @@
-"""Per-test state isolation: warn-once sentinels, registries, caches, RNG.
-
-Registered by ``tests/conftest.py`` through ``pytest_plugins``; every fixture
-here is autouse so no test module opts in or out.
-"""
+"""Per-test state isolation fixtures registered through ``tests/conftest.py``."""
 
 from __future__ import annotations
 
@@ -10,8 +6,8 @@ import os
 import random
 import sys
 import weakref
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from types import ModuleType
 
 import numpy as np
@@ -77,6 +73,52 @@ _WARN_ONCE_SENTINELS: tuple[tuple[str, str, object], ...] = (
     ("torchlens._visualization.collapse_optimizer", "_CEILING_WARNED_TRACES", weakref.WeakSet()),
     ("torchlens._visualization._collapse_disclosures", "_BUDGET_WARNED_TRACES", weakref.WeakSet()),
 )
+
+
+@contextmanager
+def _without_module_tree(module_name: str) -> Iterator[None]:
+    """Temporarily detach a module tree and restore its cached objects and parent binding."""
+
+    prefix = f"{module_name}."
+
+    def module_tree() -> dict[str, ModuleType]:
+        return {
+            name: module
+            for name, module in sys.modules.copy().items()
+            if name == module_name or name.startswith(prefix)
+        }
+
+    saved = module_tree()
+    parent_name, _, attribute = module_name.rpartition(".")
+    parent = sys.modules.get(parent_name)
+    binding = vars(parent).pop(attribute, _MISSING) if parent is not None else _MISSING
+    for name in saved:
+        del sys.modules[name]
+    try:
+        yield
+    finally:
+        for name in module_tree():
+            del sys.modules[name]
+        sys.modules.update(saved)
+        if parent is None:
+            parent = sys.modules.get(parent_name)
+        if parent is not None:
+            if binding is _MISSING:
+                vars(parent).pop(attribute, None)
+            else:
+                vars(parent)[attribute] = binding
+
+
+@pytest.fixture
+def drop_module() -> Iterator[Callable[[str], None]]:
+    """Allow fresh imports during a test while preserving the next test's module identities."""
+
+    with ExitStack() as dropped:
+
+        def drop(module_name: str) -> None:
+            dropped.enter_context(_without_module_tree(module_name))
+
+        yield drop
 
 
 # ---------------------------------------------------------------------------
