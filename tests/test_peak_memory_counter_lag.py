@@ -75,7 +75,7 @@ def _rss() -> int:
     return _exact_pages() * PAGE
 
 
-def _regions(held: list[Any]) -> list[tuple[mmap.mmap, bool]]:
+def _regions(held: list[mmap.mmap]) -> list[tuple[mmap.mmap, bool]]:
     """One fresh region per kernel RSS counter (anonymous, shared memory, file), with writability."""
 
     anon = mmap.mmap(-1, REGION_PAGES * PAGE, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
@@ -114,16 +114,17 @@ def _leave_residue(region: mmap.mmap, writable: bool) -> None:
 
 
 class _Lagged:
-    """Leave a counter residue on every allowed CPU, then pin to the first; restore on exit."""
+    """Leave a counter residue on every allowed CPU and release it on that CPU."""
 
     def __enter__(self) -> _Lagged:
         self.home = os.sched_getaffinity(0)
-        self.held: list[Any] = []
+        self.held: dict[int, list[mmap.mmap]] = {}
         cpus = sorted(self.home)
         try:
             for cpu in [*cpus[1:], cpus[0]]:
                 os.sched_setaffinity(0, {cpu})
-                for region, writable in _regions(self.held):
+                held = self.held.setdefault(cpu, [])
+                for region, writable in _regions(held):
                     _leave_residue(region, writable)
             self.lag = _lag_pages() * PAGE
         except BaseException:
@@ -135,10 +136,14 @@ class _Lagged:
         return self
 
     def __exit__(self, *exc: Any) -> None:
-        os.sched_setaffinity(0, self.home)
-        for item in reversed(self.held):
-            item.close()
-        self.held.clear()
+        try:
+            for cpu, regions in self.held.items():
+                os.sched_setaffinity(0, {cpu})
+                for region in reversed(regions):
+                    region.close()
+        finally:
+            os.sched_setaffinity(0, self.home)
+            self.held.clear()
 
 
 class Transient(nn.Module):
@@ -198,3 +203,17 @@ def test_kernel_mark_lag_is_exact_minus_approximate_never_negative() -> None:
     assert peak_memory._kernel_mark_lag_bytes(10 * 2**20, 9 * 2**20) == 2**20
     assert peak_memory._kernel_mark_lag_bytes(9 * 2**20, 10 * 2**20) == 0
     assert peak_memory._kernel_mark_lag_bytes(9 * 2**20, None) == 0
+
+
+def test_scoped_kernel_mark_recovers_a_hidden_peak_only_when_it_advanced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mib = 2**20
+    monkeypatch.setattr(
+        peak_memory, "_proc_status_kib", lambda keys: {"VmHWM": 444 * 1024, "VmRSS": 444 * 1024}
+    )
+    monkeypatch.setattr(peak_memory, "_approximate_rss_bytes", lambda: 400 * mib)
+    monkeypatch.setattr(peak_memory, "rusage_peak_rss_bytes", lambda: 420 * mib)
+
+    assert peak_memory.peak_rss_bytes(rusage_before=400 * mib) == 464 * mib
+    assert peak_memory.peak_rss_bytes(rusage_before=420 * mib) == 444 * mib

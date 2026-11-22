@@ -15,11 +15,11 @@
 - CPU peaks are opt-in: a default capture reads CPU `Trace.cost.forward_peak_memory` and
   `backward_peak_memory` as `None`, with `forward_peak_memory_reason` / `backward_peak_memory_reason`
   naming `CaptureOptions(measure_host_peak_memory=True)`, and never writes the process high-water
-  mark. Under the opt-in the CPU forward peak is the host resident high-water growth (`VmHWM` after
-  a per-capture reset minus the pre-forward RSS; `/proc/self/statm` when psutil is absent), so a
-  buffer freed inside the forward counts; that reset (forward bracket, and each CPU backward pass)
-  is process-wide: it also resets the caller's own `VmHWM` and `ru_maxrss` readings, and cannot be
-  undone. An opted-in CPU forward that grew nothing (it fit in resident headroom) is recorded as
+  mark. Under the opt-in the CPU forward peak is the host resident high-water growth above the
+  pre-forward RSS. A buffer freed inside the forward counts. On Linux the reader corrects
+  `VmHWM` for RSS counter lag and uses an increase in `ru_maxrss` after the reset to recover a
+  kernel mark hidden by current RSS. The reset affects the caller's process-wide high-water
+  counter and cannot be undone. An opted-in CPU forward that grew nothing is recorded as
   `None` with a reason naming `CaptureOptions(measure_python_peak_memory=True)`. MPS is the
   allocator delta and can read `0`. The `tracemalloc` Python-allocation peak is a second opt-in
   because the allocator hook costs 1.7x-2.5x total capture time. Never assert `forward_peak_memory

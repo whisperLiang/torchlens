@@ -2666,7 +2666,7 @@ def _run_backward_with_capture(
         with contextlib.suppress(BaseException):
             _materialize_backward_projections(trace)
         raise
-    backend, before = _peak_memory_baseline(
+    backend, before, rusage_before = _peak_memory_baseline(
         loss.device, bool(getattr(trace, "measure_host_peak_memory", False))
     )
     backward_start_time = time.time()
@@ -2700,7 +2700,7 @@ def _run_backward_with_capture(
         duration = time.time() - backward_start_time
         memory_error: BaseException | None = None
         try:
-            _backend, after = _memory_snapshot(loss.device)
+            _backend, after = _memory_snapshot(loss.device, rusage_before)
         except BaseException as exc:
             memory_error = exc
             after = before

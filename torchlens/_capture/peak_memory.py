@@ -59,9 +59,9 @@ def reset_peak_rss() -> bool:
     peak-RSS counter is touched; no page state relevant to correctness
     changes. The reset is process-wide and cannot be undone: after a capture
     (forward bracket) or a CPU ``backward`` (each pass), a caller's own
-    ``VmHWM`` and ``ru_maxrss`` reads report the high-water since that bracket
-    began, not since process start. Nothing in TorchLens reads it across
-    brackets. Called only under ``CaptureOptions(measure_host_peak_memory=True)``.
+    ``VmHWM`` and ``ru_maxrss`` reads reflect the reset. Linux can still
+    retain an older ``ru_maxrss`` across an exec. Called only under
+    ``CaptureOptions(measure_host_peak_memory=True)``.
 
     Returns
     -------
@@ -77,14 +77,19 @@ def reset_peak_rss() -> bool:
         return False
 
 
-def peak_rss_bytes() -> int:
+def peak_rss_bytes(*, rusage_before: int | None = None) -> int:
     """Return the process resident high-water mark in bytes, or 0.
 
-    Reads ``VmHWM`` from ``/proc/self/status`` on Linux, corrected by
-    :func:`_kernel_mark_lag_bytes` when the mark is above the current RSS;
-    falls back to ``ru_maxrss`` elsewhere, which macOS reports in bytes and
-    Linux and the BSDs in kibibytes. Both are process-lifetime maxima unless
-    :func:`reset_peak_rss` succeeded beforehand.
+    Linux displays the larger of the saved mark and the current RSS as
+    ``VmHWM``. The current RSS can hide the saved mark when they come from
+    different counters. A scoped increase in ``ru_maxrss`` recovers that
+    mark so the same lag correction applies.
+
+    Parameters
+    ----------
+    rusage_before:
+        ``ru_maxrss`` in bytes just after a successful reset. It bounds any
+        older peak inherited across an exec that a procfs reset cannot clear.
 
     Returns
     -------
@@ -96,13 +101,25 @@ def peak_rss_bytes() -> int:
         status = _proc_status_kib(("VmHWM", "VmRSS"))
     except (OSError, ValueError, IndexError):
         status = {}
-    hwm_kib = status.get("VmHWM")
-    if hwm_kib is not None:
-        rss_kib = status.get("VmRSS", hwm_kib)
-        lag = 0
-        if hwm_kib > rss_kib:
-            lag = _kernel_mark_lag_bytes(rss_kib * 1024, _approximate_rss_bytes())
-        return hwm_kib * 1024 + lag
+    if "VmHWM" not in status:
+        return rusage_peak_rss_bytes()
+    hwm = status["VmHWM"] * 1024
+    rss = status.get("VmRSS", status["VmHWM"]) * 1024
+    if hwm == rss and rusage_before is None:
+        return hwm
+    lag = _kernel_mark_lag_bytes(rss, _approximate_rss_bytes())
+    if hwm > rss:
+        return hwm + lag
+    if lag and rusage_before is not None:
+        raw_peak = rusage_peak_rss_bytes()
+        if raw_peak > rusage_before:
+            return max(hwm, raw_peak + lag)
+    return hwm
+
+
+def rusage_peak_rss_bytes() -> int:
+    """Read ``ru_maxrss`` in bytes, or return 0 when unavailable."""
+
     try:
         import resource
         import sys
@@ -131,8 +148,7 @@ def _kernel_mark_lag_bytes(exact_rss: int, approximate_rss: int | None) -> int:
     Linux keeps the RSS counters per CPU. Where ``/proc`` reports the exact
     sum (``VmRSS``, ``statm``; measured on Linux 7.0), the kernel still sets
     ``VmHWM``'s mark from the approximate total (``/proc/self/stat`` field
-    24), which leaves out each CPU's unfolded residue: up to about 63 pages
-    per CPU, 8 MiB measured on a 32-CPU host. A mark set when a freed buffer
+    24), which leaves out each CPU's unfolded residue. A mark set when a freed buffer
     was unmapped therefore reads below the RSS ``/proc`` showed while the
     buffer was resident. The lag read now stands in for the lag at that
     unmap, except the share of the CPU that ran the unmap: the unmap itself
@@ -238,7 +254,7 @@ CPU_PEAK_NOT_REQUESTED_REASON = (
 
 
 def resident_growth_and_basis(
-    rss_before: int, scoped: bool, requested: bool
+    rss_before: int, rusage_before: int | None, requested: bool
 ) -> tuple[int | None, str]:
     """Return the forward pair's ``resident`` growth and its ``resident_basis``.
 
@@ -246,8 +262,8 @@ def resident_growth_and_basis(
     ----------
     rss_before:
         The bracket's baseline RSS in bytes (0 when unreadable).
-    scoped:
-        Whether :func:`reset_peak_rss` scoped the mark to this bracket.
+    rusage_before:
+        ``ru_maxrss`` in bytes after a successful reset, or ``None`` for an unscoped bracket.
     requested:
         Whether the capture opted in with ``measure_host_peak_memory=True``.
 
@@ -263,14 +279,14 @@ def resident_growth_and_basis(
         return None, "not_requested"
     growth: int | None = None
     try:
-        peak_rss_after = peak_rss_bytes()
+        peak_rss_after = peak_rss_bytes(rusage_before=rusage_before)
         if peak_rss_after > 0 and rss_before > 0:
             growth = max(0, peak_rss_after - rss_before)
     except Exception:  # noqa: BLE001 - measurement never raises into capture
         growth = None
     if growth is None:
         return None, "unavailable"
-    return growth, "per_capture" if scoped else "process_lifetime"
+    return growth, "per_capture" if rusage_before is not None else "process_lifetime"
 
 
 def forward_peak_value(

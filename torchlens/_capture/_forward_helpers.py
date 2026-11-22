@@ -199,11 +199,11 @@ def _forward_peak_memory_bracket(trace: "Trace", device: "object | None") -> "It
     else:
         backend_label = "cpu"
         before = process_rss_bytes()
-    # peak PAIR (brainpipe): scope the host resident high-water mark to
-    # THIS capture, but only under the measure_host_peak_memory opt-in:
-    # the reset is process-wide and also resets the caller's ru_maxrss.
+    # Scope the process-wide host mark only when the caller opts in.
     host_requested = bool(getattr(trace, "measure_host_peak_memory", False))
-    rss_peak_scoped = host_requested and reset_peak_rss()
+    rusage_before = (
+        peak_memory.rusage_peak_rss_bytes() if host_requested and reset_peak_rss() else None
+    )
     rss_before = before if backend_label == "cpu" else process_rss_bytes()
 
     # Opt-in only: the tracemalloc allocator hook is the single most expensive
@@ -274,7 +274,7 @@ def _forward_peak_memory_bracket(trace: "Trace", device: "object | None") -> "It
         # growth over this bracket; ``resident_basis`` discloses its scope or
         # why it is ``None`` (not requested, or an unreadable baseline).
         resident_growth, resident_basis = peak_memory.resident_growth_and_basis(
-            rss_before, bool(rss_peak_scoped), host_requested
+            rss_before, rusage_before, host_requested
         )
         measured = peak_memory.host_forward_peak(
             backend_label, rss_delta, int(traced_peak), resident_growth, resident_basis

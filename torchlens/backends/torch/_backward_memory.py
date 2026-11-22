@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import torch
 
-from ..._capture.peak_memory import peak_rss_bytes, process_rss_bytes, reset_peak_rss
+from ..._capture.peak_memory import (
+    peak_rss_bytes,
+    process_rss_bytes,
+    reset_peak_rss,
+    rusage_peak_rss_bytes,
+)
 
 
-def _memory_snapshot(device: torch.device) -> tuple[str, int]:
+def _memory_snapshot(device: torch.device, rusage_before: int | None = None) -> tuple[str, int]:
     """Return backend name and current allocated memory for a device.
 
     Parameters
     ----------
     device:
         Device associated with the backward loss tensor.
+    rusage_before:
+        Host peak in bytes just after a successful reset, if the pass scoped it.
 
     Returns
     -------
@@ -24,11 +31,11 @@ def _memory_snapshot(device: torch.device) -> tuple[str, int]:
         return "cuda", int(torch.cuda.max_memory_allocated(device))
     if device.type == "mps" and hasattr(torch, "mps"):
         return "mps", int(torch.mps.current_allocated_memory())
-    return "cpu", max(process_rss_bytes(), peak_rss_bytes())  # VmHWM: a freed buffer counts
+    return "cpu", max(process_rss_bytes(), peak_rss_bytes(rusage_before=rusage_before))
 
 
-def _peak_memory_baseline(device: torch.device, measure_host: bool) -> tuple[str, int]:
-    """Return the pre-pass memory baseline WITHOUT resetting peak tracking.
+def _peak_memory_baseline(device: torch.device, measure_host: bool) -> tuple[str, int, int | None]:
+    """Return the pre-pass baseline, scoping the host mark for opted-in CPU passes.
 
     this used to call ``torch.cuda.reset_peak_memory_stats`` on every
     ``backward``, clobbering the caller's process-wide high-water counter.
@@ -50,9 +57,12 @@ def _peak_memory_baseline(device: torch.device, measure_host: bool) -> tuple[str
 
     Returns
     -------
-    tuple[str, int]
-        Backend label and starting memory snapshot in bytes.
+    tuple[str, int, int | None]
+        Backend label, starting memory in bytes and the host mark just after
+        a successful reset, if scoped.
     """
-    if measure_host and device.type not in {"cuda", "mps"}:
-        reset_peak_rss()
-    return _memory_snapshot(device)
+    if measure_host and device.type not in {"cuda", "mps"} and reset_peak_rss():
+        rusage_before = rusage_peak_rss_bytes()
+        return "cpu", process_rss_bytes(), rusage_before
+    backend, before = _memory_snapshot(device)
+    return backend, before, None
