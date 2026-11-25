@@ -280,8 +280,8 @@ def test_pr_and_nightly_legs_agree_on_suite_and_floor(backend: str) -> None:
 
     pr_leg = _legs(_PR_WORKFLOW, "backend-protocol")[backend]
     nightly_leg = _legs(_NIGHTLY_WORKFLOW, "preview-backends")[backend]
-    for key in ("marker", "import_check", "executed_floor"):
-        assert pr_leg[key] == nightly_leg[key], f"{backend}: {key} differs"
+    for key in ("marker", "import_check", "executed_floor", "docs_passed_ids"):
+        assert pr_leg.get(key) == nightly_leg.get(key), f"{backend}: {key} differs"
     assert pr_leg.get("dev") == nightly_leg.get("dev")
     assert int(pr_leg["executed_floor"]) >= 10
 
@@ -342,6 +342,10 @@ def test_nightly_runs_the_ecosystem_rosters() -> None:
         ("tests/backend_conformance/test_preview_tf.py", set(PREVIEW_BACKENDS)),
         ("pyproject.toml", set(PREVIEW_BACKENDS)),
         (".github/workflows/pr.yml", set(PREVIEW_BACKENDS)),
+        (".github/workflows/nightly.yml", set(PREVIEW_BACKENDS)),
+        ("tests/test_docs_snippets.py", set(PREVIEW_BACKENDS)),
+        ("tests/fixtures/backend_docs/tf_passed_ids.txt", {"tf"}),
+        ("docs/reference/split_state_migration.md", {"tf"}),
         ("torchlens/backends/mlx/wrappers.py", {"mlx"}),
         ("torchlens/backends/tinygrad/capture.py", {"tinygrad"}),
         ("docs/backends/paddle.md", {"paddle"}),

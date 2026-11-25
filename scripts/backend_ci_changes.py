@@ -15,7 +15,8 @@ A path triggers a leg when it is:
   ``torchlens/compat/`` or ``tests/backend_conformance/``, ``pyproject.toml``,
   the workflow itself, this script, or the executed-floor check;
 - the backend's own: anything under ``torchlens/backends/<backend>/``, its
-  page ``docs/backends/<backend>.md``, or a test path that names one of the
+  page ``docs/backends/<backend>.md``, a page with a required doc snippet in
+  its passed-ID floor, or a test path that names one of the
   backend's tokens as a whole word (``tests/test_tf_eager.py`` names ``tf``).
 
 Usage::
@@ -35,6 +36,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Iterable
+from pathlib import Path
 
 #: Path tokens that name each preview backend in test file paths.
 BACKEND_TOKENS: dict[str, tuple[str, ...]] = {
@@ -56,12 +58,26 @@ SHARED_FILES: frozenset[str] = frozenset(
     {
         "pyproject.toml",
         ".github/workflows/pr.yml",
+        ".github/workflows/nightly.yml",
         "scripts/backend_ci_changes.py",
         "scripts/check_ci_executed_tests.py",
+        "tests/test_docs_snippets.py",
     }
 )
 _BACKENDS_TOP_LEVEL = re.compile(r"^torchlens/backends/[^/]+\.py$")
 _TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
+_DOC_FLOORS = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "backend_docs"
+
+
+def _has_required_doc_snippet(page: str, backend: str) -> bool:
+    """Use the collected snippet IDs in a backend's floors to find its pages."""
+    prefix = f"{page}-"
+    return any(
+        line.partition("[")[2].startswith(prefix)
+        for floor in _DOC_FLOORS.glob(f"{backend}*_passed_ids.txt")
+        for line in floor.read_text(encoding="utf-8").splitlines()
+        if line.startswith("tests/test_docs_snippets.py::")
+    )
 
 
 def is_shared_path(path: str) -> bool:
@@ -103,6 +119,8 @@ def is_backend_path(path: str, backend: str) -> bool:
         return True
     if path == f"docs/backends/{backend}.md":
         return True
+    if path.startswith("docs/"):
+        return _has_required_doc_snippet(path.removeprefix("docs/"), backend)
     if not path.startswith("tests/"):
         return False
     words = set(_TOKEN_SPLIT.split(path.lower()))

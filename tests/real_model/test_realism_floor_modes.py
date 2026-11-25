@@ -93,6 +93,18 @@ def test_positional_interface_unchanged(junits):
     assert _run(str(degraded), "2", "0.1").returncode == 1
 
 
+def test_passed_ids_floor_rejects_empty_or_missing_manifest(junits, tmp_path):
+    """A declared manifest carries at least one required test."""
+    green, _ = junits
+    ids = tmp_path / "ids.txt"
+    args = (str(green), "0", "--passed-ids", str(ids))
+    assert _run(*args).returncode != 0
+    ids.write_text("# missing all required nodes\n", encoding="utf-8")
+    result = _run(*args)
+    assert result.returncode == 1
+    assert "empty" in result.stderr
+
+
 @pytest.mark.parametrize(
     ("manifest_name", "expected_count"),
     [("canary_passed_ids.txt", 1), ("r1_core_passed_ids.txt", 3)],

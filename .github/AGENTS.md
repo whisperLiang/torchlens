@@ -23,6 +23,12 @@ end of the smoke job and of each `backend-protocol` leg; nightly and weekly: the
 install lines, markers and floors in lockstep with the protocol shells, the
 pyproject extras and each other.
 
+The Recipe Peer leg runs general and PyTorch doc snippets with the recipe
+pages under a zero-skip floor. Preview legs attest backend-specific snippets
+against the exact IDs in `tests/fixtures/backend_docs/`. Repository checks
+verify those IDs and the selectors against pytest collection. Adding a slow
+preview snippet requires a passed-ID floor on its slow step.
+
 Nightly's performance gate measures parent/current and fixed-anchor/current.
 The latest reachable release tag anchors cumulative drift; tagless forks use
 the reviewed immutable commit in `benchmarks/perf_anchor.json`. Preparation

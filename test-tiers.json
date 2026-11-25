@@ -2077,9 +2077,9 @@
         "tests/test_tl_lifecycle.py"
       ],
       "torchlens/_distributed/_recognizer.py": [
+        "tests/test_backend_doc_routing.py",
         "tests/test_capture_guard_transactionality.py",
         "tests/test_distributed_c0_core.py",
-        "tests/test_distributed_funcol_boundaries.py",
         "tests/test_docs_executable_contracts.py",
         "tests/test_fastlog/test_ddp_unwrap.py",
         "tests/test_nightly_peer_recipe_leg.py",
@@ -8355,8 +8355,8 @@
         "tests/test_hon_attribution_refusals.py"
       ],
       "torchlens/attribution/_onebackward/__init__.py": [
+        "tests/test_backend_doc_routing.py",
         "tests/test_docs_executable_contracts.py",
-        "tests/test_nightly_peer_recipe_leg.py",
         "tests/test_onebackward_bydoor.py",
         "tests/test_onebackward_core.py",
         "tests/test_onebackward_edgeplumbing.py",
@@ -8375,13 +8375,13 @@
         "tests/test_strict_accessors.py"
       ],
       "torchlens/attribution/_onebackward/_edge_plumbing.py": [
+        "tests/test_backend_doc_routing.py",
         "tests/test_docs_executable_contracts.py",
         "tests/test_nightly_peer_recipe_leg.py",
         "tests/test_onebackward_bydoor.py",
         "tests/test_onebackward_core.py",
         "tests/test_onebackward_edgeplumbing.py",
         "tests/test_onebackward_frozen.py",
-        "tests/test_onebackward_realmodel.py",
         "tests/test_onebackward_refusals.py"
       ],
       "torchlens/attribution/_onebackward/_engine.py": [
@@ -8395,7 +8395,7 @@
         "tests/test_onebackward_refusals.py"
       ],
       "torchlens/attribution/_onebackward/_errors.py": [
-        "tests/test_docs_executable_contracts.py",
+        "tests/test_backend_doc_routing.py",
         "tests/test_errors_quiet.py",
         "tests/test_intervention_error_catalog.py",
         "tests/test_onebackward_edgeplumbing.py",
@@ -8430,10 +8430,10 @@
         "tests/test_read_table_pandas_extra.py"
       ],
       "torchlens/attribution/_onebackward/_suppress.py": [
+        "tests/test_backend_doc_routing.py",
         "tests/test_docs_executable_contracts.py",
         "tests/test_nightly_peer_recipe_leg.py",
         "tests/test_onebackward_bydoor.py",
-        "tests/test_onebackward_core.py",
         "tests/test_onebackward_edgeplumbing.py",
         "tests/test_onebackward_frozen.py",
         "tests/test_onebackward_hookband.py",
@@ -8537,10 +8537,10 @@
         "tests/test_attribution_kit.py"
       ],
       "torchlens/backends/__init__.py": [
-        "tests/backend_conformance/test_capability_truth.py",
         "tests/split/test_split_backend_capabilities.py",
         "tests/split/test_split_optional_backends.py",
         "tests/test_backend_constants_rule.py",
+        "tests/test_backend_doc_routing.py",
         "tests/test_backend_docs_lockstep.py",
         "tests/test_backend_framework_pins.py",
         "tests/test_backend_protocol.py",
@@ -8579,9 +8579,9 @@
       "torchlens/backends/_default_specs.py": [
         "tests/backend_conformance/test_capability_truth.py",
         "tests/backend_parity/test_trace_option_honesty.py",
+        "tests/test_backend_doc_routing.py",
         "tests/test_backend_docs_lockstep.py",
         "tests/test_backend_framework_pins.py",
-        "tests/test_backend_protocol.py",
         "tests/test_capture_unification_p3b.py",
         "tests/test_input_boundary_guards.py",
         "tests/test_torch_compat.py"
@@ -8710,6 +8710,7 @@
       ],
       "torchlens/backends/_protocols/mlx.py": [
         "tests/backends/test_tf_registry.py",
+        "tests/test_backend_doc_routing.py",
         "tests/test_backend_framework_pins.py",
         "tests/test_backend_registry.py",
         "tests/test_capture_unification_p3b.py",
@@ -8717,6 +8718,7 @@
         "tests/test_torch_compat.py"
       ],
       "torchlens/backends/_protocols/mlx_wrapped_state.py": [
+        "tests/test_backend_doc_routing.py",
         "tests/test_backend_framework_pins.py"
       ],
       "torchlens/backends/_protocols/paddle.py": [
@@ -8732,6 +8734,7 @@
       "torchlens/backends/_protocols/tf.py": [
         "tests/backends/test_tf_protocol_p2.py",
         "tests/backends/test_tf_registry.py",
+        "tests/test_backend_doc_routing.py",
         "tests/test_backend_framework_pins.py",
         "tests/test_backend_registry.py",
         "tests/test_capture_unification_p3b.py",
@@ -9062,12 +9065,12 @@
       "torchlens/backends/mlx/wrappers.py": [
         "tests/backend_conformance/test_deviceref_vocabulary.py",
         "tests/split/test_split_mlx_stateful.py",
+        "tests/test_backend_doc_routing.py",
         "tests/test_backend_framework_pins.py",
         "tests/test_capture_unification_p8.py",
         "tests/test_preview_grad_tolerance_tripwires.py",
         "tests/test_preview_oracle_compare.py",
-        "tests/test_preview_replay_tolerance_tripwires.py",
-        "tests/test_preview_teardown_contract.py"
+        "tests/test_preview_replay_tolerance_tripwires.py"
       ],
       "torchlens/backends/paddle/__init__.py": [
         "tests/test_capture_unification_p3b.py",
@@ -9339,7 +9342,7 @@
         "tests/backend_conformance/test_deviceref_vocabulary.py",
         "tests/split/test_split_native_backends_replay.py",
         "tests/split/test_split_tf_native_contract.py",
-        "tests/test_backend_framework_pins.py",
+        "tests/test_backend_doc_routing.py",
         "tests/test_preview_grad_tolerance_tripwires.py",
         "tests/test_preview_oracle_compare.py",
         "tests/test_preview_replay_tolerance_tripwires.py",
@@ -11727,7 +11730,7 @@
         "tests/test_vizx_netron_baseline_diff.py"
       ],
       "torchlens/distributed/__init__.py": [
-        "tests/test_capture_guard_transactionality.py",
+        "tests/test_backend_doc_routing.py",
         "tests/test_distributed_c0_core.py",
         "tests/test_distributed_funcol_boundaries.py",
         "tests/test_distributed_honesty.py",
@@ -11737,9 +11740,9 @@
         "tests/test_distributed_teardown_dormancy.py"
       ],
       "torchlens/distributed/_audit.py": [
+        "tests/test_backend_doc_routing.py",
         "tests/test_capture_guard_transactionality.py",
         "tests/test_distributed_c0_core.py",
-        "tests/test_distributed_funcol_boundaries.py",
         "tests/test_merged_derive_steps.py",
         "tests/test_merged_engine.py",
         "tests/test_merged_engine_hardening.py",
@@ -11747,7 +11750,7 @@
         "tests/test_w051_capt3_merged_ledger_shape.py"
       ],
       "torchlens/distributed/_dtensor.py": [
-        "tests/test_capture_guard_transactionality.py",
+        "tests/test_backend_doc_routing.py",
         "tests/test_distributed_c0_core.py",
         "tests/test_distributed_funcol_boundaries.py",
         "tests/test_distributed_honesty.py",
@@ -11757,34 +11760,34 @@
         "tests/test_distributed_teardown_dormancy.py"
       ],
       "torchlens/distributed/_ledger.py": [
+        "tests/test_backend_doc_routing.py",
         "tests/test_capture_guard_transactionality.py",
         "tests/test_distributed_c0_core.py",
         "tests/test_distributed_funcol_boundaries.py",
         "tests/test_distributed_honesty.py",
         "tests/test_distributed_lifecycle_disarm_atomicity.py",
         "tests/test_distributed_lifecycle_failclosed.py",
-        "tests/test_distributed_shard_local_marker.py",
-        "tests/test_distributed_teardown_dormancy.py"
+        "tests/test_distributed_shard_local_marker.py"
       ],
       "torchlens/distributed/_lifecycle.py": [
+        "tests/test_backend_doc_routing.py",
         "tests/test_capture_guard_transactionality.py",
         "tests/test_distributed_c0_core.py",
         "tests/test_distributed_funcol_boundaries.py",
         "tests/test_distributed_honesty.py",
         "tests/test_distributed_lifecycle_disarm_atomicity.py",
         "tests/test_distributed_lifecycle_failclosed.py",
-        "tests/test_distributed_shard_local_marker.py",
-        "tests/test_distributed_teardown_dormancy.py"
+        "tests/test_distributed_shard_local_marker.py"
       ],
       "torchlens/distributed/_recognizer.py": [
+        "tests/test_backend_doc_routing.py",
         "tests/test_capture_guard_transactionality.py",
         "tests/test_distributed_c0_core.py",
         "tests/test_distributed_funcol_boundaries.py",
         "tests/test_distributed_honesty.py",
         "tests/test_distributed_lifecycle_disarm_atomicity.py",
         "tests/test_distributed_lifecycle_failclosed.py",
-        "tests/test_distributed_shard_local_marker.py",
-        "tests/test_distributed_teardown_dormancy.py"
+        "tests/test_distributed_shard_local_marker.py"
       ],
       "torchlens/errors/__init__.py": [
         "tests/behaviour/test_cell_tmp.py",

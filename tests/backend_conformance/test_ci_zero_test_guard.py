@@ -180,7 +180,10 @@ def test_nightly_legs_declare_meaningful_executed_floors() -> None:
     assert sorted(backends) == ["jax", "mlx", "paddle", "tf", "tinygrad"]
     assert len(floors) == len(backends), "every leg must declare executed_floor"
     assert all(floor >= 10 for floor in floors), floors
-    assert '.junit.xml ${{ matrix.executed_floor }}" >> ' in workflow
+    assert re.search(
+        r'\.junit\.xml \$\{\{ matrix\.executed_floor \}\}[^\n]*" >> "[^\n]+/junit/legs\.floor"',
+        workflow,
+    )
 
 
 def test_passed_ids_floor_accepts_path_spelled_node_ids(tmp_path: Path) -> None:

@@ -27,6 +27,7 @@ import ast
 import importlib.util
 import linecache
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -86,6 +87,15 @@ DOC_FILE_GROUPS: dict[str, tuple[str, ...]] = {
 DOC_FILES = tuple(name for group in DOC_FILE_GROUPS.values() for name in group)
 BLOCK_RE = re.compile(r"```python\n(?P<code>.*?)\n```", re.DOTALL)
 
+BACKEND_MARKERS = {
+    "tensorflow": "tf_backend",
+    "jax": "backend_jax",
+    "jaxlib": "backend_jax",
+    "tinygrad": "backend_tinygrad",
+    "paddle": "backend_paddle",
+    "mlx": "backend_mlx",
+}
+
 
 def _docs_dir() -> Path:
     """Return the documentation directory.
@@ -137,8 +147,9 @@ def _doc_block_params(group: str) -> list[object]:
         marks = (
             (pytest.mark.heavy,) if ("torch.compile" in code or "frames_compiled" in code) else ()
         )
-        if file_name == "reference/split_state_migration.md" and "import tensorflow" in code:
-            marks += (pytest.mark.tf_backend,)
+        tree = ast.parse(code, filename=f"{file_name}:python-block-{block_index}")
+        backends = _required_backend_modules(tree, code)
+        marks += tuple(getattr(pytest.mark, name) for name in sorted(_backend_markers(backends)))
         params.append(pytest.param(file_name, block_index, code, marks=marks))
     return params
 
@@ -163,22 +174,56 @@ def _missing_extra_modules(code: str) -> list[str]:
     )
 
 
-def _missing_imported_modules(tree: ast.AST) -> list[str]:
-    """Return the root modules the code imports that are not installed.
-
-    A doc example may demonstrate an OPTIONAL-dependency feature that is not
-    installed in every test env. This feature detect runs BEFORE execution, so a
-    missing extra is a visible skip with its module named, while any ImportError
-    raised during execution (a broken import path, a torchlens module that moved)
-    fails loudly instead of skipping.
-    """
-
+def _import_roots(nodes: Iterable[ast.AST]) -> set[str]:
+    """Read absolute import roots from the supplied AST nodes."""
     roots: set[str] = set()
-    for node in ast.walk(tree):
+    for node in nodes:
         if isinstance(node, ast.Import):
             roots.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
             roots.add(node.module.split(".")[0])
+    return roots
+
+
+def _required_backend_modules(tree: ast.Module, code: str) -> set[str]:
+    """Read backend imports at module scope and any first-line declaration.
+
+    Use ``# requires-backends: tensorflow`` for a required import under a guard
+    or inside a function, or for an indirect requirement. Standalone Keras
+    must declare its runtime. A declaration of ``torch`` uses the default route.
+    """
+    prefix = "# requires-backends:"
+    first_line = code.partition("\n")[0]
+    declared = (
+        set(first_line.removeprefix(prefix).split()) if first_line.startswith(prefix) else set()
+    )
+    unknown = declared - BACKEND_MARKERS.keys() - {"torch"}
+    if unknown:
+        raise ValueError(f"unknown requires-backends modules: {sorted(unknown)}")
+
+    direct = _import_roots(tree.body)
+    required = (direct & BACKEND_MARKERS.keys()) | declared
+    if "keras" in direct and not declared:
+        raise ValueError("standalone Keras needs a first-line '# requires-backends:' declaration")
+    return required
+
+
+def _backend_markers(modules: Iterable[str]) -> set[str]:
+    """Map required frameworks to the existing pytest markers."""
+    return {BACKEND_MARKERS[module] for module in modules if module in BACKEND_MARKERS}
+
+
+def _missing_imported_modules(
+    tree: ast.AST, *, required_backends: set[str] | None = None
+) -> list[str]:
+    """Feature-detect absent dependencies before the snippet runs.
+
+    For per-block snippets, guard or function bodies can handle optional
+    backend imports themselves. Keep the existing check for other peers.
+    """
+    roots = _import_roots(ast.walk(tree))
+    if required_backends is not None:
+        roots = (roots - BACKEND_MARKERS.keys()) | required_backends
     return sorted(root for root in roots if importlib.util.find_spec(root) is None)
 
 
@@ -209,8 +254,11 @@ def _run_doc_block(file_name: str, block_index: int, code: str, tmp_path: Path) 
         "__name__": f"docs_snippet_{Path(file_name).stem}_{block_index}",
         "DOCS_TMPDIR": str(tmp_path),
     }
-    compiled = compile(code, synthetic_filename, "exec")
-    missing = _missing_imported_modules(ast.parse(code)) + _missing_extra_modules(code)
+    tree = ast.parse(code, filename=synthetic_filename)
+    compiled = compile(tree, synthetic_filename, "exec")
+    missing = _missing_imported_modules(
+        tree, required_backends=_required_backend_modules(tree, code)
+    ) + _missing_extra_modules(code)
     if missing:
         pytest.skip(f"doc snippet imports uninstalled optional dependencies: {missing}")
     from tests.support.capability_routes import capability_route

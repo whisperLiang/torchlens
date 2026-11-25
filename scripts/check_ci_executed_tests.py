@@ -20,8 +20,8 @@ Usage::
     python scripts/check_ci_executed_tests.py <junit.xml> 0 --min-passed <N>
     python scripts/check_ci_executed_tests.py <junit.xml> 0 --passed-ids <file>
 
-The passed-ids file holds one ``<classname>::<name>`` per line (pytest junit
-identity); blank lines and ``#`` comments are ignored.
+The passed-ids file requires at least one test ID (one per line). Blank lines
+and ``#`` comments are ignored.
 
 ``<min_executed>`` may also be ``tier:<name>``: the floor is then half the
 count that the test-tier collection artifact (``tests/tiers/collection.json``)
@@ -154,9 +154,11 @@ def check_passed_ids(junit_path: Path, ids_path: Path) -> list[str]:
 
     required = [
         line.strip()
-        for line in ids_path.read_text().splitlines()
+        for line in ids_path.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.strip().startswith("#")
     ]
+    if not required:
+        raise ValueError(f"required passed-ID list is empty: {ids_path}")
     passed = collect_passed_ids(junit_path)
     return [
         node_id
@@ -243,7 +245,11 @@ def main(argv: list[str]) -> int:
             return 1
         print(f"passed-count check passed: {passed} passed (floor {min_passed}).")
     if passed_ids_path is not None:
-        missing = check_passed_ids(junit_path, passed_ids_path)
+        try:
+            missing = check_passed_ids(junit_path, passed_ids_path)
+        except (OSError, ValueError) as exc:
+            print(f"exact-passed-ID floor FAILED: {exc}", file=sys.stderr)
+            return 1
         if missing:
             print(
                 "exact-passed-ID floor FAILED: these required nodes did not PASS"

@@ -1077,6 +1077,7 @@ jobs:
             marker: tf_backend
             import_check: "import tensorflow, keras"
             executed_floor: 18
+            docs_passed_ids: tests/fixtures/backend_docs/tf_passed_ids.txt
           - backend: jax
             install: '"jax[cpu]>=0.4.30" equinox flax'
             marker: backend_jax
@@ -1097,6 +1098,7 @@ jobs:
             pair_marker: backend_mlx and backend_tinygrad
             pair_import_check: "import mlx.core, mlx.nn, tinygrad"
             pair_floor: 4
+            pair_docs_passed_ids: ""
           - backend: paddle
             # Pinned to the 3.3 minor stream the preview suite is validated
             # against (paddle 3.3.x in the parity env); paddle minors have
@@ -1167,7 +1169,7 @@ jobs:
         # suite (marker drift, collection regression, importorskip cascade)
         # must not stay green; each leg carries its own executed-test floor.
         run: |
-          echo "preview-${{ matrix.backend }}.junit.xml ${{ matrix.executed_floor }}" >> "${{ runner.temp }}/junit/legs.floor"
+          echo "preview-${{ matrix.backend }}.junit.xml ${{ matrix.executed_floor }}${{ matrix.docs_passed_ids && format(' --passed-ids {0}', matrix.docs_passed_ids) || '' }}" >> "${{ runner.temp }}/junit/legs.floor"
 
       - name: Restore the ${{ matrix.backend }} ecosystem weights cache
         # Pretrained checkpoints for the ecosystem roster rows
@@ -1229,7 +1231,7 @@ jobs:
           python -c '${{ matrix.pair_import_check }}'
           pytest tests/ -m "${{ matrix.pair_marker }} and not slow" --tb=short \
             --junitxml="${{ runner.temp }}/junit/preview-${{ matrix.backend }}-pair.junit.xml"
-          echo "preview-${{ matrix.backend }}-pair.junit.xml ${{ matrix.pair_floor }}" >> "${{ runner.temp }}/junit/legs.floor"
+          echo "preview-${{ matrix.backend }}-pair.junit.xml ${{ matrix.pair_floor }}${{ matrix.pair_docs_passed_ids && format(' --passed-ids {0}', matrix.pair_docs_passed_ids) || '' }}" >> "${{ runner.temp }}/junit/legs.floor"
 
       - name: Upload the ${{ matrix.backend }} ecosystem scorecard
         if: ${{ !cancelled() }}
@@ -1972,11 +1974,11 @@ jobs:
     # and torchvision are held at the versions the base install resolved, so
     # no peer can move them. The base install is the enforcing smoke row
     # (py3.10, torch 2.13.0). LXT (the LRP recipe) is Clear BSD licensed,
-    # which permits this CI use. The docs snippet suite
-    # (tests/test_docs_snippets.py) runs in the same pytest session: a peer
+    # which permits this CI use. PyTorch, general and third-party peer snippets
+    # from tests/test_docs_snippets.py run in the same pytest session: a peer
     # that re-wraps a torch slot at import changes what later captures in the
     # process see, and its per-peer parity probes run only where the peers
-    # are installed.
+    # are installed. Preview backend jobs execute and attest their own snippets.
     name: Recipe pages with every peer installed
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -2056,13 +2058,14 @@ jobs:
         run: |
           "$RUNNER_TEMP/peer-venv/bin/python" -m pytest tests/test_recipe_pages_executed.py \
             tests/test_docs_snippets.py \
+            -m "not (tf_backend or backend_jax or backend_tinygrad or backend_paddle or backend_mlx)" \
             -rA --tb=short -p no:cacheprovider \
             --junitxml="$RUNNER_TEMP/junit/peer-recipes.junit.xml"
 
       - name: Declare the executed-test floor (recipe pages and doc snippets)
         # A skip counts as a failure on this leg (maximum skipped fraction 0):
-        # every page's and snippet's peer is installed, so a skip means a page
-        # or snippet went unrun. The floor is the measured executed count of
+        # every selected page's and snippet's peer is installed, so a skip
+        # means a selected test went unrun. The floor is the measured count of
         # both files in this environment: 107 recipe-page tests and 125 docs
         # snippet tests, 0 skipped (2026-11-03, torch 2.13.0, python 3.10).
         run: |

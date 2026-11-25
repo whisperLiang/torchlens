@@ -1,7 +1,7 @@
 """The nightly peer-recipe leg runs every recipe page with its peer installed.
 
-The docs snippet suite runs in the same pytest session, so the snippets see a
-process where every peer is importable.
+General and PyTorch doc snippets run in the same pytest session, so the
+snippets see a process where every peer is importable.
 
 ``tests/test_recipe_pages_executed.py`` skips a third-party recipe page when the
 page's tool is not installed, so on an ordinary leg those pages cover nothing.
@@ -70,9 +70,11 @@ def test_peer_recipe_job_requires_peers_and_fails_on_any_skip() -> None:
     assert "tests/test_docs_snippets.py" in runs[0]["run"], "the snippets run beside the peers"
     assert runs[0].get("env", {}).get("TORCHLENS_RECIPE_PEERS") == "1"
     assert "-rA" in runs[0]["run"] and "--junitxml=" in runs[0]["run"]
-    # No marker expression: heavy recipe pages (HEAVY_PAGES) must run here too.
+    # test_backend_doc_routing checks that the marker expression retains all
+    # generic tests, including the heavy recipe pages.
     pytest_args = shlex.split(runs[0]["run"].split("-m pytest", 1)[1].replace("\\\n", " "))
-    assert not any(arg == "-m" or arg.startswith("-m=") for arg in pytest_args), pytest_args
+    assert pytest_args.count("-m") == 1, pytest_args
+    assert not any(arg.startswith(("-k", "--deselect", "--ignore")) for arg in pytest_args)
     check = re.search(
         r'echo "peer-recipes\.junit\.xml (\d+) (\S+)"',
         _run_text(job),
@@ -80,7 +82,7 @@ def test_peer_recipe_job_requires_peers_and_fails_on_any_skip() -> None:
     assert check, "the leg must attest its junit with the executed-test check"
     floor, max_skipped = int(check.group(1)), float(check.group(2))
     assert max_skipped == 0.0, "a skipped recipe page counts as a failure on this leg"
-    assert floor >= len(PAGES), (floor, len(PAGES))
+    assert floor >= max(232, len(PAGES)), (floor, len(PAGES))
 
 
 def test_peer_recipe_job_installs_every_page_pin_and_holds_the_base() -> None:

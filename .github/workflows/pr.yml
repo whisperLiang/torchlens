@@ -368,7 +368,10 @@ jobs:
         # means the environment lost a tool and must fail, not pass silently.
         env:
           TORCHLENS_CHECKS_STRICT: "1"
-        run: python scripts/checks/run_all.py
+        run: |
+          python scripts/checks/run_all.py
+          pytest -q tests/test_backend_doc_routing.py tests/test_backend_framework_pins.py \
+            tests/test_nightly_peer_recipe_leg.py
 
   packaging:
     name: Packaging manifest tripwires
@@ -437,6 +440,7 @@ jobs:
             marker: tf_backend
             import_check: "import tensorflow, keras"
             executed_floor: 18
+            docs_passed_ids: tests/fixtures/backend_docs/tf_passed_ids.txt
           - backend: jax
             install: '"jax[cpu]==0.10.2" equinox flax'
             marker: backend_jax
@@ -542,7 +546,7 @@ jobs:
           BACKEND: ${{ matrix.backend }}
           EXECUTED_FLOOR: ${{ matrix.executed_floor }}
         run: |
-          echo "backend-$BACKEND.junit.xml $EXECUTED_FLOOR" >> "${{ runner.temp }}/junit/legs.floor"
+          echo "backend-$BACKEND.junit.xml $EXECUTED_FLOOR${{ matrix.docs_passed_ids && format(' --passed-ids {0}', matrix.docs_passed_ids) || '' }}" >> "${{ runner.temp }}/junit/legs.floor"
 
       - name: Check the ${{ matrix.backend }} leg's executed-test floor
         if: ${{ !cancelled() && steps.changes.outputs.run == 'true' }}
